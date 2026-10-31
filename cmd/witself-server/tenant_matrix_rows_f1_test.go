@@ -18,6 +18,7 @@ func tenantRowsF1() []tenantRow {
 		tenantF1Exempt("/startupz", exemptPublic, credNone, "/startupz", "", "Health-listener startup check, not a tenant API; server.go:7412."),
 		tenantF1Exempt("/healthz", exemptPublic, credNone, "/healthz", "", "Health-listener health check, not a tenant API; server.go:7413."),
 		tenantF1Exempt("/readyz", exemptPublic, credNone, "/readyz", "", "Health-listener readiness, not a tenant API; server.go:7414."),
+		tenantF1Exempt("/sync-readyz", exemptPublic, credNone, "/sync-readyz", "", "Health-listener route registered in healthMuxWithSync at server.go:7554; served only when the local runtime selects the sync schema."),
 		tenantF1Exempt("/metrics", exemptPublic, credNone, "/metrics", "", "Dedicated metrics listener; server.go:7444 exposes cell metrics."),
 		tenantF1Exempt("POST /v1/accounts:provision-exact", exemptSystemToken, credProvision, "/v1/accounts:provision-exact", `{"account_id":"${account}"}`, "Cell-wide provision token chooses an account by design; server.go:4252."),
 		tenantF1Exempt("GET /v1/accounts/", exemptSystemToken, credProvision, "/v1/accounts/${account}:plan", "", "accountSystemGetHandler uses the cell provision token; server.go:4347-4360."),
@@ -132,9 +133,11 @@ func tenantRowsF1() []tenantRow {
 			{Name: "operator-preview", Kind: foreign, Cred: credOperator, NoIdempotencyKey: true, NoIdempotencyKeyWhy: "internal/server/transcript_redaction.go:97-100 rejects mutation guards on dry_run=true previews.", Build: tenantBuild("POST", "/v1/transcripts/${transcript}/entries:redact", "dry_run=true", `{"from_sequence":1,"until_sequence":1}`)},
 		}},
 	}
-	// Positive list witnesses are seeded before the first fingerprint.
+	// Mark the local-only route and seed positive list witnesses before the first fingerprint.
 	for i := range rows {
 		switch rows[i].Pattern {
+		case "/sync-readyz":
+			rows[i].LocalRuntimeOnly = true
 		case "GET /v1/facts", "GET /v1/fact-subjects", "GET /v1/fact-candidates", "GET /v1/transcripts", "GET /v1/support/tickets", "GET /v1/fact-occurrences":
 			for j := range rows[i].Probes {
 				if rows[i].Probes[j].Kind == own {

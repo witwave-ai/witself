@@ -6582,6 +6582,7 @@ func (s *Store) importAccountWithTracker(
 	ic.importedAt = importedAt
 	disposition := AccountImportDisposition{}
 	promoteSourceToTarget := false
+	syncRetry := make(map[string]*syncImportStreamState)
 
 	m, err := export.Read(ctx, r, export.ImportOptions{
 		CurrentSchema: SchemaVersion(),
@@ -6641,7 +6642,7 @@ func (s *Store) importAccountWithTracker(
 					)
 				}
 			}
-			if err := validateArchiveManifestTables(m.SchemaVersion, m.Tables); err != nil {
+			if err := validateSyncImportManifest(ctx, tx, m); err != nil {
 				return err
 			}
 			ic.schemaVersion = m.SchemaVersion
@@ -6710,6 +6711,12 @@ func (s *Store) importAccountWithTracker(
 			return nil
 		},
 		Row: wrapImportRow(tracker, s.wrapImportRowClobber(func(table string, row []byte) error {
+			if spec, ok := syncArchiveTableByName(table); ok {
+				if syncRetry[table] == nil {
+					syncRetry[table] = &syncImportStreamState{}
+				}
+				return importSyncRow(ctx, tx, spec, expectedAccountID, row, disposition.AlreadyImported, syncRetry[table])
+			}
 			if _, ok := importColumns[table]; !ok {
 				return fmt.Errorf("%w: table %q not importable", ErrArchiveContent, table)
 			}
@@ -6765,6 +6772,11 @@ func (s *Store) importAccountWithTracker(
 	})
 	if err != nil {
 		return export.Manifest{}, AccountImportDisposition{}, err
+	}
+	if disposition.AlreadyImported && m.SyncExtension != nil {
+		if err := validateSyncRetryCompleteness(ctx, tx, expectedAccountID, syncRetry); err != nil {
+			return export.Manifest{}, AccountImportDisposition{}, err
+		}
 	}
 	if ic.accounts != 1 {
 		return export.Manifest{}, AccountImportDisposition{}, fmt.Errorf(

@@ -55,6 +55,11 @@ type tenantRow struct {
 	Handler      string
 	Actions      []string
 	Probes       []tenantProbe
+	// LocalRuntimeOnly requires hosted absence (404) instead of public success.
+	// Local selection and hosted absence are covered in internal/server by
+	// TestLocalRuntimeSyncReadinessSeparation and
+	// TestHostedRuntimeNeverRegistersSyncReadiness.
+	LocalRuntimeOnly bool
 }
 
 type tenantProbe struct {
@@ -141,6 +146,7 @@ var tenantExemptPatterns = map[string]tenantClass{
 	"/startupz":                            exemptPublic,
 	"/healthz":                             exemptPublic,
 	"/readyz":                              exemptPublic,
+	"/sync-readyz":                         exemptPublic,
 	"/metrics":                             exemptPublic,
 	"POST /v1/accounts:provision-exact":    exemptSystemToken,
 	"GET /v1/accounts/":                    exemptSystemToken,
@@ -346,8 +352,8 @@ func TestTenantMatrixCoversEveryRoute(t *testing.T) {
 		t.Errorf("runtime pending must be empty after 122c; found %q", pattern)
 	}
 	checkTenantPolicySets(t, rows)
-	if exemptCount != 18 {
-		t.Errorf("exempt route count = %d, want 18", exemptCount)
+	if exemptCount != 19 {
+		t.Errorf("exempt route count = %d, want 19", exemptCount)
 	}
 	for _, route := range tenantInventory(t) {
 		if !seen[route.Pattern] {
@@ -356,6 +362,19 @@ func TestTenantMatrixCoversEveryRoute(t *testing.T) {
 		}
 	}
 	t.Logf("rows=%d classes=%v families=%v probes=%v", len(rows), classes, families, kinds)
+}
+
+func TestTenantMatrixLocalRuntimeOnly(t *testing.T) {
+	var got []string
+	for _, row := range tenantRows() {
+		if row.LocalRuntimeOnly {
+			got = append(got, row.Pattern)
+		}
+	}
+	want := []string{"/sync-readyz"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("LocalRuntimeOnly routes = %v, want %v", got, want)
+	}
 }
 
 var tenantSourceCitation = regexp.MustCompile(`[^[:space:]]+\.go:[0-9]+`)

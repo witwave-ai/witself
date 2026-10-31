@@ -20,11 +20,19 @@ import (
 type startupMigrationStub struct {
 	unbounded func() error
 	bounded   func(context.Context) error
+	sync      func(context.Context) error
 }
 
 func (s startupMigrationStub) Migrate() error { return s.unbounded() }
 func (s startupMigrationStub) MigrateContext(ctx context.Context) error {
 	return s.bounded(ctx)
+}
+
+func (s startupMigrationStub) MigrateSync(ctx context.Context) error {
+	if s.sync == nil {
+		return errors.New("unexpected sync migration")
+	}
+	return s.sync(ctx)
 }
 
 func migrationStartupEnvironment(t *testing.T) {

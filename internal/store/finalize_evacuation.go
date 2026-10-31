@@ -121,6 +121,9 @@ func (s *Store) finalizeAccountEvacuationSourceOnce(
 	if status != "suspended" && status != "closed" {
 		return AccountEvacuationFinalization{}, ErrAccountNotExportable
 	}
+	if err := refuseSyncDestruction(ctx, tx); err != nil {
+		return AccountEvacuationFinalization{}, err
+	}
 	if err := setEvacuationAuthorityTx(ctx, tx, evacuationID); err != nil {
 		return AccountEvacuationFinalization{}, err
 	}
@@ -192,6 +195,9 @@ func purgePortableAccountRowsTx(
 	accountID string,
 	schemaVersion int,
 ) (map[string]int64, error) {
+	if err := refuseSyncDestruction(ctx, tx); err != nil {
+		return nil, err
+	}
 	if err := rejectCrossAccountEvacuationCascadesTx(
 		ctx, tx, accountID,
 	); err != nil {

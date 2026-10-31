@@ -525,6 +525,9 @@ func (s *Store) processAccountPurgeCandidateOnce(
 		eligible:       true,
 		deletedByTable: make(map[string]int64),
 	}
+	if err := refuseSyncDestruction(ctx, tx); err != nil {
+		return result, err
+	}
 	deferred, err := accountPurgeVaultLifecycleActiveTx(ctx, tx, accountID)
 	if err != nil {
 		return result, err

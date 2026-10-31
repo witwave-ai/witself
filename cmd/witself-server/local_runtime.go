@@ -42,3 +42,11 @@ func configureLocalStore(ctx context.Context, cfg *server.Config, st runtimeconf
 	}
 	return nil
 }
+
+func configureLocalSyncStore(cfg *server.Config, st runtimeconfig.SyncSchemaStore) {
+	cfg.SyncSchemaReady = func(ctx context.Context) error {
+		ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		defer cancel()
+		return runtimeconfig.CheckSyncSchemaReady(ctx, st, store.SyncSchemaVersion())
+	}
+}

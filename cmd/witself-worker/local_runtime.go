@@ -1,11 +1,29 @@
 package main
 
 import (
+	"context"
 	"strconv"
 
 	"github.com/witwave-ai/witself/internal/envconfig"
 	"github.com/witwave-ai/witself/internal/runtimeconfig"
 )
+
+type workerStartupMigrator interface {
+	Migrate() error
+	MigrateSync(context.Context) error
+}
+
+func migrateWorkerStore(ctx context.Context, st workerStartupMigrator, runtime runtimeconfig.Config) error {
+	if err := st.Migrate(); err != nil {
+		return err
+	}
+	if runtime.Local && runtime.SyncSchema {
+		ctx, cancel := context.WithTimeout(ctx, runtime.MigrationWait)
+		defer cancel()
+		return st.MigrateSync(ctx)
+	}
+	return nil
+}
 
 func workerListenerAddresses(runtime runtimeconfig.Config, lookup func(string) (string, bool)) (string, string) {
 	if runtime.Local {

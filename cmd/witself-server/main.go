@@ -135,6 +135,7 @@ func parseAgentEmailBackfillCommandArgs(args []string) (string, string, bool) {
 type startupMigrator interface {
 	Migrate() error
 	MigrateContext(context.Context) error
+	MigrateSync(context.Context) error
 }
 
 // These boundaries keep migration selection and its ordering before listener
@@ -250,6 +251,9 @@ func serveWithStartup(startup serverStartup) int {
 		if runtime.Local {
 			migrationCtx, cancel := context.WithTimeout(ctx, runtime.MigrationWait)
 			migrationErr = migrator.MigrateContext(migrationCtx)
+			if migrationErr == nil && runtime.SyncSchema {
+				migrationErr = migrator.MigrateSync(migrationCtx)
+			}
 			cancel()
 		} else {
 			migrationErr = migrator.Migrate()
@@ -342,6 +346,9 @@ func serveWithStartup(startup serverStartup) int {
 			if err := configureLocalStore(ctx, &cfg, st, runtime.AccountID); err != nil {
 				fmt.Fprintf(os.Stderr, "witself-server: %v\n", err)
 				return 1
+			}
+			if runtime.SyncSchema {
+				configureLocalSyncStore(&cfg, st)
 			}
 		}
 		oprID, err := st.EnsureRootOperator(ctx, acctID)
@@ -1404,19 +1411,9 @@ func serveWithStartup(startup serverStartup) int {
 			finalization, err := st.FinalizeAccountEvacuationSource(
 				ctx, accountID, evacuationID,
 			)
-			switch {
-			case errors.Is(err, store.ErrAccountNotFound):
+			if err != nil {
 				return server.AccountEvacuationFinalizationRecord{},
-					server.ErrNotFound
-			case errors.Is(err, store.ErrCannotCloseDefault):
-				return server.AccountEvacuationFinalizationRecord{},
-					server.ErrCannotCloseDefault
-			case errors.Is(err, store.ErrAccountEvacuationMismatch),
-				errors.Is(err, store.ErrAccountNotExportable):
-				return server.AccountEvacuationFinalizationRecord{},
-					server.ErrConflict
-			case err != nil:
-				return server.AccountEvacuationFinalizationRecord{}, err
+					mapAccountFinalizationError(err)
 			}
 			return server.AccountEvacuationFinalizationRecord{
 				AccountID:        finalization.AccountID,
@@ -2989,12 +2986,28 @@ func mapAccountImportError(err error) error {
 		return server.ErrBadArchive
 	case errors.Is(err, store.ErrArchiveAccountMismatch),
 		errors.Is(err, store.ErrArchiveContent),
+		errors.Is(err, store.ErrSyncArchiveRequired),
 		errors.Is(err, export.ErrCorrupt):
 		return server.ErrBadArchive
 	case err != nil:
 		return err
 	}
 	return nil
+}
+
+func mapAccountFinalizationError(err error) error {
+	switch {
+	case errors.Is(err, store.ErrAccountNotFound):
+		return server.ErrNotFound
+	case errors.Is(err, store.ErrCannotCloseDefault):
+		return server.ErrCannotCloseDefault
+	case errors.Is(err, store.ErrAccountEvacuationMismatch),
+		errors.Is(err, store.ErrAccountNotExportable),
+		errors.Is(err, store.ErrSyncDestructionUnsupported):
+		return server.ErrConflict
+	default:
+		return err
+	}
 }
 
 type serverAccountImportLease struct {
@@ -3057,6 +3070,7 @@ func mapBackupValidationError(err error) error {
 	case errors.Is(err, store.ErrImportAuditContradiction),
 		errors.Is(err, store.ErrArchiveAccountMismatch),
 		errors.Is(err, store.ErrArchiveContent),
+		errors.Is(err, store.ErrSyncArchiveRequired),
 		errors.Is(err, export.ErrCorrupt):
 		return server.ErrBadArchive
 	default:

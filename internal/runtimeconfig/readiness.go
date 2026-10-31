@@ -12,6 +12,24 @@ type BootstrapStore interface {
 	LocalBootstrapAccount(context.Context) (string, error)
 }
 
+// SyncSchemaStore reads the independent, explicitly installed sync namespace.
+type SyncSchemaStore interface {
+	AppliedSyncSchemaVersion(context.Context) (int, error)
+}
+
+// CheckSyncSchemaReady deliberately does not change core service readiness.
+// Callers install this separate check only after explicit local sync selection.
+func CheckSyncSchemaReady(ctx context.Context, st SyncSchemaStore, compiledVersion int) error {
+	if st == nil {
+		return errors.New("local sync schema is not ready")
+	}
+	applied, err := st.AppliedSyncSchemaVersion(ctx)
+	if err != nil || compiledVersion <= 0 || applied != compiledVersion {
+		return errors.New("local sync schema is not ready")
+	}
+	return nil
+}
+
 // ValidateAccount verifies the active bootstrap account and optional binding.
 func ValidateAccount(ctx context.Context, st BootstrapStore, expectedAccountID string) error {
 	id, err := st.LocalBootstrapAccount(ctx)

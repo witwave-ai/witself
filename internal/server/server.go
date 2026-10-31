@@ -106,6 +106,9 @@ type Config struct {
 	// Ready, when set, gates /readyz: it returns 200 only when Ready returns
 	// nil, else 503. nil means always-ready. Liveness/startup never gate on it.
 	Ready func(context.Context) error
+	// SyncSchemaReady installs /sync-readyz only for a selected local runtime.
+	// It never changes the existing /readyz dependency or response.
+	SyncSchemaReady func(context.Context) error
 
 	// AccountID, when set, is surfaced as the account block in /v1/capabilities
 	// (the seeded default account on single-account backends).
@@ -2376,7 +2379,7 @@ func Run(ctx context.Context, cfg Config) error {
 		handler    http.Handler
 	}{
 		{"api", cfg.APIAddr, metrics.instrument(apiMux(instrumentedConfig))},
-		{"health", cfg.HealthAddr, healthMux(cfg.Ready)},
+		{"health", cfg.HealthAddr, runtimeHealthMux(cfg)},
 		{"metrics", cfg.MetricsAddr, metricsMuxFor(
 			metrics, cfg.ReadAgentEmailCellStorageMetrics, cfg.ReadSupportSLOMetrics,
 			cfg.ReadIdentityCapacityMetrics, cfg.ReadAuditAppendMetrics, cfg.ReadSealedPlanePostureMetrics, cfg.ReadMemoryCurationCounters, cfg.ReadMemoryCurationQueueMetrics, cfg.ReadActivityMeteringFailures)},
@@ -7515,6 +7518,17 @@ func changeSupportTicketStateHandler(auth AuthFunc, changeState func(ctx context
 }
 
 func healthMux(ready func(context.Context) error) http.Handler {
+	return healthMuxWithSync(ready, nil)
+}
+
+func runtimeHealthMux(cfg Config) http.Handler {
+	if cfg.LocalRuntime {
+		return healthMuxWithSync(cfg.Ready, cfg.SyncSchemaReady)
+	}
+	return healthMux(cfg.Ready)
+}
+
+func healthMuxWithSync(ready, syncReady func(context.Context) error) http.Handler {
 	mux := http.NewServeMux()
 	ok := func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -7536,6 +7550,15 @@ func healthMux(ready func(context.Context) error) http.Handler {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok\n"))
 	})
+	if syncReady != nil {
+		mux.HandleFunc("/sync-readyz", func(w http.ResponseWriter, r *http.Request) {
+			if syncReady(r.Context()) != nil {
+				http.Error(w, "local sync schema is not ready", http.StatusServiceUnavailable)
+				return
+			}
+			ok(w, r)
+		})
+	}
 	return securityResponseHeaders(mux)
 }
 
