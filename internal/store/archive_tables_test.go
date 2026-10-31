@@ -63,6 +63,10 @@ func TestValidateArchiveManifestTablesIsSchemaAwareAndExact(t *testing.T) {
 }
 
 func TestCanonicalArchiveTablesMatchMigrationsExporterAndImporter(t *testing.T) {
+	// A separate migration namespace must not evade the portability contract.
+	if err := validateSyncArchiveRegistryContract(syncMigrationsFS); err != nil {
+		t.Fatal(err)
+	}
 	migrationIntroductions := archiveTableIntroductionsFromMigrations(t)
 	registryIntroductions := make(map[string]int, len(canonicalArchiveTables))
 	registryOrder := make([]string, 0, len(canonicalArchiveTables))

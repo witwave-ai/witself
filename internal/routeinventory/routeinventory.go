@@ -30,8 +30,10 @@ const (
 var ServerListeners = map[string]Listener{
 	"apiMux": ListenerAPI,
 	"registerAgentEmailOutboundProviderEventRoute": ListenerAPI,
-	"healthMux":     ListenerHealth,
-	"metricsMuxFor": ListenerMetrics,
+	"healthMux": ListenerHealth,
+	// Local-runtime health mux additionally serving /sync-readyz (LC-S6B).
+	"healthMuxWithSync": ListenerHealth,
+	"metricsMuxFor":     ListenerMetrics,
 }
 
 // Site records the source position of a Handle or HandleFunc call.

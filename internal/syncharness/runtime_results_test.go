@@ -294,7 +294,7 @@ func TestRuntimeResultOutcomeAndClassVocabulary(t *testing.T) {
 func TestRuntimeResultsPreserveUnknownAccountingInventory(t *testing.T) {
 	catalog := mustCatalog(t)
 	expected := map[string]int{
-		"accounts_operators_agents": 47, "avatars": 22, "backups_exports_imports": 8,
+		"accounts_operators_agents": 48, "avatars": 22, "backups_exports_imports": 8,
 		"facts_subjects_candidates_aliases": 16, "inbound_outbound_email": 33,
 		"memories_capture_curation_vectors_deletion": 32, "messages_complete_requests": 29,
 		"preferences_consent": 5, "realms": 3, "secrets_vault": 27, "transcripts": 8, "usage_billing": 2,
@@ -306,7 +306,7 @@ func TestRuntimeResultsPreserveUnknownAccountingInventory(t *testing.T) {
 			t.Fatal("runtime evidence assigned unproved production accounting quantities")
 		}
 	}
-	if len(catalog.Accounting) != 232 || !reflect.DeepEqual(counts, expected) {
+	if len(catalog.Accounting) != 233 || !reflect.DeepEqual(counts, expected) {
 		t.Fatal("production accounting inventory changed without reviewed expectations")
 	}
 }

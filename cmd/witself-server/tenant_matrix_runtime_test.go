@@ -94,7 +94,7 @@ func (rt *tenantRuntime) send(t *testing.T, row tenantRow, p tenantProbe, req te
 	req = tenantResolveCredential(req, credential)
 	listener := routeinventory.ListenerAPI
 	switch row.Pattern {
-	case "/livez", "/startupz", "/healthz", "/readyz":
+	case "/livez", "/startupz", "/healthz", "/readyz", "/sync-readyz":
 		listener = routeinventory.ListenerHealth
 	case "/metrics":
 		listener = routeinventory.ListenerMetrics
@@ -405,9 +405,13 @@ func (rt *tenantRuntime) exempt(t *testing.T, row tenantRow, p tenantProbe, f *t
 	}
 	switch row.Class {
 	case exemptPublic:
+		wantStatus := http.StatusOK
+		if row.LocalRuntimeOnly {
+			wantStatus = http.StatusNotFound
+		}
 		for _, cred := range []string{"", rt.creds[sideA][credAgent]} {
-			if r := check(req, cred); r.Status != 200 {
-				t.Errorf("public status=%d want=200", r.Status)
+			if r := check(req, cred); r.Status != wantStatus {
+				t.Errorf("public status=%d want=%d", r.Status, wantStatus)
 			}
 		}
 	case exemptSystemToken:

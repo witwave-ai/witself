@@ -42,6 +42,35 @@ func TestHealthHandlerSeparatesLivenessStartupAndReadiness(t *testing.T) {
 	}
 }
 
+func TestLocalRuntimeSyncReadinessDoesNotChangeCore(t *testing.T) {
+	state := &healthState{}
+	state.started.Store(true)
+	before := healthHandler(state)
+	status, body := requestHealth(t, before, "/readyz")
+	if status != http.StatusOK || body != "ok\n" {
+		t.Fatal("core readiness baseline changed")
+	}
+	if status, _ := requestHealth(t, before, "/sync-readyz"); status != http.StatusNotFound {
+		t.Fatal("unselected worker registered sync readiness")
+	}
+	state.syncReady = func(context.Context) error { return errors.New("private sync diagnostic") }
+	after := healthHandler(state)
+	if gotStatus, gotBody := requestHealth(t, after, "/readyz"); gotStatus != status || gotBody != body {
+		t.Fatal("sync selection changed core readiness bytes")
+	}
+	if status, body := requestHealth(t, after, "/sync-readyz"); status != http.StatusServiceUnavailable || body != "local sync schema is not ready\n" {
+		t.Fatal("sync refusal did not use a fixed value-free response")
+	}
+	state.syncReady = func(context.Context) error { return nil }
+	if status, body := requestHealth(t, after, "/sync-readyz"); status != http.StatusOK || body != "ok\n" {
+		t.Fatal("installed sync schema did not become ready")
+	}
+	state.started.Store(false)
+	if status, _ := requestHealth(t, after, "/sync-readyz"); status != http.StatusServiceUnavailable {
+		t.Fatal("sync readiness bypassed worker startup")
+	}
+}
+
 func TestMetricsAreBoundedAndContainRetentionCounts(t *testing.T) {
 	registry := NewRegistry()
 	if err := registry.Register(Job{Name: "transcript_retention", Run: blockingJob}); err != nil {

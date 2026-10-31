@@ -409,6 +409,15 @@
       "evidence": "SCAFFOLD_ONLY"
     },
     {
+      "name": "route:internal/server/server.go:/sync-readyz",
+      "kind": "route",
+      "source": "internal/server/server.go",
+      "symbol": "/sync-readyz",
+      "family": "accounts_operators_agents",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY"
+    },
+    {
       "name": "route:internal/server/server.go:/v1/capabilities",
       "kind": "route",
       "source": "internal/server/server.go",

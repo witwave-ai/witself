@@ -174,7 +174,7 @@ func serve() int {
 		return 1
 	}
 	defer st.Close()
-	if err := st.Migrate(); err != nil {
+	if err := migrateWorkerStore(ctx, st, runtime); err != nil {
 		fmt.Fprintf(os.Stderr, "witself-worker: migrate: %v\n", err)
 		return 1
 	}
@@ -202,6 +202,7 @@ func serveWorker(ctx context.Context, jobStore *store.Store, st runtimeconfig.Bo
 
 	healthAddr, metricsAddr := workerListenerAddresses(runtime, lookup)
 	ready := st.Ping
+	var syncReady func(context.Context) error
 	restartPolicy := ""
 	if runtime.Local {
 		restartPolicy = runtime.JobRestartPolicy
@@ -209,6 +210,18 @@ func serveWorker(ctx context.Context, jobStore *store.Store, st runtimeconfig.Bo
 			ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 			defer cancel()
 			return runtimeconfig.CheckReady(ctx, st, store.SchemaVersion(), runtime.AccountID)
+		}
+		if runtime.SyncSchema {
+			syncStore, ok := st.(runtimeconfig.SyncSchemaStore)
+			if !ok {
+				fmt.Fprintln(os.Stderr, "witself-worker: local sync schema is not ready")
+				return 1
+			}
+			syncReady = func(ctx context.Context) error {
+				ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+				defer cancel()
+				return runtimeconfig.CheckSyncSchemaReady(ctx, syncStore, store.SyncSchemaVersion())
+			}
 		}
 	}
 	fmt.Fprintln(os.Stderr, "witself-worker: migrated; database ready")
@@ -218,6 +231,7 @@ func serveWorker(ctx context.Context, jobStore *store.Store, st runtimeconfig.Bo
 		HealthAddr:       healthAddr,
 		MetricsAddr:      metricsAddr,
 		Ready:            ready,
+		SyncSchemaReady:  syncReady,
 		JobRestartPolicy: restartPolicy,
 	}); err != nil {
 		fmt.Fprintf(os.Stderr, "witself-worker: %v\n", err)

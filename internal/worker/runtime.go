@@ -36,13 +36,15 @@ type Config struct {
 	HealthAddr       string
 	MetricsAddr      string
 	Ready            func(context.Context) error
+	SyncSchemaReady  func(context.Context) error
 	ShutdownTimeout  time.Duration
 	JobRestartPolicy string
 }
 
 type healthState struct {
-	started atomic.Bool
-	ready   func(context.Context) error
+	started   atomic.Bool
+	ready     func(context.Context) error
+	syncReady func(context.Context) error
 }
 
 type runtimeEvent struct {
@@ -104,7 +106,7 @@ func (r *Registry) run(ctx context.Context, cfg Config, timing jobRestartTiming)
 		return fmt.Errorf("worker metrics listener %s: %w", cfg.MetricsAddr, err)
 	}
 
-	state := &healthState{ready: cfg.Ready}
+	state := &healthState{ready: cfg.Ready, syncReady: cfg.SyncSchemaReady}
 	servers := []struct {
 		name string
 		srv  *http.Server
@@ -317,5 +319,14 @@ func healthHandler(state *healthState) http.Handler {
 		}
 		ok(w, nil)
 	})
+	if state.syncReady != nil {
+		mux.HandleFunc("/sync-readyz", func(w http.ResponseWriter, request *http.Request) {
+			if !state.started.Load() || state.syncReady(request.Context()) != nil {
+				http.Error(w, "local sync schema is not ready", http.StatusServiceUnavailable)
+				return
+			}
+			ok(w, nil)
+		})
+	}
 	return mux
 }

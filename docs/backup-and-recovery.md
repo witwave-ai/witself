@@ -147,6 +147,7 @@ with fresh limiter state; export/import never synthesizes or transfers debt.
 Freeze moves while any possible destination is older than schema 90 because it
 must reject a newer archive rather than silently discard these streams.
 
+
 Schema 91 likewise adds no portable account stream. Its one-row
 `agent_email_cell_storage_capacity` ledger is cell-local platform safety state
 and is excluded from logical account archives. The destination's schema-91
@@ -601,6 +602,47 @@ are distinct. The import route accepts the paired suspended/closed evacuation
 archive with its exact evacuation ID, not the active-capable customer
 `purpose=self` artifact; none of this implies a customer import command. See
 [cli-command-surface.md](cli-command-surface.md).
+
+### Explicit local sync archive extension
+
+LC-S6B adds a separately versioned sync namespace, installed only when both
+`WITSELF_RUNTIME=local` and `WITSELF_LOCAL_SYNC_SCHEMA=1` are selected. It does
+not advance the core schema version. The namespace's installed version is a
+durable database-wide requirement: clearing the selection does not remove DDL,
+erase evidence, or permit a core-only export or import.
+
+A sync-bearing manifest carries optional `sync_extension` with `version: 1`,
+`schema_version: 1`, and the exact ordered `required_streams` list. These streams
+also appear after the core streams in `tables`; checksums declare empty streams
+explicitly. Core archives from databases without the namespace omit the field
+and retain their original bytes. A core-only importer refuses the extra table
+membership; a current importer refuses unsupported extensions, missing or
+unknown streams, and sync archives when the destination namespace is absent.
+A destination with installed sync schema refuses core-only archives. Install
+the selected namespace explicitly before restoring its evidence; import never
+implicitly runs DDL.
+
+The sync registry preserves identity, operations and separately stored payloads,
+immutable outcomes and public verifiers, sealed bundles, publication evidence,
+counters, configured budgets, deletion knowledge, retained evidence and pins.
+Current capture controls, database-principal capabilities, transaction admissions
+and touches, and resource reservations are explicitly excluded. Import copies
+historical evidence without enabling writers or transport; later capture
+activation must establish fresh coverage and reconcile capacity reservations.
+Backups include all portable sync streams and imply no independent witness or
+whole-host recovery guarantee.
+
+A destructive source finalization or an eligible account purge (including
+purge preview) refuses with
+`sync evidence prevents destructive finalization or purge` whenever the sync
+namespace is installed. This conservative refusal applies even to empty streams
+and survives configuration removal. LC-S6E/F must supply successor publication,
+retained floors and terminal denial before destructive movement can be enabled.
+The ordinary non-sync finalization and purge contract is unchanged. Sync schema
+downgrades and databases ahead of the compiled sync version fail closed and
+preserve data. Core `/readyz` remains independent; selected local processes
+expose `/sync-readyz` for installed-versus-compiled sync schema readiness only.
+This is not capture or convergence readiness; guards/capture are LC-S6C.
 
 ## Restore Scope
 

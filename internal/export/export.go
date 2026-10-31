@@ -58,18 +58,28 @@ const chunkSize = 32 << 20 // 32 MiB
 // Manifest is the archive's leading entry: everything a future importer needs
 // to decide whether and how it can restore this archive.
 type Manifest struct {
-	FormatVersion int       `json:"format_version"`
-	SchemaVersion int       `json:"schema_version"`
-	ServerVersion string    `json:"server_version"`
-	Compression   string    `json:"compression"` // of chunk content semantics; outer stream is gzip
-	Purpose       string    `json:"purpose,omitempty"`
-	BackupID      string    `json:"backup_id,omitempty"`
-	AccountID     string    `json:"account_id"`
-	Cell          string    `json:"cell,omitempty"`
-	Status        string    `json:"status"` // account status at export time
-	EvacuationID  string    `json:"evacuation_id,omitempty"`
-	ExportedAt    time.Time `json:"exported_at"`
-	Tables        []string  `json:"tables"`
+	FormatVersion int            `json:"format_version"`
+	SchemaVersion int            `json:"schema_version"`
+	ServerVersion string         `json:"server_version"`
+	Compression   string         `json:"compression"` // of chunk content semantics; outer stream is gzip
+	Purpose       string         `json:"purpose,omitempty"`
+	BackupID      string         `json:"backup_id,omitempty"`
+	AccountID     string         `json:"account_id"`
+	Cell          string         `json:"cell,omitempty"`
+	Status        string         `json:"status"` // account status at export time
+	EvacuationID  string         `json:"evacuation_id,omitempty"`
+	ExportedAt    time.Time      `json:"exported_at"`
+	Tables        []string       `json:"tables"`
+	SyncExtension *SyncExtension `json:"sync_extension,omitempty"`
+}
+
+// SyncExtension declares mandatory portable evidence from the separately
+// installed local sync namespace. Its absence preserves the core wire format.
+// RequiredStreams includes empty streams; omission is never evidence of emptiness.
+type SyncExtension struct {
+	Version         int      `json:"version"`
+	SchemaVersion   int      `json:"schema_version"`
+	RequiredStreams []string `json:"required_streams"`
 }
 
 // ChunkSum records one chunk's integrity data in the trailing checksums entry.

@@ -499,6 +499,17 @@
       "reason": "Per-action event dimensions, quantities, read/reconciliation and refusal behavior require review; null is unknown, not zero"
     },
     {
+      "name": "route:internal/server/server.go:/sync-readyz",
+      "family": "accounts_operators_agents",
+      "disposition": "S",
+      "evidence": "SCAFFOLD_ONLY",
+      "original_events": null,
+      "hour_count": null,
+      "day_count": null,
+      "replay_work": null,
+      "reason": "Per-action event dimensions, quantities, read/reconciliation and refusal behavior require review; null is unknown, not zero"
+    },
+    {
       "name": "route:internal/server/server.go:/v1/capabilities",
       "family": "accounts_operators_agents",
       "disposition": "S",

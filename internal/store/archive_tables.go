@@ -15,6 +15,8 @@ import (
 // Keep this list in ExportAccount dependency order. Contract tests pin every
 // entry to the embedded CREATE TABLE migration, the exporter queries, and the
 // import allowlist.
+// The independent sync namespace is registered in sync_archive_tables.go and
+// checked by the same contract test; its evidence never enters this core list.
 type archiveTableIntroduction struct {
 	name             string
 	introducedSchema int

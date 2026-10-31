@@ -1494,7 +1494,18 @@ func (s *Store) exportAccount(
 			ORDER BY posted_at, id`, arg: accountID, keyset: []string{"posted_at", "id"}},
 	}
 
+	syncExtension, err := exportSyncExtension(ctx, tx)
+	if err != nil {
+		return err
+	}
+	if syncExtension != nil {
+		for _, table := range syncArchiveTables {
+			sources = append(sources, &querySource{tx: tx, table: table.name, q: table.exportQuery(), arg: accountID, keyset: table.orderBy})
+		}
+	}
+
 	m := export.Manifest{
+		SyncExtension: syncExtension,
 		SchemaVersion: SchemaVersion(),
 		ServerVersion: serverVersion,
 		AccountID:     accountID,

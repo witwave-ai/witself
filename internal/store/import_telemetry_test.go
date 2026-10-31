@@ -265,6 +265,11 @@ func (tx *importTelemetryPanicTx) QueryRow(_ context.Context, sql string, _ ...a
 		case sql == `SELECT clock_timestamp()`:
 			*dest[0].(*time.Time) = tx.now
 			return nil
+		case strings.HasPrefix(sql, `SELECT to_regclass('witself_sync_schema_version')`):
+			// The core-only fixture has no installed sync namespace. Keep the
+			// panic at the row insert after durable archive negotiation.
+			*dest[0].(*bool), *dest[1].(*bool) = false, false
+			return nil
 		case strings.Contains(sql, "FROM accounts"):
 			return pgx.ErrNoRows
 		default:

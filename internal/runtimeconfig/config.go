@@ -22,6 +22,7 @@ const (
 // Config contains local-only overrides. Hosted callers receive its zero value.
 type Config struct {
 	Local                            bool
+	SyncSchema                       bool
 	APIAddr, HealthAddr, MetricsAddr string
 	DatabaseURL, SpoolDir, AccountID string
 	Jobs                             map[string]bool
@@ -60,6 +61,17 @@ var localJobEligibility = map[string]bool{
 // wildcard refusals; its values never appear in diagnostics.
 func FromEnv(role string, lookup func(string) (string, bool), environ []string) (Config, error) {
 	runtime, _ := lookup("WITSELF_RUNTIME")
+	const syncVariable = "WITSELF_LOCAL_SYNC_SCHEMA"
+	syncValue, syncPresent := lookup(syncVariable)
+	for _, entry := range environ {
+		name, _, _ := strings.Cut(entry, "=")
+		if strings.EqualFold(name, syncVariable) && (runtime != "local" || name != syncVariable) {
+			return Config{}, fmt.Errorf("%s is forbidden without explicit local runtime selection", name)
+		}
+	}
+	if syncPresent && runtime != "local" {
+		return Config{}, fmt.Errorf("%s is forbidden without explicit local runtime selection", syncVariable)
+	}
 	switch runtime {
 	case "":
 		return Config{}, nil
@@ -90,6 +102,12 @@ func FromEnv(role string, lookup func(string) (string, bool), environ []string) 
 		}
 	}
 	cfg := Config{Local: true, MigrationWait: DefaultMigrationWait, JobRestartPolicy: JobRestartNever}
+	if syncPresent {
+		if syncValue != "1" {
+			return Config{}, fmt.Errorf("%s must be 1 when explicitly selected", syncVariable)
+		}
+		cfg.SyncSchema = true
+	}
 	if raw := trimmed(lookup, "WITSELF_LOCAL_MIGRATION_WAIT", ""); raw != "" {
 		var err error
 		cfg.MigrationWait, err = time.ParseDuration(raw)
