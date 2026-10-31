@@ -437,7 +437,8 @@ function Test-WSBootstrapVerifier {
     # Simulate an unsuitable trusted runtime before Add-Type has loaded the type.
     if (-not ('WSB2Verifier' -as [type])) {
         & {
-            function Add-Type { throw 'synthetic_dependency_unavailable' }
+            function Deny-WSTypeLoad { throw 'synthetic_dependency_unavailable' }
+            Set-Alias -Name Add-Type -Value Deny-WSTypeLoad
             $refused = $false
             try { Initialize-WSComponentVerifier } catch {
                 $refused = $_.Exception.Message -ceq 'invalid_key: trusted PowerShell 7 with .NET RSA SubjectPublicKeyInfo support is required'
@@ -639,7 +640,7 @@ if ($BoundaryControlsOnly) {
     return $wrapper
 }
 
-function Test-WSRemoteBoundaryControls {
+function Test-WSRemoteBoundaryControl {
     param([string]$Wrapper, [string]$TemporaryRoot)
     $fixture = Join-Path $TemporaryRoot 'boundary-control-fixture'
     [IO.File]::WriteAllText($fixture, 'synthetic local downloader fixture')
@@ -672,7 +673,7 @@ $env:WS_UNTRUSTED_CLOCK = ''
 try {
     $script:remoteOnlyWrapper = New-RemoteOnlyInstallerWrapper $temporaryRoot
     if ($PSVersionTable.PSVersion.Major -ge 7) {
-        Test-WSRemoteBoundaryControls $script:remoteOnlyWrapper $temporaryRoot
+        Test-WSRemoteBoundaryControl $script:remoteOnlyWrapper $temporaryRoot
         Test-WSBootstrapVerifier $installer $repositoryRoot $temporaryRoot
     } else {
         if ($BootstrapOnly) { throw 'bootstrap_units_require_pwsh7' }

@@ -815,8 +815,10 @@ try {
     $componentVerifier = $null
     $componentArchive = $null
     if (-not [string]::IsNullOrWhiteSpace($env:WS_COMPONENT_SET_DIR)) {
-        # An explicitly selected component bundle emits fixed outcomes only.
-        function Write-Host { param($Object) }
+        # An explicitly selected component bundle emits fixed outcomes only:
+        # route every later progress line of this install to a sink.
+        function Hide-WSHostLine { $null = $args }
+        Set-Alias -Name Write-Host -Value Hide-WSHostLine
         $expectedTag = if ([string]::IsNullOrWhiteSpace($Version)) { '' } else { 'v' + $Version.TrimStart('v') }
         $componentVerifier = Get-WSVerifiedComponentSet $env:WS_COMPONENT_SET_DIR $env:WS_TRUST_ROOT_PEM_FILE $expectedTag
         $componentArchive = $componentVerifier.App('windows', 'amd64')
