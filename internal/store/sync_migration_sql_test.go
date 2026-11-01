@@ -184,7 +184,8 @@ func syncSQLCreateTable(tokens []syncSQLToken) (name string, body []syncSQLToken
 	if !tokens[i].keyword("TABLE") {
 		// Only these non-table CREATE forms occur in this migration namespace.
 		// Reject unfamiliar forms rather than silently losing a table inventory.
-		if i == 0 && (tokens[i].keyword("FUNCTION") || tokens[i].keyword("TRIGGER") || tokens[i].keyword("INDEX")) {
+		if i == 0 && (tokens[i].keyword("FUNCTION") || tokens[i].keyword("TRIGGER") || tokens[i].keyword("INDEX") ||
+			(tokens[i].keyword("CONSTRAINT") && len(tokens) > 1 && tokens[1].keyword("TRIGGER"))) {
 			return "", nil, false, nil
 		}
 		return "", nil, false, errSyncMigrationSQL
@@ -234,6 +235,13 @@ func syncSQLAlterTable(tokens []syncSQLToken, tables map[string]syncMigrationTab
 	table, found := tables[name]
 	if !ok || !found {
 		return errSyncMigrationSQL
+	}
+	// LC-S6C1 replaces only the inert capability CHECK. Do not generalize
+	// constraint removal: dropping a key could invalidate custody ordering.
+	if name == "sync_writer_capabilities" && len(p.tokens) == 3 &&
+		p.tokens[0].keyword("DROP") && p.tokens[1].keyword("CONSTRAINT") &&
+		p.tokens[2].keyword("sync_writer_capabilities_enabled_check") {
+		return nil
 	}
 	// Refused statements must not partially change the lexical inventory.
 	table.columns = slices.Clone(table.columns)
@@ -684,4 +692,25 @@ func syncSQLKnownColumns(table *syncMigrationTableContract, columns []string) bo
 		}
 	}
 	return true
+}
+
+// LOCK TABLE is inventory-neutral only in the reviewed strongest drain form.
+func syncSQLInventoryLock(tokens []syncSQLToken) bool {
+	if len(tokens) < 8 || !tokens[1].keyword("TABLE") {
+		return false
+	}
+	i := 2
+	for {
+		_, n, err := syncSQLRelation(tokens[i:])
+		if err != nil || n != 1 {
+			return false
+		}
+		i += n
+		if i < len(tokens) && tokens[i].text == "," {
+			i++
+			continue
+		}
+		break
+	}
+	return len(tokens) == i+4 && tokens[i].keyword("IN") && tokens[i+1].keyword("ACCESS") && tokens[i+2].keyword("EXCLUSIVE") && tokens[i+3].keyword("MODE")
 }

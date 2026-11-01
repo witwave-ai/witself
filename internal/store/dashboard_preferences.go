@@ -146,6 +146,9 @@ func (s *Store) PutDashboardPreferences(ctx context.Context, p Principal, prefs 
 	if err != nil {
 		return DashboardPreferences{}, err
 	}
+	if s.syncCaptureSelected.Load() {
+		return s.putDashboardPreferencesSync(ctx, p, canonical, syncPreferencesFault{})
+	}
 	var out DashboardPreferences
 	err = s.pool.QueryRow(ctx, `
 		INSERT INTO agent_dashboard_preferences

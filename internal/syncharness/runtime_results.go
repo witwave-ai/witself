@@ -50,6 +50,7 @@ type RuntimeResultRecord struct {
 	Artifact          string               `json:"artifact,omitempty"`
 	Outcome           EvidenceStatus       `json:"outcome"`
 	MissingCapability string               `json:"missing_capability,omitempty"`
+	Reason            string               `json:"reason,omitempty"`
 }
 
 // RuntimeArtifact retains only symbolic experiment provenance and an assertion
@@ -83,7 +84,7 @@ func validEvidenceClass(class EvidenceClass) bool {
 
 // fixtureRuntimeRecord is a reviewed adapter allocation, not an execution.
 // LC-S6A registers no real database, binary, lifecycle or witness adapters.
-// Adding one requires a compiled execution binding and retained artifacts.
+// LC-S6C1's separate production allocation is in capture_runtime_results.go.
 func fixtureRuntimeRecord(id string) (RuntimeResultRecord, int, bool) {
 	r := RuntimeResultRecord{Version: 1, Obligation: id, EvidenceClass: FixtureEvidence, Executable: "lc_s6a_go_test_v1", DatabaseClass: "none", PlatformClass: "portable_go", Outcome: Pass}
 	// These are reviewed expected counts; bindings supply counts from execution.
@@ -139,7 +140,7 @@ func (r RuntimeResultRecord) Validate(manifests []ObligationManifest) error {
 	if r.Version != 1 || !validRuntimeToken(r.Obligation) || !validRuntimeToken(r.Capability) || !validRuntimeToken(r.Scenario) {
 		return ErrRuntimeResult
 	}
-	for _, value := range []string{r.Adapter.Package, r.Adapter.Symbol, r.Executable, r.DatabaseClass, r.PlatformClass, r.Artifact, r.MissingCapability} {
+	for _, value := range []string{r.Adapter.Package, r.Adapter.Symbol, r.Executable, r.DatabaseClass, r.PlatformClass, r.Artifact, r.MissingCapability, r.Reason} {
 		if value != "" && !validRuntimeToken(value) {
 			return ErrRuntimeResult
 		}
@@ -164,10 +165,10 @@ func (r RuntimeResultRecord) Validate(manifests []ObligationManifest) error {
 		}
 		return nil
 	}
-	if (r.Outcome != Pass && r.Outcome != Fail) || !validEvidenceClass(r.EvidenceClass) || r.MissingCapability != "" {
+	if (r.Outcome != Pass && r.Outcome != Fail) || !validEvidenceClass(r.EvidenceClass) || r.MissingCapability != "" || r.Reason != "" {
 		return ErrRuntimeResult
 	}
-	expected, _, ok := fixtureRuntimeRecord(r.Obligation)
+	expected, _, ok := expectedRuntimeRecord(r)
 	expected.Outcome = r.Outcome
 	if !ok || r != expected {
 		return ErrRuntimeResult
@@ -225,7 +226,7 @@ func LoadRuntimeResults(fsys fs.FS) (RuntimeResults, error) {
 			continue
 		}
 		a, err := loadRuntimeArtifact(fsys, r.Artifact)
-		_, checks, _ := fixtureRuntimeRecord(r.Obligation)
+		_, checks, _ := expectedRuntimeRecord(r)
 		if err != nil || a.Result != r || a.Checks != checks || artifacts[r.Artifact] {
 			return RuntimeResults{}, ErrRuntimeResult
 		}

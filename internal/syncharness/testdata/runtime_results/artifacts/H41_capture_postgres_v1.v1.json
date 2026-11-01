@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "id": "H41_capture_postgres_v1",
+  "result": {
+    "version": 1,
+    "obligation": "H41",
+    "capability": "complete_production_writer_inventory",
+    "evidence_class": "real_postgres",
+    "adapter": {
+      "package": "store",
+      "symbol": "TestSyncCaptureForgottenJournal"
+    },
+    "scenario": "OmittedSemanticJournal",
+    "executable": "lc_s6c1_go_test_v1",
+    "database_class": "postgresql",
+    "platform_class": "go_test_host",
+    "artifact": "H41_capture_postgres_v1",
+    "outcome": "PASS"
+  },
+  "checks": 5
+}

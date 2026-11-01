@@ -37,7 +37,7 @@ func TestSyncArchiveRegistryRejectsUnregisteredMigrationTable(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			mutated := copiedSyncMigrationFS(t)
-			mutated["sync_migrations/0002_unregistered.sql"] = &fstest.MapFile{Data: []byte(tc.sql)}
+			mutated[fmt.Sprintf("sync_migrations/%04d_unregistered.sql", SyncSchemaVersion()+1)] = &fstest.MapFile{Data: []byte(tc.sql)}
 			err := validateSyncArchiveRegistryContract(mutated)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("unregistered schema mutation survived: %v; want %q", err, tc.want)
@@ -61,7 +61,7 @@ func TestSyncArchiveRegistrySQLLiteralsAndCommentsAreOpaque(t *testing.T) {
 		`/* CREATE TABLE evidence_extra (account_id text); /* nested ; */ */ SELECT 1;`,
 	} {
 		mutated := copiedSyncMigrationFS(t)
-		mutated["sync_migrations/0002_opaque.sql"] = &fstest.MapFile{Data: []byte(sql)}
+		mutated[fmt.Sprintf("sync_migrations/%04d_opaque.sql", SyncSchemaVersion()+1)] = &fstest.MapFile{Data: []byte(sql)}
 		if err := validateSyncArchiveRegistryContract(mutated); err != nil {
 			t.Fatalf("opaque SQL content changed the registry contract: %v", err)
 		}
@@ -103,7 +103,7 @@ func TestSyncArchiveRegistrySQLUnsupportedFailsClosed(t *testing.T) {
 		`UNREVIEWED STATEMENT;`,
 	} {
 		mutated := copiedSyncMigrationFS(t)
-		mutated["sync_migrations/0002_unsupported.sql"] = &fstest.MapFile{Data: []byte(sql)}
+		mutated[fmt.Sprintf("sync_migrations/%04d_unsupported.sql", SyncSchemaVersion()+1)] = &fstest.MapFile{Data: []byte(sql)}
 		if err := validateSyncArchiveRegistryContract(mutated); !errors.Is(err, errSyncMigrationSQL) || err.Error() != errSyncMigrationSQL.Error() {
 			t.Fatalf("unsupported SQL must return the fixed refusal: %v", err)
 		}
@@ -387,6 +387,11 @@ func syncMigrationTableContracts(source fs.FS) (map[string]syncMigrationTableCon
 			// cannot silently pass as inventory-neutral SQL. Accepted procedural
 			// bodies remain opaque; PostgreSQL's catalog certifies their effects.
 			switch {
+			case statement[0].keyword("LOCK"):
+				if !syncSQLInventoryLock(statement) {
+					return nil, "", errSyncMigrationSQL
+				}
+				continue
 			case statement[0].keyword("ALTER"):
 				if len(statement) < 2 || !statement[1].keyword("TABLE") {
 					return nil, "", errSyncMigrationSQL

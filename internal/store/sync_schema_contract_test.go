@@ -361,7 +361,7 @@ func TestSyncArchiveSchemaCompletenessRegisteredMigrationPostgres(t *testing.T) 
 		t.Fatal(err)
 	}
 	mutated := copiedSyncMigrationFS(t)
-	mutated["sync_migrations/0002_registered_evidence.sql"] = &fstest.MapFile{Data: []byte(`-- +goose Up
+	mutated[fmt.Sprintf("sync_migrations/%04d_registered_evidence.sql", SyncSchemaVersion()+1)] = &fstest.MapFile{Data: []byte(`-- +goose Up
 ALTER TABLE sync_incarnations ADD COLUMN registered_evidence text NOT NULL DEFAULT 'registered';
 -- +goose Down
 SELECT 1;
