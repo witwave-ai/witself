@@ -144,7 +144,7 @@ func TestAutobuildSurvivesCommandsUntilPurge(t *testing.T) {
 	var witnesses []harnessProcessWitness
 	for _, operation := range []string{"install", "start", "status", "stop", "start", "remove"} {
 		if err := invoke(operation); err != nil {
-			t.Fatalf("harness %s: %v", operation, err)
+			t.Fatalf("harness operation failed: %s: %v", operation, err)
 		}
 		if operation == "start" {
 			// Keep both generations before Stop or Remove erases their records.
@@ -152,7 +152,7 @@ func TestAutobuildSurvivesCommandsUntilPurge(t *testing.T) {
 			for _, component := range []string{"postgres", "server", "worker"} {
 				witness := newHarnessProcessWitness(t, root, component)
 				if !witness.alive(t) {
-					t.Fatalf("%s cleanup witness did not observe the running component", component)
+					t.Fatalf("harness cleanup witness did not observe the running component: %s", component)
 				}
 				witnesses = append(witnesses, witness)
 			}
@@ -168,11 +168,11 @@ func TestAutobuildSurvivesCommandsUntilPurge(t *testing.T) {
 	}
 	for _, witness := range witnesses {
 		if witness.alive(t) {
-			t.Errorf("owned %s process survived harness removal", witness.record.Component)
+			t.Errorf("harness process survived removal: %s", witness.record.Component)
 		}
 	}
 	if err := invoke("remove", "-purge"); err != nil {
-		t.Fatal(err)
+		t.Fatalf("harness purge failed: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(root, ".harness-build")); !os.IsNotExist(err) {
 		t.Fatal("purge retained autobuilt components")
