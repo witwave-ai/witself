@@ -39,6 +39,9 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 }
 
 func runWithBuilder(ctx context.Context, args []string, out io.Writer, build func(context.Context, string, string, *localcell.Binaries) error) error {
+	if len(args) != 0 && (args[0] == "payload" || args[0] == "channel") {
+		return safeTrustError(runTrustCommand(ctx, args, out, trustCommandClock()))
+	}
 	if len(args) != 0 && (args[0] == "run" || args[0] == "service") {
 		return runServiceCommand(ctx, args, out)
 	}

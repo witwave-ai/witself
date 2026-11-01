@@ -13,8 +13,10 @@ Sigstore release evidence remains independent evidence, not replaced by this
 format. Root custody and production signing require S7-F2 approval.
 
 The following are **not yet true**: there is no production root, no published
-component manifest, no installer verification (B2), and no channel ownership or
-private payload handoff (B3). Windows production packaging remains gated by S7-F1.
+component manifest, no LC-S7D update/restore flow or supervisor launch-check
+wiring, and no Windows MSI build. B2 bootstrap verification and B3 channel
+ownership/private payload handoff exist only through their explicit dark paths.
+Windows production packaging remains gated by the S7-F1 follow-up.
 `ProductionRoots()` is empty. Tests and offline tools explicitly supply public
 fixture roots; there is no ambient root discovery, unsigned fallback or network
 operation. A verifier without explicit roots returns `no_trust_root`.
@@ -393,3 +395,98 @@ installer mocks reject service-manager calls and cell/server/worker/PostgreSQL
 URLs, while Go checks keep client archive declarations limited to their matching
 client binaries and declared client assets. Neither release configuration nor
 publication is changed by B2.
+
+## Channel ownership and payload handoff
+
+LC-S7B3 adds harness-only ownership receipts, private generations and lifecycle
+handoff records. No shipped command imports this package, no adapter executes a
+package manager, and no service is registered or launched by these operations.
+The frozen format and vectors above are unchanged. Historical references above
+to B3 work describe the B1/B2 boundary; the following contract records what B3
+implements and what still requires LC-S7D integration.
+
+`channel receipt|inspect|preflight` and `payload stage|activate|retire|inspect`
+require an explicit `--root`, `--component-set-dir` and `--trust-root-pem`.
+The supplied PEM must be a public TEST-ONLY root. Target selection is explicit
+through `--os` and `--arch` (defaulting to the harness platform); existing
+generations use `--generation`. A production invocation has no trust root and
+refuses with `no_trust_root`. These paths consume local bundles and never fetch
+metadata or a verifier. Harness observations emit reason codes and counts rather
+than private paths, installing identities, manifests or full digests.
+
+`<root>/channel/receipt.json` is a bounded 0600 caller declaration. It records
+the channel, at most 64 cleaned absolute owned paths of at most 1024 bytes each,
+installing uid or SID, caller timestamp, revision, and known component-set
+identity. Writing rejects symlink components; ownership is never inferred from
+PATH, Cellar or directory names. Reads revalidate private storage. A missing
+receipt means unmanaged. Shell and Homebrew adapters observe each declared path
+as present, absent or foreign, including identity changes and symlink swaps.
+An owned path overlapping the declared data root, PGDATA or payload directory
+refuses with `ownership_overlap`. A candidate affecting package-owned paths
+returns `channel_action_required`; only declared lifecycle paths are allowed.
+The registered Linux-package and MSI adapters return `channel_not_implemented`.
+
+The harness root is an explicit private installation workspace. The existing
+LC-S7A layout places PGDATA at `<root>/pg`; payload generations occupy the
+distinct `<root>/payload` sibling, outside PGDATA. Channel preflight receives an
+explicit data-root and PGDATA declaration; the harness defaults them to the
+installation root and `<root>/pg`. `StageGeneration` requires an exact
+`AcceptSet`-committed platform and fresh acquisition verification. Components
+from a different signed manifest refuse even when independently valid. Every
+archive passes `ExtractVerified` into a newly created component subtree, then
+`RecheckInventory`. Generation names are the signed channel, sequence and first
+16 digest characters. Existing generations are never replaced. Four generations
+and a default two-GiB sum of authenticated inventories are the limits; both are
+checked before extraction. Retirement is explicit.
+
+`generation.json` retains the exact signed document and envelope, selected
+components and relative host, inventory digest and byte total, staging time,
+public roots and the committed trust snapshot. Reads derive the layout again
+from the exact committed document. Current acquisition authority is persisted
+separately at `<root>/trust/trust-state.json`; the generation snapshot cannot
+silently lower current authority. The generation container changes from 0700 to
+0500 after staging. Signed file modes remain unchanged so inventory recheck
+still verifies their exact modes. This is owner-private storage and accidental
+write protection, not protection from the same user changing permissions. A
+failed extraction removes only its own new directory. If a journal write may
+already have committed, the complete recorded generation is retained for reload.
+
+`<root>/payload/handoff.json` is a separate lifecycle journal. Receipt and
+journal transactions use exclusive writer fences, private temporary files,
+file fsync, rename and directory sync; concurrent or interrupted fences refuse
+without guessed stale-lock takeover. Package success is never written as cell
+success. The lifecycle progression is `staged` → `activating` intent →
+`activated` → `superseded` → `retired`, with `faulted` available from every
+state. The next operation reconciles an interrupted activation by re-verifying
+the generation and completing or faulting it. A previous active generation is
+superseded and retained, never automatically retired.
+
+Retirement refuses an activated generation, a matching private service
+descriptor, or a running process with the generation host's executable identity.
+B3 native process-reference observation is Linux-only; unsupported hosts refuse retirement; their native process fixture is NOT RUN.
+Linux observes executable device/inode identities through `/proc`. Missing or
+denied process visibility refuses retirement; macOS has no standard-library
+enumerator here and reports `process_observation_unavailable`. Windows private
+receipt, trust and journal persistence fails closed until an ACL-backed adapter
+exists. Windows file-index/reparse checks compile, but native Windows persistence
+and read-only marking are not certified by this slice.
+
+`Activate` is the sole generation producer for the `ServicePayload` shape. A
+first activation requires fresh acquisition acceptance; an already activated
+committed generation can restart offline after metadata expires. It rechecks
+the whole generation, opens the absolute host with `O_NOFOLLOW|O_CLOEXEC` on
+Unix, compares the host to its signed inventory, and records device/inode, size
+and digest in the private activation receipt before returning the payload. It
+does not resolve PATH. The harness's `payload activate --launch-check` calls
+`VerifyPayloadIdentity` to reopen the host and reject a changed identity,
+observed content change or symlink substitution. `Activate` reopens and checks
+the host, closes its handle, and returns a pathname. It does not execute the host.
+
+Replacement and symlink refusal at check time are the proven properties.
+Execution-time atomicity is deferred to the LC-S7D supervisor. A check followed
+by a separate pathname-based execution cannot atomically prevent a later
+replacement. Same-user in-place rewriting also
+remains the documented boundary. The LC-S7A supervisor is unchanged; LC-S7D must
+wire the check and define its execution protection before claiming a race-free
+runtime handoff. This slice introduces no installer, release pipeline,
+publication, production root, update/restore flow or MSI build.

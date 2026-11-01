@@ -7,6 +7,10 @@ import (
 
 // ServicePayload identifies one immutable, explicitly supplied host invocation.
 // It contains no credentials and is never resolved through PATH.
+// The dark component-set path is produced only by trust.Activate, whose unnamed
+// return shape is assignment-compatible without adding a trust dependency here.
+// Its receipt must pass trust.VerifyPayloadIdentity at launch; that integration
+// currently exists only in localcellharness and remains LC-S7D supervisor work.
 type ServicePayload struct {
 	Generation string   `json:"generation"`
 	Host       string   `json:"host"`

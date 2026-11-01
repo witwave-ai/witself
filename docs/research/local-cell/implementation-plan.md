@@ -1032,18 +1032,23 @@ the owning user logs in. No reboot receipt exists yet, and A provides no channel
 installer, macOS or Windows registration, resource-budget acceptance, or hosted
 default change. Owner reboot receipt driver: see [service-reboot-receipt.md](service-reboot-receipt.md); receipt not yet recorded.
 
-| LC-S7 | Codex GPT-6 Astra (B2 implementer); Fable (integration owner) | LC-S7B2 implemented: bootstrap verifiers dark, parity on the B1 corpus; owner gate pending | [component-set trust v1](component-set-trust.md#bootstrap-verifiers) | offline bootstrap verifier corpus, default installer and remote-only archive boundaries; native evidence remains separate | owner gate; B3 channel ownership; S7-F1 Windows channel and S7-F2 signing custody | gate B2 on Linux, macOS and Windows before channel integration |
+| LC-S7 | Codex GPT-6 Astra (B3 implementer); Fable (integration owner) | LC-S7B3 implemented: channel receipts/adapters, private payload generations, handoff journal, protected activation (dark); owner gate pending | [component-set trust v1](component-set-trust.md#channel-ownership-and-payload-handoff) | hermetic ownership, generation and handoff checks; B1/B2 corpus unchanged; native evidence remains separate | owner gate; LC-S7D supervisor execution protection and update flow; Windows ACL persistence/MSI; production signing custody | gate B3 before channel and supervisor integration |
 
 LC-S7B1 supplies the frozen component-set format, offline Go verification,
 fixture vectors and manifest tooling. LC-S7B2 adds explicitly selected shell and
 PowerShell bootstrap verification and a dormant Homebrew helper, with parity
 suites over the unchanged B1 corpus. Default installer behavior and all three
-current Homebrew formulae remain unchanged. No production root, manifest
-publication or release-pipeline change is introduced. The bootstrap session does
-not persist trust state across invocations; B3 still owns channel ownership,
-persisted acquisition state and the private payload handoff. S7-F1 gates the
-production Windows channel and S7-F2 gates production signing identities and
-custody. The owner gate is pending; M3 and M9 remain incomplete.
+current Homebrew formulae remain unchanged. LC-S7B3 adds explicit channel
+receipts and observe/preflight adapters, four bounded private payload generations,
+persisted acquisition authority, a separate lifecycle handoff journal, and an
+activation receipt with a harness-only launch identity check. The previous
+active generation is retained; unknown process visibility refuses retirement.
+Windows private persistence requires a future ACL adapter. A pathname check
+does not atomically bind a later execution: LC-S7D still owns supervisor wiring,
+execution protection and update/restore acceptance. No production root, manifest
+publication, release-pipeline change or MSI build is introduced. S7-F1 follow-up
+owns the production Windows channel and S7-F2 owns production signing custody.
+The owner gate is pending; M3 and M9 remain incomplete.
 
 LC-S5A/B supply four separately migrated schemas and a minimal witness in one
 disposable PostgreSQL database, an ordinary remote-only client, deterministic
