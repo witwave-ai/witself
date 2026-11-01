@@ -22,11 +22,11 @@ func notifyFixtureStop(stopped chan<- os.Signal) {
 	signal.Notify(stopped, syscall.SIGTERM, os.Interrupt)
 }
 func runFixtureStopHelper() bool { return false }
-func fixturePostmasterRecord(data, _ string) []byte {
-	return []byte(fmt.Sprintf("%d\n%s\n%d\n", os.Getpid(), data, time.Now().Unix()))
+func fixturePostmasterRecord(data, _ string, epoch int64) []byte {
+	return []byte(fmt.Sprintf("%d\n%s\n%d\n", os.Getpid(), data, epoch))
 }
 
-func stopFixturePostgres(data []byte) error {
+func stopFixturePostgres(data []byte, deadline time.Time) error {
 	pid, err := strconv.Atoi(strings.Split(string(data), "\n")[0])
 	if err != nil {
 		return err
@@ -36,5 +36,16 @@ func stopFixturePostgres(data []byte) error {
 		return err
 	}
 	defer func() { _ = process.Release() }()
-	return process.Signal(syscall.SIGTERM)
+	if err := process.Signal(syscall.SIGTERM); err != nil {
+		return err
+	}
+	for time.Now().Before(deadline) {
+		if err := syscall.Kill(pid, 0); err == syscall.ESRCH {
+			return nil
+		} else if err != nil {
+			return err
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return fmt.Errorf("fixture PostgreSQL shutdown timeout")
 }

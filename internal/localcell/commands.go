@@ -36,7 +36,7 @@ func allocatePorts() (Ports, error) {
 	for range 6 {
 		listener, err := net.Listen("tcp4", "127.0.0.1:0")
 		if err != nil {
-			return Ports{}, errors.New("cannot allocate local cell loopback ports")
+			return Ports{}, fixedCause("cannot allocate local cell loopback ports")
 		}
 		listeners = append(listeners, listener)
 		ports = append(ports, listener.Addr().(*net.TCPAddr).Port)
@@ -45,6 +45,48 @@ func allocatePorts() (Ports, error) {
 }
 
 func addr(port int) string { return net.JoinHostPort("127.0.0.1", strconv.Itoa(port)) }
+
+// Probe without retaining reservations: the eventual bind remains authoritative.
+// Already-running, identity-verified components own their ports and are not
+// launched again by Start, so their ports are excluded from this preflight.
+func probePorts(ports Ports, running map[string]bool) error {
+	for _, group := range []struct {
+		component string
+		ports     []int
+	}{
+		{"postgres", []int{ports.Postgres}},
+		{"server", []int{ports.ServerAPI, ports.ServerHealth, ports.ServerMetrics}},
+		{"worker", []int{ports.WorkerHealth, ports.WorkerMetrics}},
+	} {
+		if running[group.component] {
+			continue
+		}
+		for _, port := range group.ports {
+			listener, err := net.Listen("tcp4", addr(port))
+			if err != nil {
+				return fixedCause("saved local cell port is occupied")
+			}
+			_ = listener.Close()
+		}
+	}
+	return nil
+}
+
+func (c *Cell) allocateAvailablePorts() (Ports, error) {
+	for range 3 {
+		ports, err := allocatePorts()
+		if err != nil {
+			return Ports{}, err
+		}
+		if c.afterPortAllocation != nil {
+			c.afterPortAllocation(ports)
+		}
+		if probePorts(ports, nil) == nil {
+			return ports, nil
+		}
+	}
+	return Ports{}, fixedCause("cannot allocate local cell loopback ports")
+}
 
 func (c *Cell) password() (string, error) {
 	path := c.path("run", "postgres.password")
@@ -149,8 +191,18 @@ func (c *Cell) pgCommand(ctx context.Context, tool string, args ...string) error
 		return err
 	}
 	defer release()
-	if cmd.Run() != nil {
-		return errors.New("local cell PostgreSQL command failed")
+	if err := cmd.Run(); err != nil {
+		switch ctx.Err() {
+		case context.Canceled:
+			return fixedCause("PostgreSQL command cancelled")
+		case context.DeadlineExceeded:
+			return fixedCause("PostgreSQL command timed out")
+		}
+		var exit *exec.ExitError
+		if errors.As(err, &exit) {
+			return fixedCause("PostgreSQL command exited with failure")
+		}
+		return fixedCause("PostgreSQL command could not start")
 	}
 	return nil
 }

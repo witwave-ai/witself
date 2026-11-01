@@ -22,7 +22,7 @@ func (c *Cell) startPostgres(ctx context.Context, _ *Manifest) error {
 	}
 	pid, err := c.postmaster()
 	if err != nil || pid == 0 {
-		return errors.New("PostgreSQL did not publish process ownership")
+		return fixedCause("PostgreSQL did not publish process ownership")
 	}
 	identity, alive, err := processIdentity(pid)
 	if err != nil || !alive {

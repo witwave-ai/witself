@@ -8,6 +8,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -26,11 +27,19 @@ func processIdentity(pid int) (string, bool, error) {
 }
 
 func linuxProcessStartTicks(pid int) (uint64, bool, error) {
+	return linuxProcessStartTicksWithRead(pid, os.ReadFile)
+}
+
+func linuxProcessStartTicksWithRead(pid int, readFile func(string) ([]byte, error)) (uint64, bool, error) {
 	if pid <= 0 {
 		return 0, false, errors.New("localcell: invalid process ID")
 	}
-	data, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
-	if errors.Is(err, os.ErrNotExist) {
+	data, err := readFile("/proc/" + strconv.Itoa(pid) + "/stat")
+	// A process can disappear after procfs opens stat but before the read.
+	// Linux then reports ESRCH rather than ENOENT. Both establish an exited
+	// process; other read errors remain inspection failures, without retrying
+	// or substituting a different process identity.
+	if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ESRCH) {
 		return 0, false, nil
 	}
 	if err != nil {

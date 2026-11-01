@@ -131,7 +131,8 @@ func TestPostgresRecoveryRequiresNativeStartEpoch(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	writePostmaster(started.Unix() + 60)
+	// Sixty seconds is now the accepted lower boundary; refuse the next second.
+	writePostmaster(started.Unix() + 61)
 	inspection, err := c.Inspect(t.Context())
 	state := inspection.Processes["postgres"]
 	if err != nil || !state.Alive || state.Matches || state.PID != child.PID {

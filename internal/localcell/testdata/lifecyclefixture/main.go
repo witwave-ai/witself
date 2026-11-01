@@ -46,15 +46,7 @@ func run(name string) error {
 	case "createdb":
 		return fixtureWriteFile(filepath.Join("pg", "fixture-created-database"), []byte(os.Args[len(os.Args)-1]))
 	case "psql":
-		if err := checkDatabase(argument("-d")); err != nil {
-			return err
-		}
-		if strings.Contains(argument("-c"), "SELECT id FROM accounts") {
-			fmt.Println("acc_aaaaaaaaaaaaaaaa")
-		} else {
-			fmt.Println("1")
-		}
-		return nil
+		return runFixturePSQL() // FLAKE-3 fix 2 (F6)
 	case "pg_ctl":
 		return controlPostgres()
 	case "postgres":
@@ -115,15 +107,9 @@ func controlPostgres() error {
 	if err != nil {
 		return err
 	}
-	if err := stopFixturePostgres(dataBytes); err != nil {
-		return err
-	}
-	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
-		if _, err := os.Stat(pidfile); os.IsNotExist(err) {
-			return nil
-		}
-	}
-	return fmt.Errorf("fixture PostgreSQL shutdown timeout")
+	// Real pg_ctl stop waits for the postmaster to exit. The pidfile can be
+	// removed before deferred cleanup finishes, so it is not an exit witness.
+	return stopFixturePostgres(dataBytes, time.Now().Add(5*time.Second))
 }
 
 func servePostgres() error {
@@ -148,19 +134,67 @@ func servePostgres() error {
 		return err
 	}
 	pidfile := filepath.Join(data, "postmaster.pid")
+	epoch := time.Now()
+	if delay, err := os.ReadFile("fixture-postgres-epoch-delay"); err == nil {
+		offset, err := time.ParseDuration(string(delay))
+		if err != nil || offset < 0 {
+			return fmt.Errorf("fixture PostgreSQL epoch delay is invalid")
+		}
+		// Model work between process creation and PostgreSQL's epoch capture
+		// without introducing an actual sleep into the lifecycle fixture.
+		epoch = epoch.Add(offset)
+	}
+	recordData := fixturePostmasterRecord(data, string(match[1]), epoch.Unix())
+	_, emptyErr := os.Stat("fixture-postgres-empty-record")
+	if emptyErr == nil {
+		recordData = nil
+	}
 	// pg_ctl treats existence as readiness. Publish the complete record in one
 	// rename so it can never return while the PID file is empty or partial.
-	if err := fixtureWriteFile(pidfile+".pending", fixturePostmasterRecord(data, string(match[1]))); err != nil {
+	// The explicit empty-record negative control is also published atomically.
+	if err := fixtureWriteFile(pidfile+".pending", recordData); err != nil {
 		return err
+	}
+	if argument("--fixture-publication-gate") == "held" {
+		// This explicit fixture-only argument never enters production launch
+		// paths. The release signal is always scoped to this fixture's root.
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			if _, err := os.Stat("fixture-postgres-publication-release"); err == nil {
+				break
+			} else if !os.IsNotExist(err) {
+				return err
+			}
+			if !time.Now().Before(deadline) {
+				if err := fixtureWriteFile("fixture-postgres-publication-expired", nil); err != nil { // FLAKE-3 fix 4 (F9)
+					return err // FLAKE-3 fix 4 (F9)
+				} // FLAKE-3 fix 4 (F9)
+				return fmt.Errorf("fixture PostgreSQL publication timeout")
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
 	}
 	if err := os.Rename(pidfile+".pending", pidfile); err != nil {
 		return err
+	}
+	if emptyErr == nil {
+		// No process authority can be recovered from this deliberately invalid
+		// record. Exit immediately so the negative control cannot strand a peer.
+		return nil
 	}
 	<-stopped
 	if err := record("postgres-stop"); err != nil {
 		return err
 	}
-	return os.Remove(pidfile)
+	if err := os.Remove(pidfile); err != nil {
+		return err
+	}
+	if _, err := os.Stat("fixture-postgres-exit-delay"); err == nil {
+		// Keep the process and its listener alive after removing the pidfile.
+		// This deterministic fixture seam exposes premature pg_ctl completion.
+		time.Sleep(500 * time.Millisecond)
+	}
+	return nil
 }
 
 func serveComponent(component string) error {
