@@ -1,7 +1,10 @@
 # Linux user-service reboot receipt
 
-Status: **owner receipt not yet recorded**. Fable runs this procedure after the
-LC-S7A-R change is reviewed and merged. The driver is
+Status: **owner receipt recorded 2026-10-30** on a disposable Linux arm64 VM at
+commit 917a2b99; the outcome is recorded in the M3 row of the
+[living progress record](implementation-plan.md#living-progress-record), and this
+document still carries no receipt values. Fable ran this procedure after the
+LC-S7A-R change (#856) was reviewed and merged. The driver is
 [`TestOwnerRebootReceipt`](../../../internal/localcell/service_receipt_test.go),
 compiled only on Linux with `-tags ownerreceipt`. The default suite exercises
 only its hermetic contract helpers. The authenticated `service observe` action
