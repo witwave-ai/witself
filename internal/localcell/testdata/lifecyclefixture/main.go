@@ -148,7 +148,12 @@ func servePostgres() error {
 		return err
 	}
 	pidfile := filepath.Join(data, "postmaster.pid")
-	if err := fixtureWriteFile(pidfile, fixturePostmasterRecord(data, string(match[1]))); err != nil {
+	// pg_ctl treats existence as readiness. Publish the complete record in one
+	// rename so it can never return while the PID file is empty or partial.
+	if err := fixtureWriteFile(pidfile+".pending", fixturePostmasterRecord(data, string(match[1]))); err != nil {
+		return err
+	}
+	if err := os.Rename(pidfile+".pending", pidfile); err != nil {
 		return err
 	}
 	<-stopped

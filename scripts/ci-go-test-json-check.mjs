@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // A successful native command and a complete JSON stream are both required by
-// the workflow. Only exact source-approved diagnostics may leave the JSON stream.
+// the workflow. Only source-approved diagnostic text may leave the JSON stream.
 import {createReadStream, readFileSync, readdirSync} from 'node:fs';
 import {pathToFileURL} from 'node:url';
 
@@ -23,30 +23,45 @@ const testNamePattern = /^(?:Test|Example|Fuzz)[A-Za-z0-9_]*(?:\/[A-Za-z0-9_.,:=
 
 function sourceLiterals(source, assertions) {
   // Tokenize comments and strings as whole units, so examples inside comments,
-  // string contents, and concatenated or formatted expressions cannot enroll
-  // themselves as diagnostics. Unsupported Go string escapes fail closed.
+  // string contents, and concatenated expressions cannot enroll themselves as
+  // diagnostics. Unsupported Go string escapes fail closed. Formatted assertions
+  // enroll only their fixed prefix, never their arguments or formatted output.
   const tokens = (source.match(/\/\/[^\n]*|\/\*[\s\S]*?\*\/|"(?:\\.|[^"\\])*"|`[^`]*`|'(?:\\.|[^'\\])*'|[A-Za-z_][A-Za-z0-9_]*|[^\s]/g) ?? [])
     .filter(token => !token.startsWith('//') && !token.startsWith('/*'));
   const literals = [];
+  const prefixes = [];
   for (let index = 0; index + 5 < tokens.length; index++) {
     const [receiver, dot, method, open, literal, close] = tokens.slice(index, index + 6);
-    if (dot !== '.' || open !== '(' || close !== ')' || !literal.startsWith('"')) continue;
+    if (dot !== '.' || open !== '(' || !literal.startsWith('"')) continue;
     if (assertions ? !/^(?:Fatal|Error|Fatalf|Errorf)$/.test(method) || !/^[A-Za-z_]\w*$/.test(receiver)
       : receiver !== 'errors' || method !== 'New') continue;
     let value;
     try { value = JSON.parse(literal); } catch { continue; }
-    // Production errors may contain their fixed package prefix. Assertions are
-    // stricter: no paths, formatting directives, long numbers, =, : or \\.
+    const format = value.indexOf('%');
+    if (assertions && /^(?:Fatalf|Errorf)$/.test(method) && format !== -1 && (close === ',' || close === ')')) {
+      const match = value.slice(0, format);
+      // Keep the full source prefix (including its value separator) for matching,
+      // but omit a final colon from the value-free label shown to the operator.
+      const message = match.trimEnd().replace(/:$/, '').trimEnd();
+      if (message.length < 12 || !/^[A-Za-z][A-Za-z0-9 _.,;:!?()'"-]*$/.test(message) ||
+        !/^[A-Za-z][A-Za-z0-9 _.,;:!?()'"-]*$/.test(match) || /\d{3}|[a-f0-9]{64}/i.test(message)) continue;
+      prefixes.push({match, message});
+      continue;
+    }
+    if (close !== ')') continue;
+    // Production errors may contain their fixed package prefix. Exact assertions
+    // are stricter: no paths, formatting directives, long numbers, =, : or \\.
     if (!/^[A-Za-z][A-Za-z0-9 _.,;:!?()'"-]*$/.test(value) || /\d{3}|[a-f0-9]{64}/i.test(value)) continue;
     if (assertions && /[:=\\/]/.test(value)) continue;
     literals.push(value);
   }
-  return literals;
+  return {literals, prefixes};
 }
 
 function diagnosticAllowlist() {
   const errors = new Set();
   const assertions = new Map(expectedPackages.map(name => [name, new Set()]));
+  const prefixes = new Map(expectedPackages.map(name => [name, new Map()]));
   const testFiles = new Map(expectedPackages.map(name => [name, new Set()]));
   for (const name of expectedPackages) {
     const directory = new URL(`../${name.slice('github.com/witwave-ai/witself/'.length)}/`, import.meta.url);
@@ -58,18 +73,20 @@ function diagnosticAllowlist() {
       const isTest = file.endsWith('_test.go');
       if (isTest) testFiles.get(name).add(file);
       if (!isTest && name === expectedPackages[2]) continue;
-      for (const literal of sourceLiterals(source, isTest)) {
+      const sourceDiagnostics = sourceLiterals(source, isTest);
+      for (const literal of sourceDiagnostics.literals) {
         (isTest ? assertions.get(name) : errors).add(literal);
       }
+      for (const {match, message} of sourceDiagnostics.prefixes) prefixes.get(name).set(match, message);
     }
   }
   // The helpers' fixed errors propagate across package boundaries. Assertions
   // remain local to their package. A copied script with no sources emits only
   // unclassified reasons; a missing source never licenses arbitrary output.
-  return {messages: new Map([...assertions].map(([name, messages]) => [name, new Set([...errors, ...messages])])), testFiles};
+  return {messages: new Map([...assertions].map(([name, messages]) => [name, new Set([...errors, ...messages])])), prefixes, testFiles};
 }
 
-const {messages: allowlist, testFiles} = diagnosticAllowlist();
+const {messages: allowlist, prefixes: prefixAllowlist, testFiles} = diagnosticAllowlist();
 
 // Mask before truncating so a secret crossing the display boundary cannot leave
 // an unmasked prefix. Password-file/environment fragments are suppressed to the
@@ -193,6 +210,11 @@ export async function checkGoTestJSON(input, requiredTests = [], {diagnose = fal
             state.why.set(name, message);
             break;
           }
+          const prefix = [...(prefixAllowlist.get(event.Package) ?? [])].find(([match]) => message.startsWith(match));
+          if (prefix) {
+            state.why.set(name, prefix[1]);
+            break;
+          }
         }
       }
       return;
@@ -245,7 +267,15 @@ export async function checkGoTestJSON(input, requiredTests = [], {diagnose = fal
       if (action === 'skip') lines.push(`skip ${name} ${testName}`);
       if (action === 'fail') {
         lines.push(`fail ${name} ${testName}`);
-        lines.push(`why ${name} ${testName} :: ${state.timedOut.has(testName) ? 'test timed out' : state.why.get(testName) ?? '(unclassified)'}`);
+        let reason = state.timedOut.has(testName) ? 'test timed out' : state.why.get(testName);
+        if (reason === undefined) {
+          // Map insertion order preserves the first classified output event.
+          // Derive only the display label; keep each test's own reason intact.
+          const child = [...state.why].find(([childName]) =>
+            childName.startsWith(`${testName}/`) && state.tests.get(childName) === 'fail');
+          reason = child ? `child failed: ${child[1]}` : '(unclassified)';
+        }
+        lines.push(`why ${name} ${testName} :: ${reason}`);
         for (const diagnostic of state.diagnostics.get(testName) ?? []) lines.push(`diagnose ${name} ${testName} :: ${diagnostic}`);
       }
     }

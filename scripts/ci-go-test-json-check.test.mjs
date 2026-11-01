@@ -191,6 +191,18 @@ func TestPolicy(t *testing.T) {
   t.Fatal("multiple arguments", value)
   // t.Fatal("comment assertion")
   t.Fatal("concatenated assertion" + value)
+  t.Fatalf("abcdefghijkl: %v", value)
+  t.Errorf("abcdefghijk: %v", value)
+  t.Fatalf("safe formatted assertion: %v", value)
+  t.Fatalf("safe formatted: detail: %v", value)
+  t.Errorf("safe formatted assertion without colon %s", value)
+  t.Fatalf("unsafe formatted/path: %v", value)
+  t.Fatalf("unsafe formatted=value: %v", value)
+  t.Fatalf("unsafe formatted 123 digits: %v", value)
+  t.Fatal("nonformat method assertion: %v", value)
+  t.Fatalf("concatenated formatted assertion: %v" + value)
+  // t.Fatalf("comment formatted assertion: %v", value)
+  _ = \`t.Fatalf("quoted formatted assertion: %v", value)\`
   _ = errors.New("test-only error")
 }
 `);
@@ -242,6 +254,174 @@ test('why diagnostics from the actual packages recognize production errors and n
   assertFixture(script, outputFailure(['    policy_test.go:12: canonical policy was rejected\n'], 'canonical policy was rejected'));
   assertFixture(script, outputFailure(['    fixture_test.go:12: local cell password file is unavailable or not private\n'],
     'local cell password file is unavailable or not private', packages[0]));
+});
+
+test('formatted concurrent Start failure is classified by its value-free source prefix', () => {
+  assertFixture(script, outputFailure([
+    '    lifecycle_hermetic_test.go:123: independent concurrent Start did not finish: fixture error\n',
+  ], 'independent concurrent Start did not finish', packages[0]));
+});
+
+test('a failure sharing only the first eleven source-prefix characters stays unclassified', () => {
+  assert.equal('independent'.length, 11);
+  assertFixture(script, outputFailure([
+    '    lifecycle_hermetic_test.go:123: independent private-fixture-marker\n',
+  ], '(unclassified)', packages[0]));
+});
+
+// Ordinary output and why classification are value-free; the inherited
+// --require … --diagnose proof path masks by pattern and is unchanged.
+test('ordinary output and why classification omit formatted values', () => {
+  assertFixture(script, outputFailure([
+    `    lifecycle_hermetic_test.go:123: independent concurrent Start did not finish: private-fixture-marker ${'a'.repeat(64)} password=private-value\n`,
+  ], 'independent concurrent Start did not finish', packages[0]));
+});
+
+test('formatted assertion prefixes require at least twelve safe display characters', () => {
+  withDiagnosticSources(target => {
+    assertFixture(target, outputFailure(['    policy_test.go:12: abcdefghijkl: private-fixture-marker\n'], 'abcdefghijkl'));
+    assertFixture(target, outputFailure(['    policy_test.go:12: abcdefghijk: private-fixture-marker\n']));
+  });
+});
+
+test('formatted prefixes require the complete source prefix and remain package-local', () => {
+  withDiagnosticSources(target => {
+    assertFixture(target, outputFailure(['    policy_test.go:12: safe formatted assertion: private-fixture-marker\n'], 'safe formatted assertion'));
+    assertFixture(target, outputFailure(['    policy_test.go:12: safe formatted: detail: private-fixture-marker\n'], 'safe formatted: detail'));
+    assertFixture(target, outputFailure(['    policy_test.go:12: safe formatted assertion without colon private-fixture-marker\n'],
+      'safe formatted assertion without colon'));
+    for (const message of ['safe formatted assertion private-fixture-marker', 'safe formatted assertion:private-fixture-marker',
+      'safe formatted assertion without colony private-fixture-marker']) {
+      assertFixture(target, outputFailure([`    policy_test.go:12: ${message}\n`]));
+    }
+    assertFixture(target, outputFailure(['    policy_test.go:12: safe formatted assertion: private-fixture-marker\n'], '(unclassified)', packages[0]));
+  });
+});
+
+test('unsafe, commented, quoted, concatenated and nonformat prefixes cannot enroll diagnostics', () => {
+  withDiagnosticSources(target => {
+    for (const prefix of ['unsafe formatted/path', 'unsafe formatted=value',
+      'unsafe formatted 123 digits', 'nonformat method assertion', 'concatenated formatted assertion',
+      'comment formatted assertion', 'quoted formatted assertion']) {
+      assertFixture(target, outputFailure([`    policy_test.go:12: ${prefix}: private-fixture-marker\n`]));
+    }
+  });
+});
+
+test('hermetic install and startup-barrier failures identify their stage without values', () => {
+  for (const prefix of ['synthetic install', 'start ended before owning the startup barrier']) {
+    assertFixture(script, outputFailure([`    lifecycle_integration_test.go:12: ${prefix}: private-fixture-marker\n`], prefix, packages[0]));
+  }
+  const fixed = 'start did not reach the startup barrier within its fixture deadline';
+  assertFixture(script, outputFailure([`    lifecycle_integration_test.go:12: ${fixed}\n`], fixed, packages[0]));
+});
+
+for (const {name, output, leafReason, ancestorReason} of [
+  {
+    name: 'classified nested lifecycle failure gives both ancestors the safe child reason',
+    output: '    lifecycle_hermetic_test.go:174: start did not reach the startup barrier within its fixture deadline\nprivate-fixture-marker\n',
+    leafReason: 'start did not reach the startup barrier within its fixture deadline',
+    ancestorReason: 'child failed: start did not reach the startup barrier within its fixture deadline',
+  },
+  {
+    name: 'unclassified nested lifecycle failure leaves both ancestors unclassified',
+    output: '    lifecycle_hermetic_test.go:174: private-fixture-marker\n',
+    leafReason: '(unclassified)',
+    ancestorReason: '(unclassified)',
+  },
+]) {
+  test(name, () => {
+    const parent = 'TestHermeticLifecycle';
+    const intermediate = `${parent}/ConcurrentStartIndependentRoots`;
+    const leaf = `${intermediate}/OverlappingStarts`;
+    assertFixture(script, {
+      input: stream([
+        event('start', packages[0]), ...[parent, intermediate, leaf].map(name => event('run', packages[0], name)),
+        event('output', packages[0], leaf, {Output: output}),
+        ...[leaf, intermediate, parent].map(name => event('fail', packages[0], name)), event('fail', packages[0]),
+      ]),
+      args: ['--require', parent],
+      output: [
+        `package ${packages[0]} pass=0 skip=0 fail=3`,
+        `fail ${packages[0]} ${parent}`, `why ${packages[0]} ${parent} :: ${ancestorReason}`,
+        `fail ${packages[0]} ${intermediate}`, `why ${packages[0]} ${intermediate} :: ${ancestorReason}`,
+        `fail ${packages[0]} ${leaf}`, `why ${packages[0]} ${leaf} :: ${leafReason}`, '',
+      ].join('\n'),
+      stderr: failureDiagnostic,
+    });
+  });
+}
+
+test('ancestor fallback uses classification event order and preserves direct reasons', () => {
+  withDiagnosticSources(target => {
+    const parent = 'TestFixture';
+    const runFirst = `${parent}/ZRunFirst`;
+    const reasonFirst = `${parent}/MReasonFirst`;
+    const failFirst = `${parent}/AFailFirst`;
+    for (const direct of [false, true]) {
+      assertFixture(target, {
+        input: stream([
+          ...packageEvents(packages[0]), event('start', packages[1]),
+          ...[parent, runFirst, reasonFirst, failFirst].map(name => event('run', packages[1], name)),
+          event('output', packages[1], reasonFirst, {Output: `safe formatted assertion: private-fixture-marker ${'a'.repeat(64)} password=private-value\n`}),
+          event('output', packages[1], runFirst, {Output: 'ace-count\n'}),
+          event('output', packages[1], failFirst, {Output: 'owner-is-admin-group\n'}),
+          ...(direct ? [event('output', packages[1], parent, {Output: 'localcell: fixed private error\n'})] : []),
+          ...[failFirst, runFirst, reasonFirst, parent].map(name => event('fail', packages[1], name)),
+          event('fail', packages[1]), ...packageEvents(packages[2]),
+        ]),
+        output: summary({[packages[1]]: {pass: 0, fail: 4, failedNames: [parent, runFirst, reasonFirst, failFirst], why: {
+          [parent]: direct ? 'localcell: fixed private error' : 'child failed: safe formatted assertion',
+          [runFirst]: 'ace-count', [reasonFirst]: 'safe formatted assertion', [failFirst]: 'owner-is-admin-group',
+        }}}),
+        stderr: failureDiagnostic,
+      });
+    }
+  });
+});
+
+test('ancestor fallback excludes passing or skipped children, prefix siblings and other packages', () => {
+  withDiagnosticSources(target => {
+    const parent = 'TestFixture';
+    const passed = `${parent}/Passed`;
+    const skipped = `${parent}/Skipped`;
+    const unclassified = `${parent}/Unclassified`;
+    const sibling = `${parent}Sibling/Failed`;
+    assertFixture(target, {
+      input: stream([
+        event('start', packages[0]), event('run', packages[0], unclassified),
+        event('output', packages[0], unclassified, {Output: 'localcell: fixed private error\n'}),
+        event('fail', packages[0], unclassified), event('fail', packages[0]),
+        event('start', packages[1]), event('run', packages[1], parent),
+        ...[[passed, 'pass'], [skipped, 'skip'], [sibling, 'fail'], [unclassified, 'fail']].flatMap(([name, action]) => [
+          event('run', packages[1], name),
+          event('output', packages[1], name, {Output: name === unclassified ? 'private-fixture-marker\n' : 'ace-count\n'}),
+          event(action, packages[1], name),
+        ]),
+        event('fail', packages[1], parent), event('fail', packages[1]), ...packageEvents(packages[2]),
+      ]),
+      output: summary({
+        [packages[0]]: {pass: 0, fail: 1, failedNames: [unclassified], why: {[unclassified]: 'localcell: fixed private error'}},
+        [packages[1]]: {pass: 1, skip: 1, fail: 3, names: [skipped], failedNames: [parent, sibling, unclassified], why: {[sibling]: 'ace-count'}},
+      }),
+      stderr: failureDiagnostic,
+    });
+  });
+});
+
+test('autobuild lifecycle failures classify each formatted assertion without operation or component values', () => {
+  for (const prefix of ['harness operation failed', 'harness cleanup witness did not observe the running component',
+    'harness process survived removal', 'harness purge failed']) {
+    assertFixture(script, outputFailure([`    main_test.go:12: ${prefix}: private-fixture-marker\n`], prefix, packages[2]));
+  }
+  for (const fixed of ['cannot build lifecycle fixture', 'cannot prepare fixture tool', 'cannot repair harness fixture during cleanup',
+    'cannot purge harness fixture during cleanup', 'autobuilt component disappeared after command return',
+    'non-purge removal retained runtime records', 'purge retained autobuilt components', 'cannot retain harness process cleanup identity',
+    'invalid harness process cleanup identity', 'cannot prepare harness cleanup witness', 'cannot create harness cleanup witness',
+    'cannot retain harness cleanup witness', 'cannot construct harness cleanup witness', 'cannot verify harness cleanup identity',
+    'harness cleanup witness lost its process identity']) {
+    assertFixture(script, outputFailure([`    main_test.go:12: ${fixed}\n`], fixed, packages[2]));
+  }
 });
 
 test('runtime configuration failures retain fixed first-line reasons before formatted details', () => {

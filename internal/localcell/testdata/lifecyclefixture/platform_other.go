@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 )
 
 func fixtureExecutable(name string) string { return name }
@@ -22,7 +23,7 @@ func notifyFixtureStop(stopped chan<- os.Signal) {
 }
 func runFixtureStopHelper() bool { return false }
 func fixturePostmasterRecord(data, _ string) []byte {
-	return []byte(fmt.Sprintf("%d\n%s\n1\n", os.Getpid(), data))
+	return []byte(fmt.Sprintf("%d\n%s\n%d\n", os.Getpid(), data, time.Now().Unix()))
 }
 
 func stopFixturePostgres(data []byte) error {
