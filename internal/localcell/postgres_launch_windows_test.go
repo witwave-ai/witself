@@ -61,16 +61,17 @@ func main() {
   partial := false
   stale := false
   if mode, err := os.ReadFile(filepath.Join(root, "tmp", "postgres-fixture-mode")); err == nil {
-    if string(mode) == "starting-descendant" {
-      status = "starting"
+    if string(mode) == "starting-descendant" || string(mode) == "ready-descendant" { // FLAKE-4
+      if string(mode) == "starting-descendant" { status = "starting" } // FLAKE-4
       child := exec.Command(os.Args[0], "--descendant")
       child.Stdout, child.Stderr = os.Stdout, os.Stderr
       if child.Start() != nil { os.Exit(112) }
       if child.Process.Release() != nil { os.Exit(113) }
-      deadline := time.Now().Add(5*time.Second)
+      // The parent's launch deadline and kill-on-close job bound this wait. // FLAKE-4
       for {
-        if _, err := os.Stat(filepath.Join(root, "tmp", "postgres-fixture-descendant")); err == nil { break }
-        if time.Now().After(deadline) { os.Exit(114) }
+        data, err := os.ReadFile(filepath.Join(root, "tmp", "postgres-fixture-descendant")) // FLAKE-4
+        var descendant record // FLAKE-4
+        if err == nil && json.Unmarshal(data, &descendant) == nil && descendant.PID > 1 { break } // FLAKE-4
         time.Sleep(10*time.Millisecond)
       }
     } else if string(mode) == "starting" { status = "starting" } else if string(mode) == "partial" { partial = true } else if string(mode) == "stale" { stale = true } else {
@@ -205,11 +206,32 @@ func TestWindowsPostgresLaunchUsesPublishedPostmasterIdentity(t *testing.T) {
 
 func TestWindowsPostgresLaunchRefusesForeignPIDAndUnreadyState(t *testing.T) {
 	directory := buildWindowsPostgresLaunchFixture(t)
+	// Parent setup also runs for a replay selecting only the foreign-pid subtest. // FLAKE-4
+	calibration, manifest := unitCell(t)             // FLAKE-4
+	calibration.cfg.Binaries.PostgresDir = directory // FLAKE-4
+	// Bootstrap watchdog only; measure a full ready launch including its descendant. // FLAKE-4
+	calibration.cfg.Timeout = 60 * time.Second                       // FLAKE-4
+	if err := testMkdir(calibration.path("pg"), 0o700); err != nil { // FLAKE-4
+		t.Fatal("Calibration directory could not be created") // FLAKE-4
+	} // FLAKE-4
+	if err := testWriteFile(calibration.path("tmp", "postgres-fixture-mode"), []byte("ready-descendant"), 0o600); err != nil { // FLAKE-4
+		t.Fatal("Startup mode could not be written for calibration") // FLAKE-4
+	} // FLAKE-4
+	// Both calibration processes sleep until identity-verified parent cleanup. // FLAKE-4
+	cleanupWindowsPostgresFixture(t, calibration)                            // FLAKE-4
+	started := time.Now()                                                    // FLAKE-4
+	if err := calibration.startPostgres(t.Context(), manifest); err != nil { // FLAKE-4
+		t.Fatal("Measured launch did not reach readiness with its descendant") // FLAKE-4
+	} // FLAKE-4
+	startup := time.Since(started) // FLAKE-4
+	// A five-second minimum and ten times measured startup tolerate runner load. // FLAKE-4
+	timeout := max(5*time.Second, 10*startup)                        // FLAKE-4
+	t.Logf("fixture startup=%s refusal budget=%s", startup, timeout) // FLAKE-4
 	for _, mode := range []string{"foreign-pid", "starting", "starting-descendant"} {
 		t.Run(mode, func(t *testing.T) {
 			c, m := unitCell(t)
 			c.cfg.Binaries.PostgresDir = directory
-			c.cfg.Timeout = time.Second
+			c.cfg.Timeout = timeout // FLAKE-4
 			if err := testMkdir(c.path("pg"), 0o700); err != nil {
 				t.Fatal(err)
 			}
@@ -223,13 +245,25 @@ func TestWindowsPostgresLaunchRefusesForeignPIDAndUnreadyState(t *testing.T) {
 				t.Fatal(err)
 			}
 			cleanupWindowsPostgresFixture(t, c)
-			if err := c.startPostgres(t.Context(), m); err == nil {
+			started := time.Now()                                                                  // FLAKE-4
+			err := c.startPostgres(t.Context(), m)                                                 // FLAKE-4
+			t.Logf("fixture mode=%s launch wall=%s budget=%s", mode, time.Since(started), timeout) // FLAKE-4
+			if err == nil {                                                                        // FLAKE-4
 				t.Fatal("PostgreSQL launch accepted a different PID or unfinished startup")
 			}
 			var launched, retained ProcessRecord
-			if readJSON(c.path("tmp", "postgres-fixture-record"), &launched) != nil || readJSON(c.path("run", "postgres.json"), &retained) != nil {
-				t.Fatal("failed PostgreSQL launch discarded its published ownership evidence")
-			}
+			if readJSON(c.path("run", "postgres.json"), &retained) != nil { // FLAKE-4
+				t.Fatal("Ownership evidence was not retained after PostgreSQL launch refusal") // FLAKE-4
+			} // FLAKE-4
+			if readJSON(c.path("tmp", "postgres-fixture-record"), &launched) != nil { // FLAKE-4
+				t.Fatal("Fixture record was not published before PostgreSQL launch refusal") // FLAKE-4
+			} // FLAKE-4
+			if mode == "foreign-pid" && err.Error() != "PostgreSQL process ownership is unproven" { // FLAKE-4
+				t.Fatal("Foreign PID refusal did not reach the ownership check") // FLAKE-4
+			} // FLAKE-4
+			if mode != "foreign-pid" && err.Error() != "local cell PostgreSQL start deadline exceeded" { // FLAKE-4
+				t.Fatal("Unready mode refusal did not reach the startup deadline") // FLAKE-4
+			} // FLAKE-4
 			if retained.PID != launched.PID || retained.StartTime != launched.StartTime || !retained.LaunchPending {
 				t.Fatal("failed PostgreSQL launch adopted a postmaster.pid identity")
 			}
