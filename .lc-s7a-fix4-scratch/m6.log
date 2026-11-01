@@ -1,6 +1,0 @@
-=== RUN   TestNativeServiceInvocationFailure
-    service_native_diagnostics_test.go:188: invocation did not forward captured stderr to the diagnostic callback
---- FAIL: TestNativeServiceInvocationFailure (0.02s)
-FAIL
-FAIL	github.com/witwave-ai/witself/internal/localcell	0.402s
-FAIL

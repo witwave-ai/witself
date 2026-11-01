@@ -1,1 +1,0 @@
-{"command": ["go", "test", "./internal/localcell", "-count=1", "-timeout=5m", "-v", "-run", "^TestNativeService(InvocationFailure|DiagnosticSanitizer|ChildEnvironment|FailureDiagnostics)$|^TestServiceSystemdCapabilityRequiresUsableStorageAndBus$"], "exit": 0, "wall_seconds": 6.44}

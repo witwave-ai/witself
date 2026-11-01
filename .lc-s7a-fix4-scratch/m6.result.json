@@ -1,1 +1,0 @@
-{"command": ["go", "test", "-overlay=.lc-s7a-fix4-scratch/m6-overlay.json", "./internal/localcell", "-count=1", "-timeout=5m", "-v", "-run", "^TestNativeServiceInvocationFailure$"], "exit": 1, "wall_seconds": 3.66}

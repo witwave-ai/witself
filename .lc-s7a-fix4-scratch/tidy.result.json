@@ -1,1 +1,0 @@
-{"command": ["go", "mod", "tidy", "-diff"], "exit": 0, "wall_seconds": 0.74}
