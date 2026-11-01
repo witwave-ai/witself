@@ -3,6 +3,7 @@
 package main
 
 import (
+	"errors" // FLAKE-3 fix 5 (W1)
 	"fmt"
 	"net"
 	"net/http"
@@ -29,11 +30,31 @@ func main() {
 		}
 		return
 	}
-	if run(name) != nil {
-		fmt.Fprintln(os.Stderr, "synthetic lifecycle fixture failed")
-		os.Exit(1)
-	}
+	if err := run(name); err != nil { // FLAKE-3 fix 5 (W1)
+		message, code := "synthetic lifecycle fixture failed", 1          // FLAKE-3 fix 5 (W1)
+		if name == "pg_ctl" && len(os.Args) > 1 && os.Args[1] == "stop" { // FLAKE-3 fix 5 (W1)
+			message, code = fixtureStopFailure(err) // FLAKE-3 fix 5 (W1)
+		} // FLAKE-3 fix 5 (W1)
+		fmt.Fprintln(os.Stderr, message) // FLAKE-3 fix 5 (W1)
+		os.Exit(code)                    // FLAKE-3 fix 5 (W1)
+	} // FLAKE-3 fix 5 (W1)
 }
+func fixtureStopFailure(err error) (string, int) { // FLAKE-3 fix 5 (W1)
+	var exit *exec.ExitError                                                         // FLAKE-3 fix 5 (W1)
+	if errors.As(err, &exit) && (exit.ExitCode() == 124 || exit.ExitCode() == 125) { // FLAKE-3 fix 5 (W1)
+		return "synthetic lifecycle fixture failed", exit.ExitCode() // FLAKE-3 fix 5 (W1)
+	} // FLAKE-3 fix 5 (W1)
+	switch err.Error() { // FLAKE-3 fix 5 (W1)
+	case "fixture PostgreSQL shutdown timeout": // FLAKE-3 fix 5 (W1)
+		return "fixture PostgreSQL shutdown timeout", 1 // FLAKE-3 fix 5 (W1)
+	case "fixture process creation identity mismatch": // FLAKE-3 fix 5 (W1)
+		return "fixture process creation identity mismatch", 1 // FLAKE-3 fix 5 (W1)
+	case "fixture process identity mismatch": // FLAKE-3 fix 5 (W1)
+		return "fixture process identity mismatch", 1 // FLAKE-3 fix 5 (W1)
+	default: // FLAKE-3 fix 5 (W1)
+		return "synthetic lifecycle fixture failed", 1 // FLAKE-3 fix 5 (W1)
+	} // FLAKE-3 fix 5 (W1)
+} // FLAKE-3 fix 5 (W1)
 
 func run(name string) error {
 	switch name {

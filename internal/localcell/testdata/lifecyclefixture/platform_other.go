@@ -3,9 +3,11 @@
 package main
 
 import (
+	"encoding/json" // FLAKE-3 fix 5 (W1)
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath" // FLAKE-3 fix 5 (W1)
 	"strconv"
 	"strings"
 	"syscall"
@@ -31,6 +33,18 @@ func stopFixturePostgres(data []byte, deadline time.Time) error {
 	if err != nil {
 		return err
 	}
+	var record struct{ Root string }                                      // FLAKE-3 fix 5 (W1)
+	recordData, err := os.ReadFile(filepath.Join("run", "postgres.json")) // FLAKE-3 fix 5 (W1)
+	if err != nil {                                                       // FLAKE-3 fix 5 (W1)
+		return err // FLAKE-3 fix 5 (W1)
+	} // FLAKE-3 fix 5 (W1)
+	root, err := os.Getwd() // FLAKE-3 fix 5 (W1)
+	if err != nil {         // FLAKE-3 fix 5 (W1)
+		return err // FLAKE-3 fix 5 (W1)
+	} // FLAKE-3 fix 5 (W1)
+	if json.Unmarshal(recordData, &record) != nil || record.Root != root { // FLAKE-3 fix 5 (W1)
+		return fmt.Errorf("fixture process identity mismatch") // FLAKE-3 fix 5 (W1)
+	} // FLAKE-3 fix 5 (W1)
 	process, err := os.FindProcess(pid)
 	if err != nil {
 		return err

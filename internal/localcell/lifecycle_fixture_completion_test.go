@@ -2,10 +2,12 @@ package localcell_test
 
 import (
 	"encoding/json"
+	"fmt" // FLAKE-3 fix 5 (W1)
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings" // FLAKE-3 fix 5 (W1)
 	"testing"
 	"time"
 
@@ -159,14 +161,14 @@ func TestFixturePostgresStopWaitsForExit(t *testing.T) {
 	t.Setenv("WITSELF_HOME", t.TempDir())
 	t.Setenv("DSH_HOME", t.TempDir())
 	t.Run("CellStop", func(t *testing.T) {
-		testFixturePostgresStopWaitsForExit(t, binaries, false)
+		testFixturePostgresStopWaitsForExit(t, binaries, false, false) // FLAKE-3 fix 5 (W1)
 	})
 	t.Run("PGCtlStop", func(t *testing.T) {
-		testFixturePostgresStopWaitsForExit(t, binaries, true)
+		testFixturePostgresStopWaitsForExit(t, binaries, true, false) // FLAKE-3 fix 5 (W1)
 	})
 }
 
-func testFixturePostgresStopWaitsForExit(t *testing.T, binaries localcell.Binaries, direct bool) {
+func testFixturePostgresStopWaitsForExit(t *testing.T, binaries localcell.Binaries, direct, logicalPWD bool) { // FLAKE-3 fix 5 (W1)
 	t.Helper()
 	cell, root := disposableCell(t, binaries, nil)
 	if err := cell.Install(t.Context(), localcell.InstallOptions{}); err != nil {
@@ -183,13 +185,24 @@ func testFixturePostgresStopWaitsForExit(t *testing.T, binaries localcell.Binari
 	if err != nil || json.Unmarshal(data, &previous) != nil || previous.PID <= 1 {
 		t.Fatal("cannot retain delayed postmaster ownership record")
 	}
+	if !filepath.IsAbs(previous.Root) { // FLAKE-3 fix 5 (W1)
+		t.Fatal("stoproot-a01 published fixture root is not absolute") // FLAKE-3 fix 5 (W1)
+	} // FLAKE-3 fix 5 (W1)
+	if logicalPWD && previous.Root == root { // FLAKE-3 fix 5 (W1)
+		t.Fatal("stoproot-a02 aliased fixture root did not diverge") // FLAKE-3 fix 5 (W1)
+	} // FLAKE-3 fix 5 (W1)
+	var stderr fixtureStopStderr // FLAKE-3 fix 5 (W1)
 	done := make(chan struct{})
 	var stopErr error
 	go func() {
 		if direct {
-			command := exec.CommandContext(t.Context(), filepath.Join(binaries.PostgresDir, lifecycleExecutableName("pg_ctl")), "stop", "-D", filepath.Join(root, "pg"), "-w", "-t", "5")
-			command.Dir, command.Env = root, []string{}
-			command.Stdout, command.Stderr = io.Discard, io.Discard
+			command := exec.CommandContext(t.Context(), filepath.Join(binaries.PostgresDir, lifecycleExecutableName("pg_ctl")), "stop", "-D", filepath.Join(previous.Root, "pg"), "-w", "-t", "5") // FLAKE-3 fix 5 (W1)
+			command.Dir, command.Env = previous.Root, []string{}                                                                                                                                   // FLAKE-3 fix 5 (W1)
+			if logicalPWD {                                                                                                                                                                        // FLAKE-3 fix 5 (W1)
+				// Unix Getwd otherwise resolves aliases even when Dir uses one. // FLAKE-3 fix 5 (W1)
+				command.Env = []string{"PWD=" + command.Dir} // FLAKE-3 fix 5 (W1)
+			} // FLAKE-3 fix 5 (W1)
+			command.Stdout, command.Stderr = io.Discard, &stderr // FLAKE-3 fix 5 (W1)
 			stopErr = command.Run()
 		} else {
 			stopErr = cell.Stop(t.Context())
@@ -213,7 +226,14 @@ func testFixturePostgresStopWaitsForExit(t *testing.T, binaries localcell.Binari
 		t.Fatal("postmaster stop did not finish within its fixture deadline")
 	}
 	if stopErr != nil {
-		t.Fatalf("delayed postmaster stop failed: %v", stopErr)
+		if direct { // FLAKE-3 fix 5 (W1)
+			exitCode := -1                                    // FLAKE-3 fix 5 (W1)
+			if exitErr, ok := stopErr.(*exec.ExitError); ok { // FLAKE-3 fix 5 (W1)
+				exitCode = exitErr.ExitCode() // FLAKE-3 fix 5 (W1)
+			} // FLAKE-3 fix 5 (W1)
+			reportFixtureDirectStopFailure(t, exitCode, stderr.String()) // FLAKE-3 fix 5 (W1)
+		} // FLAKE-3 fix 5 (W1)
+		t.Fatal("cellstop-a01 delayed postmaster stop failed") // FLAKE-3 fix 5 (W1)
 	}
 	if _, err := os.Stat(filepath.Join(root, "pg", "postmaster.pid")); !os.IsNotExist(err) {
 		t.Fatal("postmaster stop did not remove its published pidfile")
@@ -226,4 +246,79 @@ func testFixturePostgresStopWaitsForExit(t *testing.T, binaries localcell.Binari
 		t.Fatalf("immediate restart after delayed postmaster stop failed: %v", err)
 	}
 	assertReady(t, cell)
-}
+}                               // FLAKE-3 fix 5 (W1)
+type fixtureStopStderr struct { // FLAKE-3 fix 5 (W1)
+	data [4096]byte // FLAKE-3 fix 5 (W1)
+	used int        // FLAKE-3 fix 5 (W1)
+} // FLAKE-3 fix 5 (W1)
+func (b *fixtureStopStderr) Write(data []byte) (int, error) { // FLAKE-3 fix 5 (W1)
+	b.used += copy(b.data[b.used:], data) // FLAKE-3 fix 5 (W1)
+	return len(data), nil                 // FLAKE-3 fix 5 (W1)
+}                                           // FLAKE-3 fix 5 (W1)
+func (b *fixtureStopStderr) String() string { return string(b.data[:b.used]) } // FLAKE-3 fix 5 (W1)
+type fixtureStopReporter interface {        // FLAKE-3 fix 5 (W1)
+	Fatal(...any)          // FLAKE-3 fix 5 (W1)
+	Fatalf(string, ...any) // FLAKE-3 fix 5 (W1)
+} // FLAKE-3 fix 5 (W1)
+func reportFixtureDirectStopFailure(t fixtureStopReporter, exitCode int, stderr string) { // FLAKE-3 fix 5 (W1)
+	switch { // FLAKE-3 fix 5 (W1)
+	case exitCode == 124: // FLAKE-3 fix 5 (W1)
+		t.Fatal("helper console attach failed during direct stop") // FLAKE-3 fix 5 (W1)
+	case exitCode == 125: // FLAKE-3 fix 5 (W1)
+		t.Fatal("helper identity mismatch during direct stop") // FLAKE-3 fix 5 (W1)
+	case strings.Contains(stderr, "fixture PostgreSQL shutdown timeout"): // FLAKE-3 fix 5 (W1)
+		t.Fatal("fixture shutdown timeout during direct stop") // FLAKE-3 fix 5 (W1)
+	case strings.Contains(stderr, "fixture process creation identity mismatch"): // FLAKE-3 fix 5 (W1)
+		t.Fatal("fixture creation identity mismatch during direct stop") // FLAKE-3 fix 5 (W1)
+	case strings.Contains(stderr, "fixture process identity mismatch"): // FLAKE-3 fix 5 (W1)
+		t.Fatal("fixture identity mismatch during direct stop") // FLAKE-3 fix 5 (W1)
+	default: // FLAKE-3 fix 5 (W1)
+		t.Fatalf("unclassified direct stop failure %d", exitCode) // FLAKE-3 fix 5 (W1)
+	} // FLAKE-3 fix 5 (W1)
+}                                                             // FLAKE-3 fix 5 (W1)
+type fixtureStopRecordingReporter struct{ messages []string } // FLAKE-3 fix 5 (W1)
+func (r *fixtureStopRecordingReporter) Fatal(args ...any) { // FLAKE-3 fix 5 (W1)
+	r.messages = append(r.messages, fmt.Sprint(args...)) // FLAKE-3 fix 5 (W1)
+} // FLAKE-3 fix 5 (W1)
+func (r *fixtureStopRecordingReporter) Fatalf(format string, args ...any) { // FLAKE-3 fix 5 (W1)
+	r.messages = append(r.messages, fmt.Sprintf(format, args...)) // FLAKE-3 fix 5 (W1)
+} // FLAKE-3 fix 5 (W1)
+func TestFixtureDirectStopDiagnostics(t *testing.T) { // FLAKE-3 fix 5 (W1)
+	for _, tc := range []struct { // FLAKE-3 fix 5 (W1)
+		name         string // FLAKE-3 fix 5 (W1)
+		code         int    // FLAKE-3 fix 5 (W1)
+		stderr, want string // FLAKE-3 fix 5 (W1)
+	}{ // FLAKE-3 fix 5 (W1)
+		{"Attach", 124, "fixture process identity mismatch", "helper console attach failed during direct stop"},                  // FLAKE-3 fix 5 (W1)
+		{"HelperIdentity", 125, "fixture PostgreSQL shutdown timeout", "helper identity mismatch during direct stop"},            // FLAKE-3 fix 5 (W1)
+		{"Shutdown", 1, "fixture PostgreSQL shutdown timeout\n", "fixture shutdown timeout during direct stop"},                  // FLAKE-3 fix 5 (W1)
+		{"Creation", 1, "fixture process creation identity mismatch\n", "fixture creation identity mismatch during direct stop"}, // FLAKE-3 fix 5 (W1)
+		{"RootIdentity", 1, "fixture process identity mismatch\n", "fixture identity mismatch during direct stop"},               // FLAKE-3 fix 5 (W1)
+		{"Unknown", 9, "private fixture sentinel", "unclassified direct stop failure 9"},                                         // FLAKE-3 fix 5 (W1)
+		{"Launch", -1, "private fixture sentinel", "unclassified direct stop failure -1"},                                        // FLAKE-3 fix 5 (W1)
+	} { // FLAKE-3 fix 5 (W1)
+		t.Run(tc.name, func(t *testing.T) { // FLAKE-3 fix 5 (W1)
+			var reporter fixtureStopRecordingReporter                           // FLAKE-3 fix 5 (W1)
+			reportFixtureDirectStopFailure(&reporter, tc.code, tc.stderr)       // FLAKE-3 fix 5 (W1)
+			if len(reporter.messages) != 1 || reporter.messages[0] != tc.want { // FLAKE-3 fix 5 (W1)
+				t.Fatal("stopdiag-a01 direct stop classification changed") // FLAKE-3 fix 5 (W1)
+			} // FLAKE-3 fix 5 (W1)
+		}) // FLAKE-3 fix 5 (W1)
+	} // FLAKE-3 fix 5 (W1)
+} // FLAKE-3 fix 5 (W1)
+func TestFixtureStopStderrBound(t *testing.T) { // FLAKE-3 fix 5 (W1)
+	var stderr fixtureStopStderr                                      // FLAKE-3 fix 5 (W1)
+	first := []byte("fixture process identity mismatch\n")            // FLAKE-3 fix 5 (W1)
+	if n, err := stderr.Write(first); n != len(first) || err != nil { // FLAKE-3 fix 5 (W1)
+		t.Fatal("stopbuf-b001 initial diagnostic write failed") // FLAKE-3 fix 5 (W1)
+	} // FLAKE-3 fix 5 (W1)
+	large := []byte(strings.Repeat("x", 8192)) // FLAKE-3 fix 5 (W1)
+	for range 2 {                              // FLAKE-3 fix 5 (W1)
+		if n, err := stderr.Write(large); n != len(large) || err != nil { // FLAKE-3 fix 5 (W1)
+			t.Fatal("stopbuf-b002 truncated diagnostic write failed") // FLAKE-3 fix 5 (W1)
+		} // FLAKE-3 fix 5 (W1)
+	} // FLAKE-3 fix 5 (W1)
+	if got := stderr.String(); len(got) != 4096 || !strings.HasPrefix(got, string(first)) { // FLAKE-3 fix 5 (W1)
+		t.Fatal("stopbuf-b003 bounded diagnostic content changed") // FLAKE-3 fix 5 (W1)
+	} // FLAKE-3 fix 5 (W1)
+} // FLAKE-3 fix 5 (W1)
