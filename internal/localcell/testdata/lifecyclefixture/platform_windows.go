@@ -56,15 +56,15 @@ func fixtureWriteFile(path string, data []byte) error {
 	return closeErr
 }
 func notifyFixtureStop(stopped chan<- os.Signal) { signal.Notify(stopped, os.Interrupt) }
-func fixturePostmasterRecord(data, port string) []byte {
-	return []byte(fmt.Sprintf("%d\n%s\n%d\n%s\n\n127.0.0.1\n\nready\n", os.Getpid(), data, time.Now().Unix(), port))
+func fixturePostmasterRecord(data, port string, epoch int64) []byte {
+	return []byte(fmt.Sprintf("%d\n%s\n%d\n%s\n\n127.0.0.1\n\nready\n", os.Getpid(), data, epoch, port))
 }
 
 // The synthetic pg_ctl mirrors PW2's verified detached console helper. Actual
 // PostgreSQL uses its own pg_ctl shutdown protocol; no PID-only force kill or
 // Unix signal emulation is used here. Holding the verified handle reserves its
 // PID until the scoped CTRL_BREAK has been sent.
-func stopFixturePostgres(data []byte) error {
+func stopFixturePostgres(data []byte, deadline time.Time) error {
 	pid, err := strconv.Atoi(strings.Split(string(data), "\n")[0])
 	if err != nil {
 		return err
@@ -76,7 +76,21 @@ func stopFixturePostgres(data []byte) error {
 	defer func() { _ = windows.CloseHandle(handle) }()
 	command := exec.Command(os.Args[0], "--fixture-stop-postgres", strconv.Itoa(pid))
 	command.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.DETACHED_PROCESS}
-	return command.Run()
+	if err := command.Run(); err != nil {
+		return err
+	}
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return fmt.Errorf("fixture PostgreSQL shutdown timeout")
+	}
+	state, err := windows.WaitForSingleObject(handle, uint32(remaining.Milliseconds()))
+	if err != nil {
+		return err
+	}
+	if state != windows.WAIT_OBJECT_0 {
+		return fmt.Errorf("fixture PostgreSQL shutdown timeout")
+	}
+	return nil
 }
 
 func fixturePostgresHandle(pid int) (windows.Handle, error) {

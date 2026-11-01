@@ -372,7 +372,7 @@ func (c *Cell) cleanupInterruption() (*Interruption, error) {
 func validJournalStep(operation, step string) bool {
 	steps := map[string]map[string]bool{
 		"install": {"manifest": true, "password": true, "initdb": true, "configure": true, "postgres": true, "database": true, "stop": true},
-		"start":   {"postgres": true, "server": true, "server_ready": true, "account": true, "worker": true, "worker_ready": true},
+		"start":   {"ports": true, "postgres": true, "server": true, "server_ready": true, "account": true, "worker": true, "worker_ready": true},
 		"stop":    {"stop": true},
 		"remove":  {"stop": true, "spool": true, "tmp": true, "logs": true, "purge": true, "runtime_cleanup": true},
 	}
@@ -393,6 +393,14 @@ func (c *Cell) step(operation, step string, fn func() error) error {
 				return journalErr
 			}
 			return fmt.Errorf("local cell %s: %s failed: %w", operation, step, exit)
+		}
+		var cause fixedCause
+		if errors.As(err, &cause) {
+			if journalErr := c.journalCause(operation, step, "failed", cause.Error()); journalErr != nil {
+				return journalErr
+			}
+			// Only the fixed cause crosses this boundary, never its wrappers.
+			return fmt.Errorf("local cell %s: %s failed: %w", operation, step, cause)
 		}
 		_ = c.journal(operation, step, "failed")
 		var readiness *readinessError

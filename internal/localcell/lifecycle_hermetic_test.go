@@ -27,7 +27,13 @@ func TestHermeticLifecycle(t *testing.T) {
 	t.Run("ConcurrentStartSameRoot", func(t *testing.T) { testConcurrentStartSameRoot(t, binaries) })
 	t.Run("ConcurrentStartIndependentRoots", func(t *testing.T) { testConcurrentStartIndependentRoots(t, binaries) })
 	t.Run("InterruptedStartRepair", func(t *testing.T) { testInterruptedStartRepair(t, binaries, nil) })
-	t.Run("InterruptedPostgresRecordRepair", func(t *testing.T) { testInterruptedPostgresRecordRepair(t, binaries) })
+	t.Run("InterruptedPostgresRecordRepair", func(t *testing.T) {
+		t.Run("CurrentEpoch", func(t *testing.T) { testInterruptedPostgresRecordRepair(t, binaries, 0) })
+		t.Run("DelayedEpoch", func(t *testing.T) { testInterruptedPostgresRecordRepair(t, binaries, 5*time.Second) })
+	})
+	t.Run("EmptyPostgresRecordCause", func(t *testing.T) { testEmptyPostgresRecordCause(t, binaries) })
+	t.Run("SavedPortPreflight", func(t *testing.T) { testSavedPortPreflight(t, binaries) })
+	t.Run("InstallPortReallocation", func(t *testing.T) { testInstallPortReallocation(t, binaries) })
 	t.Run("ReadinessFailureRollsBack", func(t *testing.T) { testWaitsForReadiness(t, binaries, nil) })
 	t.Run("MigrationWaitExtendsServerReadiness", func(t *testing.T) { testMigrationWaitReadiness(t, binaries) })
 	t.Run("EarlyExitCauseIsJournaled", func(t *testing.T) { testEarlyExitCause(t, binaries) })
@@ -191,7 +197,7 @@ func testConcurrentStartSameRoot(t *testing.T, binaries localcell.Binaries) {
 	ctx, cancel := context.WithTimeout(t.Context(), timeout)
 	defer cancel()
 	if err := contender.Start(ctx); !errors.Is(err, localcell.ErrLocked) {
-		t.Fatalf("concurrent same-root Start = %v, want ErrLocked", err)
+		t.Fatalf("concurrent same-root Start lock refusal missing: %v", err)
 	}
 	release()
 	if err := <-done; err != nil {
@@ -359,13 +365,18 @@ func TestConcurrentStartRecordingReporter(t *testing.T) {
 	}
 }
 
-func testInterruptedPostgresRecordRepair(t *testing.T, binaries localcell.Binaries) {
+func testInterruptedPostgresRecordRepair(t *testing.T, binaries localcell.Binaries, epochDelay time.Duration) {
 	cell, root := disposableCell(t, binaries, func(operation, step string) error {
 		if operation == "install" && step == "postgres" {
 			return errors.New("injected PostgreSQL record interruption")
 		}
 		return nil
 	})
+	if epochDelay != 0 {
+		if err := lifecycleWriteFile(filepath.Join(root, "fixture-postgres-epoch-delay"), []byte(epochDelay.String())); err != nil {
+			t.Fatal("cannot stage delayed PostgreSQL epoch fixture")
+		}
+	}
 	if err := cell.Install(t.Context(), localcell.InstallOptions{}); err == nil {
 		t.Fatal("install did not stop at the PostgreSQL interruption")
 	}

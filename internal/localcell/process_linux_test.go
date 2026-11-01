@@ -4,9 +4,45 @@ package localcell
 
 import (
 	"encoding/binary"
+	"os"
 	"strconv"
+	"syscall"
 	"testing"
 )
+
+func TestLinuxProcessStatReadAfterExit(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		gone bool
+	}{
+		{"missing before open", syscall.ENOENT, true},
+		{"exited during read", syscall.ESRCH, true},
+		{"permission denied", syscall.EACCES, false},
+		{"read failed", syscall.EIO, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reads := 0
+			read := func(path string) ([]byte, error) {
+				reads++
+				if path != "/proc/42/stat" {
+					t.Fatal("process stat observation selected the wrong process")
+				}
+				return nil, &os.PathError{Op: "read", Path: path, Err: tc.err}
+			}
+			start, alive, err := linuxProcessStartTicksWithRead(42, read)
+			if reads != 1 {
+				t.Fatal("process stat observation retried a failed identity read")
+			}
+			if start != 0 || alive {
+				t.Fatal("failed process stat read fabricated a live identity")
+			}
+			if (err == nil) != tc.gone {
+				t.Fatal("process stat exit read lost the inspection distinction")
+			}
+		})
+	}
+}
 
 func TestLinuxClockTicksUsesKernelAuxiliaryVector(t *testing.T) {
 	wordBytes := strconv.IntSize / 8

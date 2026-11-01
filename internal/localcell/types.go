@@ -112,6 +112,11 @@ type Cell struct {
 	cfg        Config
 	childrenMu sync.Mutex
 	children   map[string]*childObservation
+	// Test failpoint between releasing an allocation and probing it. Nil in production.
+	afterPortAllocation func(Ports)
+	// Test observers scoped to interrupted PostgreSQL recovery. Nil in production.
+	recoveryProcessIdentity  func(int) (string, bool, error)
+	recoveryProcessStartedAt func(int) (time.Time, error)
 }
 
 // New validates configuration without creating anything or starting a process.

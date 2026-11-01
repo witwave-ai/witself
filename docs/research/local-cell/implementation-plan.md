@@ -264,6 +264,13 @@ LC-S1 implements the opt-in runtime configuration, server/worker private listene
 
 LC-S2 implements the disposable lifecycle module, exclusive ownership and interruption recovery, PostgreSQL/process identity, explicit child environments, private spool/temp layout, loopback ports, and bounded readiness checks through tests and a harness only; lifecycle planning, restart policy, migration cancellation, platform service adapters, downloads, installer manifest trust, Windows DACL privacy, and reclaiming a crashed cell's stale SysV shared-memory segment when it is purged (macOS allows 32 machine-wide; a normally stopped cell leaves none) remain deferred, with nothing installed or activated.
 
+Interrupted PostgreSQL recovery accepts a kernel process creation time from
+60 seconds before through one second after the epoch in `postmaster.pid`.
+The postmaster writes that epoch after creation, so load can delay publication;
+the one-second allowance after the epoch absorbs clock granularity. The unchanged
+process identity equality check before and after reading the creation time is
+the PID-reuse defense; the start-time window alone does not authorize adoption.
+
 - Introduce an explicit local runtime configuration and a dependency-light lifecycle module
   or companion executable. Keep its location and command names open until the
   module review; native installers and a possible infra CLI frontend use the
@@ -997,7 +1004,7 @@ before starting.
 | M9 | vacant | proposed | none | none | all exit gates; transition plan for existing free users (founder) | last |
 | LC-S0 | planning lead; fixtures vacant | in progress | text complete | static | fixtures | LC-S1 |
 | LC-S1 | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | merged (disabled) | PR #822 | unit, real PostgreSQL, nine killed mutations, native macOS readiness/version | no live activation | LC-S2 |
-| LC-S2 | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | merged (disabled) | PR #824 | unit, mutation, synthetic lifecycle, native real PostgreSQL 4/4 with no shared-memory leak, three executable reviews (19 killed mutations) | no live activation | LC-S3 |
+| LC-S2 | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | merged (disabled) | PR #824; FLAKE-3 adds fixed lifecycle causes, asymmetric recovery start tolerance, saved-port preflight, Windows stop completion and Linux process-exit observation | unit, mutation, synthetic lifecycle, native real PostgreSQL 4/4 with no shared-memory leak, three executable reviews (19 killed mutations) | no live activation | LC-S3 |
 | LC-S2-P | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | in progress | PW0 #829, PW1 #830, PW2 #831, PW3 #834, PL1 #838, PL2 #841 merged | native real-PostgreSQL 16 lifecycle proofs in CI: Windows x86_64 (5m17s), Linux x86_64 (3m49s), macOS arm64 (4m8s), macOS x86_64 (8m39s), Linux arm64 (4m5s) | Windows 11 acceptance receipt (PW4, founder VM); per-platform resource budgets (D8) | per-platform resource budgets (D8) |
 | LC-S3 | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | merged (disabled) | PR #825 | route/CLI/MCP/hook tests; executable review (9 killed mutations) plus a default-account fix pass | no live activation | LC-S4 |
 | LC-S4 | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | merged (disabled) | PR #826 | route/console and real API tests; executable review (10 killed mutations) | no live activation | LC-S2-P (D8), LC-S5 (M0c) |

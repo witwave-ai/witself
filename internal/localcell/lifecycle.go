@@ -88,7 +88,7 @@ func (c *Cell) Install(ctx context.Context, options InstallOptions) error {
 	if err := c.layout(); err != nil {
 		return err
 	}
-	ports, err := allocatePorts()
+	ports, err := c.allocateAvailablePorts()
 	if err != nil {
 		return err
 	}
@@ -199,6 +199,7 @@ func (c *Cell) Start(ctx context.Context) error {
 		name string
 		run  func(context.Context) error
 	}{
+		{"ports", func(context.Context) error { return probePorts(m.Ports, before) }},
 		{"postgres", func(ctx context.Context) error { return c.startPostgres(ctx, m) }},
 		{"server", func(context.Context) error { return c.startChild(m, "server") }},
 		{"server_ready", func(ctx context.Context) error { return c.waitReady(ctx, "server", m.Ports.ServerHealth) }},
@@ -623,40 +624,57 @@ func (c *Cell) recoverPostgresRecord() error {
 	}
 	if state.Alive {
 		if !state.Matches || state.PID != pid {
-			return errors.New("PostgreSQL recovery identity mismatch")
+			return fixedCause("PostgreSQL recovery identity mismatch")
 		}
 		return nil
 	}
 	data, err := readPostgresFile(c.path("pg", "postmaster.pid"))
 	if err != nil {
-		return errors.New("cannot read PostgreSQL recovery identity")
+		return fixedCause("cannot read PostgreSQL recovery identity")
 	}
 	lines := postmasterLines(data)
 	if len(lines) < 3 || filepath.Clean(lines[1]) != c.path("pg") || lines[0] != strconv.Itoa(pid) {
-		return errors.New("PostgreSQL recovery record changed")
+		return fixedCause("PostgreSQL recovery record changed")
 	}
 	epoch, err := strconv.ParseInt(lines[2], 10, 64)
 	if err != nil || epoch <= 0 {
-		return errors.New("invalid PostgreSQL recovery start time")
+		return fixedCause("invalid PostgreSQL recovery start time")
 	}
-	identityBefore, alive, err := processIdentity(pid)
+	observeIdentity, observeStartedAt := processIdentity, processStartedAt
+	if c.recoveryProcessIdentity != nil {
+		observeIdentity = c.recoveryProcessIdentity
+	}
+	if c.recoveryProcessStartedAt != nil {
+		observeStartedAt = c.recoveryProcessStartedAt
+	}
+	identityBefore, alive, err := observeIdentity(pid)
 	if err != nil {
-		return errors.New("cannot verify PostgreSQL recovery process")
+		return fixedCause("cannot verify PostgreSQL recovery process")
 	}
 	if !alive {
 		// A proven-dead postmaster needs no recovered signaling authority.
 		// Keep its stale PID file for PostgreSQL to reconcile on the next start.
 		return nil
 	}
-	started, err := processStartedAt(pid)
-	if err != nil || started.Unix() < epoch-1 || started.Unix() > epoch+1 {
-		return errors.New("PostgreSQL recovery start time mismatch")
+	started, err := observeStartedAt(pid)
+	if err != nil || !postgresRecoveryStartMatches(started, epoch) {
+		return fixedCause("PostgreSQL recovery start time mismatch")
 	}
-	identity, alive, err := processIdentity(pid)
+	identity, alive, err := observeIdentity(pid)
 	if err != nil || !alive || identity != identityBefore {
-		return errors.New("cannot verify PostgreSQL recovery process")
+		return fixedCause("cannot verify PostgreSQL recovery process")
 	}
 	return writeAtomic(c.path("run", "postgres.json"), ProcessRecord{PID: pid, StartTime: identity, Root: c.cfg.Root, Component: "postgres"}, nil)
+}
+
+func postgresRecoveryStartMatches(started time.Time, epoch int64) bool {
+	// The postmaster records its epoch after process creation, which may lag
+	// under load. Allow creation up to 60 seconds before that record and one
+	// second after it for clock granularity. The unchanged before/after process
+	// identity check above, not this window, prevents PID reuse. Compare the
+	// positive difference only after ordering to avoid overflowing epoch+1.
+	created := started.Unix()
+	return epoch > 0 && created >= epoch-60 && (created <= epoch || created-epoch <= 1)
 }
 
 func (c *Cell) stopAll(ctx context.Context) error { return c.stopSelected(ctx, nil) }

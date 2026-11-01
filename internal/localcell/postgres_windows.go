@@ -48,7 +48,7 @@ func (c *Cell) startPostgres(ctx context.Context, _ *Manifest) error {
 		for {
 			identity, alive, err := processIdentity(record.PID)
 			if err != nil || !alive || identity != record.StartTime {
-				return errors.New("local cell PostgreSQL exited before readiness")
+				return fixedCause("PostgreSQL exited before readiness")
 			}
 			ready, err := c.windowsPostgresReady(record, stale)
 			if err != nil {

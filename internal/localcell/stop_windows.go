@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"strconv"
 	"syscall"
+	"time"
 
 	"golang.org/x/sys/windows"
 )
@@ -157,6 +158,8 @@ func (c *Cell) terminatePendingPostgres(ctx context.Context, state ProcessState)
 }
 
 func (c *Cell) stopPostgres(ctx context.Context, state ProcessState) error {
+	ctx, cancel := c.deadline(ctx)
+	defer cancel()
 	record, err := c.windowsStopRecord("postgres", state)
 	if err != nil {
 		return err
@@ -172,7 +175,27 @@ func (c *Cell) stopPostgres(ctx context.Context, state ProcessState) error {
 	if err != nil || pid != record.PID {
 		return errors.New("localcell: PostgreSQL process identity mismatch; refusing to stop")
 	}
-	return c.pgCommand(ctx, "pg_ctl", "stop", "-D", c.path("pg"), "-m", "fast", "-w", "-t", strconv.Itoa(max(1, int(c.cfg.Timeout.Seconds()))))
+	if err := c.pgCommand(ctx, "pg_ctl", "stop", "-D", c.path("pg"), "-m", "fast", "-w", "-t", strconv.Itoa(max(1, int(c.cfg.Timeout.Seconds())))); err != nil {
+		return err
+	}
+	// pg_ctl can finish before the postmaster's process object signals exit.
+	// Keep the verified handle and use the same deadline, including time already
+	// spent in pg_ctl, so successful Stop permits immediate removal of its files.
+	deadline, _ := ctx.Deadline()
+	for {
+		remaining := time.Until(deadline)
+		wait := uint32(max(0, min(25, remaining.Milliseconds())))
+		result, err := windows.WaitForSingleObject(handle, wait)
+		if err != nil || (result != windows.WAIT_OBJECT_0 && result != uint32(windows.WAIT_TIMEOUT)) {
+			return errors.New("localcell: cannot verify PostgreSQL stop completion")
+		}
+		if result == windows.WAIT_OBJECT_0 {
+			return nil
+		}
+		if ctx.Err() != nil || remaining <= 0 {
+			return fixedCause("PostgreSQL did not exit after stop")
+		}
+	}
 }
 
 // An unfinished launch has not earned graceful shutdown semantics. Repair owns
