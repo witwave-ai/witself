@@ -130,7 +130,7 @@ MEMORY_RELEVANCE_COMMIT   ?= $(shell git rev-parse HEAD)
 MEMORY_RELEVANCE_PROVIDER ?= local
 MEMORY_RELEVANCE_HARDWARE ?= unspecified
 
-.PHONY: help db-up db-down db-reset serve login test test-integration test-memory-cloud-conformance test-memory-load-quality test-memory-curation-load test-memory-recall-load test-memory-archive-load test-memory-concurrency-load test-memory-relevance dashboard-acceptance rehearse-migrations feature-status plan-contract gitops-cell-values build check check-local check-go-mod-tidy govulncheck security-scan check-infra check-cell-secrets check-postgres-backup-image check-postgres-image-mirror check-product-site check-docs
+.PHONY: help db-up db-down db-reset serve login test test-integration test-memory-cloud-conformance test-memory-load-quality test-memory-curation-load test-memory-recall-load test-memory-archive-load test-memory-concurrency-load test-memory-relevance dashboard-acceptance rehearse-migrations feature-status plan-contract gitops-cell-values build check check-local check-static check-go-mod-tidy govulncheck security-scan check-infra check-cell-secrets check-postgres-backup-image check-postgres-image-mirror check-product-site check-docs
 
 help: ## List targets
 	@grep -hE '^[a-z-]+:.*##' $(MAKEFILE_LIST) | sed -E 's/:[^#]*## /\t/' | sort
@@ -392,6 +392,10 @@ check-postgres-image-mirror: ## Verify digest-preserving local copies; Skopeo is
 check-local: ## Fetch and select the required local pre-push checks
 	node scripts/check-local.mjs
 
+check-static: ## Run local ShellCheck/actionlint and their hermetic regression checks
+	bash scripts/check-static-local.sh
+	bash scripts/test-check-static-local.sh
+
 check-docs: ## Check audited research documents and any affected index contract
 	node --test scripts/check-docs.test.mjs scripts/run-docs-check.test.mjs
 	node scripts/run-docs-check.mjs
@@ -402,6 +406,7 @@ check-product-site: ## Check brochure output, indexing, screenshots, and deploym
 check: ## Run the full application gate set (see CLAUDE.md for brochure-only scope)
 	bash scripts/check-conflict-markers.sh
 	bash scripts/test-conflict-markers.sh
+	$(MAKE) check-static
 	$(MAKE) check-docs
 	$(MAKE) check-cell-secrets
 	$(MAKE) check-postgres-backup-image
