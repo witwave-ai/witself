@@ -1,6 +1,7 @@
 package store
 
 import (
+	"fmt"
 	"reflect"
 	"slices"
 	"strings"
@@ -43,7 +44,7 @@ func TestSyncArchiveRegistryAlterQualifiedTargetDoesNotAlias(t *testing.T) {
 	for _, target := range []string{`public.sync_incarnations`, `"public"."sync_incarnations"`} {
 		t.Run(target, func(t *testing.T) {
 			mutated := copiedSyncMigrationFS(t)
-			mutated["sync_migrations/0002_qualified_alter.sql"] = &fstest.MapFile{
+			mutated[fmt.Sprintf("sync_migrations/%04d_qualified_alter.sql", SyncSchemaVersion()+1)] = &fstest.MapFile{
 				Data: []byte(`ALTER TABLE ` + target + ` ADD COLUMN unregistered_evidence text;`),
 			}
 			if err := validateSyncArchiveRegistryContract(mutated); err != errSyncMigrationSQL {
@@ -65,7 +66,7 @@ func TestSyncArchiveRegistryAlterSQLLiteralsAndCommentsAreOpaque(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			mutated := copiedSyncMigrationFS(t)
-			mutated["sync_migrations/0002_opaque_alter.sql"] = &fstest.MapFile{Data: []byte(tc.sql)}
+			mutated[fmt.Sprintf("sync_migrations/%04d_opaque_alter.sql", SyncSchemaVersion()+1)] = &fstest.MapFile{Data: []byte(tc.sql)}
 			if err := validateSyncArchiveRegistryContract(mutated); err != nil {
 				t.Fatalf("opaque ALTER content changed the registry contract: %v", err)
 			}

@@ -23,6 +23,7 @@ type Store struct {
 	memoryCurationMetrics          memoryCurationMetrics
 	activityMarkers                sync.Map // committed read markers, scoped to this database pool
 	activityMeteringFailures       atomic.Uint64
+	syncCaptureSelected            atomic.Bool
 	importObserver                 ImportObserver
 	importRowDecodeLegacy          bool
 	importRowClobber               bool

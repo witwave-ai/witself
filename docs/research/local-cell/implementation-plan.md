@@ -1010,7 +1010,7 @@ before starting.
 | LC-S4 | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | merged (disabled) | PR #826 | route/console and real API tests; executable review (10 killed mutations) | no live activation | LC-S2-P (D8), LC-S5 (M0c) |
 | LC-S2-R1 | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | merged (disabled) | PR #839 | migration-lock cancellation, worker restart policy and lifecycle readiness tests; five executable reviews (two merge-regression tests added) | no live activation | service adapters |
 | LC-S5 | Codex GPT-6 Astra (implementer); Fable (integration owner) | merged (harness-only): LC-S5A #843, LC-S5B #844, LC-S5C #845, LC-S5D #846; H03/H05 model allocations remain deferred | synthetic topology/catalogs/scheduler; typed protocol; local capture/publication/accounting; transition, authority and recovery oracles; trace replay/reducer; H01–H69 manifests | scoped model/vector fixtures and opted-in PostgreSQL miniature transaction, fixture reopen and reducer tests; hosted dependency/byte baselines | [LC-S5-owned inventories and M4 proof](sync-contract.md#open-items-by-milestone); missing production adapters remain SCAFFOLD_ONLY and runtime schedules NOT_RUN | LC-S6 design: M4 owes real writer, movement, mixed-binary, role, restore and independent-witness proofs |
-| LC-S6 | Codex GPT-6 Astra (LC-S6A/B implementer); Fable (integration owner) | LC-S6A merged #848; LC-S6B merged #861 (F1 answered yes 2026-10-27: separately versioned opt-in sync migration namespace, selected only with the local runtime; `/sync-readyz` inventories); guards/capture are LC-S6C; C–F planned per the LC-S6 design | A completes H03/H05 model allocations and separates executable capability evidence from the immutable v1 scaffold inventory; B adds a separately versioned explicitly selected local sync schema, archive extension and destructive-movement refusal | pure legacy-projection and ordered-membership models; versioned runtime result validation and compiled adapter bindings; fixture evidence plus B production-schema PostgreSQL tests (six executable reviews; the migration-cancellation test now asserts the guarantee rather than its stage label, #859); no capture, mixed-binary, native restore or independent-witness acceptance | C–F writer capture, application/accounting, movement and native/independent-witness proof; founder F2–F4 and D9 boundaries remain | spec LC-S6C; implement C–F in their accepted dependency order without promoting an obligation from partial capability evidence |
+| LC-S6 | Codex GPT-6 Astra (LC-S6A/B/C1 implementer); Fable (integration owner) | LC-S6A merged #848; LC-S6B merged #861 (F1 answered yes 2026-10-27); LC-S6C1 implemented for review, dark and local-only; C2–F remain pending | A separates executable capability evidence from immutable v1 obligations; B adds the selected sync namespace and movement registration; C1 adds guarded inventory, admitted preferences, locking admission, capture gates and committed-prefix finalization | fixture/model and B schema evidence; C1 binds seven single-executable real-PostgreSQL capability records to executing store tests; no obligation promotion or mixed-binary, principal, native-restore or independent-witness acceptance | C2 mixed executables, real principals and proof profile after F2/F4; D snapshot materialization/application/accounting, E movement and F recovery; F3/D9 remain unresolved | owner gate and independent C1 review; continue in dependency order without treating partial capability evidence as an obligation pass |
 | LC-S7 | Codex GPT-6 Astra (LC-S7A implementer); Fable (integration owner) | LC-S7A merged #850 (nine executable reviews, eight fix passes; the first real Linux CI runs replaced the `GetUnit` lookup with `LoadUnit` and removed `User=` from per-user units); LC-S7A-R #856 merged; reboot-and-login receipt recorded 2026-10-30 (Linux arm64 VM); LC-S7B1 #855, LC-S7B2 #860, LC-S7B3 #865 merged | explicit foreground supervisor and Linux systemd user adapter; two-phase receipt driver and read-only `observe` control; component-set trust format v1 with offline Go, shell, PowerShell and Homebrew verification and channel-owned payload handoff, all dark; later slices planned | hermetic service ownership, authenticated control, desired-state and old-boot fences; native registration, same-boot restart, persisted write and exact removal proven on both Linux CI rows; sanitized diagnostics on failure | no channel, minimum-OS, Linux x86_64 reboot, or two-user acceptance yet; one arm64 VM row does not certify the glibc floor | LC-S7C adapters and two-user receipts; LC-S7D supervisor wiring and update/restore acceptance |
 
 LC-S6B implements the first production sync schema in a separate embedded
@@ -1026,6 +1026,22 @@ supply retained floors, successor publication and terminal denial. Budgets are
 explicit and empty by default. LC-S6B merged #861; guards/capture are
 LC-S6C. This establishes the H47 registry component only,
 not movement completion, sync activation or M4 acceptance.
+
+LC-S6C1 adds sync migration 0002 and a reviewed fixed-order domain-table
+inventory, relation-lock installation drain, explicit admit/touch/seal/commit
+transactions, deferred semantic coverage, and an account committed-prefix
+counter. Explicit selected-local store calls enable capabilities and activate
+capture under a session gate; the same physical connection acknowledges a pinned
+snapshot, whose materialization remains D. Capture status is separately typed as
+`disabled`, `bootstrapping` or `suspended`, with no `ready` state. Dashboard
+preferences are the only converted production writer; every other covered writer
+against a capture-active account refuses until D supplies its admitted adapter.
+Hosted and unselected-local behavior remains unchanged. The seven C1 capability
+records are scoped to single-executable PostgreSQL experiments; prepared
+transactions remain NOT_RUN when the server reports `max_prepared_transactions=0`.
+All H obligation statuses remain NOT_RUN/SCAFFOLD_ONLY; C2's mixed executables,
+real database principals and capture-proof worker profile, plus D–F, are still
+required before capture or M4 acceptance.
 
 LC-S7A adds an explicitly selected local foreground host and a per-user Linux
 systemd adapter around the existing lifecycle. The supervisor holds its own

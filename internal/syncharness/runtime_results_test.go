@@ -53,14 +53,24 @@ func TestRuntimeResultsInventoryAndBoundaries(t *testing.T) {
 		t.Fatal(err)
 	}
 	covered := map[string]bool{}
-	passes, pending := 0, 0
+	fixturePasses, capturePasses, pending := 0, 0, 0
 	for _, r := range results.Records {
 		covered[r.Obligation+":"+r.Capability] = true
 		switch r.Outcome {
 		case Pass:
-			passes++
-			if r.EvidenceClass != FixtureEvidence || r.DatabaseClass != "none" {
-				t.Fatal("fixture inventory claimed runtime evidence")
+			switch r.EvidenceClass {
+			case FixtureEvidence:
+				fixturePasses++
+				if r.DatabaseClass != "none" {
+					t.Fatal("runtime evidence: fixture inventory claimed database execution")
+				}
+			case RealPostgresEvidence:
+				capturePasses++
+				if r.Adapter.Package != "store" || r.Executable != "lc_s6c1_go_test_v1" || r.DatabaseClass != "postgresql" {
+					t.Fatal("runtime evidence: production capture allocation changed")
+				}
+			default:
+				t.Fatal("runtime evidence: unexecuted broader evidence class claimed")
 			}
 		case NotRun:
 			pending++
@@ -85,7 +95,7 @@ func TestRuntimeResultsInventoryAndBoundaries(t *testing.T) {
 			t.Fatal("completed model capability missing from runtime inventory")
 		}
 	}
-	if passes != 12 || pending != 81 || len(results.Records) != 93 {
+	if fixturePasses != 12 || capturePasses != 7 || pending != 74 || len(results.Records) != 93 {
 		t.Fatal("runtime evidence inventory changed without review")
 	}
 }

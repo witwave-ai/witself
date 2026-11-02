@@ -443,8 +443,11 @@ compatibility-release rule is specific to fact deletion
 ([compatibility rule](../../../internal/store/migrate.go#L323)); it is not an
 account capture record or an in-flight transaction barrier.
 
-**CURRENT CODE** — Dashboard preference writes intentionally have no audit event
-or revision fence ([preferences](../../../internal/store/dashboard_preferences.go#L129)).
+**CURRENT CODE** — Unselected and capture-disabled dashboard preference writes
+retain their direct SQL and absence of an audit event or revision fence
+([preferences](../../../internal/store/dashboard_preferences.go)). The selected,
+capture-active path uses one admitted `preferences.put` operation with the prior
+revision dependency ([admission and sealing](../../../internal/store/sync_capture_tx.go)).
 The audit insertion stores verb and metadata
 ([event insertion](../../../internal/store/events.go#L1075)), while outbound
 email uses its own outbox
@@ -454,6 +457,21 @@ cannot substitute for verified account-wide change capture.
 **CURRENT CODE** — Storage accounting already uses DML triggers, TRUNCATE rejection and durable-state downgrade guards ([DML](../../../internal/store/migrations/0091_bound_agent_email_cell_storage.sql#L381), [TRUNCATE](../../../internal/store/migrations/0091_bound_agent_email_cell_storage.sql#L401), [downgrade](../../../internal/store/migrations/0091_bound_agent_email_cell_storage.sql#L436)). Migration 0101 combines an activity probe with a real table lock ([probe](../../../internal/store/migrations/0101_add_transcript_storage_usage.sql#L39), [lock](../../../internal/store/migrations/0101_add_transcript_storage_usage.sql#L60)); an integration fixture observes an actually blocked advisory lock ([fixture](../../../internal/store/activity_integration_test.go#L497), [observation](../../../internal/store/activity_integration_test.go#L521)). These enforcement/scheduling seams do not implement the proposed capture barrier.
 
 **CURRENT CODE** — Import leases hold a database/account/epoch-scoped session advisory lock with connection cleanup ([scope](../../../internal/store/account_import_lease.go#L15), [acquisition](../../../internal/store/account_import_lease.go#L88), [cleanup](../../../internal/store/account_import_lease.go#L132)). Backup/self export uses read-only REPEATABLE READ snapshots ([snapshot](../../../internal/store/export.go#L130), [self export](../../../internal/store/export.go#L214)); purge uses SERIALIZABLE ([purge](../../../internal/store/account_purge.go#L248), [closed-account purge](../../../internal/store/account_purge.go#L490)). The SC-5.6 stale-snapshot and physical-session experiments therefore remain necessary.
+
+**CURRENT CODE** — Explicitly selected local sync migration 0002 installs guards
+and deferred coverage checks over the fixed-order reviewed inventory
+([migration](../../../internal/store/sync_migrations/0002_sync_capture_guards.sql),
+[inventory](../../../internal/store/sync_writer_inventory.go)). The production
+helper admits before domain access, records semantic touches, seals one bundle,
+and holds the finalized counter through commit
+([transaction helper](../../../internal/store/sync_capture_tx.go)). Activation
+holds an exclusive session gate through acknowledgment by that same physical
+connection, and reports only disabled, bootstrapping or suspended capture status
+([activation](../../../internal/store/sync_capture_activation.go),
+[separate status](../../../internal/runtimeconfig/sync_status.go)). C1's
+[single-executable capability records](../../../internal/syncharness/capture_runtime_results.go)
+do not promote any H obligation; snapshot materialization, mixed binaries,
+principal enforcement and native recovery remain separate acceptance work.
 
 ### Open items
 

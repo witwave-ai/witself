@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -144,7 +145,7 @@ func TestSyncArchiveSchemaCompletenessRegisteredTypesPostgres(t *testing.T) {
 		t.Fatal("registered type projection does not match archive registry")
 	}
 	mutated := copiedSyncMigrationFS(t)
-	mutated["sync_migrations/0002_registered_types.sql"] = &fstest.MapFile{Data: []byte(`-- +goose Up
+	mutated[fmt.Sprintf("sync_migrations/%04d_registered_types.sql", SyncSchemaVersion()+1)] = &fstest.MapFile{Data: []byte(`-- +goose Up
 CREATE DOMAIN registered_contract_domain AS varchar(32);
 ALTER TABLE sync_incarnations ADD COLUMN registered_varchar varchar(32);
 ALTER TABLE sync_incarnations ADD COLUMN registered_numeric numeric(10,2);

@@ -19,6 +19,7 @@ func TestTranscriptStorageUsageSQLStaysInOneFile(t *testing.T) {
 	fset := token.NewFileSet()
 	var importFunction *ast.FuncDecl
 	archiveKeys := 0
+	inventoryKeys := 0
 	for _, path := range paths {
 		if strings.HasSuffix(path, "_test.go") {
 			continue
@@ -34,6 +35,13 @@ func TestTranscriptStorageUsageSQLStaysInOneFile(t *testing.T) {
 				archiveKeys++
 			}
 		}
+		var inventoryKey *ast.BasicLit
+		if path == "sync_writer_inventory.go" {
+			inventoryKey = transcriptStorageSyncInventoryKey(file)
+			if inventoryKey != nil {
+				inventoryKeys++
+			}
+		}
 		ast.Inspect(file, func(node ast.Node) bool {
 			if fn, ok := node.(*ast.FuncDecl); ok && fn.Name.Name == "importAccountWithTracker" {
 				if importFunction != nil {
@@ -41,32 +49,140 @@ func TestTranscriptStorageUsageSQLStaysInOneFile(t *testing.T) {
 				}
 				importFunction = fn
 			}
-			literal, ok := node.(*ast.BasicLit)
-			if !ok || literal.Kind != token.STRING {
-				return true
-			}
-			value, err := strconv.Unquote(literal.Value)
-			if err != nil {
-				t.Fatalf("decode string at %s: %v", fset.Position(literal.Pos()), err)
-			}
-			if !strings.Contains(value, "transcript_storage_usage") &&
-				!strings.Contains(value, "witself_transcript_entry_storage_bytes") &&
-				!strings.Contains(value, "witself_transcript_storage_shard") {
-				return true
-			}
-			if path != "transcript_storage_usage.go" && literal != archiveKey {
-				t.Errorf("counter SQL or name outside its helper file at %s", fset.Position(literal.Pos()))
-			}
 			return true
 		})
+		for _, literal := range transcriptStorageForbiddenLiterals(path, file, archiveKey, inventoryKey) {
+			t.Errorf("counter SQL or name outside its helper file at %s", fset.Position(literal.Pos()))
+		}
 	}
 	if archiveKeys != 1 {
 		t.Fatalf("archive exclusion keys = %d, want exactly one", archiveKeys)
+	}
+	if inventoryKeys != 1 {
+		t.Fatalf("counter inventory exemption count = %d, want exactly one", inventoryKeys)
 	}
 	if importFunction == nil {
 		t.Fatal("importAccountWithTracker not found")
 	}
 	assertTranscriptStorageImportPlacement(t, importFunction)
+}
+
+// The guard inventory is metadata, not another SQL writer. Exempt exactly one
+// direct string element in the top-level var syncWriterTables = []string{...}
+// declaration. A duplicate, nested declaration, array, map, or expression does
+// not gain a filename-wide exemption.
+func transcriptStorageSyncInventoryKey(file *ast.File) *ast.BasicLit {
+	var key *ast.BasicLit
+	declarations := 0
+	for _, declaration := range file.Decls {
+		group, ok := declaration.(*ast.GenDecl)
+		if !ok || group.Tok != token.VAR {
+			continue
+		}
+		for _, spec := range group.Specs {
+			value, ok := spec.(*ast.ValueSpec)
+			if !ok {
+				continue
+			}
+			for _, name := range value.Names {
+				if name.Name != "syncWriterTables" {
+					continue
+				}
+				declarations++
+				if declarations != 1 || len(value.Names) != 1 || len(value.Values) != 1 {
+					return nil
+				}
+				list, ok := value.Values[0].(*ast.CompositeLit)
+				if !ok {
+					return nil
+				}
+				slice, ok := list.Type.(*ast.ArrayType)
+				if !ok || slice.Len != nil {
+					return nil
+				}
+				element, ok := slice.Elt.(*ast.Ident)
+				if !ok || element.Name != "string" {
+					return nil
+				}
+				for _, entry := range list.Elts {
+					literal, ok := entry.(*ast.BasicLit)
+					if !ok || literal.Kind != token.STRING {
+						continue
+					}
+					text, err := strconv.Unquote(literal.Value)
+					if err != nil {
+						return nil
+					}
+					if text == "transcript_storage_usage" {
+						if key != nil {
+							return nil
+						}
+						key = literal
+					}
+				}
+			}
+		}
+	}
+	return key
+}
+
+func transcriptStorageForbiddenLiterals(path string, file *ast.File, archiveKey, inventoryKey *ast.BasicLit) []*ast.BasicLit {
+	var forbidden []*ast.BasicLit
+	ast.Inspect(file, func(node ast.Node) bool {
+		literal, ok := node.(*ast.BasicLit)
+		if !ok || literal.Kind != token.STRING {
+			return true
+		}
+		value, err := strconv.Unquote(literal.Value)
+		if err != nil {
+			forbidden = append(forbidden, literal)
+			return true
+		}
+		if !strings.Contains(value, "transcript_storage_usage") &&
+			!strings.Contains(value, "witself_transcript_entry_storage_bytes") &&
+			!strings.Contains(value, "witself_transcript_storage_shard") {
+			return true
+		}
+		if path != "transcript_storage_usage.go" &&
+			(path != "archive_tables.go" || literal != archiveKey) &&
+			(path != "sync_writer_inventory.go" || literal != inventoryKey) {
+			forbidden = append(forbidden, literal)
+		}
+		return true
+	})
+	return forbidden
+}
+
+func TestTranscriptStorageUsageInventoryExemptionIsExact(t *testing.T) {
+	const allowed = `var syncWriterTables = []string{"transcript_storage_usage"}`
+	for _, tc := range []struct {
+		name, path, declarations string
+		accepted                 bool
+	}{
+		{"one_inventory_entry", "sync_writer_inventory.go", allowed, true},
+		{"SQL_elsewhere", "sync_writer_inventory.go", allowed + `; const query = "SELECT * FROM transcript_storage_usage"`, false},
+		{"name_elsewhere", "sync_writer_inventory.go", allowed + `; var other = "transcript_storage_usage"`, false},
+		{"helper_name_elsewhere", "sync_writer_inventory.go", allowed + `; const query = "SELECT witself_transcript_storage_shard()"`, false},
+		{"extra_inventory_entry", "sync_writer_inventory.go", `var syncWriterTables = []string{"transcript_storage_usage", "transcript_storage_usage"}`, false},
+		{"extra_declaration", "sync_writer_inventory.go", allowed + ";" + allowed, false},
+		{"wrong_file", "other.go", allowed, false},
+		{"wrong_declaration", "sync_writer_inventory.go", `var other = []string{"transcript_storage_usage"}`, false},
+		{"nested_declaration", "sync_writer_inventory.go", `func writer() { ` + allowed + `; _ = syncWriterTables }`, false},
+		{"array_declaration", "sync_writer_inventory.go", `var syncWriterTables = [1]string{"transcript_storage_usage"}`, false},
+		{"SQL_inventory_entry", "sync_writer_inventory.go", `var syncWriterTables = []string{"SELECT * FROM transcript_storage_usage"}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			file, err := parser.ParseFile(token.NewFileSet(), tc.path, "package store\n"+tc.declarations, 0)
+			if err != nil {
+				t.Fatalf("counter exemption fixture parsing failed: %v", err)
+			}
+			key := transcriptStorageSyncInventoryKey(file)
+			accepted := key != nil && len(transcriptStorageForbiddenLiterals(tc.path, file, nil, key)) == 0
+			if accepted != tc.accepted {
+				t.Fatalf("counter exemption fixture accepted = %t, want %t", accepted, tc.accepted)
+			}
+		})
+	}
 }
 
 func transcriptStorageArchiveKey(t *testing.T, file *ast.File) *ast.BasicLit {

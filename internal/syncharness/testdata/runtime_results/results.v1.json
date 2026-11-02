@@ -482,13 +482,17 @@
       "version": 1,
       "obligation": "H35",
       "capability": "production_relation_guards",
+      "evidence_class": "real_postgres",
       "adapter": {
-        "package": "",
-        "symbol": ""
+        "package": "store",
+        "symbol": "TestSyncCaptureInstallationDrain"
       },
       "scenario": "GuardInstallRelationDrain",
-      "outcome": "NOT_RUN",
-      "missing_capability": "production_relation_guards"
+      "executable": "lc_s6c1_go_test_v1",
+      "database_class": "postgresql",
+      "platform_class": "go_test_host",
+      "artifact": "H35_capture_postgres_v1",
+      "outcome": "PASS"
     },
     {
       "version": 1,
@@ -500,7 +504,8 @@
       },
       "scenario": "GuardInstallRelationDrain",
       "outcome": "NOT_RUN",
-      "missing_capability": "prepared_transactions"
+      "missing_capability": "prepared_transactions",
+      "reason": "max_prepared_transactions_0"
     },
     {
       "version": 1,
@@ -534,13 +539,17 @@
       "version": 1,
       "obligation": "H36",
       "capability": "production_writer_admission",
+      "evidence_class": "real_postgres",
       "adapter": {
-        "package": "",
-        "symbol": ""
+        "package": "store",
+        "symbol": "TestSyncCaptureLateFirstWrite"
       },
       "scenario": "PreBeginLateFirstWrite",
-      "outcome": "NOT_RUN",
-      "missing_capability": "production_writer_admission"
+      "executable": "lc_s6c1_go_test_v1",
+      "database_class": "postgresql",
+      "platform_class": "go_test_host",
+      "artifact": "H36_capture_postgres_v1",
+      "outcome": "PASS"
     },
     {
       "version": 1,
@@ -562,13 +571,17 @@
       "version": 1,
       "obligation": "H37",
       "capability": "production_locking_admission",
+      "evidence_class": "real_postgres",
       "adapter": {
-        "package": "",
-        "symbol": ""
+        "package": "store",
+        "symbol": "TestSyncCaptureStaleSnapshots"
       },
       "scenario": "OldSnapshotLockingAdmission",
-      "outcome": "NOT_RUN",
-      "missing_capability": "production_locking_admission"
+      "executable": "lc_s6c1_go_test_v1",
+      "database_class": "postgresql",
+      "platform_class": "go_test_host",
+      "artifact": "H37_capture_postgres_v1",
+      "outcome": "PASS"
     },
     {
       "version": 1,
@@ -590,13 +603,17 @@
       "version": 1,
       "obligation": "H38",
       "capability": "production_account_gate",
+      "evidence_class": "real_postgres",
       "adapter": {
-        "package": "",
-        "symbol": ""
+        "package": "store",
+        "symbol": "TestSyncCaptureAccountGate"
       },
       "scenario": "AccountGateDrain",
-      "outcome": "NOT_RUN",
-      "missing_capability": "production_account_gate"
+      "executable": "lc_s6c1_go_test_v1",
+      "database_class": "postgresql",
+      "platform_class": "go_test_host",
+      "artifact": "H38_capture_postgres_v1",
+      "outcome": "PASS"
     },
     {
       "version": 1,
@@ -618,13 +635,17 @@
       "version": 1,
       "obligation": "H39",
       "capability": "same_physical_session_snapshot",
+      "evidence_class": "real_postgres",
       "adapter": {
-        "package": "",
-        "symbol": ""
+        "package": "store",
+        "symbol": "TestSyncCaptureSnapshotSession"
       },
       "scenario": "SnapshotPinSameSessionAck",
-      "outcome": "NOT_RUN",
-      "missing_capability": "same_physical_session_snapshot"
+      "executable": "lc_s6c1_go_test_v1",
+      "database_class": "postgresql",
+      "platform_class": "go_test_host",
+      "artifact": "H39_capture_postgres_v1",
+      "outcome": "PASS"
     },
     {
       "version": 1,
@@ -686,13 +707,17 @@
       "version": 1,
       "obligation": "H41",
       "capability": "complete_production_writer_inventory",
+      "evidence_class": "real_postgres",
       "adapter": {
-        "package": "",
-        "symbol": ""
+        "package": "store",
+        "symbol": "TestSyncCaptureForgottenJournal"
       },
       "scenario": "OmittedSemanticJournal",
-      "outcome": "NOT_RUN",
-      "missing_capability": "complete_production_writer_inventory"
+      "executable": "lc_s6c1_go_test_v1",
+      "database_class": "postgresql",
+      "platform_class": "go_test_host",
+      "artifact": "H41_capture_postgres_v1",
+      "outcome": "PASS"
     },
     {
       "version": 1,
@@ -714,13 +739,17 @@
       "version": 1,
       "obligation": "H42",
       "capability": "production_committed_prefix",
+      "evidence_class": "real_postgres",
       "adapter": {
-        "package": "",
-        "symbol": ""
+        "package": "store",
+        "symbol": "TestSyncCaptureCommittedPrefix"
       },
       "scenario": "CommittedPrefixCounter",
-      "outcome": "NOT_RUN",
-      "missing_capability": "production_committed_prefix"
+      "executable": "lc_s6c1_go_test_v1",
+      "database_class": "postgresql",
+      "platform_class": "go_test_host",
+      "artifact": "H42_capture_postgres_v1",
+      "outcome": "PASS"
     },
     {
       "version": 1,

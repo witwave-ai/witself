@@ -106,6 +106,14 @@ func (s *Store) AppliedSyncSchemaVersion(ctx context.Context) (int, error) {
 // this method. It holds the same database-wide migration session lock as core
 // migrations. Each migration file completes before cancellation is observed.
 func (s *Store) MigrateSync(ctx context.Context) (retErr error) {
+	return s.InstallSyncGuards(ctx)
+}
+
+// InstallSyncGuards installs the selected sync namespace under the migration
+// session lock. Migration 0002 drains the entire reviewed relation inventory
+// with ACCESS EXCLUSIVE locks in its DDL transaction before attaching guards.
+// Installing guards does not enable a capability or activate any account.
+func (s *Store) InstallSyncGuards(ctx context.Context) (retErr error) {
 	db, err := sql.Open("pgx", s.dsn)
 	if err != nil {
 		return errors.New("open sync migration database failed")

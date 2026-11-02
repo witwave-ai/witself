@@ -204,11 +204,16 @@ func TestSyncMigrationFinishesFileBeforeCancellationPostgres(t *testing.T) {
 		t.Fatal("release sync DDL gate failed")
 	}
 	assertMigrationCanceled(t, awaitMigrationResult(t, result, 10*time.Second), "verify")
-	if version, err := st.AppliedSyncSchemaVersion(ctx); err != nil || version != SyncSchemaVersion() {
+	// Cancellation occurs while 0001 waits on accounts. It must finish that
+	// file, then stop before beginning the separately atomic 0002 guard drain.
+	if version, err := st.AppliedSyncSchemaVersion(ctx); err != nil || version != 1 {
 		t.Fatal("cancellation did not preserve complete applied migration file")
 	}
 	if err := st.MigrateSync(ctx); err != nil {
 		t.Fatal("sync migration did not resume after file completion")
+	}
+	if version, err := st.AppliedSyncSchemaVersion(ctx); err != nil || version != SyncSchemaVersion() {
+		t.Fatal("sync migration resume did not install remaining complete files")
 	}
 }
 
@@ -581,12 +586,11 @@ func TestSyncSchemaEvidenceAndEvacuationGuardsPostgres(t *testing.T) {
 			t.Errorf("%s evacuation write was not refused: SQLSTATE=%s", name, syncTestSQLState(err))
 		}
 	}
-	// Core relations gain no new sync capture guard in this slice.
-	var guards int
-	if err := st.pool.QueryRow(ctx, `SELECT count(*) FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid
-		JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=current_schema()
-		AND c.relname NOT LIKE 'sync\_%' ESCAPE '\' AND t.tgname LIKE 'sync\_%' ESCAPE '\'`).Scan(&guards); err != nil || guards != 0 {
-		t.Fatal("sync migration installed a domain row guard")
+	// 0001 left domain guards absent; 0002 intentionally installs them while
+	// all existing inert capability fixtures stay disabled. Verify the reviewed
+	// installed inventory instead of preserving the schema-1 absence rule.
+	if err := validateInstalledSyncWriterInventory(ctx, st); err != nil {
+		t.Fatal("sync migration domain guard inventory differs from reviewed coverage")
 	}
 }
 
