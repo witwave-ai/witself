@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -22,7 +23,7 @@ import (
 // ordinary hermetic lane records its unavailable inputs without a test skip.
 // Reboot/login and two-user isolation remain separate owner receipts.
 func TestNativeServiceLifecycle(t *testing.T) {
-	if runtime.GOOS != "linux" {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
 		if _, err := localcell.NewServiceAdapter().Plan(t.Context(), localcell.ServiceDescriptor{}); !errors.Is(err, localcell.ErrServiceManagerUnavailable) {
 			t.Fatal("unsupported native adapter did not return its capability result")
 		}
@@ -48,6 +49,9 @@ func TestNativeServiceLifecycle(t *testing.T) {
 		t.Fatal("cannot build native service host")
 	}
 	descriptor := localcell.ServiceDescriptor{Adapter: "systemd-user", Scope: "user", Runtime: "local", DesiredState: "running", ResourceProfile: "unconfigured", Payload: localcell.ServicePayload{Host: host, Args: []string{"run", "--root", root, "--pgbin", binaries.PostgresDir, "--server", binaries.Server, "--worker", binaries.Worker, "--timeout", "60s"}}}
+	if runtime.GOOS == "darwin" {
+		descriptor.Adapter = "launchd-agent"
+	}
 	if err := cell.PrepareService(t.Context(), descriptor); err != nil {
 		t.Fatal("cannot prepare native service descriptor")
 	}
@@ -58,6 +62,9 @@ func TestNativeServiceLifecycle(t *testing.T) {
 	adapter := localcell.NewServiceAdapter()
 	diagnosticHome := nativeServiceDiagnosticHome()
 	label := "witself-cell-" + descriptor.InstallationID + ".service"
+	if runtime.GOOS == "darwin" {
+		label = "ai.witwave.witself.cell." + descriptor.InstallationID
+	}
 	diagnosticRun := func(ctx context.Context, name string, args ...string) ([]byte, error) {
 		if name == "child-capability" {
 			return nativeServiceCapabilityDiagnostic(ctx, descriptor)
@@ -87,6 +94,9 @@ func TestNativeServiceLifecycle(t *testing.T) {
 			if err := invoke("install"); err != nil {
 				t.Fatal("native user service install failed")
 			}
+			if runtime.GOOS == "darwin" {
+				nativeServiceLaunchdRegistrationDiagnostics(os.Getuid(), t.Logf, root, diagnosticHome, label, diagnosticRun)
+			}
 			return
 		}
 		command = exec.Command(host, "run", "--root", root)
@@ -103,7 +113,7 @@ func TestNativeServiceLifecycle(t *testing.T) {
 	}
 	stop := func() error {
 		if manager {
-			// Disable the exact registration; reapplying it is a fresh host on
+			// Remove the exact registration; reapplying it is a fresh host on
 			// this boot, with the same durable running fence and private data.
 			err := adapter.Remove(context.Background(), descriptor)
 			if err != nil {
@@ -142,6 +152,9 @@ func TestNativeServiceLifecycle(t *testing.T) {
 		t.Log("PASS service_manager_available")
 	} else {
 		t.Log("NOT_RUN service_manager_unavailable")
+		if runtime.GOOS == "darwin" {
+			logFailure(planErr, nil)
+		}
 	}
 	start()
 	waitServiceReady(t, cell)
@@ -155,9 +168,7 @@ func TestNativeServiceLifecycle(t *testing.T) {
 	start()
 	waitServiceReady(t, cell)
 	after := nativeServiceProcess(t, root)
-	oldIdentity, newIdentity := strings.Split(before.StartTime, ":"), strings.Split(after.StartTime, ":")
-	if len(oldIdentity) != 3 || len(newIdentity) != 3 || oldIdentity[0] != "linux" || newIdentity[0] != "linux" ||
-		oldIdentity[1] != newIdentity[1] || (before.PID == after.PID && before.StartTime == after.StartTime) {
+	if !nativeServiceFreshProcess(runtime.GOOS, before, after) {
 		t.Fatal("native service restart did not establish a fresh process on the same boot")
 	}
 	read()
@@ -180,6 +191,59 @@ func TestNativeServiceLifecycle(t *testing.T) {
 		t.Log("PASS service_manager_persistence")
 	} else {
 		t.Log("PASS service_foreground_persistence")
+	}
+}
+
+func nativeServiceFreshProcess(goos string, before, after localcell.ProcessRecord) bool {
+	oldIdentity, newIdentity := strings.Split(before.StartTime, ":"), strings.Split(after.StartTime, ":")
+	if len(oldIdentity) != 3 || len(newIdentity) != 3 || oldIdentity[0] != goos || newIdentity[0] != goos ||
+		(before.PID == after.PID && before.StartTime == after.StartTime) {
+		return false
+	}
+	if goos == "linux" {
+		return oldIdentity[1] == newIdentity[1]
+	}
+	if goos != "darwin" {
+		return false
+	}
+	// process_darwin.go records creation seconds and microseconds. Unlike the
+	// Linux boot ID, neither timestamp field must match after a host restart.
+	for _, identity := range [][]string{oldIdentity, newIdentity} {
+		seconds, secErr := strconv.ParseInt(identity[1], 10, 64)
+		microseconds, usecErr := strconv.ParseInt(identity[2], 10, 64)
+		if secErr != nil || usecErr != nil || seconds <= 0 || microseconds < 0 || microseconds >= 1_000_000 {
+			return false
+		}
+	}
+	return true
+}
+
+func TestNativeServiceFreshProcess(t *testing.T) {
+	for _, tc := range []struct {
+		name, goos, before, after string
+		samePID, want             bool
+	}{
+		{"linux_same_boot", "linux", "linux:boot:1", "linux:boot:2", true, true},
+		{"linux_other_boot", "linux", "linux:boot:1", "linux:other:2", false, false},
+		{"linux_same_process", "linux", "linux:boot:1", "linux:boot:1", true, false},
+		{"darwin_new_second", "darwin", "darwin:10:999999", "darwin:11:0", true, true},
+		{"darwin_new_microsecond", "darwin", "darwin:10:1", "darwin:10:2", true, true},
+		{"darwin_same_process", "darwin", "darwin:10:1", "darwin:10:1", true, false},
+		{"darwin_bad_second", "darwin", "darwin:zero:1", "darwin:11:0", false, false},
+		{"darwin_bad_microsecond", "darwin", "darwin:10:1", "darwin:11:1000000", false, false},
+		{"wrong_platform", "darwin", "linux:10:1", "darwin:11:0", false, false},
+		{"missing_field", "darwin", "darwin:10", "darwin:11:0", false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			before := localcell.ProcessRecord{PID: 10, StartTime: tc.before}
+			after := localcell.ProcessRecord{PID: 11, StartTime: tc.after}
+			if tc.samePID {
+				after.PID = before.PID
+			}
+			if got := nativeServiceFreshProcess(tc.goos, before, after); got != tc.want {
+				t.Fatal("native restart identity decision differs from the platform contract")
+			}
+		})
 	}
 }
 

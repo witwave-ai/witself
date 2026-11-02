@@ -48,7 +48,7 @@ func validateServiceDescriptor(d ServiceDescriptor) error {
 	}
 	if d.Version != 1 || d.InstallationID == "" || d.UID != uid || !filepath.IsAbs(d.Root) || filepath.Clean(d.Root) != d.Root ||
 		d.Scope != "user" || d.Runtime != "local" || d.Revision == 0 || d.Payload.Generation == "" || !filepath.IsAbs(d.Payload.Host) ||
-		(d.Adapter != "foreground" && d.Adapter != "systemd-user") || !validServiceDesiredState(d.DesiredState) || d.ResourceProfile != "unconfigured" {
+		(d.Adapter != "foreground" && d.Adapter != "systemd-user" && d.Adapter != "launchd-agent") || !validServiceDesiredState(d.DesiredState) || d.ResourceProfile != "unconfigured" {
 		return ErrServiceOwnershipConflict
 	}
 	for _, arg := range append([]string{d.Payload.Host, d.Payload.Generation, d.InstallationID}, d.Payload.Args...) {

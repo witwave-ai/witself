@@ -13,7 +13,7 @@ import (
 )
 
 var serviceSystemdHex = regexp.MustCompile(`(?i)[0-9a-f]{64}`)
-var serviceSystemdToken = regexp.MustCompile(`[A-Za-z0-9_-]{43,}`)
+var serviceSystemdToken = regexp.MustCompile(`[A-Za-z0-9_+/-]{43,}={0,2}`)
 var serviceSystemdEnvironment = regexp.MustCompile(`(?m)\b(?:Environment(?:File)?|[A-Z_][A-Z0-9_]*)[ \t]*=[^\r\n]*`)
 
 // Sanitize before taking the tail: truncating first can expose a partial token
@@ -32,6 +32,9 @@ func sanitizeServiceSystemdDetail(text, root, home string, privatePaths ...strin
 	}
 	text = serviceSystemdEnvironment.ReplaceAllString(text, "<environment>")
 	text = serviceSystemdHex.ReplaceAllString(text, "<hex>")
+	// Cover standard and URL-safe base64 after private path replacement so the
+	// placeholders survive. Long plain path segments may also become <token>;
+	// privacy takes precedence over retaining that diagnostic detail.
 	text = serviceSystemdToken.ReplaceAllString(text, "<token>")
 	text = strings.Map(func(r rune) rune {
 		if unicode.IsControl(r) {

@@ -13,7 +13,7 @@ func TestServiceUnsupportedAdapterCapability(t *testing.T) {
 	if !errors.Is(err, ErrServiceManagerUnavailable) || observation.Available || observation.Fallback != "localcellharness run" {
 		t.Fatal("unsupported adapter omitted capability")
 	}
-	if runtime.GOOS != "linux" {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
 		if _, err := NewServiceAdapter().Plan(context.Background(), ServiceDescriptor{}); !errors.Is(err, ErrServiceManagerUnavailable) {
 			t.Fatal("unsupported platform selected native manager")
 		}

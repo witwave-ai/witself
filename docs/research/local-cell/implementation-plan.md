@@ -1011,7 +1011,7 @@ before starting.
 | LC-S2-R1 | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | merged (disabled) | PR #839 | migration-lock cancellation, worker restart policy and lifecycle readiness tests; five executable reviews (two merge-regression tests added) | no live activation | service adapters |
 | LC-S5 | Codex GPT-6 Astra (implementer); Fable (integration owner) | merged (harness-only): LC-S5A #843, LC-S5B #844, LC-S5C #845, LC-S5D #846; H03/H05 model allocations remain deferred | synthetic topology/catalogs/scheduler; typed protocol; local capture/publication/accounting; transition, authority and recovery oracles; trace replay/reducer; H01–H69 manifests | scoped model/vector fixtures and opted-in PostgreSQL miniature transaction, fixture reopen and reducer tests; hosted dependency/byte baselines | [LC-S5-owned inventories and M4 proof](sync-contract.md#open-items-by-milestone); missing production adapters remain SCAFFOLD_ONLY and runtime schedules NOT_RUN | LC-S6 design: M4 owes real writer, movement, mixed-binary, role, restore and independent-witness proofs |
 | LC-S6 | Codex GPT-6 Astra (LC-S6A/B/C1 implementer); Fable (integration owner) | LC-S6A merged #848; LC-S6B merged #861 (F1 answered yes 2026-10-27); LC-S6C1 merged #869 (five executable coverage reviews and four fix passes; dark and local-only); C2–F remain pending | A separates executable capability evidence from immutable v1 obligations; B adds the selected sync namespace and movement registration; C1 adds guarded inventory, admitted preferences, locking admission, capture gates and committed-prefix finalization | fixture/model and B schema evidence; C1 binds seven single-executable real-PostgreSQL capability records to executing store tests; no obligation promotion or mixed-binary, principal, native-restore or independent-witness acceptance | C2 mixed executables, real principals and proof profile after F2/F4; D snapshot materialization/application/accounting, E movement and F recovery; F3/D9 remain unresolved | C1 passed the owner gate and five independent reviews; continue in dependency order without treating partial capability evidence as an obligation pass |
-| LC-S7 | Codex GPT-6 Astra (LC-S7A implementer); Fable (integration owner) | LC-S7A merged #850 (nine executable reviews, eight fix passes; the first real Linux CI runs replaced the `GetUnit` lookup with `LoadUnit` and removed `User=` from per-user units); LC-S7A-R #856 merged; reboot-and-login receipt recorded 2026-10-30 (Linux arm64 VM); LC-S7B1 #855, LC-S7B2 #860, LC-S7B3 #865 merged | explicit foreground supervisor and Linux systemd user adapter; two-phase receipt driver and read-only `observe` control; component-set trust format v1 with offline Go, shell, PowerShell and Homebrew verification and channel-owned payload handoff, all dark; later slices planned | hermetic service ownership, authenticated control, desired-state and old-boot fences; native registration, same-boot restart, persisted write and exact removal proven on both Linux CI rows; sanitized diagnostics on failure | no channel, minimum-OS, Linux x86_64 reboot, or two-user acceptance yet; one arm64 VM row does not certify the glibc floor | LC-S7C adapters and two-user receipts; LC-S7D supervisor wiring and update/restore acceptance |
+| LC-S7 | Codex GPT-6 Astra (LC-S7A/C1 implementer); Fable (integration owner) | LC-S7A merged #850 (nine executable reviews, eight fix passes; the first real Linux CI runs replaced the `GetUnit` lookup with `LoadUnit` and removed `User=` from per-user units); LC-S7A-R #856 merged; reboot-and-login receipt recorded 2026-10-30 (Linux arm64 VM); LC-S7B1 #855, LC-S7B2 #860, LC-S7B3 #865 merged; LC-S7C1 implemented: macOS launchd LaunchAgent adapter, native proof wiring on both macOS rows; owner gate pending | explicit foreground supervisor, Linux systemd user and macOS launchd LaunchAgent adapters; two-phase receipt driver and read-only `observe` control; component-set trust format v1 with offline Go, shell, PowerShell and Homebrew verification and channel-owned payload handoff, all dark | hermetic service ownership, authenticated control, desired-state and old-boot fences; native registration, same-boot restart, persisted write and exact removal proven on both Linux CI rows; C1 macOS native CI NOT RUN in the worker lane; sanitized diagnostics on failure | Windows adapter C2, two-user/reboot/sleep receipts owed; no channel, minimum-OS, or Linux x86_64 reboot acceptance yet; one arm64 VM row does not certify the glibc floor | owner gate and both macOS native CI rows for C1; LC-S7C2 Windows adapter and owner session/isolation receipts; LC-S7D supervisor wiring and update/restore acceptance |
 
 LC-S6B implements the first production sync schema in a separate embedded
 `internal/store/sync_migrations/` namespace with its own Goose version table.
@@ -1045,17 +1045,23 @@ real database principals and capture-proof worker profile, plus D–F, are still
 required before capture or M4 acceptance.
 
 LC-S7A adds an explicitly selected local foreground host and a per-user Linux
-systemd adapter around the existing lifecycle. The supervisor holds its own
-lifetime lease, persists stopped and maintenance fences, authenticates local
-control, and reconciles old-boot process records without signaling reused PIDs.
-The Unix CI proof records manager capability and exercises authenticated data
-persistence across a same-boot host restart, using the explicit foreground host
-when a Linux user manager is unavailable; macOS records its unsupported adapter
-capability. This is per-user work only: availability after reboot means after
-the owning user logs in. A provides no channel installer, macOS or Windows
-registration, resource-budget acceptance, or hosted default change. Owner reboot
-receipt driver: see [service-reboot-receipt.md](service-reboot-receipt.md); the
-receipt was recorded 2026-10-30 (M3 row above).
+systemd adapter around the existing lifecycle. Its supervisor holds a lifetime
+lease, persists stopped and maintenance fences, authenticates local control,
+and reconciles old-boot records without signaling reused PIDs. LC-S7C1 adds the
+macOS per-user LaunchAgent in the owning user's `gui/<uid>` domain, selected only
+by explicit local `service install`, and extends the same native proof to both
+macOS CI rows: registration, same-boot host restart, authenticated write
+persistence and exact removal. Missing GUI/user-manager capability records
+`NOT_RUN service_manager_unavailable` and exercises foreground persistence.
+Hermetic fakes establish rendering and refusal behavior; macOS native CI and the
+owner gate remain pending. `KeepAlive=false` leaves restart supervision to the
+host; the durable desired-state fence keeps explicit `service stop` stopped.
+Availability after reboot means after the owning user's login. Windows C2,
+two-user, macOS reboot/login, logout, sleep/resume and minimum-OS receipts remain
+owed; this adds no channel installer, resource-budget acceptance or hosted
+default change, and empty `WITSELF_RUNTIME` remains hosted. The separate Linux
+arm64 owner reboot receipt was recorded 2026-10-30 (M3 row above); see
+[service-reboot-receipt.md](service-reboot-receipt.md).
 
 | LC-S7 | Codex GPT-6 Astra (B3 implementer); Fable (integration owner) | LC-S7B3 merged #865: channel receipts/adapters, private payload generations, handoff journal, protected activation (dark); two executable coverage reviews and one fix pass (a lexical ownership-overlap check that could claim a case alias of a package-owned path was replaced by observed file identity; 14/14 mutations killed) | [component-set trust v1](component-set-trust.md#channel-ownership-and-payload-handoff) | hermetic ownership, generation and handoff checks; B1/B2 corpus unchanged; native evidence remains separate | LC-S7D supervisor execution protection and update flow; Windows ACL persistence/MSI; production signing custody | LC-S7D supervisor integration; LC-S7C adapters |
 
