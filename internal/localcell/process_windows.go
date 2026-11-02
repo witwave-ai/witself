@@ -17,6 +17,21 @@ import (
 // access refusal here because enabled SeDebugPrivilege bypasses process DACLs.
 var windowsOpenProcess = windows.OpenProcess
 
+// OpenProcessToken / GetTokenInformation (TOKEN_USER) verify the retained
+// process object, not its default owner or a second PID lookup.
+var windowsProcessTokenUser = func(handle windows.Handle) (*windows.SID, error) {
+	var token windows.Token
+	if err := windows.OpenProcessToken(handle, windows.TOKEN_QUERY, &token); err != nil {
+		return nil, errors.New("localcell: peer:sid")
+	}
+	defer func() { _ = token.Close() }()
+	user, err := token.GetTokenUser()
+	if err != nil || user == nil || user.User.Sid == nil {
+		return nil, errors.New("localcell: peer:sid")
+	}
+	return user.User.Sid.Copy()
+}
+
 func processIdentity(pid int) (string, bool, error) {
 	if pid <= 0 || uint64(pid) > uint64(^uint32(0)) {
 		return "", false, errors.New("localcell: invalid process ID")

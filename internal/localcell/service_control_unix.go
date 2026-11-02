@@ -3,6 +3,7 @@
 package localcell
 
 import (
+	"context"
 	"errors"
 	"net"
 	"os"
@@ -11,7 +12,7 @@ import (
 
 func serviceControlCapability() error { return nil }
 
-func (c *Cell) validateServiceSocket() error {
+func (c *Cell) validateServiceControlEndpoint() error {
 	info, err := os.Lstat(c.path("service", "control.sock"))
 	if err != nil || info.Mode()&os.ModeSocket == 0 || info.Mode().Perm() != 0o600 {
 		return ErrServiceControlRefused
@@ -26,7 +27,7 @@ func (c *Cell) validateServiceSocket() error {
 func (c *Cell) listenServiceControl() (net.Listener, error) {
 	path := c.path("service", "control.sock")
 	if _, err := os.Lstat(path); err == nil {
-		if err := c.validateServiceSocket(); err != nil {
+		if err := c.validateServiceControlEndpoint(); err != nil {
 			return nil, err
 		}
 		if err := removePrivateFile(path); err != nil {
@@ -49,9 +50,13 @@ func (c *Cell) listenServiceControl() (net.Listener, error) {
 	return listener, nil
 }
 
-func (c *Cell) removeServiceSocket() error {
-	if err := c.validateServiceSocket(); err != nil {
+func (c *Cell) removeServiceControlEndpoint() error {
+	if err := c.validateServiceControlEndpoint(); err != nil {
 		return err
 	}
 	return removePrivateFile(c.path("service", "control.sock"))
+}
+
+func (c *Cell) dialServiceControl(ctx context.Context) (net.Conn, error) {
+	return (&net.Dialer{}).DialContext(ctx, "unix", c.path("service", "control.sock"))
 }

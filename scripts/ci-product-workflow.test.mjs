@@ -128,7 +128,7 @@ function assertLocalcellWindowsJob(ci) {
   assert.deepEqual(job.steps.slice(0, 3), [checkout, go, node]);
   const checks = job.steps.slice(3);
   const packages = './cmd/witself-server ./cmd/witself-worker ./internal/localcell/... ./internal/tools/localcellharness/... ./internal/runtimeconfig/...';
-  assert.deepEqual(checks.map(step => step.run.trim()), [
+  const expectedRuns = [
     `go build ${packages}`,
     `go vet ${packages}`,
     'node --test scripts/ci-go-test-json-check.test.mjs',
@@ -150,23 +150,48 @@ function assertLocalcellWindowsJob(ci) {
       '$parserExit = $LASTEXITCODE',
       'if ($goExit -ne 0 -or $parserExit -ne 0) { exit 1 }',
     ].join('\n'),
+    [
+      "$proofJSON = Join-Path $env:RUNNER_TEMP 'lc-pg16\\service-proof.json'",
+      "go test -json ./internal/localcell -run '^TestNativeServiceLifecycle$' -count=1 -timeout=15m > $proofJSON 2>&1",
+      '$goExit = $LASTEXITCODE',
+      'node scripts/ci-go-test-json-check.mjs --input $proofJSON --diagnose --require TestNativeServiceLifecycle',
+      '$parserExit = $LASTEXITCODE',
+      '# The checker prints successful capability outcomes only. Project the',
+      '# fixed boot diagnostic fields so successful native rounds retain them.',
+      'Get-Content -LiteralPath $proofJSON | ForEach-Object {',
+      '  try { $event = $_ | ConvertFrom-Json -ErrorAction Stop } catch { return }',
+      "  if ($event.Action -eq 'output' -and $event.Test -eq 'TestNativeServiceLifecycle' -and",
+      "      $event.Output -cmatch '^\\s*service_native(?:_diagnostics)?_test\\.go:[0-9]+: (service_boot_identity ntstatus=0x[0-9a-f]{8} length=[0-9]{1,10} guid_nonzero=(?:true|false))\\r?\\n$') {",
+      '    Write-Output $Matches[1]',
+      '  }',
+      '}',
+      'if ($goExit -ne 0 -or $parserExit -ne 0) { exit 1 }',
+    ].join('\n'),
     './scripts/ci-postgres16-windows.ps1 -Cleanup',
-  ], `${label}: unit execution stays unchanged and the native proof is narrow, complete, and fail closed`);
+  ];
+  assert.deepEqual(checks.map(step => step.run.trim()), expectedRuns,
+    `${label}: unit execution stays unchanged and both native proofs are narrow, complete, and fail closed`);
   for (const step of checks) assert.equal(step.shell, 'pwsh');
   const proof = checks[5];
-  const cleanup = checks[6];
+  const serviceProof = checks[6];
+  const cleanup = checks[7];
+  assert.equal(serviceProof.run, `${expectedRuns[6]}\n`, `${label}: service proof run text is byte-exact`);
   assert.deepEqual(proof.env, {
     WITSELF_LOCALCELL_PGBIN: '${{ runner.temp }}\\lc-pg16\\pgsql\\bin',
     TEMP: '${{ runner.temp }}\\lc-pg16\\testtmp',
     TMP: '${{ runner.temp }}\\lc-pg16\\testtmp',
   });
+  assert.deepEqual(serviceProof.env, proof.env, `${label}: both native proofs receive the exact private PostgreSQL environment`);
+  assert.equal(serviceProof.run.trimEnd().split('\n').at(-1),
+    'if ($goExit -ne 0 -or $parserExit -ne 0) { exit 1 }',
+    `${label}: native and parser exits are evaluated after the diagnostic projection`);
   assert.equal(expression(cleanup.if), 'always()', `${label}: cleanup also runs after failure`);
   for (const step of job.steps) {
     for (const key of ['continue-on-error', 'working-directory']) {
       assert.equal(step[key], undefined, `${label}: step cannot override ${key}`);
     }
     if (step !== cleanup) assert.equal(step.if, undefined, `${label}: required steps cannot skip`);
-    if (step !== proof) assert.equal(step.env, undefined, `${label}: only native proof receives PostgreSQL`);
+    if (step !== proof && step !== serviceProof) assert.equal(step.env, undefined, `${label}: only the two native proofs receive PostgreSQL`);
   }
 }
 
@@ -197,7 +222,7 @@ function assertLocalcellUnixJob(ci) {
   assert.deepEqual(job.steps.slice(0, 3), windows.steps.slice(0, 3), `${label}: same pinned checkout and toolchain`);
   const checks = job.steps.slice(3);
   const packages = './cmd/witself-server ./cmd/witself-worker ./internal/localcell/... ./internal/tools/localcellharness/... ./internal/runtimeconfig/...';
-  assert.deepEqual(checks.filter(step => step.name !== 'Prove native service restart or record adapter capability').map(step => step.name), windows.steps.slice(3).map(step => step.name), `${label}: same ordered lifecycle proof stages`);
+  assert.deepEqual(checks.map(step => step.name), windows.steps.slice(3).map(step => step.name), `${label}: same ordered lifecycle and service proof stages`);
   assert.deepEqual(checks.map(step => step.run.trim()), [
     `go build ${packages}`,
     `go vet ${packages}`,
@@ -694,6 +719,64 @@ test('PowerShell mocked checksum mismatch terminates before archive access', t =
     'Mismatch must follow download and hashing without archive access');
 });
 
+test('Windows PowerShell service proof preserves both exits and projects only complete boot fields', t => {
+  const script = workflows['ci.yml'].jobs['localcell-windows'].steps
+    .find(step => step.name === 'Prove native service restart or record adapter capability').run;
+  const bootFields = 'service_boot_identity ntstatus=0x00000000 length=32 guid_nonzero=true';
+  const output = `    service_native_diagnostics_test.go:42: ${bootFields}\n`;
+  const event = {Action: 'output', Test: 'TestNativeServiceLifecycle', Output: output};
+  const fixture = [
+    '{malformed JSON',
+    JSON.stringify({...event, Output: 'unrelated output\n'}),
+    JSON.stringify({...event, Output: output.replace(' guid_nonzero=true', '')}),
+    JSON.stringify({...event, Output: output.replace('\n', ' extra\n')}),
+    JSON.stringify({...event, Output: `${output}extra`}),
+    JSON.stringify({...event, Output: `extra${output}`}),
+    JSON.stringify({...event, Action: 'pass'}),
+    JSON.stringify({...event, Test: 'TestOther'}),
+    `${JSON.stringify(event)} trailing text`,
+    JSON.stringify(event),
+  ].join('\n');
+  const temporary = mkdtempSync(join(root, '.lc-windows-workflow-test-'));
+  try {
+    mkdirSync(join(temporary, 'lc-pg16'));
+    for (const [goExit, checkerExit] of [[0, 0], [1, 0], [0, 1], [1, 1]]) {
+      // The actual workflow run text performs capture, projection, and exit
+      // checks. Only go/node are mocked; neither native proof nor PostgreSQL runs.
+      const harness = `
+        $ErrorActionPreference = 'Stop'
+        $env:RUNNER_TEMP = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${Buffer.from(temporary).toString('base64')}'))
+        function go {
+          [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${Buffer.from(fixture).toString('base64')}'))
+          $global:LASTEXITCODE = ${goExit}
+        }
+        function node {
+          Write-Output 'contract:checker'
+          $global:LASTEXITCODE = ${checkerExit}
+        }
+        ${script}
+      `;
+      const result = spawnSync('pwsh', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', harness], {
+        encoding: 'utf8', timeout: 30_000,
+      });
+      if (result.error?.code === 'ENOENT') {
+        t.skip('pwsh is unavailable; mocked PowerShell service proof runtime contract requires PowerShell');
+        return;
+      }
+      assert(result.error === undefined, 'Mocked PowerShell service proof must launch');
+      assert.equal(result.status, goExit || checkerExit ? 1 : 0,
+        `Service proof native=${goExit} checker=${checkerExit}`);
+      // Boolean checks prevent even synthetic raw event text reaching failure
+      // diagnostics. Exact output rejects every malformed event and raw JSON leak.
+      assert(result.stdout.replaceAll('\r\n', '\n') === `contract:checker\n${bootFields}\n`,
+        'Checker always runs and projection emits only the three complete boot fields');
+      assert(result.stderr === '', 'Rejected projection inputs produce no raw event diagnostics');
+    }
+  } finally {
+    rmSync(temporary, {recursive: true, force: true});
+  }
+});
+
 test('Windows PostgreSQL provisioning verifies a complete exact vendor pin and runtime before use', () => {
   const pin = JSON.parse(readFileSync(new URL('./ci-postgres16-windows.json', import.meta.url), 'utf8'));
   assert.deepEqual(Object.keys(pin).sort(), ['major', 'sha256', 'url']);
@@ -1125,6 +1208,40 @@ const mutations = [
   ['Windows proof leaks output instead of capturing its file', data => { const step = data['ci.yml'].jobs['localcell-windows'].steps.find(step => step.name === 'Prove native PostgreSQL sixteen lifecycle'); step.run = step.run.replace(' > $proofJSON 2>&1', ''); }],
   ['Windows proof leaves its file outside the cleanup tree', data => { const step = data['ci.yml'].jobs['localcell-windows'].steps.find(step => step.name === 'Prove native PostgreSQL sixteen lifecycle'); step.run = step.run.replace('lc-pg16\\proof.json', 'proof.json'); }],
   ['Windows proof loses the separate native exit capture', data => { const step = data['ci.yml'].jobs['localcell-windows'].steps.find(step => step.name === 'Prove native PostgreSQL sixteen lifecycle'); step.run = step.run.replace('$goExit = $LASTEXITCODE', '$goExit = 0'); }],
+  ['Windows service proof step removed', data => {
+    const job = data['ci.yml'].jobs['localcell-windows'];
+    job.steps = job.steps.filter(step => step.name !== 'Prove native service restart or record adapter capability');
+  }],
+  ...[
+    ["'^TestNativeServiceLifecycle$'", "'TestNativeServiceLifecycle'", 'broadens the run filter'],
+    [' --require TestNativeServiceLifecycle', '', 'omits required service outcome'],
+    [' --diagnose', '', 'omits diagnostics'],
+    [' --input $proofJSON', '', 'does not read captured JSON'],
+    [' > $proofJSON 2>&1', '', 'prints raw Go output'],
+    ['lc-pg16\\service-proof.json', 'service-proof.json', 'leaves JSON outside cleanup tree'],
+    ['$goExit = $LASTEXITCODE', '$goExit = 0', 'loses the separate native exit capture'],
+    ['$goExit -ne 0 -or ', '', 'masks native exit'],
+    [' -or $parserExit -ne 0', '', 'masks checker exit'],
+    [' guid_nonzero=(?:true|false)', '(?: guid_nonzero=(?:true|false))?', 'allows missing boot GUID presence field'],
+    ['Write-Output $Matches[1]', 'Write-Output $_', 'leaks raw event text from projection'],
+  ].map(([before, after, name]) => [`Windows service proof ${name}`, data => {
+    const step = data['ci.yml'].jobs['localcell-windows'].steps.find(step => step.name === 'Prove native service restart or record adapter capability');
+    step.run = step.run.replace(before, after);
+  }]),
+  ['Windows service proof checks exits before projection', data => {
+    const step = data['ci.yml'].jobs['localcell-windows'].steps.find(step => step.name === 'Prove native service restart or record adapter capability');
+    const exitCheck = 'if ($goExit -ne 0 -or $parserExit -ne 0) { exit 1 }';
+    step.run = step.run.replace(exitCheck, '').replace('Get-Content', `${exitCheck}\nGet-Content`);
+  }],
+  ['Windows service proof loses PostgreSQL environment', data => {
+    delete data['ci.yml'].jobs['localcell-windows'].steps.find(step => step.name === 'Prove native service restart or record adapter capability').env.WITSELF_LOCALCELL_PGBIN;
+  }],
+  ['Windows service proof ignores failure', data => {
+    data['ci.yml'].jobs['localcell-windows'].steps.find(step => step.name === 'Prove native service restart or record adapter capability')['continue-on-error'] = true;
+  }],
+  ['Windows service proof runs after failed prerequisites', data => {
+    data['ci.yml'].jobs['localcell-windows'].steps.find(step => step.name === 'Prove native service restart or record adapter capability').if = 'always()';
+  }],
   ['Windows unit step enables proof diagnostics', data => { const step = data['ci.yml'].jobs['localcell-windows'].steps.find(step => step.name === 'Test Local Cell packages and require complete results'); step.run += ' --diagnose'; }],
   ['Windows proof cleanup removed', data => { data['ci.yml'].jobs['localcell-windows'].steps.pop(); }],
   ['Windows proof cleanup only on success', data => { delete data['ci.yml'].jobs['localcell-windows'].steps.at(-1).if; }],

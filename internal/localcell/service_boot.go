@@ -1,6 +1,7 @@
 package localcell
 
 import (
+	"context"
 	"errors"
 	"os"
 	"strings"
@@ -64,6 +65,18 @@ func (c *Cell) reconcileOldBoot(oldBoot, currentBoot string) error {
 		if strings.HasPrefix(currentBoot, "linux:") && !strings.HasPrefix(record.StartTime, oldBoot+":") {
 			return ErrServiceOwnershipConflict
 		}
+		if strings.HasPrefix(currentBoot, "windows:") {
+			// A creation FILETIME is not a boot identity. Unknown legacy records
+			// and records from the new boot cannot be deleted. Even an old-boot
+			// claim must not erase an independently observed live incarnation.
+			if record.BootID != oldBoot {
+				return ErrServiceOwnershipConflict
+			}
+			identity, alive, err := processIdentity(record.PID)
+			if err != nil || (alive && identity == record.StartTime) {
+				return ErrServiceOwnershipConflict
+			}
+		}
 		records = append(records, c.path("run", component+".json"))
 		if component == "postgres" {
 			pg = record
@@ -92,4 +105,48 @@ func (c *Cell) reconcileOldBoot(oldBoot, currentBoot string) error {
 		}
 	}
 	return syncDirectory(c.path("run"))
+}
+
+// bindServiceProcessBoot extends only explicit local service launches. The
+// platform launcher remains responsible for its pre-execution PID fence. A
+// crash before this second publication leaves a record without boot authority;
+// Windows old-boot reconciliation refuses that record instead of guessing.
+func (c *Cell) bindServiceProcessBoot(component string) error {
+	return c.bindServiceProcessBootWithReader(component, serviceBootID)
+}
+
+func (c *Cell) bindServiceProcessBootWithReader(component string, readBoot func() (string, error)) (result error) {
+	defer func() { result = serviceFailureFallback(result, "boot_binding") }()
+	if os.Getenv("WITSELF_RUNTIME") != "local" {
+		return nil
+	}
+	if _, err := c.ServiceDescriptor(); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	boot, err := readBoot()
+	if err != nil {
+		return err
+	}
+	var record ProcessRecord
+	if err := readJSON(c.path("run", component+".json"), &record); err != nil {
+		return err
+	}
+	if record.Root != c.cfg.Root || record.Component != component || record.LaunchPending || (record.BootID != "" && record.BootID != boot) {
+		return ErrServiceOwnershipConflict
+	}
+	identity, alive, err := processIdentity(record.PID)
+	if err != nil || !alive || identity != record.StartTime {
+		return ErrServiceOwnershipConflict
+	}
+	record.BootID = boot
+	return writeAtomic(c.path("run", component+".json"), record, nil)
+}
+
+func (c *Cell) startServicePostgres(ctx context.Context, m *Manifest) error {
+	if err := c.startPostgres(ctx, m); err != nil {
+		return err
+	}
+	return c.bindServiceProcessBoot("postgres")
 }

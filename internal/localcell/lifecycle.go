@@ -128,7 +128,7 @@ func (c *Cell) Install(ctx context.Context, options InstallOptions) error {
 			return c.pgCommand(ctx, "initdb", "-D", c.path("pg"), "-U", m.Role, "--auth=scram-sha-256", "--pwfile="+c.path("run", "postgres.password"), "--encoding=UTF8", "--locale=C")
 		}},
 		{"configure", func() error { return c.configurePostgres(m) }},
-		{"postgres", func() error { return c.startPostgres(ctx, m) }},
+		{"postgres", func() error { return c.startServicePostgres(ctx, m) }},
 		{"database", func() error {
 			// initdb creates the bootstrap role. createdb must connect to a
 			// template database in THIS new cluster to create the application DB.
@@ -200,7 +200,7 @@ func (c *Cell) Start(ctx context.Context) error {
 		run  func(context.Context) error
 	}{
 		{"ports", func(context.Context) error { return probePorts(m.Ports, before) }},
-		{"postgres", func(ctx context.Context) error { return c.startPostgres(ctx, m) }},
+		{"postgres", func(ctx context.Context) error { return c.startServicePostgres(ctx, m) }},
 		{"server", func(context.Context) error { return c.startChild(m, "server") }},
 		{"server_ready", func(ctx context.Context) error { return c.waitReady(ctx, "server", m.Ports.ServerHealth) }},
 		{"account", func(ctx context.Context) error {

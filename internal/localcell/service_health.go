@@ -17,6 +17,32 @@ import (
 
 var errServiceHealth = errors.New("service_authenticated_health_failed")
 
+type serviceHealthProgress struct{ site string }
+type serviceHealthProgressKey struct{}
+
+// The progress pointer belongs to the synchronous supervisor hook invocation.
+// It retains the last sub-step when cancellation interrupts that invocation.
+func withServiceHealthProgress(ctx context.Context, progress *serviceHealthProgress) context.Context {
+	return context.WithValue(ctx, serviceHealthProgressKey{}, progress)
+}
+
+func serviceHealthSite(site string) string {
+	switch site {
+	case "health_lock", "health_tree", "health_database", "health_credential", "health_probe", "health_ready":
+		return site
+	default:
+		return "unknown"
+	}
+}
+
+func serviceHealthStep(ctx context.Context, site string) string {
+	site = serviceHealthSite(site)
+	if progress, ok := ctx.Value(serviceHealthProgressKey{}).(*serviceHealthProgress); ok {
+		progress.site = site
+	}
+	return site
+}
+
 type serviceHealthCredential struct {
 	InstallationID string `json:"installation_id"`
 	AccountID      string `json:"account_id"`
@@ -27,9 +53,11 @@ type serviceHealthCredential struct {
 // ServiceHealth requires the existing native process fences, exact database
 // schema/account readiness, and an authenticated loopback API identity response.
 // No credential or underlying connection error is returned to the caller.
-func (c *Cell) ServiceHealth(ctx context.Context) error {
+func (c *Cell) ServiceHealth(ctx context.Context) (result error) {
 	ctx, cancel := c.deadline(ctx)
 	defer cancel()
+	site := serviceHealthStep(ctx, "health_lock")
+	defer func() { result = serviceFailureAt(result, site) }()
 	lock, err := c.own(false)
 	if errors.Is(err, ErrLocked) {
 		return err
@@ -38,6 +66,7 @@ func (c *Cell) ServiceHealth(ctx context.Context) error {
 		return errServiceHealth
 	}
 	defer func() { _ = lock.Close() }()
+	site = serviceHealthStep(ctx, "health_tree")
 	d, err := c.ServiceDescriptor()
 	if err != nil || d.DesiredState != "running" || d.Faulted {
 		return errServiceHealth
@@ -56,6 +85,7 @@ func (c *Cell) ServiceHealth(ctx context.Context) error {
 	if err != nil {
 		return errServiceHealth
 	}
+	site = serviceHealthStep(ctx, "health_database")
 	dsn := url.URL{Scheme: "postgres", Host: addr(m.Ports.Postgres), Path: "/" + m.Database, User: url.UserPassword(m.Role, password), RawQuery: "sslmode=disable"}
 	st, err := store.Open(ctx, dsn.String())
 	if err != nil {
@@ -65,18 +95,22 @@ func (c *Cell) ServiceHealth(ctx context.Context) error {
 	if err := runtimeconfig.CheckReady(ctx, st, store.SchemaVersion(), m.AccountID); err != nil {
 		return errServiceHealth
 	}
+	site = serviceHealthStep(ctx, "health_credential")
 	credential, err := c.serviceAPICredential(ctx, st, m)
 	if err != nil {
 		return errServiceHealth
 	}
+	site = serviceHealthStep(ctx, "health_probe")
 	client := localHTTPClient()
 	defer client.CloseIdleConnections()
 	if err := serviceAuthenticatedProbe(ctx, client, "http://"+addr(m.Ports.ServerAPI), credential); err != nil {
 		return err
 	}
+	site = serviceHealthStep(ctx, "health_ready")
 	if !ready(ctx, client, m.Ports.ServerHealth) || !ready(ctx, client, m.Ports.WorkerHealth) {
 		return errServiceHealth
 	}
+	site = serviceHealthStep(ctx, "health_tree")
 	return c.serviceLiveTree()
 }
 

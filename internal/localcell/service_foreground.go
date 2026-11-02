@@ -22,10 +22,10 @@ func (c *Cell) acquireServiceLease(d ServiceDescriptor) (*operationLock, error) 
 
 func (c *Cell) acquireServiceLeaseWithBoot(d ServiceDescriptor, readBoot func() (string, error)) (*operationLock, error) {
 	if err := privateDir(c.path("service"), false); err != nil {
-		return nil, err
+		return nil, serviceFailureAt(err, "lease_directory")
 	}
 	if err := servicePrivateRecord(c.path(".service-host.lock")); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return nil, err
+		return nil, serviceFailureAt(err, "lease_record")
 	}
 	f, err := openLockFile(c.path(".service-host.lock"), true)
 	if err != nil {
@@ -52,7 +52,7 @@ func (c *Cell) acquireServiceLeaseWithBoot(d ServiceDescriptor, readBoot func() 
 	record := serviceLeaseRecord{Version: 1, BootID: boot, StartIdentity: start, PID: os.Getpid(), Owner: d.UID, InstallationID: d.InstallationID}
 	if err := writeAtomic(c.path("service", "lease.json"), record, nil); err != nil {
 		_ = lock.Close()
-		return nil, err
+		return nil, serviceFailureAt(err, "lease_write")
 	}
 	return lock, nil
 }

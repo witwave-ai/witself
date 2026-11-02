@@ -256,6 +256,106 @@ test('why diagnostics from the actual packages recognize production errors and n
     'local cell password file is unavailable or not private', packages[0]));
 });
 
+test('child control and native proof retain each closed transport cause as why', async () => {
+  for (const step of ['dial', 'deadline', 'eof', 'response']) {
+    const message = `localcell: service_control_unavailable: transport:${step}`;
+    for (const testName of ['TestServiceControlChildProcessClient', 'TestNativeServiceLifecycle']) {
+      const native = testName === 'TestNativeServiceLifecycle';
+      const outputs = [
+        `    service_native_diagnostics_test.go:12: ${message}\n`,
+        '    service_native_diagnostics_test.go:13: service_control accept=rejected step=peer:sid\n',
+      ];
+      const failed = [event('start', packages[0]), event('run', packages[0], testName),
+        ...outputs.map(Output => event('output', packages[0], testName, {Output})),
+        event('fail', packages[0], testName), event('fail', packages[0])];
+      const input = native ? failed : [...failed, ...packages.slice(1).flatMap(name => packageEvents(name))];
+      const result = await checkGoTestJSON([stream(input)], native ? [testName] : [], {diagnose: native});
+      assert.equal(result.valid, false);
+      assert.equal(result.reason, failureDiagnostic.trimEnd());
+      assert(result.lines.includes(`why ${packages[0]} ${testName} :: ${message}`));
+      assert.equal(result.lines.some(line => line.startsWith('diagnose ') && line.includes('step=peer:sid')), native);
+    }
+  }
+});
+
+test('transport why rejects appended private text and unknown transport steps', () => {
+  for (const message of ['localcell: service_control_unavailable: transport:unknown',
+    'localcell: service_control_unavailable: transport:eof private-marker']) {
+    assertFixture(script, outputFailure([`    service_native_diagnostics_test.go:12: ${message}\n`], '(unclassified)', packages[0]));
+  }
+});
+
+test('unchanged checker retains assertion fallback for dynamic pipe refusal and native diagnose detail', async () => {
+  for (const native of [false, true]) {
+    const testName = native ? 'TestNativeServiceLifecycle' : 'TestServiceControlChildProcessClient';
+    const assertion = native ? 'authenticated native service stop failed' : 'child control action failed: stop';
+    const reason = native ? assertion : 'child control action failed';
+    const failed = [event('start', packages[0]), event('run', packages[0], testName),
+      ...['localcell: service_control_refused: pipe:io', 'service_control accept=rejected step=peer:sid', assertion]
+        .map(message => event('output', packages[0], testName, {Output: `    service_native_diagnostics_test.go:12: ${message}\n`})),
+      event('fail', packages[0], testName), event('fail', packages[0])];
+    const input = native ? failed : [...failed, ...packages.slice(1).flatMap(name => packageEvents(name))];
+    const result = await checkGoTestJSON([stream(input)], native ? [testName] : [], {diagnose: native});
+    assert(result.lines.includes(`why ${packages[0]} ${testName} :: ${reason}`));
+    assert.equal(result.lines.some(line => line.startsWith('diagnose ') && line.includes('service_control_refused: pipe:io')), native);
+  }
+});
+
+function foregroundHostFailure(output, message) {
+  const testName = 'TestWindowsServiceForegroundSubprocessCommands';
+  return {
+    input: stream(packages.flatMap(name => name === packages[2]
+      ? [event('start', name), event('run', name, testName),
+        ...output.map(Output => event('output', name, testName, {Output})),
+        event('fail', name, testName), event('fail', name)] : packageEvents(name))),
+    output: summary({[packages[2]]: {pass: 0, fail: 1, failedNames: [testName], why: {[testName]: message}}}),
+    stderr: failureDiagnostic,
+  };
+}
+
+test('foreground harness first lifecycle error wins before a classified exit fatal without diagnose', () => {
+  const message = 'localcell: service_lease_unavailable';
+  assertFixture(script, foregroundHostFailure([
+    `    service_subprocess_windows_test.go:12: ${message}\n`,
+    '    service_subprocess_windows_test.go:13: exit_code=1\n',
+    '    service_subprocess_windows_test.go:14: foreground host exited with error before authenticated status after restart\n',
+  ], message));
+});
+
+test('foreground harness first classified exit fatal wins before a lifecycle error without diagnose', () => {
+  const message = 'foreground host exited with error before authenticated status after restart';
+  assertFixture(script, foregroundHostFailure([
+    `    service_subprocess_windows_test.go:12: ${message}\n`,
+    '    service_subprocess_windows_test.go:13: localcell: service_lease_unavailable\n',
+  ], message));
+});
+
+test('foreground harness classifies every iteration and exit cause without diagnose', () => {
+  // Independent contract: collapsing the direct Fatal call sites to the old
+  // generic assertion removes these source allowlist entries and fails here.
+  for (const iteration of ['on first start', 'after restart']) {
+    for (const cause of [
+      'foreground command budget expired before authenticated status',
+      'foreground synthetic budget expired before authenticated status',
+      'foreground host exited with error before authenticated status',
+      'foreground host exited cleanly before authenticated status',
+      'foreground readiness exceeded synthetic budget',
+      'foreground host did not expose authenticated status within allowance',
+      'foreground command budget expired during shutdown',
+      'foreground synthetic budget expired during shutdown',
+      'foreground host exited with error during shutdown',
+      'foreground shutdown exceeded synthetic budget',
+      'foreground console shutdown exceeded allowance',
+    ]) {
+      const message = `${cause} ${iteration}`;
+      assertFixture(script, foregroundHostFailure([
+        '    service_subprocess_windows_test.go:12: exit_code=1\n',
+        `    service_subprocess_windows_test.go:13: ${message}\n`,
+      ], message));
+    }
+  }
+});
+
 test('formatted concurrent Start failure is classified by its value-free source prefix', () => {
   assertFixture(script, outputFailure([
     '    lifecycle_hermetic_test.go:123: independent concurrent Start did not finish: fixture error\n',

@@ -8,6 +8,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
 	"os"
 	"os/exec"
@@ -25,8 +28,14 @@ import (
 	"github.com/witwave-ai/witself/internal/localcell"
 )
 
+var nativeServiceDiagnosticDSN = regexp.MustCompile(`(?i)\bpostgres(?:ql)?://[^\r\n]*`)
+var nativeServiceDiagnosticPassword = regexp.MustCompile(`(?i)\b(?:password|pgpassword)[ \t]*=[^\r\n]*`)
+var nativeServiceDiagnosticPID = regexp.MustCompile(`(?i)\b(?:[a-z_]*_)?pid(?:\s*[=:]\s*|\s+)[0-9]+`)
 var nativeServiceDiagnosticHex = regexp.MustCompile(`(?i)[0-9a-f]{64}`)
 var nativeServiceDiagnosticToken = regexp.MustCompile(`[A-Za-z0-9_+/-]{43,}={0,2}`)
+var nativeServiceDiagnosticSID = regexp.MustCompile(`S-[0-9]+(?:-[0-9]+)+`)
+var nativeServiceDiagnosticPipe = regexp.MustCompile(`(?i)\\\\\.\\pipe\\[^\s"'<>]+`)
+var nativeServiceDiagnosticWindowsPath = regexp.MustCompile(`(?i)(?:[a-z]:[\\/]|\\\\)[^\r\n"'<>]*`)
 var nativeServiceDiagnosticEnvironment = regexp.MustCompile(`(?m)\b(?:Environment(?:File)?|[A-Z_][A-Z0-9_]*)[ \t]*=[^\r\n]*`)
 var nativeServiceLaunchdAssignment = regexp.MustCompile(`^(.+?)([ \t]*(?:=>|=)[ \t]*)(.*)$`)
 var nativeServiceLaunchdKey = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9 _()-]*$`)
@@ -54,7 +63,7 @@ func (b *nativeServiceDiagnosticBuffer) snapshot() []byte {
 // harness. Cell subprocess credentials/configuration remain lifecycle-owned.
 func nativeServiceChildEnvironment(lookup func(string) (string, bool)) []string {
 	result := []string{"WITSELF_RUNTIME=local"}
-	for _, key := range []string{"HOME", "PATH", "XDG_RUNTIME_DIR", "XDG_CONFIG_HOME", "DBUS_SESSION_BUS_ADDRESS", "LANG", "LC_ALL", "TMPDIR"} {
+	for _, key := range []string{"HOME", "PATH", "XDG_RUNTIME_DIR", "XDG_CONFIG_HOME", "DBUS_SESSION_BUS_ADDRESS", "LANG", "LC_ALL", "TMPDIR", "WITSELF_HOME", "DSH_HOME", "GOCOVERDIR", "SystemRoot", "TEMP", "TMP"} {
 		if value, present := lookup(key); present {
 			result = append(result, key+"="+value)
 		}
@@ -83,6 +92,16 @@ func sanitizeNativeServiceDiagnostic(text, root, home string) string {
 	// The property query never requests Environment. A journal line can still
 	// contain Environment= or a shell-style uppercase variable assignment;
 	// discard the assignment and its remaining line, including quoted spaces.
+	// url.Parse permits apostrophes in passwords and raw spaces/quotes in
+	// paths. Their end cannot safely be inferred from an error line. Discard
+	// the entire line tail for a DSN or password assignment, including quoted,
+	// escaped and percent-encoded forms, rather than retaining a private tail.
+	text = nativeServiceDiagnosticDSN.ReplaceAllString(text, "<dsn>")
+	text = nativeServiceDiagnosticPassword.ReplaceAllString(text, "<password>")
+	text = nativeServiceDiagnosticPID.ReplaceAllString(text, "<pid>")
+	text = nativeServiceDiagnosticPipe.ReplaceAllString(text, "<pipe>")
+	text = nativeServiceDiagnosticSID.ReplaceAllString(text, "<sid>")
+	text = nativeServiceDiagnosticWindowsPath.ReplaceAllString(text, "<path>")
 	text = nativeServiceDiagnosticEnvironment.ReplaceAllString(text, "<environment>")
 	text = nativeServiceDiagnosticHex.ReplaceAllString(text, "<hex>")
 	// Cover both standard and URL-safe base64, after replacing root/home so
@@ -104,14 +123,20 @@ type nativeServiceDiagnosticCommand func(context.Context, string, ...string) ([]
 
 // Share the actual process/capture path with the hermetic regression, even when
 // native lifecycle prerequisites are unavailable on the current host.
-func nativeServiceInvoke(ctx context.Context, host, root, home, label string, args []string, logf func(string, ...any), run nativeServiceDiagnosticCommand) error {
+func nativeServiceInvoke(ctx context.Context, host, root, home, label string, args []string, logf func(string, ...any), run nativeServiceDiagnosticCommand, hostCaptures ...*nativeServiceDiagnosticBuffer) error {
 	cmd := exec.CommandContext(ctx, host, args...)
+	cmd.WaitDelay = time.Second
 	cmd.Env = nativeServiceChildEnvironment(os.LookupEnv)
 	var stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = io.Discard, &stderr
 	err := cmd.Run()
 	if err != nil {
-		nativeServiceFailureDiagnostics(logf, root, home, label, err, stderr.Bytes(), run)
+		var hostCapture *nativeServiceDiagnosticBuffer
+		if len(hostCaptures) != 0 {
+			hostCapture = hostCaptures[0]
+		}
+		nativeServiceFailureDiagnostics(logf, root, home, label, err, stderr.Bytes(), hostCapture, run)
+		return &nativeServiceInvocationError{cause: err, control: nativeServiceInvocationControl(stderr.Bytes())}
 	}
 	return err
 }
@@ -136,6 +161,7 @@ func nativeServiceDiagnosticOutput(ctx context.Context, name string, args ...str
 		info, err := os.Stat(binary)
 		if err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0 {
 			command := exec.CommandContext(ctx, binary, args...)
+			command.WaitDelay = time.Second
 			command.Env = nativeServiceLaunchdCommandEnvironment(nativeServiceDiagnosticHome())
 			return command.Output()
 		}
@@ -150,6 +176,7 @@ func nativeServiceDiagnosticOutput(ctx context.Context, name string, args ...str
 				continue
 			}
 			command := exec.CommandContext(ctx, binary, args...)
+			command.WaitDelay = time.Second
 			command.Env = nativeServiceDiagnosticCommandEnvironment(nativeServiceDiagnosticHome(), os.LookupEnv)
 			return command.CombinedOutput()
 		}
@@ -387,6 +414,25 @@ func nativeServiceDirectoryDiagnostics(log func(string, ...any), home string) {
 
 const nativeServiceCapabilityArgument = "native-service-capability-probe"
 
+func nativeServiceCapabilityArguments() []string {
+	return []string{"-test.run=^TestNativeServiceCapabilityDiagnostic$", "--", nativeServiceCapabilityArgument}
+}
+
+// Record only the probe verb and flag names from the actual argv constructor.
+// Neither the executable nor flag values, paths or descriptor are loggable.
+func nativeServiceCapabilityCommandShape() string {
+	var shape []string
+	for _, argument := range nativeServiceCapabilityArguments() {
+		if strings.HasPrefix(argument, "-") {
+			flag, _, _ := strings.Cut(argument, "=")
+			shape = append(shape, flag)
+		} else if argument == nativeServiceCapabilityArgument {
+			shape = append(shape, argument)
+		}
+	}
+	return strings.Join(shape, " ")
+}
+
 // Recheck Plan in a fresh child with exactly the harness's allowed environment.
 // The descriptor travels over stdin and this probe performs no lifecycle writes.
 func nativeServiceCapabilityDiagnostic(ctx context.Context, descriptor localcell.ServiceDescriptor) ([]byte, error) {
@@ -398,17 +444,170 @@ func nativeServiceCapabilityDiagnostic(ctx context.Context, descriptor localcell
 	if err != nil {
 		return nil, errors.New("native_service_capability_descriptor_invalid")
 	}
-	command := exec.CommandContext(ctx, host, "-test.run=^TestNativeServiceCapabilityDiagnostic$", "--", nativeServiceCapabilityArgument)
+	command := exec.CommandContext(ctx, host, nativeServiceCapabilityArguments()...)
+	command.WaitDelay = time.Second
 	command.Env = nativeServiceChildEnvironment(os.LookupEnv)
 	command.Stdin = bytes.NewReader(data)
 	return command.CombinedOutput()
 }
 
-func nativeServiceFailureDiagnostics(logf func(string, ...any), root, home, label string, processErr error, stderr []byte, run nativeServiceDiagnosticCommand) {
-	nativeServiceFailureDiagnosticsForGOOS(runtime.GOOS, os.Getuid(), logf, root, home, label, processErr, stderr, run)
+// The native proof and portable failed-host fixture share this exact invocation
+// path. Keep the capture on the receiver so each restarted foreground host
+// replaces the capture consumed by the same failure callback.
+type nativeServiceFailureDiagnostic struct {
+	proof                   *nativeServiceProofBudget
+	goos, root, home, label string
+	uid                     int
+	logf                    func(string, ...any)
+	run                     nativeServiceDiagnosticCommand
+	foregroundStderr        *nativeServiceDiagnosticBuffer
+	foregroundExit          *nativeServiceDiagnosticExit
+	step                    string
+	controlErr              error
 }
 
-func nativeServiceFailureDiagnosticsForGOOS(goos string, uid int, logf func(string, ...any), root, home, label string, processErr error, stderr []byte, run nativeServiceDiagnosticCommand) {
+func (d *nativeServiceFailureDiagnostic) logFailure(processErr error, stderr []byte) {
+	d.logProofBudget()
+	d.logStep()
+	var sites strings.Builder
+	localcell.WriteServiceHostFailure(&sites, d.controlErr, "control_transport")
+	for _, line := range strings.Split(strings.TrimSpace(sites.String()), "\n") {
+		if line != "" {
+			d.logf("%s", line)
+		}
+	}
+	if d.foregroundExit != nil {
+		payload := sanitizeNativeServiceDiagnostic(fmt.Sprintf("native service host exit error: %v", d.foregroundExit.exitError()), d.root, d.home)
+		for _, line := range strings.Split(payload, "\n") {
+			d.logf("%s", line)
+		}
+	}
+	nativeServiceFailureDiagnosticsForGOOS(d.goos, d.uid, d.logf, d.root, d.home, d.label, processErr, stderr, d.foregroundStderr, d.run)
+}
+
+// Success receipts admit complete internal labels only; sanitizing a partially
+// private line into something that resembles a receipt would erase evidence.
+var nativeServiceShutdownLine = regexp.MustCompile(`^service_shutdown phase=(startup|tick|control|idle) operation=((reconcile|repair|stop|start|none)|health site=(health_lock|health_tree|health_database|health_credential|health_probe|health_ready|unknown)) journal_pending=(true|false) journal_read_ok=(true|false)$`)
+
+func nativeServiceShutdownReceipt(before, after []byte) (string, error) {
+	fresh := after
+	if len(before) > 0 {
+		// The bounded manager tail can slide as lines append. Only accept new
+		// bytes after an unchanged complete suffix of the pre-stop capture.
+		found := false
+		for offset := 0; offset < len(before); {
+			if bytes.HasPrefix(after, before[offset:]) {
+				fresh = after[len(before)-offset:]
+				found = true
+				break
+			}
+			newline := bytes.IndexByte(before[offset:], '\n')
+			if newline < 0 {
+				break
+			}
+			offset += newline + 1
+		}
+		if !found {
+			return "", errors.New("native_service_shutdown_capture_changed")
+		}
+		if before[len(before)-1] != '\n' {
+			// A new suffix is not a new line when the prior capture ended in
+			// private partial text. Drop that completed partial line entirely.
+			newline := bytes.IndexByte(fresh, '\n')
+			if newline < 0 {
+				fresh = nil
+			} else {
+				fresh = fresh[newline+1:]
+			}
+		}
+	}
+	lines := strings.Split(string(fresh), "\n")
+	for index := len(lines) - 2; index >= 0; index-- {
+		line := lines[index]
+		if nativeServiceShutdownLine.MatchString(line) {
+			return line, nil
+		}
+	}
+	return "", errors.New("native_service_shutdown_receipt_unavailable")
+}
+
+// Count complete fresh receipts without changing the inherited last-receipt
+// projection. Capture suffix and partial-line handling deliberately match it.
+func nativeServiceShutdownReceiptCount(before, after []byte) int {
+	fresh := after
+	if len(before) > 0 {
+		found := false
+		for offset := 0; offset < len(before); {
+			if bytes.HasPrefix(after, before[offset:]) {
+				fresh = after[len(before)-offset:]
+				found = true
+				break
+			}
+			newline := bytes.IndexByte(before[offset:], '\n')
+			if newline < 0 {
+				break
+			}
+			offset += newline + 1
+		}
+		if !found {
+			return 0
+		}
+		if before[len(before)-1] != '\n' {
+			newline := bytes.IndexByte(fresh, '\n')
+			if newline < 0 {
+				fresh = nil
+			} else {
+				fresh = fresh[newline+1:]
+			}
+		}
+	}
+	count := 0
+	lines := strings.Split(string(fresh), "\n")
+	for index := 0; index < len(lines)-1; index++ {
+		if nativeServiceShutdownLine.MatchString(lines[index]) {
+			count++
+		}
+	}
+	return count
+}
+
+func nativeServiceShutdownStderr(goos, root, label string, foreground *nativeServiceDiagnosticBuffer, run nativeServiceDiagnosticCommand) ([]byte, error) {
+	if foreground != nil {
+		return foreground.snapshot(), nil
+	}
+	if goos == "darwin" {
+		return nativeServiceLaunchdStderr(root)
+	}
+	if goos == "linux" {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		return run(ctx, "journalctl", "--user", "-u", label, "--no-pager", "-n", "40", "--output=cat")
+	}
+	return nil, errors.New("native_service_shutdown_capture_unavailable")
+}
+
+func nativeServiceStopWithShutdownReceipt(goos, root, label string, foreground *nativeServiceDiagnosticBuffer, logf func(string, ...any), run nativeServiceDiagnosticCommand, stopHost func() error) error {
+	before, beforeErr := nativeServiceShutdownStderr(goos, root, label, foreground, run)
+	if err := stopHost(); err != nil {
+		return err
+	}
+	after, afterErr := nativeServiceShutdownStderr(goos, root, label, foreground, run)
+	if beforeErr != nil || afterErr != nil {
+		return errors.New("native_service_shutdown_capture_unavailable")
+	}
+	line, err := nativeServiceShutdownReceipt(before, after)
+	if err != nil {
+		return err
+	}
+	logf("%s", line)
+	return nil
+}
+
+func nativeServiceFailureDiagnostics(logf func(string, ...any), root, home, label string, processErr error, stderr []byte, foregroundStderr *nativeServiceDiagnosticBuffer, run nativeServiceDiagnosticCommand) {
+	nativeServiceFailureDiagnosticsForGOOS(runtime.GOOS, os.Getuid(), logf, root, home, label, processErr, stderr, foregroundStderr, run)
+}
+
+func nativeServiceFailureDiagnosticsForGOOS(goos string, uid int, logf func(string, ...any), root, home, label string, processErr error, stderr []byte, foregroundStderr *nativeServiceDiagnosticBuffer, run nativeServiceDiagnosticCommand) {
 	log := func(format string, values ...any) {
 		// Sanitize the complete payload first, then give every line its own
 		// testing.T source prefix so the CI JSON checker retains diagnostic bodies.
@@ -419,6 +618,19 @@ func nativeServiceFailureDiagnosticsForGOOS(goos string, uid int, logf func(stri
 	}
 	log("native service process error: %v", processErr)
 	log("native service stderr (last 30 lines):\n%s", nativeServiceStderrTail(stderr))
+	if foregroundStderr != nil || goos == "darwin" || goos == "windows" {
+		var hostStderr []byte
+		var err error
+		if foregroundStderr != nil {
+			// Foreground hosts write to the synchronized process buffer, not
+			// the launchd file. An empty capture is still available evidence.
+			hostStderr = foregroundStderr.snapshot()
+		} else {
+			hostStderr, err = nativeServiceLaunchdStderr(root)
+		}
+		log("native service host stderr error: %v", err)
+		log("native service host stderr (last 30 lines):\n%s", nativeServiceStderrTail([]byte(sanitizeNativeServiceDiagnostic(string(hostStderr), root, home))))
+	}
 	commands := []struct {
 		name string
 		args []string
@@ -430,11 +642,9 @@ func nativeServiceFailureDiagnosticsForGOOS(goos string, uid int, logf func(stri
 		{"journalctl", []string{"--user", "-u", label, "--no-pager", "-n", "40"}},
 		{"child-capability", nil},
 	}
-	if goos == "darwin" {
+	switch goos {
+	case "darwin":
 		nativeServiceLaunchdDirectoryDiagnostics(log, home)
-		hostStderr, err := nativeServiceLaunchdStderr(root)
-		log("native service host stderr error: %v", err)
-		log("native service host stderr (last 30 lines):\n%s", nativeServiceStderrTail([]byte(sanitizeNativeServiceDiagnostic(string(hostStderr), root, home))))
 		domain := "gui/" + strconv.Itoa(uid)
 		commands = []struct {
 			name string
@@ -444,7 +654,14 @@ func nativeServiceFailureDiagnosticsForGOOS(goos string, uid int, logf func(stri
 			{"launchctl", []string{"print", domain}},
 			{"child-capability", nil},
 		}
-	} else {
+	case "windows":
+		nativeServiceWindowsEndpointDiagnostics(log, root)
+		nativeServiceWindowsDirectoryDiagnostics(log, root)
+		commands = []struct {
+			name string
+			args []string
+		}{{"child-capability", nil}}
+	default:
 		nativeServiceDirectoryDiagnostics(log, home)
 	}
 	for _, command := range commands {
@@ -463,7 +680,11 @@ func nativeServiceFailureDiagnosticsForGOOS(goos string, uid int, logf func(stri
 				log("native service launchctl stderr:\n%s", exitErr.Stderr)
 			}
 		}
-		log("native service %s diagnostic command: %s", command.name, strings.Join(command.args, " "))
+		shape := strings.Join(command.args, " ")
+		if command.name == "child-capability" {
+			shape = nativeServiceCapabilityCommandShape()
+		}
+		log("native service %s diagnostic command: %s", command.name, shape)
 		if command.name == "launchctl" {
 			log("native service %s diagnostic error: %v", command.name, err)
 			// The formatter removed all values. Keep structural uppercase keys
@@ -499,9 +720,11 @@ func TestNativeServiceInvocationFailure(t *testing.T) {
 		commands = append(commands, append([]string{name}, args...))
 		return nil, errors.New("diagnostic unavailable")
 	}
+	hostCapture := &nativeServiceDiagnosticBuffer{}
+	_, _ = hostCapture.Write([]byte("service_control accept=rejected step=peer:sid\n"))
 	err = nativeServiceInvoke(t.Context(), host, root, home, label,
 		[]string{"-test.run=^TestNativeServiceInvocationFailure$", "--", childArgument},
-		func(format string, args ...any) { fmt.Fprintf(&logged, format+"\n", args...) }, run)
+		func(format string, args ...any) { fmt.Fprintf(&logged, format+"\n", args...) }, run, hostCapture)
 	var exitErr *exec.ExitError
 	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 23 {
 		t.Fatal("invocation did not return the failing child's process error")
@@ -512,6 +735,9 @@ func TestNativeServiceInvocationFailure(t *testing.T) {
 	if !strings.Contains(logged.String(), "native service stderr (last 30 lines):\n"+reason+"\n") {
 		t.Error("invocation did not forward captured stderr to the diagnostic callback")
 	}
+	if !strings.Contains(logged.String(), "native service host stderr (last 30 lines):\nservice_control accept=rejected step=peer:sid\n") {
+		t.Error("invocation did not forward the active foreground host capture")
+	}
 	wantCommands := [][]string{
 		{"systemctl", "--user", "show", label, "--property=Id,LoadState,FragmentPath,User,DropInPaths,ActiveState,SubState,Result,ExecMainStatus,UnitFileState", "--no-pager"},
 		{"systemctl", "--user", "show", "--property=Version,UnitPath,NFailedUnits", "--no-pager"},
@@ -520,12 +746,292 @@ func TestNativeServiceInvocationFailure(t *testing.T) {
 		{"journalctl", "--user", "-u", label, "--no-pager", "-n", "40"},
 		{"child-capability"},
 	}
-	if runtime.GOOS == "darwin" {
+	switch runtime.GOOS {
+	case "darwin":
 		domain := "gui/" + strconv.Itoa(os.Getuid())
 		wantCommands = [][]string{{"launchctl", "print", domain + "/" + label}, {"launchctl", "print", domain}, {"child-capability"}}
+	case "windows":
+		wantCommands = [][]string{{"child-capability"}}
 	}
 	if !reflect.DeepEqual(commands, wantCommands) {
 		t.Error("invocation did not attempt every best-effort diagnostic command")
+	}
+}
+
+// Keep the native-only proof bound to the same behavioral path exercised below.
+// This contract supplements that test; it does not substitute for capture checks.
+func TestNativeServiceForegroundDiagnosticBinding(t *testing.T) {
+	source, err := os.ReadFile("service_native_test.go")
+	if err != nil || !nativeServiceForegroundDiagnosticBinding(source) {
+		t.Fatal("native proof bypassed the shared failed-host capture invocation")
+	}
+	mutant := strings.Replace(string(source), "t.Logf, diagnosticRun, diagnostics.foregroundStderr)", "t.Logf, diagnosticRun)", 1)
+	if mutant == string(source) || nativeServiceForegroundDiagnosticBinding([]byte(mutant)) {
+		t.Fatal("native diagnostic binding survived removal of the invocation host capture")
+	}
+}
+
+func nativeServiceForegroundDiagnosticBinding(source []byte) bool {
+	file, err := parser.ParseFile(token.NewFileSet(), "service_native_test.go", source, 0)
+	if err != nil {
+		return false
+	}
+	var proof *ast.FuncDecl
+	for _, declaration := range file.Decls {
+		if function, ok := declaration.(*ast.FuncDecl); ok && function.Name.Name == "TestNativeServiceLifecycle" {
+			proof = function
+		}
+	}
+	if proof == nil {
+		return false
+	}
+	ident := func(expression ast.Expr, name string) bool {
+		value, ok := expression.(*ast.Ident)
+		return ok && value.Name == name
+	}
+	selector := func(expression ast.Expr, receiver, name string) bool {
+		value, ok := expression.(*ast.SelectorExpr)
+		return ok && ident(value.X, receiver) && value.Sel.Name == name
+	}
+	bindings, starts, bypasses, invocationCaptures := 0, 0, 0, 0
+	ast.Inspect(proof.Body, func(node ast.Node) bool {
+		if call, ok := node.(*ast.CallExpr); ok {
+			if selector(call.Fun, "diagnostics", "startForeground") {
+				starts++
+			}
+			if name, ok := call.Fun.(*ast.Ident); ok && name.Name == "nativeServiceInvoke" && len(call.Args) > 0 && selector(call.Args[len(call.Args)-1], "diagnostics", "foregroundStderr") {
+				invocationCaptures++
+			}
+			if name, ok := call.Fun.(*ast.Ident); ok && strings.HasPrefix(name.Name, "nativeServiceFailureDiagnostics") {
+				bypasses++
+			}
+		}
+		assignment, ok := node.(*ast.AssignStmt)
+		if !ok || len(assignment.Lhs) != len(assignment.Rhs) {
+			return true
+		}
+		for index, left := range assignment.Lhs {
+			right := assignment.Rhs[index]
+			if ident(left, "logFailure") && selector(right, "diagnostics", "logFailure") {
+				bindings++
+			}
+		}
+		return true
+	})
+	return bindings == 1 && starts == 1 && bypasses == 0 && invocationCaptures == 1
+}
+
+func TestNativeServiceShutdownReceipt(t *testing.T) {
+	const first = "service_shutdown phase=idle operation=none journal_pending=false journal_read_ok=true"
+	const last = "service_shutdown phase=tick operation=stop journal_pending=true journal_read_ok=false"
+	const health = "service_shutdown phase=control operation=health site=health_database journal_pending=false journal_read_ok=true"
+	for _, test := range []struct {
+		name, before, after, want string
+	}{
+		{"complete", "", first + "\n", first},
+		{"health_substep", "", health + "\n", health},
+		{"health_unknown", "", strings.Replace(health, "site=health_database", "site=unknown", 1) + "\n", strings.Replace(health, "site=health_database", "site=unknown", 1)},
+		{"health_missing_substep", "", strings.Replace(health, " site=health_database", "", 1) + "\n", ""},
+		{"health_nonhealth_substep", "", strings.Replace(health, "site=health_database", "site=supervisor_health", 1) + "\n", ""},
+		{"health_private_substep", "", strings.Replace(health, "site=health_database", "site=private", 1) + "\n", ""},
+		{"nonhealth_substep", "", strings.Replace(health, "operation=health", "operation=stop", 1) + "\n", ""},
+		{"last_complete", "", first + "\n" + last + "\n", last},
+		{"private_other_lines", "", "private text\n" + first + "\nprivate tail\n", first},
+		{"new_receipt_only", first + "\n", first + "\n" + last + "\n", last},
+		{"bounded_tail_slides", "old prefix\n" + first + "\n", first + "\n" + last + "\n", last},
+		{"stale_receipt", first + "\n", first + "\nprivate tail\n", ""},
+		{"replaced_capture", first + "\n", last + "\n", ""},
+		{"partial_private_prefix", "private prefix ", "private prefix " + first + "\n", ""},
+		{"partial_then_complete", "private prefix ", "private prefix " + first + "\n" + last + "\n", last},
+		{"private_suffix", "", first + " private text\n", ""},
+		{"private_prefix", "", "private text " + first + "\n", ""},
+		{"incomplete_fields", "", "service_shutdown phase=idle operation=none journal_pending=false\n", ""},
+		{"unterminated", "", first, ""},
+		{"private_phase", "", strings.Replace(first, "phase=idle", "phase=private", 1) + "\n", ""},
+		{"private_operation", "", strings.Replace(first, "operation=none", "operation=private", 1) + "\n", ""},
+		{"non_boolean", "", strings.Replace(first, "journal_pending=false", "journal_pending=0", 1) + "\n", ""},
+		{"extra_field", "", first + " extra=false\n", ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			line, err := nativeServiceShutdownReceipt([]byte(test.before), []byte(test.after))
+			if line != test.want || (err == nil) != (test.want != "") {
+				t.Fatal("shutdown projection accepted private, incomplete, or stale evidence or lost a complete receipt")
+			}
+		})
+	}
+}
+
+func TestNativeServiceShutdownReceiptCount(t *testing.T) {
+	const receipt = "service_shutdown phase=idle operation=none journal_pending=false journal_read_ok=true"
+	const partial = "service_shutdown phase=idle "
+	for _, test := range []struct {
+		name, before, after string
+		want                int
+	}{
+		{"zero", "", "", 0},
+		{"one", "", receipt + "\n", 1},
+		{"two_identical", "", receipt + "\n" + receipt + "\n", 2},
+		{"valid_and_malformed", "", receipt + "\n" + receipt + " extra=false\n", 1},
+		{"split_before_boundary", partial, receipt + "\n", 0},
+		{"partial_then_complete", partial, receipt + "\n" + receipt + "\n", 1},
+		{"fresh_only", receipt + "\n", receipt + "\n" + receipt + "\n", 1},
+		{"bounded_tail_slides", "old prefix\n" + receipt + "\n", receipt + "\n" + receipt + "\n", 1},
+		{"stale", receipt + "\n", receipt + "\n", 0},
+		{"replaced_capture", "old prefix\n", receipt + "\n", 0},
+		{"unterminated", "", receipt, 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if nativeServiceShutdownReceiptCount([]byte(test.before), []byte(test.after)) != test.want {
+				t.Fatal("shutdown receipt count accepted incomplete or stale evidence or lost a complete receipt")
+			}
+		})
+	}
+}
+
+func TestNativeServiceSuccessfulStopDiagnostics(t *testing.T) {
+	const receipt = "service_shutdown phase=idle operation=none journal_pending=false journal_read_ok=true"
+	for _, goos := range []string{"windows", "darwin", "linux"} {
+		for _, outcome := range []string{"success", "stop_error", "missing_receipt"} {
+			t.Run(goos+"/"+outcome, func(t *testing.T) {
+				root := t.TempDir()
+				before := []byte(receipt + "\nprivate previous host\n")
+				after := append(bytes.Clone(before), []byte("private current host\n"+receipt+"\nprivate trailing text\n")...)
+				if outcome == "missing_receipt" {
+					after = append(bytes.Clone(before), []byte("private current host\n")...)
+				}
+				var foreground *nativeServiceDiagnosticBuffer
+				current := before
+				if goos == "windows" {
+					foreground = &nativeServiceDiagnosticBuffer{}
+					_, _ = foreground.Write(before)
+				}
+				if goos == "darwin" {
+					if err := os.Mkdir(filepath.Join(root, "service"), 0o700); err != nil {
+						t.Fatal("cannot prepare manager shutdown fixture")
+					}
+					if err := os.WriteFile(filepath.Join(root, "service", "host-stderr.log"), before, 0o600); err != nil {
+						t.Fatal("cannot prepare manager shutdown log")
+					}
+				}
+				reads, stops := 0, 0
+				run := func(ctx context.Context, name string, args ...string) ([]byte, error) {
+					reads++
+					deadline, bounded := ctx.Deadline()
+					if name != "journalctl" || !reflect.DeepEqual(args, []string{"--user", "-u", "fixture", "--no-pager", "-n", "40", "--output=cat"}) || !bounded || time.Until(deadline) > 5*time.Second {
+						t.Fatal("shutdown manager log read was not bounded and value-only")
+					}
+					return bytes.Clone(current), nil
+				}
+				var logged []string
+				err := nativeServiceStopWithShutdownReceipt(goos, root, "fixture", foreground, func(format string, args ...any) {
+					logged = append(logged, fmt.Sprintf(format, args...))
+				}, run, func() error {
+					stops++
+					if outcome == "stop_error" {
+						return errors.New("fixture stop failed")
+					}
+					current = after
+					if foreground != nil {
+						_, _ = foreground.Write(after[len(before):])
+					}
+					if goos == "darwin" {
+						if err := os.WriteFile(filepath.Join(root, "service", "host-stderr.log"), after, 0o600); err != nil {
+							t.Fatal("cannot finish manager shutdown log")
+						}
+					}
+					return nil
+				})
+				if stops != 1 || (err == nil) != (outcome == "success") {
+					t.Fatal("shutdown projection changed the stop result or accepted missing evidence")
+				}
+				if outcome == "success" {
+					if len(logged) != 1 || logged[0] != receipt {
+						t.Fatal("successful shutdown did not emit exactly one complete value-free receipt")
+					}
+				} else if len(logged) != 0 {
+					t.Fatal("unsuccessful shutdown emitted a success receipt")
+				}
+				wantReads := 0
+				if goos == "linux" {
+					wantReads = 2
+					if outcome == "stop_error" {
+						wantReads = 1
+					}
+				}
+				if reads != wantReads {
+					t.Fatal("shutdown receipt queried an unrelated manager")
+				}
+			})
+		}
+	}
+}
+
+func TestNativeServiceForegroundFailureDiagnostics(t *testing.T) {
+	for _, goos := range []string{"windows", "darwin", "linux"} {
+		t.Run(goos, func(t *testing.T) {
+			root, home := t.TempDir(), t.TempDir()
+			if err := os.Mkdir(filepath.Join(root, "service"), 0o700); err != nil {
+				t.Fatal("cannot create foreground diagnostic fixture")
+			}
+			const staleLog = "stale manager host stderr"
+			if err := os.WriteFile(filepath.Join(root, "service", "host-stderr.log"), []byte(staleLog), 0o600); err != nil {
+				t.Fatal("cannot create stale manager log fixture")
+			}
+			hex, token := strings.Repeat("d3", 32), nativeServiceStandardBase64TokenFixture(t)
+			const privateEnvironment = "private foreground environment"
+			foreground := &nativeServiceDiagnosticBuffer{}
+			for line := 0; line < 35; line++ {
+				if _, err := fmt.Fprintf(foreground, "foreground-line-%02d %s %s %s LANG=%s\n", line, root, hex, token, privateEnvironment); err != nil {
+					t.Fatal("cannot populate foreground diagnostic buffer")
+				}
+			}
+			log := func(buffer *nativeServiceDiagnosticBuffer) string {
+				var logged strings.Builder
+				diagnostics := nativeServiceFailureDiagnostic{
+					goos: goos, uid: 501, root: root, home: home, label: "fixture", foregroundStderr: buffer,
+					logf: func(format string, args ...any) {
+						line := fmt.Sprintf(format, args...)
+						if strings.Contains(line, "\n") {
+							t.Error("foreground diagnostic lost source-line prefixes")
+						}
+						fmt.Fprintln(&logged, line)
+					},
+					run: func(context.Context, string, ...string) ([]byte, error) { return nil, nil },
+				}
+				logFailure := diagnostics.logFailure
+				logFailure(errors.New("fixture failure"), []byte("invocation stderr"))
+				return logged.String()
+			}
+			output := log(foreground)
+			for _, private := range []string{root, home, hex, token, privateEnvironment, staleLog} {
+				if strings.Contains(output, private) {
+					t.Fatal("foreground diagnostics exposed planted private data or used the stale manager log")
+				}
+			}
+			for _, expected := range []string{
+				"native service stderr (last 30 lines):\ninvocation stderr\n",
+				"native service host stderr error: <nil>\n",
+				"native service host stderr (last 30 lines):\nforeground-line-05 <root> <hex> <token> <environment>\n",
+				"foreground-line-34",
+			} {
+				if !strings.Contains(output, expected) {
+					t.Error("foreground diagnostics omitted the available sanitized host capture")
+				}
+			}
+			var hostBlock strings.Builder
+			hostBlock.WriteString("native service host stderr (last 30 lines):\n")
+			for line := 5; line < 35; line++ {
+				fmt.Fprintf(&hostBlock, "foreground-line-%02d <root> <hex> <token> <environment>\n", line)
+			}
+			if strings.Count(output, "foreground-line-") != 30 || !strings.Contains(output, hostBlock.String()) {
+				t.Error("foreground diagnostics did not retain exactly the last thirty host stderr lines")
+			}
+			output = log(&nativeServiceDiagnosticBuffer{})
+			if strings.Contains(output, "native_service_host_stderr_unavailable") || strings.Contains(output, staleLog) ||
+				!strings.Contains(output, "native service host stderr error: <nil>\nnative service host stderr (last 30 lines):\n\n") {
+				t.Fatal("an empty foreground capture was confused with an unavailable host log")
+			}
+		})
 	}
 }
 
@@ -607,8 +1113,11 @@ func TestNativeServiceFailureDiagnosticsRejectCallerEnvironment(t *testing.T) {
 		}
 	}
 	directoryCount := 5
-	if runtime.GOOS == "darwin" {
+	switch runtime.GOOS {
+	case "darwin":
 		directoryCount = 2 // The private fixture has no Library directory.
+	case "windows":
+		directoryCount = 1 // The private fixture has no service directory.
 	}
 	if strings.Count(output, "native service directory ") != directoryCount {
 		t.Error("caller-environment regression omitted required directory diagnostics")
@@ -621,9 +1130,12 @@ func TestNativeServiceFailureDiagnosticsRejectCallerEnvironment(t *testing.T) {
 		{"journalctl", "--user", "-u", label, "--no-pager", "-n", "40"},
 		{"child-capability"},
 	}
-	if runtime.GOOS == "darwin" {
+	switch runtime.GOOS {
+	case "darwin":
 		domain := "gui/" + strconv.Itoa(os.Getuid())
 		wantCommands = [][]string{{"launchctl", "print", domain + "/" + label}, {"launchctl", "print", domain}, {"child-capability"}}
+	case "windows":
+		wantCommands = [][]string{{"child-capability"}}
 	}
 	if !reflect.DeepEqual(commands, wantCommands) {
 		t.Error("caller-environment regression did not attempt every best-effort diagnostic command")
@@ -722,7 +1234,7 @@ func TestNativeServiceFailureDiagnostics(t *testing.T) {
 			t.Error("diagnostic callback contains multiple lines and would lose its CI source prefixes")
 		}
 		fmt.Fprintln(&logged, line)
-	}, root, home, label, errors.New("exit status 1 "+root+" "+secret+" "+controlToken+" LANG="+environmentValue), []byte(stderr.String()), run)
+	}, root, home, label, errors.New("exit status 1 "+root+" "+secret+" "+controlToken+" LANG="+environmentValue), []byte(stderr.String()), nil, run)
 	wantCommands := [][]string{
 		{"systemctl", "--user", "show", label, "--property=Id,LoadState,FragmentPath,User,DropInPaths,ActiveState,SubState,Result,ExecMainStatus,UnitFileState", "--no-pager"},
 		{"systemctl", "--user", "show", "--property=Version,UnitPath,NFailedUnits", "--no-pager"},
@@ -759,7 +1271,18 @@ func TestNativeServiceCapabilityDiagnostic(t *testing.T) {
 		}
 		if _, err := localcell.NewServiceAdapter().Plan(t.Context(), descriptor); err != nil {
 			fmt.Fprintln(os.Stderr, err)
+			if runtime.GOOS == "windows" {
+				fmt.Fprintln(os.Stderr, "native service capability: service_adapter_unsupported")
+			}
+			if diagnostic := nativeServicePlatformCapabilityDiagnostic(); len(diagnostic) != 0 {
+				fmt.Fprintln(os.Stderr, string(diagnostic))
+			}
 			os.Exit(1)
+		}
+		if diagnostic := nativeServicePlatformCapabilityDiagnostic(); len(diagnostic) != 0 {
+			if _, err := fmt.Fprintln(os.Stdout, string(diagnostic)); err != nil {
+				os.Exit(1)
+			}
 		}
 		if _, err := fmt.Fprintln(os.Stdout, "service_manager_available"); err != nil {
 			os.Exit(1)
@@ -1010,5 +1533,212 @@ func TestNativeServiceLaunchdStderrBounds(t *testing.T) {
 				t.Fatal("bounded stderr read exposed an incomplete leading line or lost complete data")
 			}
 		})
+	}
+}
+
+// This diagnostic record deliberately keeps data local: only field-presence and
+// equality booleans reach the log, including when parsing fails.
+type nativeServiceEndpointDiagnosticRecord struct {
+	Version            int    `json:"version"`
+	InstallationID     string `json:"installation_id"`
+	Generation         string `json:"generation"`
+	DescriptorRevision uint64 `json:"descriptor_revision"`
+	BootID             string `json:"boot_id"`
+	HostPID            int    `json:"host_pid"`
+	HostStartIdentity  string `json:"host_start_identity"`
+	PipeName           string `json:"pipe_name"`
+}
+
+func nativeServiceDiagnosticRecord(root, name string, target any) (present, valid bool) {
+	directory, err := os.Lstat(filepath.Join(root, "service"))
+	if err != nil || !directory.IsDir() || directory.Mode()&os.ModeSymlink != 0 {
+		return false, false
+	}
+	path := filepath.Join(root, "service", name)
+	info, err := os.Lstat(path)
+	if err != nil {
+		return false, false
+	}
+	if !info.Mode().IsRegular() {
+		return true, false
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return true, false
+	}
+	defer func() { _ = file.Close() }()
+	opened, err := file.Stat()
+	if err != nil || !os.SameFile(info, opened) || opened.Size() > 64<<10 {
+		return true, false
+	}
+	decoder := json.NewDecoder(io.LimitReader(file, 64<<10))
+	return true, decoder.Decode(target) == nil && decoder.Decode(new(any)) == io.EOF
+}
+
+func nativeServiceWindowsEndpointDiagnostics(log func(string, ...any), root string) {
+	var endpoint nativeServiceEndpointDiagnosticRecord
+	var descriptor localcell.ServiceDescriptor
+	var lease struct {
+		Version        int    `json:"version"`
+		BootID         string `json:"boot_id"`
+		PID            int    `json:"pid"`
+		StartIdentity  string `json:"start_identity"`
+		InstallationID string `json:"installation_id"`
+		Owner          string `json:"owner"`
+	}
+	endpointPresent, endpointValid := nativeServiceDiagnosticRecord(root, "control-endpoint.json", &endpoint)
+	descriptorPresent, descriptorValid := nativeServiceDiagnosticRecord(root, "descriptor.json", &descriptor)
+	leasePresent, leaseValid := nativeServiceDiagnosticRecord(root, "lease.json", &lease)
+	descriptorPair, leasePair := endpointValid && descriptorValid, endpointValid && leaseValid
+	log("native service endpoint record_present=%t record_decoded=%t descriptor_present=%t descriptor_decoded=%t lease_present=%t lease_decoded=%t", endpointPresent, endpointValid, descriptorPresent, descriptorValid, leasePresent, leaseValid)
+	log("native service endpoint version_valid=%t installation_equal=%t generation_equal=%t revision_equal=%t host_pid_equal=%t host_start_equal=%t boot_equal=%t owner_equal=%t pipe_present=%t",
+		endpointValid && endpoint.Version == 1, descriptorPair && endpoint.InstallationID != "" && endpoint.InstallationID == descriptor.InstallationID,
+		descriptorPair && endpoint.Generation != "" && endpoint.Generation == descriptor.Payload.Generation,
+		descriptorPair && endpoint.DescriptorRevision > 0 && endpoint.DescriptorRevision == descriptor.Revision,
+		leasePair && endpoint.HostPID > 1 && endpoint.HostPID == lease.PID,
+		leasePair && endpoint.HostStartIdentity != "" && endpoint.HostStartIdentity == lease.StartIdentity,
+		leasePair && endpoint.BootID != "" && endpoint.BootID == lease.BootID,
+		descriptorValid && leaseValid && lease.Owner != "" && lease.Owner == descriptor.UID,
+		endpointValid && endpoint.PipeName != "")
+	// The platform seam permits portable Windows-diagnostic fixtures; only a
+	// Windows process may query the actual Windows boot identity here.
+	if runtime.GOOS == "windows" {
+		log("native service endpoint current_boot_equal=%t", endpointValid && localcell.NativeServiceEndpointBootMatches(endpoint.BootID))
+	}
+}
+
+func nativeServiceWindowsDirectoryDiagnostics(log func(string, ...any), root string) {
+	directory := filepath.Join(root, "service")
+	info, err := os.Lstat(directory)
+	if err != nil {
+		log("native service directory service metadata unavailable")
+		return
+	}
+	attributes := func(info os.FileInfo) uint64 {
+		stat := reflect.ValueOf(info.Sys())
+		if stat.Kind() == reflect.Pointer && !stat.IsNil() {
+			stat = stat.Elem()
+			if stat.Kind() == reflect.Struct {
+				field := stat.FieldByName("FileAttributes")
+				if field.IsValid() && field.CanUint() {
+					return field.Uint()
+				}
+			}
+		}
+		return 0
+	}
+	log("native service directory service attributes=0x%x directory=%t symlink=%t", attributes(info), info.IsDir(), info.Mode()&os.ModeSymlink != 0)
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return
+	}
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		log("native service entries unavailable")
+		return
+	}
+	known := map[string]bool{"descriptor.json": true, "control-endpoint.json": true, "lease.json": true, "boot.json": true, "supervisor.json": true, "control.secret": true, "host-stderr.log": true}
+	for index, entry := range entries {
+		if index == 128 {
+			log("native service entries truncated")
+			return
+		}
+		name := entry.Name()
+		if !known[name] {
+			name = "<other>"
+		}
+		info, err := entry.Info()
+		if err != nil {
+			log("native service entry %s metadata unavailable", name)
+			continue
+		}
+		log("native service entry %s attributes=0x%x regular=%t symlink=%t", name, attributes(info), info.Mode().IsRegular(), info.Mode()&os.ModeSymlink != 0)
+	}
+}
+
+func TestNativeServiceWindowsFailureDiagnostics(t *testing.T) {
+	t.Setenv("WITSELF_RUNTIME", "local")
+	root, home := t.TempDir(), t.TempDir()
+	if os.Mkdir(filepath.Join(root, "service"), 0o700) != nil {
+		t.Fatal("cannot prepare diagnostic fixture")
+	}
+	const sid = "S-1-5-21-300-400-500-1001"
+	const pipe = `\\.\pipe\witself-cell-private-abcdefghijklmnopqrstuvwxyz`
+	const privatePath = `C:\private user\private cell\host.exe`
+	write := func(name string, value any) {
+		t.Helper()
+		data, err := json.Marshal(value)
+		if err != nil || os.WriteFile(filepath.Join(root, "service", name), data, 0o600) != nil {
+			t.Fatal("cannot write diagnostic fixture")
+		}
+	}
+	write("control-endpoint.json", nativeServiceEndpointDiagnosticRecord{Version: 1, InstallationID: "fixture", Generation: "generation", DescriptorRevision: 1, BootID: "windows:boot", HostPID: 50, HostStartIdentity: "windows:1:2", PipeName: pipe})
+	write("descriptor.json", localcell.ServiceDescriptor{InstallationID: "fixture", Revision: 1, UID: sid, Payload: localcell.ServicePayload{Generation: "generation"}})
+	write("lease.json", map[string]any{"version": 1, "boot_id": "windows:boot", "pid": 50, "start_identity": "windows:1:2", "installation_id": "fixture", "owner": sid})
+	var stderr strings.Builder
+	for i := 0; i < 35; i++ {
+		fmt.Fprintf(&stderr, "host-line-%02d %s %s %s\n", i, sid, pipe, privatePath)
+	}
+	if os.WriteFile(filepath.Join(root, "service", "host-stderr.log"), []byte(stderr.String()), 0o600) != nil {
+		t.Fatal("cannot write host diagnostic fixture")
+	}
+	var logged strings.Builder
+	var commands []string
+	run := func(_ context.Context, name string, _ ...string) ([]byte, error) {
+		commands = append(commands, name)
+		return []byte("service_manager_unavailable: service_adapter_unsupported\nservice_boot_identity ntstatus=0x00000000 length=32 guid_nonzero=true"), errors.New("fixture unavailable")
+	}
+	nativeServiceFailureDiagnosticsForGOOS("windows", -1, func(format string, args ...any) {
+		line := fmt.Sprintf(format, args...)
+		if strings.Contains(line, "\n") {
+			t.Error("Windows diagnostic lost source-line prefixes")
+		}
+		fmt.Fprintln(&logged, line)
+	}, root, home, "unused", errors.New("fixture "+privatePath), []byte(sid+" "+pipe), nil, run)
+	output := logged.String()
+	if !reflect.DeepEqual(commands, []string{"child-capability"}) {
+		t.Fatal("Windows diagnostics invoked a Unix manager")
+	}
+	for _, private := range []string{root, home, sid, pipe, privatePath, "windows:boot", "windows:1:2"} {
+		if strings.Contains(output, private) {
+			t.Fatal("Windows diagnostics exposed an identity or path")
+		}
+	}
+	for _, expected := range []string{"record_present=true", "lease_present=true", "installation_equal=true", "generation_equal=true", "revision_equal=true", "host_pid_equal=true", "host_start_equal=true", "boot_equal=true", "owner_equal=true", "pipe_present=true", "service_boot_identity ntstatus=0x00000000 length=32 guid_nonzero=true", "entry control-endpoint.json attributes=", "host-line-05", "host-line-34"} {
+		if !strings.Contains(output, expected) {
+			t.Error("Windows diagnostics omitted required value-free evidence")
+		}
+	}
+	for i := 0; i < 5; i++ {
+		if strings.Contains(output, fmt.Sprintf("host-line-%02d", i)) {
+			t.Error("Windows host log tail exceeded thirty lines")
+		}
+	}
+	write("control-endpoint.json", nativeServiceEndpointDiagnosticRecord{Version: 1, InstallationID: "other", Generation: "other", DescriptorRevision: 2, BootID: "other", HostPID: 51, HostStartIdentity: "other"})
+	logged.Reset()
+	nativeServiceWindowsEndpointDiagnostics(func(format string, args ...any) { fmt.Fprintf(&logged, format+"\n", args...) }, root)
+	for _, key := range []string{"installation_equal", "generation_equal", "revision_equal", "host_pid_equal", "host_start_equal", "boot_equal", "pipe_present"} {
+		if !strings.Contains(logged.String(), key+"=false") {
+			t.Error("Windows diagnostics hid an endpoint mismatch")
+		}
+	}
+}
+
+// Portable receipt for the native child's command recorder, which previously
+// logged an empty argv even though it dispatched the capability probe.
+func TestNativeServiceCapabilityCommandRecorder(t *testing.T) {
+	if !reflect.DeepEqual(nativeServiceCapabilityArguments(), []string{"-test.run=^TestNativeServiceCapabilityDiagnostic$", "--", "native-service-capability-probe"}) {
+		t.Fatal("capability probe argv changed without updating the command-shape contract")
+	}
+	var logged strings.Builder
+	run := func(context.Context, string, ...string) ([]byte, error) { return nil, errors.New("fixture refusal") }
+	nativeServiceFailureDiagnosticsForGOOS("windows", 0, func(format string, args ...any) {
+		fmt.Fprintf(&logged, format+"\n", args...)
+	}, t.TempDir(), t.TempDir(), "fixture", errors.New("fixture failure"), nil, &nativeServiceDiagnosticBuffer{}, run)
+	const want = "native service child-capability diagnostic command: -test.run -- native-service-capability-probe\n"
+	if strings.Count(logged.String(), want) != 1 {
+		t.Fatal("capability diagnostic omitted its value-free verb and flag names")
+	}
+	if strings.Contains(logged.String(), "TestNativeServiceCapabilityDiagnostic") {
+		t.Fatal("capability diagnostic exposed its flag value")
 	}
 }

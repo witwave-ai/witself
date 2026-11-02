@@ -2,6 +2,7 @@ package localcell_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -33,9 +34,10 @@ func postgresEncodingAndLocaleMatch(encoding, collate, ctype string) bool {
 	return encoding == "UTF8" && collate == "C" && ctype == "C"
 }
 
-func requirePostgres16(t *testing.T, directory string) {
+func requirePostgres16(t *testing.T, directory string, parents ...context.Context) {
 	t.Helper()
-	cmd := exec.CommandContext(t.Context(), filepath.Join(directory, lifecycleExecutableName("postgres")), "--version")
+	cmd := exec.CommandContext(lifecycleProofContext(t, parents), filepath.Join(directory, lifecycleExecutableName("postgres")), "--version")
+	cmd.WaitDelay = time.Second
 	release, err := localcell.ConfigurePostgresProofCommand(cmd)
 	if err != nil {
 		t.Fatal("cannot restrict PostgreSQL version proof command")
@@ -146,10 +148,10 @@ func assertPostgresEncodingAndUnicode(t *testing.T, root string, manifest *local
 	}
 }
 
-func lifecycleJSON(t *testing.T, manifest *localcell.Manifest, bearer, method, path string, body []byte, out any) {
+func lifecycleJSON(t *testing.T, manifest *localcell.Manifest, bearer, method, path string, body []byte, out any, parents ...context.Context) {
 	t.Helper()
 	endpoint := "http://" + net.JoinHostPort("127.0.0.1", strconv.Itoa(manifest.Ports.ServerAPI)) + path
-	req, err := http.NewRequestWithContext(t.Context(), method, endpoint, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(lifecycleProofContext(t, parents), method, endpoint, bytes.NewReader(body))
 	if err != nil {
 		t.Fatal("cannot construct Unicode proof request")
 	}
@@ -211,4 +213,14 @@ func (w *lifecycleProcessWitness) assertStopped(t *testing.T) {
 			t.Errorf("owned %s process survived cell cleanup", record.Component)
 		}
 	}
+}
+
+// Optional parents preserve the ordinary lifecycle callers while allowing the
+// native service proof to carry its whole-proof deadline through every helper.
+func lifecycleProofContext(t *testing.T, parents []context.Context) context.Context {
+	t.Helper()
+	if len(parents) != 0 {
+		return parents[0]
+	}
+	return t.Context()
 }

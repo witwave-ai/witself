@@ -7,6 +7,7 @@ type ProcessRecord struct {
 	LaunchPending bool   `json:"launch_pending,omitempty"`
 	PID           int    `json:"pid"`
 	StartTime     string `json:"start_time"`
+	BootID        string `json:"boot_id,omitempty"`
 	Root          string `json:"root"`
 	Component     string `json:"component"`
 }

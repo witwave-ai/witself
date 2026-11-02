@@ -214,6 +214,28 @@ jobs:
           node scripts/ci-go-test-json-check.mjs --input $proofJSON --diagnose --require TestRealLifecycle,TestRealLifecycle/InstallStartRestartRemove,TestRealLifecycle/TwoCellsAreIndependent,TestRealLifecycle/InterruptedStartRepair,TestRealLifecycle/WaitsForReadiness
           $parserExit = $LASTEXITCODE
           if ($goExit -ne 0 -or $parserExit -ne 0) { exit 1 }
+      - name: Prove native service restart or record adapter capability
+        shell: pwsh
+        env:
+          WITSELF_LOCALCELL_PGBIN: ${{ runner.temp }}\lc-pg16\pgsql\bin
+          TEMP: ${{ runner.temp }}\lc-pg16\testtmp
+          TMP: ${{ runner.temp }}\lc-pg16\testtmp
+        run: |
+          $proofJSON = Join-Path $env:RUNNER_TEMP 'lc-pg16\service-proof.json'
+          go test -json ./internal/localcell -run '^TestNativeServiceLifecycle$' -count=1 -timeout=15m > $proofJSON 2>&1
+          $goExit = $LASTEXITCODE
+          node scripts/ci-go-test-json-check.mjs --input $proofJSON --diagnose --require TestNativeServiceLifecycle
+          $parserExit = $LASTEXITCODE
+          # The checker prints successful capability outcomes only. Project the
+          # fixed boot diagnostic fields so successful native rounds retain them.
+          Get-Content -LiteralPath $proofJSON | ForEach-Object {
+            try { $event = $_ | ConvertFrom-Json -ErrorAction Stop } catch { return }
+            if ($event.Action -eq 'output' -and $event.Test -eq 'TestNativeServiceLifecycle' -and
+                $event.Output -cmatch '^\s*service_native(?:_diagnostics)?_test\.go:[0-9]+: (service_boot_identity ntstatus=0x[0-9a-f]{8} length=[0-9]{1,10} guid_nonzero=(?:true|false))\r?\n$') {
+              Write-Output $Matches[1]
+            }
+          }
+          if ($goExit -ne 0 -or $parserExit -ne 0) { exit 1 }
       - name: Clean PostgreSQL proof tree
         if: always()
         shell: pwsh

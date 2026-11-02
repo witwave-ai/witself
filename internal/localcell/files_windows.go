@@ -5,7 +5,6 @@ package localcell
 import (
 	"errors"
 	"io"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -53,16 +52,13 @@ func validatePrivateTree(root string) error {
 	if _, err := os.Lstat(root); errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
-	return filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
-		if err != nil {
-			return errors.New("cannot inspect private local cell layout")
-		}
+	return validatePrivateTreeSnapshot(root, filepath.WalkDir, func(path string, directory bool) error {
 		pg := filepath.Join(root, "pg")
 		if path == pg || strings.HasPrefix(path, pg+string(filepath.Separator)) {
-			return runtimeconfig.WindowsPrivatePostgresValidate(pg, path, entry.IsDir())
+			return runtimeconfig.WindowsPrivatePostgresValidate(pg, path, directory)
 		}
-		return validatePrivate(path, entry.IsDir())
-	})
+		return validatePrivate(path, directory)
+	}, os.Lstat)
 }
 
 func validateWriteTarget(path string) error {
