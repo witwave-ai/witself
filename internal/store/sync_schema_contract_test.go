@@ -43,11 +43,12 @@ type syncSchemaCatalogReader interface {
 	Begin(context.Context) (pgx.Tx, error)
 }
 
-// Read the installed catalog, never the lexical migration inventory. The full
-// user catalog catches newly created relations even outside the sync_ prefix or
-// fixture schema. OIDs distinguish a dropped/recreated relation from its prior
-// name. Materialized views are included but deliberately unsupported: unlike
-// ordinary tables/views they have no information_schema projection to certify.
+// FLAKE-6 Read the installed catalog, never the lexical migration inventory.
+// FLAKE-6 Scope both queries to current_schema() and schemas starting with its
+// FLAKE-6 literal name plus '_', captured before changing search_path below.
+// FLAKE-6 This includes fixture extensions without observing unrelated fixtures.
+// FLAKE-6 OIDs distinguish dropped/recreated relations from their prior names.
+// FLAKE-6 Materialized views remain included but deliberately unsupported.
 func readSyncSchemaCatalog(ctx context.Context, q syncSchemaCatalogReader) (syncSchemaCatalog, error) {
 	catalog := syncSchemaCatalog{tables: make(map[syncSchemaRelation]syncSchemaCatalogTable)}
 	// A transaction (or savepoint for a caller transaction) pins one connection.
@@ -68,7 +69,7 @@ func readSyncSchemaCatalog(ctx context.Context, q syncSchemaCatalogReader) (sync
 		FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
 		LEFT JOIN information_schema.tables t ON t.table_schema=n.nspname AND t.table_name=c.relname
 		WHERE c.relkind IN ('r','p','v','m','f')
-		AND n.nspname <> 'information_schema' AND n.nspname !~ '^pg_'`)
+		AND (n.nspname = $1 OR starts_with(n.nspname, $1 || '_'))`, catalog.schema) // FLAKE-6
 	if err != nil {
 		return catalog, errSyncSchemaProjection
 	}
@@ -102,8 +103,8 @@ func readSyncSchemaCatalog(ctx context.Context, q syncSchemaCatalogReader) (sync
 		LEFT JOIN pg_catalog.pg_namespace cn ON cn.oid=coll.collnamespace
 		LEFT JOIN information_schema.columns i ON i.table_schema=n.nspname AND i.table_name=c.relname AND i.column_name=a.attname
 		WHERE a.attnum > 0 AND NOT a.attisdropped AND c.relkind IN ('r','p','v','m','f')
-		AND n.nspname <> 'information_schema' AND n.nspname !~ '^pg_'
-		ORDER BY n.nspname, c.relname, a.attnum`)
+		AND (n.nspname = $1 OR starts_with(n.nspname, $1 || '_')) -- // FLAKE-6
+		ORDER BY n.nspname, c.relname, a.attnum`, catalog.schema) // FLAKE-6
 	if err != nil {
 		return catalog, errSyncSchemaProjection
 	}
@@ -372,6 +373,80 @@ SELECT 1;
 	}
 }
 
+// FLAKE-6 Reproduce unrelated fixture churn without concurrent timing or sleeps.
+func TestSyncArchiveSchemaCompletenessCatalogScopePostgres(t *testing.T) { // FLAKE-6
+	ctx := context.Background()                                                             // FLAKE-6
+	st, dsn := newSyncSchemaTestStore(t)                                                    // FLAKE-6
+	var fixture string                                                                      // FLAKE-6
+	if err := st.pool.QueryRow(ctx, `SELECT current_schema()`).Scan(&fixture); err != nil { // FLAKE-6
+		t.Fatal("F6SCOPE00001 read fixture schema failed") // FLAKE-6
+	} // FLAKE-6
+	other, err := pgx.Connect(ctx, dsn) // FLAKE-6
+	if err != nil {                     // FLAKE-6
+		t.Fatal("F6SCOPE00002 open independent connection failed") // FLAKE-6
+	} // FLAKE-6
+	var schemas []string // FLAKE-6
+	t.Cleanup(func() {   // FLAKE-6
+		for _, schema := range schemas { // FLAKE-6
+			if _, err := other.Exec(ctx, "DROP SCHEMA "+pgx.Identifier{schema}.Sanitize()+" CASCADE"); err != nil { // FLAKE-6
+				t.Error("F6SCOPE00003 drop allocated scope schema failed") // FLAKE-6
+			} // FLAKE-6
+		} // FLAKE-6
+		if err := other.Close(ctx); err != nil { // FLAKE-6
+			t.Error("F6SCOPE00004 close independent connection failed") // FLAKE-6
+		} // FLAKE-6
+	}) // FLAKE-6
+	created, dropped := "flake6_created_"+fixture, "flake6_dropped_"+fixture        // FLAKE-6
+	if strings.HasPrefix(created, fixture) || strings.HasPrefix(dropped, fixture) { // FLAKE-6
+		t.Fatal("F6SCOPE00005 unrelated schemas share fixture prefix") // FLAKE-6
+	} // FLAKE-6
+	const relation = "account_evacuation_finalizations"                                             // FLAKE-6
+	if _, err := other.Exec(ctx, "CREATE SCHEMA "+pgx.Identifier{dropped}.Sanitize()); err != nil { // FLAKE-6
+		t.Fatal("F6SCOPE00006 create disappearing relation schema failed") // FLAKE-6
+	} // FLAKE-6
+	schemas = append(schemas, dropped)                                                                                          // FLAKE-6
+	if _, err := other.Exec(ctx, "CREATE TABLE "+pgx.Identifier{dropped, relation}.Sanitize()+" (evidence text)"); err != nil { // FLAKE-6
+		t.Fatal("F6SCOPE00007 seed disappearing relation failed") // FLAKE-6
+	} // FLAKE-6
+	before := requireSyncSchemaCatalog(t, st.pool)                                                  // FLAKE-6
+	if _, err := other.Exec(ctx, "CREATE SCHEMA "+pgx.Identifier{created}.Sanitize()); err != nil { // FLAKE-6
+		t.Fatal("F6SCOPE00008 create appearing relation schema failed") // FLAKE-6
+	} // FLAKE-6
+	schemas = append(schemas, created)                                                                                          // FLAKE-6
+	if _, err := other.Exec(ctx, "CREATE TABLE "+pgx.Identifier{created, relation}.Sanitize()+" (evidence text)"); err != nil { // FLAKE-6
+		t.Fatal("F6SCOPE00009 create unrelated relation failed") // FLAKE-6
+	} // FLAKE-6
+	if _, err := other.Exec(ctx, "DROP TABLE "+pgx.Identifier{dropped, relation}.Sanitize()); err != nil { // FLAKE-6
+		t.Fatal("F6SCOPE00010 drop unrelated relation failed") // FLAKE-6
+	} // FLAKE-6
+	if err := st.MigrateSync(ctx); err != nil { // FLAKE-6
+		t.Fatal("F6SCOPE00011 migrate sync with unrelated churn failed") // FLAKE-6
+	} // FLAKE-6
+	after := requireSyncSchemaCatalog(t, st.pool)                                  // FLAKE-6
+	projection := requireDeclaredSyncSchemaProjection(t)                           // FLAKE-6
+	if err := validateSyncInstalledSchema(before, after, projection); err != nil { // FLAKE-6
+		t.Fatal("F6SCOPE00012 unrelated account_evacuation_finalizations caused catalog drift") // FLAKE-6
+	} // FLAKE-6
+	for _, catalog := range []syncSchemaCatalog{before, after} { // FLAKE-6
+		for _, schema := range []string{created, dropped} { // FLAKE-6
+			if _, found := catalog.tables[syncSchemaRelation{schema, relation}]; found { // FLAKE-6
+				t.Fatal("F6SCOPE00013 unrelated relation was read into fixture catalog") // FLAKE-6
+			} // FLAKE-6
+		} // FLAKE-6
+	} // FLAKE-6
+	extra := fixture + "_extra"                                                                   // FLAKE-6
+	if _, err := other.Exec(ctx, "CREATE SCHEMA "+pgx.Identifier{extra}.Sanitize()); err != nil { // FLAKE-6
+		t.Fatal("F6SCOPE00014 create fixture extension schema failed") // FLAKE-6
+	} // FLAKE-6
+	schemas = append(schemas, extra)                                                                                                         // FLAKE-6
+	if _, err := other.Exec(ctx, "CREATE TABLE "+pgx.Identifier{extra, "unregistered_evidence"}.Sanitize()+" (evidence text)"); err != nil { // FLAKE-6
+		t.Fatal("F6SCOPE00015 create fixture extension relation failed") // FLAKE-6
+	} // FLAKE-6
+	if err := validateSyncInstalledSchema(before, requireSyncSchemaCatalog(t, st.pool), projection); !errors.Is(err, errSyncSchemaProjection) || err.Error() != syncSchemaDifference("unregistered_evidence", "").Error() { // FLAKE-6
+		t.Fatal("F6SCOPE00016 fixture extension escaped exact unregistered_evidence refusal") // FLAKE-6
+	} // FLAKE-6
+} // FLAKE-6
+// FLAKE-6
 func TestSyncArchiveSchemaCompletenessCatalogDriftPostgres(t *testing.T) {
 	st, _ := newSyncSchemaTestStore(t)
 	before := requireSyncSchemaCatalog(t, st.pool)
