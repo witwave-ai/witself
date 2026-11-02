@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -66,6 +67,42 @@ func TestServiceDescriptorExplicitRuntimeAndImmutablePayload(t *testing.T) {
 		if err := servicePrivateRecord(c.path("service", name)); err != nil {
 			t.Fatal("service state not owner private")
 		}
+	}
+}
+
+func TestServiceDescriptorLaunchdAgentPreservesImmutableFence(t *testing.T) {
+	c, _ := unitCell(t)
+	t.Setenv("WITSELF_RUNTIME", "local")
+	host, err := os.Executable()
+	if err != nil {
+		t.Fatal("test executable unavailable")
+	}
+	d := ServiceDescriptor{Adapter: "launchd-agent", Payload: ServicePayload{Host: host, Args: []string{"run", "--root", c.cfg.Root}}}
+	if err := c.PrepareService(t.Context(), d); err != nil {
+		t.Fatal("launchd descriptor preparation refused")
+	}
+	before, err := c.ServiceDescriptor()
+	if err != nil || before.Adapter != "launchd-agent" || before.Revision != 1 || before.Payload.Generation == "" {
+		t.Fatal("launchd descriptor lost its preparation defaults")
+	}
+	if err := c.PrepareService(t.Context(), d); err != nil {
+		t.Fatal("identical launchd descriptor did not reopen")
+	}
+	for _, change := range []func(*ServiceDescriptor){
+		func(d *ServiceDescriptor) { d.Adapter = "systemd-user" },
+		func(d *ServiceDescriptor) { d.Adapter = "launchd-daemon" },
+		func(d *ServiceDescriptor) { d.Payload.Generation += "-different" },
+		func(d *ServiceDescriptor) { d.Payload.Args = append(d.Payload.Args, "--different") },
+	} {
+		changed := before
+		change(&changed)
+		if !errors.Is(c.PrepareService(t.Context(), changed), ErrServiceOwnershipConflict) {
+			t.Fatal("launchd preparation changed immutable identity")
+		}
+	}
+	after, err := c.ServiceDescriptor()
+	if err != nil || !reflect.DeepEqual(before, after) {
+		t.Fatal("launchd preparation changed the existing revision or payload")
 	}
 }
 

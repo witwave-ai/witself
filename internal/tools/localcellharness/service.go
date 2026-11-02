@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -52,6 +54,21 @@ func (v serviceFlags) hostArgs() []string {
 }
 
 func runServiceCommand(ctx context.Context, args []string, out io.Writer) error {
+	return runServiceCommandForGOOS(ctx, args, out, runtime.GOOS)
+}
+
+func serviceAdapterKind(goos string) (string, error) {
+	switch goos {
+	case "linux":
+		return "systemd-user", nil
+	case "darwin":
+		return "launchd-agent", nil
+	default:
+		return "", fmt.Errorf("%w: adapter:platform: unsupported", localcell.ErrServiceManagerUnavailable)
+	}
+}
+
+func runServiceCommandForGOOS(ctx context.Context, args []string, out io.Writer, goos string) error {
 	if os.Getenv("WITSELF_RUNTIME") != "local" {
 		return errors.New("localcellharness: service commands require explicit local runtime selection")
 	}
@@ -68,6 +85,13 @@ func runServiceCommand(ctx context.Context, args []string, out io.Writer) error 
 	values, err := parseServiceFlags(flags)
 	if err != nil {
 		return err
+	}
+	selectedAdapter := "foreground"
+	if action == "install" {
+		selectedAdapter, err = serviceAdapterKind(goos)
+		if err != nil {
+			return err
+		}
 	}
 	cell, err := localcell.New(values.config())
 	if err != nil {
@@ -89,11 +113,7 @@ func runServiceCommand(ctx context.Context, args []string, out io.Writer) error 
 		if hostErr != nil || !filepath.IsAbs(host) {
 			return errors.New("localcellharness: cannot resolve service host")
 		}
-		adapter := "foreground"
-		if action == "install" {
-			adapter = "systemd-user"
-		}
-		descriptor = localcell.ServiceDescriptor{Adapter: adapter, Scope: "user", Runtime: "local", DesiredState: "running", ResourceProfile: "unconfigured", Payload: localcell.ServicePayload{Host: host, Args: values.hostArgs()}}
+		descriptor = localcell.ServiceDescriptor{Adapter: selectedAdapter, Scope: "user", Runtime: "local", DesiredState: "running", ResourceProfile: "unconfigured", Payload: localcell.ServicePayload{Host: host, Args: values.hostArgs()}}
 		if err := cell.PrepareService(ctx, descriptor); err != nil {
 			return err
 		}

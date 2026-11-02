@@ -32,9 +32,28 @@ func TestServiceRunDispatchSIGINTNoRegistration(t *testing.T) {
 	t.Setenv("WITSELF_RUNTIME", "local")
 	host := buildServiceHarnessObserver(t)
 	token := []byte(base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0xa7}, 32)))
+	adapter, err := serviceAdapterKind(runtime.GOOS)
+	if err != nil {
+		t.Fatal("native fixture platform has no service adapter")
+	}
+
+	t.Run("fresh_install_selects_platform_descriptor", func(t *testing.T) {
+		root, cell := prepareServiceHarnessInstallation(t, host, "", nil)
+		manager := serviceHarnessManagerDirectory(t)
+		args := serviceFlags{root: root, pgbin: filepath.Join(root, "Postgres bin"), server: filepath.Join(root, "server"), worker: filepath.Join(root, "worker"), timeout: time.Second}.hostArgs()
+		invokeServiceHarness(t, host, manager, token, append([]string{"service", "install"}, args[1:]...)...)
+		descriptor, err := cell.ServiceDescriptor()
+		if err != nil || descriptor.Adapter != adapter || descriptor.Scope != "user" || descriptor.Runtime != "local" || descriptor.Revision != 1 || !reflect.DeepEqual(descriptor.Payload.Args, args) {
+			t.Fatal("fresh service install did not preserve platform selection and immutable payload")
+		}
+		calls, err := os.ReadFile(filepath.Join(manager, "calls"))
+		if err != nil || string(calls) != "New\nPlan\nApply\n" {
+			t.Fatal("fresh service install did not dispatch exactly one planned registration")
+		}
+	})
 
 	t.Run("recording_adapter_and_receipt_positive_control", func(t *testing.T) {
-		root, _ := prepareServiceHarnessInstallation(t, host, "systemd-user", token)
+		root, _ := prepareServiceHarnessInstallation(t, host, adapter, token)
 		manager := serviceHarnessManagerDirectory(t)
 		for _, action := range []string{"install", "remove"} {
 			output := invokeServiceHarness(t, host, manager, token, "service", action, "--root", root)
@@ -62,7 +81,7 @@ func TestServiceRunDispatchSIGINTNoRegistration(t *testing.T) {
 			{"Remove", "remove", localcell.ErrServiceOwnershipConflict.Error(), "unit_dir_walk:3:mode: 0775", "New\nRemove\n"},
 		} {
 			t.Run(test.method, func(t *testing.T) {
-				root, _ := prepareServiceHarnessInstallation(t, host, "systemd-user", token)
+				root, _ := prepareServiceHarnessInstallation(t, host, adapter, token)
 				manager := serviceHarnessManagerDirectory(t)
 				if os.WriteFile(filepath.Join(manager, "fail-"+test.method), nil, 0o600) != nil {
 					t.Fatal("cannot prepare manager failure fixture")
@@ -157,8 +176,11 @@ func buildServiceHarnessObserver(t *testing.T) string {
 		replacements[original] = replacement
 	}
 	factory := "service_unsupported.go"
-	if runtime.GOOS == "linux" {
+	switch runtime.GOOS {
+	case "linux":
 		factory = "service_systemd_linux.go"
+	case "darwin":
+		factory = "service_launchd_darwin.go"
 	}
 	replaceFunctionName(factory, "NewServiceAdapter", "nativeServiceAdapterUnusedForHarnessFixture")
 	bridge := serviceHarnessRecordingAdapterSource
@@ -272,6 +294,9 @@ func prepareServiceHarnessInstallation(t *testing.T, host, adapter string, token
 	if err != nil {
 		t.Fatal("cannot open synthetic installation")
 	}
+	if adapter == "" {
+		return root, cell
+	}
 	args := serviceFlags{root: root, timeout: time.Second}.hostArgs()
 	descriptor := localcell.ServiceDescriptor{Adapter: adapter, DesiredState: "stopped", Payload: localcell.ServicePayload{Host: host, Args: args}}
 	if cell.PrepareService(t.Context(), descriptor) != nil {
@@ -286,14 +311,20 @@ func prepareServiceHarnessInstallation(t *testing.T, host, adapter string, token
 func serviceHarnessEnvironment(t *testing.T, manager string) []string {
 	t.Helper()
 	home := filepath.Dir(filepath.Dir(filepath.Dir(manager)))
+	if runtime.GOOS == "darwin" {
+		home = filepath.Dir(filepath.Dir(manager))
+	}
 	return []string{"HOME=" + home, "WITSELF_HOME=" + t.TempDir(), "DSH_HOME=" + t.TempDir(), "WITSELF_RUNTIME=local", "LC_S7A_TEST_MANAGER_DIR=" + manager}
 }
 
 func serviceHarnessManagerDirectory(t *testing.T) string {
 	t.Helper()
 	directory := filepath.Join(privateHarnessRoot(t), ".config", "systemd", "user")
+	if runtime.GOOS == "darwin" {
+		directory = filepath.Join(privateHarnessRoot(t), "Library", "LaunchAgents")
+	}
 	if os.MkdirAll(directory, 0o700) != nil {
-		t.Fatal("cannot create isolated systemd user-unit directory")
+		t.Fatal("cannot create isolated service manager directory")
 	}
 	return directory
 }
@@ -404,7 +435,7 @@ func snapshotServiceHarnessTree(t *testing.T, root string) map[string]serviceHar
 		if err != nil {
 			return err
 		}
-		if info.Mode()&os.ModeSymlink != 0 || strings.HasSuffix(entry.Name(), ".service") {
+		if info.Mode()&os.ModeSymlink != 0 || strings.HasSuffix(entry.Name(), ".service") || strings.HasSuffix(entry.Name(), ".plist") {
 			t.Fatal("foreground fixture contains a service unit or enablement link")
 		}
 		value := serviceHarnessTreeEntry{mode: info.Mode()}

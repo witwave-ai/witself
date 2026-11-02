@@ -1,0 +1,81 @@
+gui/<uid>/ai.openclaw.gateway = {
+	active count = 1
+	path = <home>/Library/LaunchAgents/ai.openclaw.gateway.plist
+	type = LaunchAgent
+	state = running
+
+	program = /bin/sh
+	arguments = {
+		/bin/sh
+		<home>/.openclaw/service-env/ai.openclaw.gateway-env-wrapper.sh
+		<home>/.openclaw/service-env/ai.openclaw.gateway.env
+		/opt/homebrew/opt/node/bin/node
+		/opt/homebrew/lib/node_modules/openclaw/dist/index.js
+		gateway
+		--port
+		18789
+	}
+
+	working directory = <home>/.openclaw
+
+	stdin path = /dev/null
+	stdout path = <home>/Library/Logs/openclaw/gateway.log
+	stderr path = <home>/Library/Logs/openclaw/gateway.log
+	inherited environment = {
+		SSH_AUTH_SOCK => /var/run/com.apple.launchd.rEa5wF56y8/Listeners
+	}
+
+	default environment = {
+		PATH => /usr/bin:/bin:/usr/sbin:/sbin
+	}
+
+	environment = {
+		OSLogRateLimit => 64
+		XPC_SERVICE_NAME => ai.openclaw.gateway
+	}
+
+	domain = gui/<uid> [<asid>]
+	umask = 77
+	asid = <n>
+	minimum runtime = 10
+	exit timeout = 20
+	runs = 1
+	pid = <n>
+	immediate reason = speculative
+	forks = <n>
+	execs = 3
+	initialized = 1
+	trampolined = 1
+	started suspended = 0
+	proxy started suspended = 0
+	checked allocations = 0 (queried = 1)
+	checked allocations reason = no host
+	checked allocations flags = 0x0
+	last exit code = (never exited)
+
+	resource coalition = {
+		ID = <n>
+		type = resource
+		state = active
+		active count = 1
+		name = ai.openclaw.gateway
+	}
+
+	jetsam coalition = {
+		ID = <n>
+		type = jetsam
+		state = active
+		active count = 1
+		name = ai.openclaw.gateway
+	}
+
+	spawn type = interactive (4)
+	jetsam priority = 40
+	jetsam memory limit (active) = (unlimited)
+	jetsam memory limit (inactive) = (unlimited)
+	jetsamproperties category = daemon
+	jetsam thread limit = 32
+	cpumon = default
+
+	properties = partial import | keepalive | runatload | inferred program | managed LWCR | has LWCR
+}

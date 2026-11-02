@@ -2,13 +2,68 @@ package main
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/witwave-ai/witself/internal/localcell"
 )
+
+func TestServiceAdapterKindByGOOS(t *testing.T) {
+	for _, test := range []struct{ goos, adapter string }{
+		{"linux", "systemd-user"}, {"darwin", "launchd-agent"},
+		{"windows", ""}, {"freebsd", ""}, {"", ""},
+	} {
+		t.Run(test.goos, func(t *testing.T) {
+			adapter, err := serviceAdapterKind(test.goos)
+			if adapter != test.adapter {
+				t.Fatal("service adapter selection differs from platform contract")
+			}
+			if test.adapter == "" {
+				if !errors.Is(err, localcell.ErrServiceManagerUnavailable) || !strings.Contains(err.Error(), "adapter:platform: unsupported") || !strings.Contains(err.Error(), "localcellharness run") {
+					t.Fatal("unsupported platform omitted its capability and foreground fallback")
+				}
+			} else if err != nil {
+				t.Fatal("supported platform did not select an adapter")
+			}
+		})
+	}
+}
+
+func TestServiceInstallUnsupportedGOOSDoesNotTouchDescriptor(t *testing.T) {
+	t.Setenv("WITSELF_HOME", t.TempDir())
+	t.Setenv("DSH_HOME", t.TempDir())
+	t.Setenv("WITSELF_RUNTIME", "local")
+	for _, goos := range []string{"windows", "freebsd"} {
+		t.Run(goos, func(t *testing.T) {
+			root := privateHarnessRoot(t)
+			serviceDir := filepath.Join(root, "service")
+			if os.Mkdir(serviceDir, 0o700) != nil {
+				t.Fatal("cannot prepare descriptor refusal fixture")
+			}
+			path := filepath.Join(serviceDir, "descriptor.json")
+			before := []byte("invalid descriptor must not be read or replaced\n")
+			if os.WriteFile(path, before, 0o600) != nil {
+				t.Fatal("cannot prepare descriptor refusal fixture")
+			}
+			err := runServiceCommandForGOOS(t.Context(), []string{"service", "install", "--root", root}, io.Discard, goos)
+			if !errors.Is(err, localcell.ErrServiceManagerUnavailable) {
+				t.Fatal("unsupported install touched installation state before capability refusal")
+			}
+			after, err := os.ReadFile(path)
+			entries, dirErr := os.ReadDir(root)
+			serviceEntries, serviceErr := os.ReadDir(serviceDir)
+			if err != nil || string(after) != string(before) || dirErr != nil || len(entries) != 1 || serviceErr != nil || len(serviceEntries) != 1 {
+				t.Fatal("unsupported install mutated the descriptor or installation")
+			}
+		})
+	}
+}
 
 func TestServiceCommandsRequireExplicitLocalSelection(t *testing.T) {
 	t.Setenv("WITSELF_HOME", t.TempDir())

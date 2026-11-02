@@ -4,3 +4,6 @@
 scripts/testdata/monitoring-recovery/*.patch -whitespace
 # Frozen trust fixtures sign exact bytes; never convert their line endings.
 internal/localcell/trust/testdata/** -text
+
+# The launchd observed-print capture is compared byte for byte; never convert its line endings.
+internal/localcell/testdata/launchd-print-observed.txt -text
