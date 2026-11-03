@@ -28,6 +28,7 @@ awk '
     static_lines++
     if (static_lines == 1 && $0 != "\tbash scripts/check-static-local.sh") bad = 1
     if (static_lines == 2 && $0 != "\tbash scripts/test-check-static-local.sh") bad = 1
+    if (static_lines == 3 && $0 != "\tbash scripts/test-lint-proxy.sh") bad = 1
   }
   /^\.PHONY:/ {
     sub(/#.*/, "")
@@ -35,7 +36,7 @@ awk '
   }
   END {
     exit !(check_targets == 1 && static_targets == 1 && static_calls == 1 &&
-      docs_calls == 1 && static_call < docs_call && static_lines == 2 && !bad && phony)
+      docs_calls == 1 && static_call < docs_call && static_lines == 3 && !bad && phony)
   }
 ' "$source_root/Makefile" || fail 'Makefile check-static wiring changed'
 printf 'check-static regression: Makefile wiring passed\n'
