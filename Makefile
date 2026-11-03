@@ -395,6 +395,7 @@ check-local: ## Fetch and select the required local pre-push checks
 check-static: ## Run local ShellCheck/actionlint and their hermetic regression checks
 	bash scripts/check-static-local.sh
 	bash scripts/test-check-static-local.sh
+	bash scripts/test-lint-proxy.sh
 
 check-docs: ## Check audited research documents and any affected index contract
 	node --test scripts/check-docs.test.mjs scripts/run-docs-check.test.mjs
@@ -422,7 +423,7 @@ check: ## Run the full application gate set (see CLAUDE.md for brochure-only sco
 	WITSELF_TEST_REQUIRE_PEAK_MEMORY=1 go test ./internal/store -run '^TestImportPeakMemory$$' -count=1 -v -timeout=15m
 	WITSELF_TEST_REQUIRE_PEAK_MEMORY=1 go test ./internal/export -run '^TestReadPeakMemory$$' -count=1 -v -timeout=15m
 	WITSELF_TEST_REQUIRE_PEAK_MEMORY=1 go test ./internal/store -run '^(TestImportEntryIndexBytes|TestImportStateMemoryPostgres)$$' -count=1 -v -timeout=40m
-	go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) run ./...
+	GOPROXY="file://$(shell go env GOMODCACHE)/cache/download,$(shell go env GOPROXY)" go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) run ./...
 	$(MAKE) govulncheck
 	$(MAKE) check-infra
 	@echo "check: all gates green"
@@ -433,7 +434,7 @@ check-infra: ## Gates for nested Pulumi plus the isolated Cloudflare Workers
 	cd infra/pulumi && go vet ./...
 	cd infra/pulumi && go build ./...
 	cd infra/pulumi && go test ./...
-	cd infra/pulumi && go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) run ./...
+	cd infra/pulumi && GOPROXY="file://$(shell go env GOMODCACHE)/cache/download,$(shell go env GOPROXY)" go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) run ./...
 	npm --prefix infra/cloudflare/agent-email test
 	npm --prefix infra/cloudflare/agent-email run bundle:check
 	npm --prefix infra/cloudflare/agent-email-send test
