@@ -147,10 +147,11 @@ func TestSyncCaptureTruncateStaleSnapshot(t *testing.T) {
 			}
 			if tc.existingControl {
 				if err := st.EnableSyncWriter(ctx, principal.AccountID, SyncPreferencesPrincipal, SyncPreferencesCapability); err != nil {
+					logSyncCaptureActivityTypes(t, st, syncCaptureActivityScope{account: principal.AccountID, expectedPID: tx.Conn().PgConn().PID()})
 					t.Fatal("capture truncate enable capability failed")
 				}
 			}
-			activateSyncFixture(t, st, principal.AccountID)
+			activateSyncFixture(t, st, principal.AccountID, syncFixtureActivation{expectedPID: tx.Conn().PgConn().PID()})
 			_, err = tx.Exec(ctx, `TRUNCATE agent_dashboard_preferences`)
 			captureRefusedSnapshot(t, err) // LC-S6C1 fix 2 (F6)
 			if err := tx.Rollback(ctx); err != nil {

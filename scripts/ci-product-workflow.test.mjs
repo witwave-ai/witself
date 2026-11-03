@@ -23,7 +23,7 @@ const workflows = JSON.parse(execFileSync('ruby', ['-rjson', '-ryaml', '-e', `
 `, ...files.map(file => `${root}.github/workflows/${file}`)], {encoding: 'utf8'}));
 
 const wrapperDependencies = {
-  go: ['go-rest', 'go-store', 'go-infra', 'localcell-windows', 'localcell-unix', 'postgres-backup-image', 'postgres-image-mirror', 'provider-contract-evidence', 'static-analysis'],
+  go: ['go-rest', 'go-store', 'go-capture-principals', 'go-infra', 'localcell-windows', 'localcell-unix', 'postgres-backup-image', 'postgres-image-mirror', 'provider-contract-evidence', 'static-analysis'],
   'release-config': ['release-config-full'],
   'homebrew-formula': ['homebrew-formula-full'],
   helm: ['helm-full'],
@@ -1195,3 +1195,41 @@ for (const [name, mutate] of mutations) {
     assert.throws(() => assertWorkflowContracts(changed));
   });
 }
+
+
+test('capture principal job owns its service and requires every executable principal proof', () => {
+  const ci = workflows['ci.yml'];
+  const job = ci.jobs['go-capture-principals'];
+  assert(job, 'Missing capture principal proof job');
+  needs(job, ['changes'], 'capture principal proof');
+  assert.equal(expression(job.if), "needs.changes.outputs.application == 'true'");
+  assert.equal(job['runs-on'], 'ubuntu-24.04');
+  assert.equal(job['timeout-minutes'], 35);
+  assert.deepEqual(job.permissions, {contents: 'read'});
+  assert.deepEqual(job.services, ci.jobs['go-store'].services);
+  assert.equal(job.env.GOTOOLCHAIN, 'local');
+  assert.equal(job.env.WITSELF_TEST_DISPOSABLE_CLUSTER, '1');
+  assert.equal(job.env.WITSELF_TEST_REQUIRE_DATABASE, '1');
+  assert.equal(job.env.WITSELF_TEST_DATABASE_URL, ci.jobs['go-store'].env.WITSELF_TEST_DATABASE_URL);
+  for (const prefix of ['actions/checkout@', 'actions/setup-go@', 'actions/setup-node@']) {
+    assert.equal(action(job, prefix, 'capture principal proof').uses, action(ci.jobs['go-store'], prefix, 'store proof').uses);
+  }
+  const commands = job.steps.filter(step => step.run);
+  assert.equal(commands.length, 3);
+  // CI round 2 on #875: with the module cache cold, `go: downloading …` from the go tool's stderr entered the
+  // merged proof stream and the checker rejected an otherwise all-pass run. Warm the cache first, in its own step.
+  assert.equal(commands[0].run, 'go mod download');
+  assert.equal(commands[0].shell, undefined);
+  assert.equal(commands[1].run, 'node --test scripts/ci-go-test-json-check.test.mjs');
+  assert.equal(commands[2].shell, 'bash');
+  assert.match(commands[2].run, /go test -json \.\/internal\/store -run 'SyncPrincipal' -count=1 -timeout=25m/);
+  assert.match(commands[2].run, /--package github\.com\/witwave-ai\/witself\/internal\/store --require TestSyncPrincipalSeparation,TestSyncPrincipalBypassDenied,TestSyncPrincipalDowngradeDenied,TestSyncPrincipalCapabilityRevocation,TestSyncPrincipalActivationTopology/);
+  assert.match(commands[2].run, /if \(\( go_exit != 0 \|\| parser_exit != 0 \)\); then exit 1; fi/);
+  for (const step of job.steps) {
+    assert.equal(step['continue-on-error'], undefined);
+    assert.equal(step.if, undefined);
+  }
+  assert.equal(job['continue-on-error'], undefined);
+  assert.equal(job.environment, undefined);
+  assert(!JSON.stringify(job).includes('secrets.'));
+});

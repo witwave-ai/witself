@@ -69,7 +69,7 @@ jobs:
   go:
     name: go
     if: ${{ always() }}
-    needs: [changes, website, docs, go-rest, go-store, go-infra, localcell-windows, localcell-unix, postgres-backup-image, postgres-image-mirror, provider-contract-evidence, static-analysis]
+    needs: [changes, website, docs, go-rest, go-store, go-capture-principals, go-infra, localcell-windows, localcell-unix, postgres-backup-image, postgres-image-mirror, provider-contract-evidence, static-analysis]
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -414,6 +414,58 @@ jobs:
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@v1.7.0
           govulncheck ./...
+
+  go-capture-principals:
+    needs: changes
+    if: needs.changes.outputs.application == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    permissions:
+      contents: read
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: witself
+          POSTGRES_PASSWORD: witself
+          POSTGRES_DB: witself
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U witself -d witself"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      GOTOOLCHAIN: local
+      WITSELF_TEST_DATABASE_URL: postgres://witself:witself@localhost:5432/witself?sslmode=disable
+      WITSELF_TEST_DISPOSABLE_CLUSTER: "1"
+      WITSELF_TEST_REQUIRE_DATABASE: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      - name: Warm the module cache so download notices never enter the proof stream
+        run: go mod download
+      - name: Test principal proof result checker
+        run: node --test scripts/ci-go-test-json-check.test.mjs
+      - name: Prove isolated capture principal topology and denials
+        shell: bash
+        run: |
+          proof_json="$RUNNER_TEMP/capture-principals.json"
+          go_exit=0
+          go test -json ./internal/store -run 'SyncPrincipal' -count=1 -timeout=25m > "$proof_json" 2>&1 || go_exit=$?
+          parser_exit=0
+          node scripts/ci-go-test-json-check.mjs --input "$proof_json" --diagnose --package github.com/witwave-ai/witself/internal/store --require TestSyncPrincipalSeparation,TestSyncPrincipalBypassDenied,TestSyncPrincipalDowngradeDenied,TestSyncPrincipalCapabilityRevocation,TestSyncPrincipalActivationTopology || parser_exit=$?
+          if (( go_exit != 0 || parser_exit != 0 )); then exit 1; fi
 
   go-store:
     needs: changes

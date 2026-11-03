@@ -37,9 +37,12 @@ func (s *Store) putDashboardPreferencesSync(ctx context.Context, p Principal, ca
 		return DashboardPreferences{}, syncCaptureError(err)
 	}
 	var active bool
-	err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM sync_writer_capabilities w
+	// The shared account gate prevents activation/revocation between this hint
+	// and admission. Only the protected function needs the locking control read;
+	// ordinary runtime roles cannot UPDATE control rows, even for FOR SHARE.
+	err = tx.QueryRow(ctx, `SELECT c.snapshot_id IS NOT NULL OR EXISTS(SELECT 1 FROM sync_writer_capabilities w
 		WHERE w.account_id=c.account_id AND w.enabled AND w.revoked_generation=0 AND w.capture_epoch=c.capture_epoch)
-		FROM sync_capture c WHERE c.account_id=$1 FOR SHARE`, p.AccountID).Scan(&active)
+		FROM sync_capture c WHERE c.account_id=$1`, p.AccountID).Scan(&active)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return DashboardPreferences{}, syncCaptureError(err)
 	}
@@ -50,7 +53,8 @@ func (s *Store) putDashboardPreferencesSync(ctx context.Context, p Principal, ca
 		PriorRevision string `json:"prior_revision"`
 	}{p.ID, p.RealmID, "absent"}
 	if active {
-		admitted, err = admitSyncTx(ctx, tx, p.AccountID, SyncPreferencesPrincipal, SyncPreferencesCapability)
+		admitted, err = admitSyncTxPath(ctx, tx, p.AccountID, SyncPreferencesPrincipal, SyncPreferencesCapability,
+			s.syncPrincipalTest != nil && s.syncPrincipalTest.functions)
 		if err != nil {
 			return DashboardPreferences{}, err
 		}
@@ -125,7 +129,12 @@ func (s *Store) putDashboardPreferencesSync(ctx context.Context, p Principal, ca
 			}
 		}
 	}
-	if err := tx.Commit(ctx); err != nil {
+	if admitted != nil {
+		err = admitted.Commit(ctx)
+	} else {
+		err = tx.Commit(ctx)
+	}
+	if err != nil {
 		return DashboardPreferences{}, syncCaptureError(err)
 	}
 	return out, nil

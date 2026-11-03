@@ -800,3 +800,86 @@ for (const mutation of [
     }
   });
 }
+
+const storePackage = 'github.com/witwave-ai/witself/internal/store';
+const principalTest = 'TestSyncPrincipalBypassDenied';
+
+test('explicit store package requires a complete non-skipped principal proof', async () => {
+  for (const [action, valid] of [['pass', true], ['skip', false], ['fail', false]]) {
+    const input = stream([event('start', storePackage), event('run', storePackage, principalTest),
+      event(action, storePackage, principalTest), event(action === 'fail' ? 'fail' : 'pass', storePackage)]);
+    const result = await checkGoTestJSON([input], [principalTest], {packageName: storePackage});
+    assert.equal(result.valid, valid);
+    assert.equal(result.lines[0], `package ${storePackage} pass=${Number(action === 'pass')} skip=${Number(action === 'skip')} fail=${Number(action === 'fail')}`);
+    const cli = spawnSync(process.execPath, [script, '--package', storePackage, '--require', principalTest], {input, encoding: 'utf8'});
+    assert.equal(cli.status, valid ? 0 : 1);
+  }
+});
+
+test('store package cannot widen default or native package coverage', async () => {
+  const input = stream(packageEvents(storePackage));
+  assert.equal((await checkGoTestJSON([input])).valid, false);
+  assert.equal((await checkGoTestJSON([input], ['TestFixture'])).valid, false);
+  assert.equal((await checkGoTestJSON([stream(passing)], ['TestFixture'], {packageName: storePackage})).valid, false);
+});
+
+test('explicit package rejects absent tests zero tests skipped children and unreviewed packages', async () => {
+  const options = {packageName: storePackage};
+  for (const events of [
+    [event('start', storePackage), event('pass', storePackage)],
+    packageEvents(storePackage),
+    [event('start', storePackage), event('run', storePackage, principalTest),
+      event('run', storePackage, `${principalTest}/case`), event('skip', storePackage, `${principalTest}/case`),
+      event('pass', storePackage, principalTest), event('pass', storePackage)],
+  ]) assert.equal((await checkGoTestJSON([stream(events)], [principalTest], options)).valid, false);
+  assert.equal((await checkGoTestJSON([stream(packageEvents(storePackage))], [], options)).valid, false);
+  assert.equal((await checkGoTestJSON([], [principalTest], {packageName: 'private-marker'})).valid, false);
+  for (const args of [
+    ['--package', storePackage],
+    ['--package', 'private-marker', '--require', principalTest],
+    ['--package', storePackage, '--package', storePackage, '--require', principalTest],
+    ['--package', '--require', principalTest],
+  ]) {
+    const result = spawnSync(process.execPath, [script, ...args], {input: '', encoding: 'utf8'});
+    assert.equal(result.status, 1);
+    assert.equal(result.stderr, 'FAIL: invalid Go test checker arguments\n');
+    assert.equal(result.stdout, '');
+  }
+});
+
+
+test('store proof classifies only reviewed cluster-helper fixed assertions', () => {
+  withDiagnosticSources(target => {
+    const directory = join(target, '..', '..', 'internal', 'testenv');
+    mkdirSync(directory, {recursive: true});
+    writeFileSync(join(directory, 'disposable_cluster.go'), `package testenv
+func DisposableCluster(t testing.TB) {
+ t.Fatal("disposable cluster create role failed")
+ t.Fatalf("disposable cluster setup failure: %s", privateValue)
+ t.Fatalf("private %s", privateValue)
+ t.Fatal("disposable cluster bad " + privateValue)
+ // t.Fatal("disposable cluster commented assertion")
+}
+`);
+    for (const [output, why] of [
+      ['disposable cluster create role failed', 'disposable cluster create role failed'],
+      ['disposable cluster setup failure: private-marker', 'disposable cluster setup failure'],
+      ['disposable cluster create role failed private-marker', '(unclassified)'],
+      ['private private-marker', '(unclassified)'],
+      ['disposable cluster bad private-marker', '(unclassified)'],
+      ['disposable cluster commented assertion', '(unclassified)'],
+    ]) {
+      const input = stream([event('start', storePackage), event('run', storePackage, principalTest),
+        event('output', storePackage, principalTest, {Output: `    disposable_cluster.go:12: ${output}\n`}),
+        event('fail', storePackage, principalTest), event('fail', storePackage)]);
+      assertFixture(target, {input, status: 1, stderr: failureDiagnostic,
+        args: ['--package', storePackage, '--require', principalTest],
+        output: `package ${storePackage} pass=0 skip=0 fail=1\nfail ${storePackage} ${principalTest}\nwhy ${storePackage} ${principalTest} :: ${why}\n`});
+    }
+    const native = stream([event('start', packages[0]), event('run', packages[0], principalTest),
+      event('output', packages[0], principalTest, {Output: '    disposable_cluster.go:12: disposable cluster create role failed\n'}),
+      event('fail', packages[0], principalTest), event('fail', packages[0])]);
+    assertFixture(target, {input: native, status: 1, stderr: failureDiagnostic, args: ['--require', principalTest],
+      output: `package ${packages[0]} pass=0 skip=0 fail=1\nfail ${packages[0]} ${principalTest}\nwhy ${packages[0]} ${principalTest} :: (unclassified)\n`});
+  });
+});

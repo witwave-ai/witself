@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/witwave-ai/witself/internal/loadquality"
+	"github.com/witwave-ai/witself/internal/testenv"
 )
 
 const (
@@ -56,6 +57,7 @@ func TestNarrativeMemoryRecallLoadPostgres(t *testing.T) {
 	if dsn == "" {
 		t.Fatal("WITSELF_TEST_DATABASE_URL is required when memory recall load testing is enabled")
 	}
+	dsn = testenv.GuardPostgresTransactions(t, dsn)
 	opts, err := loadquality.ParseRecallOptions(os.Getenv)
 	if err != nil {
 		t.Fatal(err)

@@ -4,7 +4,9 @@ import (
 	"bytes" // LC-S6C1 fix 3 (G1)
 	"context"
 	"errors"
-	"net"         // LC-S6C1 fix 3 (G1)
+	"net" // LC-S6C1 fix 3 (G1)
+	"regexp"
+	"strings"
 	"sync"        // LC-S6C1 fix 3 (G1)
 	"sync/atomic" // LC-S6C1 fix 3 (G1)
 	"testing"
@@ -15,38 +17,176 @@ import (
 	"github.com/witwave-ai/witself/internal/runtimeconfig"
 )
 
-// This diagnostic contains only bounded server metadata categories and counts;
-// never session IDs, transaction IDs, query text, principals or account values.
-func logSyncCaptureActivityTypes(t *testing.T, st *Store) {
+// Optional scope distinguishes the stale transaction deliberately held by a
+// test from an unrelated backend. It also applies the production horizon
+// predicate without logging account, backend or transaction identifiers.
+type syncCaptureActivityScope struct {
+	account     string
+	expectedPID uint32
+}
+
+// Diagnostics show bounded metadata and sanitized SQL structure only. Redaction
+// runs before truncation so the boundary cannot disclose part of a literal,
+// connection string, credential assignment, or long opaque token.
+func logSyncCaptureActivityTypes(t *testing.T, st *Store, scopes ...syncCaptureActivityScope) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	var scope syncCaptureActivityScope
+	if len(scopes) != 0 {
+		scope = scopes[0]
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	rows, err := st.pool.Query(ctx, `SELECT
+		coalesce(application_name,''),
 		CASE backend_type WHEN 'client backend' THEN 'client backend'
 		WHEN 'autovacuum worker' THEN 'autovacuum worker' WHEN 'autovacuum launcher' THEN 'autovacuum launcher'
-		WHEN 'parallel worker' THEN 'parallel worker' ELSE 'other' END AS backend_category,
+		WHEN 'parallel worker' THEN 'parallel worker' ELSE 'other' END,
 		CASE state WHEN 'active' THEN 'active' WHEN 'idle' THEN 'idle'
 		WHEN 'idle in transaction' THEN 'idle in transaction'
-		WHEN 'idle in transaction (aborted)' THEN 'idle in transaction (aborted)' ELSE 'other' END AS state_category,
-		count(*) FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid()
-		GROUP BY backend_category,state_category ORDER BY backend_category,state_category`)
+		WHEN 'idle in transaction (aborted)' THEN 'idle in transaction (aborted)' ELSE 'other' END,
+		CASE WHEN xact_start IS NULL THEN 'none'
+		WHEN clock_timestamp()-xact_start < interval '1 second' THEN 'under_1s'
+		WHEN clock_timestamp()-xact_start < interval '10 seconds' THEN '1s_to_10s'
+		WHEN clock_timestamp()-xact_start < interval '1 minute' THEN '10s_to_1m'
+		ELSE 'at_least_1m' END,
+		coalesce(query,''), pid=$2,
+		CASE WHEN $1='' THEN 'unscoped'
+		WHEN NOT EXISTS(SELECT 1 FROM accounts WHERE id=$1) THEN 'account_absent'
+		WHEN EXISTS(SELECT 1 FROM accounts account WHERE account.id=$1
+		AND ((activity.backend_xmin IS NOT NULL AND age(activity.backend_xmin)>=age(account.xmin)
+		AND (activity.backend_type IS NULL OR activity.backend_type NOT IN ('autovacuum worker','autovacuum launcher')))
+		OR (activity.usesysid IS DISTINCT FROM (SELECT oid FROM pg_roles WHERE rolname=current_user)
+		AND NOT (current_setting('is_superuser')='on' OR pg_has_role(current_user,'pg_read_all_stats','MEMBER')))))
+		THEN 'matches' ELSE 'clear' END
+		FROM pg_stat_activity activity WHERE datname=current_database() AND pid<>pg_backend_pid()
+		ORDER BY backend_type,state,application_name,pid`, scope.account, int64(scope.expectedPID))
 	if err != nil {
-		t.Log("capture activity category counts unavailable")
+		t.Log("capture activity diagnostics unavailable")
 		return
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var backend, state string
-		var count int
-		if rows.Scan(&backend, &state, &count) != nil {
-			t.Log("capture activity category counts unavailable")
+		var application, backend, state, age, query, horizon string
+		var expected bool
+		if rows.Scan(&application, &backend, &state, &age, &query, &expected, &horizon) != nil {
+			t.Log("capture activity diagnostics unavailable")
 			return
 		}
-		t.Logf("capture activity category backend=%s state=%s count=%d", backend, state, count)
+		t.Logf("capture activity application_name=%q backend=%s state=%s xact_age=%s horizon=%s expected_test_transaction=%t query_prefix=%q",
+			syncCaptureDiagnosticText(application, 63), backend, state, age, horizon, expected, syncCaptureDiagnosticText(query, 80))
 	}
 	if rows.Err() != nil {
-		t.Log("capture activity category counts unavailable")
+		t.Log("capture activity diagnostics unavailable")
 	}
+}
+
+var syncCaptureDiagnosticRedactions = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)(?:[a-z][a-z0-9+.-]*://)[^\s]+`),
+	regexp.MustCompile(`(?i)\b(?:password|passwd|token|secret|credential|authorization|api[_-]?key)\s*[:=]\s*[^\s,;]+`),
+	regexp.MustCompile(`(?i)\bbearer\s+[^\s,;]+`),
+	regexp.MustCompile(`[[:xdigit:]]{32,}`),
+	regexp.MustCompile(`[A-Za-z0-9_+/=-]{48,}`),
+}
+
+// Scan structural SQL forms before generic credential redaction. PostgreSQL
+// block comments nest and dollar delimiters must match exactly. Incomplete
+// quoted/comment forms consume the remaining input because activity text may
+// have been truncated by the server in the middle of a sensitive value.
+func syncCaptureDiagnosticSQL(text string) string {
+	var result strings.Builder
+	for offset := 0; offset < len(text); {
+		rest := text[offset:]
+		switch {
+		case strings.HasPrefix(rest, "--"):
+			end := strings.IndexAny(rest, "\r\n")
+			if end < 0 {
+				end = len(rest)
+			}
+			offset += end
+			result.WriteString("[redacted]")
+		case strings.HasPrefix(rest, "/*"):
+			end, depth := 2, 1
+			for end < len(rest) && depth != 0 {
+				switch {
+				case strings.HasPrefix(rest[end:], "/*"):
+					depth++
+					end += 2
+				case strings.HasPrefix(rest[end:], "*/"):
+					depth--
+					end += 2
+				default:
+					end++
+				}
+			}
+			offset += end
+			result.WriteString("[redacted]")
+		case rest[0] == '\'' || rest[0] == '"':
+			quote, end := rest[0], 1
+			for end < len(rest) {
+				if rest[end] == '\\' {
+					// Without the session's string-conformance setting a
+					// backslash makes later quote boundaries ambiguous. Hide
+					// the remainder instead of exposing a subsequent literal.
+					end = len(rest)
+					break
+				}
+				if rest[end] == quote {
+					end++
+					if end < len(rest) && rest[end] == quote {
+						end++
+						continue
+					}
+					break
+				}
+				end++
+			}
+			offset += end
+			result.WriteString("[redacted]")
+		case rest[0] == '$':
+			delimiterEnd := 1
+			for delimiterEnd < len(rest) && syncCaptureDiagnosticTagByte(rest[delimiterEnd]) {
+				delimiterEnd++
+			}
+			if delimiterEnd >= len(rest) || rest[delimiterEnd] != '$' {
+				result.WriteByte(rest[0])
+				offset++
+				continue
+			}
+			delimiterEnd++
+			delimiter := rest[:delimiterEnd]
+			end := strings.Index(rest[delimiterEnd:], delimiter)
+			if end < 0 {
+				offset = len(text)
+			} else {
+				offset += delimiterEnd + end + len(delimiter)
+			}
+			result.WriteString("[redacted]")
+		default:
+			result.WriteByte(rest[0])
+			offset++
+		}
+	}
+	return result.String()
+}
+
+func syncCaptureDiagnosticTagByte(character byte) bool {
+	// High bytes preserve non-ASCII PostgreSQL identifier tags. Accepting an
+	// initial digit conservatively redacts a few invalid SQL forms as well.
+	return character >= 0x80 || character == '_' || character >= 'a' && character <= 'z' ||
+		character >= 'A' && character <= 'Z' || character >= '0' && character <= '9'
+}
+
+func syncCaptureDiagnosticText(text string, limit int) string {
+	text = syncCaptureDiagnosticSQL(text)
+	for _, pattern := range syncCaptureDiagnosticRedactions {
+		text = pattern.ReplaceAllString(text, "[redacted]")
+	}
+	text = strings.Join(strings.Fields(text), " ")
+	characters := []rune(text)
+	if len(characters) > limit {
+		text = string(characters[:limit])
+	}
+	return text
 }
 
 func TestSyncCaptureRefusesSnapshotsBeforeAccount(t *testing.T) {
@@ -245,7 +385,7 @@ func TestSyncCaptureRefusalReleasesSessionGateBeforeTransportClose(t *testing.T)
 		wrappersMu.Unlock() // LC-S6C1 fix 3 (G1)
 		pool.Close()        // LC-S6C1 fix 3 (G1)
 	}) // LC-S6C1 fix 3 (G1)
-	activationStore := &Store{pool: pool}                                                              // LC-S6C1 fix 3 (G1)
+	activationStore := &Store{pool: pool, syncPrincipalTest: st.syncPrincipalTest}                     // LC-S6C1 fix 3 (G1)
 	if activationStore.SelectSyncCapture(runtimeconfig.Config{Local: true, SyncSchema: true}) != nil { // LC-S6C1 fix 3 (G1)
 		t.Fatal("G1cleanup06 capture selection failed") // LC-S6C1 fix 3 (G1)
 	} // LC-S6C1 fix 3 (G1)

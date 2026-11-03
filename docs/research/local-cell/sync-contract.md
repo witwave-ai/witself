@@ -470,8 +470,16 @@ connection, and reports only disabled, bootstrapping or suspended capture status
 ([activation](../../../internal/store/sync_capture_activation.go),
 [separate status](../../../internal/runtimeconfig/sync_status.go)). C1's
 [single-executable capability records](../../../internal/syncharness/capture_runtime_results.go)
-do not promote any H obligation; snapshot materialization, mixed binaries,
-principal enforcement and native recovery remain separate acceptance work.
+do not promote any H obligation. C2a adds the
+[typed principal preflight and activation topology refusal](../../../internal/store/sync_principals.go),
+[protected functions and ownership grants](../../../internal/store/sync_migrations/0003_sync_principals.sql)
+and [principal capability records](../../../internal/syncharness/principal_runtime_results.go).
+The disposable principal tests are separate from the owner-path regression
+matrix; a one-role installation remains migration-refused at 0003
+(`sync_principals_missing`) and activation-refused
+(`sync_principal_topology_unverified`). Snapshot
+materialization, mixed binaries, installer role conversion and native recovery
+remain separate acceptance work.
 
 ### Open items
 

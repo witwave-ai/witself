@@ -1,4 +1,12 @@
 // Package testenv centralizes opt-in test prerequisites.
+//
+// PostgreSQL transaction guards attribute connections per test process: the
+// package test binary and each child process it spawns have their own tag.
+// Connections opened from a DSN that did not pass through RequirePostgres or
+// GuardPostgresTransactions are not observed. A test that replaces application_name
+// on its own connections through a config copy, URL query, or SQL SET opts those
+// connections out of observation (GUARD-2). Same-process attribution retains
+// the transaction baseline, identity, and managed-generation rules.
 package testenv
 
 import (
@@ -19,7 +27,7 @@ func RequirePostgres(t testing.TB) string {
 	t.Helper()
 	dsn := os.Getenv(databaseURLEnv)
 	if dsn != "" {
-		return dsn
+		return GuardPostgresTransactions(t, dsn)
 	}
 	if os.Getenv(requireDatabaseEnv) == "1" {
 		t.Fatal("WITSELF_TEST_DATABASE_URL is not set (WITSELF_TEST_REQUIRE_DATABASE=1)")

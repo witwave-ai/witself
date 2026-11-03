@@ -364,6 +364,12 @@ var syncSchemaProjection = map[string]syncSchemaTable{
 		{name: "prior_finalized", ordinal: 11, dataType: "bigint", nullable: true, hasDefault: false,
 			fullType: "bigint", typeName: `"pg_catalog"."int8"`, typeMod: -1,
 			notNull: false, defaultExpr: ""},
+		{name: "database_principal", ordinal: 12, dataType: "text", nullable: false, hasDefault: true,
+			fullType: "text", typeName: `"pg_catalog"."text"`, typeMod: -1,
+			notNull: true, defaultExpr: "SESSION_USER"},
+		{name: "backend_pid", ordinal: 13, dataType: "integer", nullable: false, hasDefault: true,
+			fullType: "integer", typeName: `"pg_catalog"."int4"`, typeMod: -1,
+			notNull: true, defaultExpr: "pg_backend_pid()"},
 	}},
 	"sync_tx_touches": {"BASE TABLE", []syncSchemaColumn{
 		{name: "account_id", ordinal: 1, dataType: "text", nullable: false, hasDefault: false,

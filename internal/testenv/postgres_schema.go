@@ -150,7 +150,7 @@ func ValidateHarnessPostgresDSN(dsn string) error {
 		return errors.New("harness connection query is not allowed")
 	}
 	for key := range query {
-		if key != "sslmode" {
+		if key != "sslmode" && key != "application_name" {
 			return errors.New("harness connection override is not allowed")
 		}
 	}

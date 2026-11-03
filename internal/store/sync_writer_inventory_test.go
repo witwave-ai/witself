@@ -115,7 +115,7 @@ func TestSyncWriterInventoryGuardAndLockContract(t *testing.T) {
 	if strings.Contains(sql, "pg_advisory_xact_lock") {
 		t.Fatal("sync inventory guard illegally acquires gate")
 	}
-	if SyncSchemaVersion() != 2 {
+	if SyncSchemaVersion() != 3 {
 		t.Fatalf("sync inventory version coordinate: %d", SyncSchemaVersion())
 	}
 }

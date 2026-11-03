@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/witwave-ai/witself/internal/loadquality"
+	"github.com/witwave-ai/witself/internal/testenv"
 )
 
 const memoryRelevanceEnabled = "WITSELF_MEMORY_RELEVANCE"
@@ -37,6 +38,9 @@ func TestNarrativeMemoryRelevancePostgres(t *testing.T) {
 	started := time.Now().UTC()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
+	// The redacting migration reporter intentionally exposes no testing.TB;
+	// register before wrapping so this opt-in database fixture is guarded too.
+	dsn = testenv.GuardPostgresTransactions(t, dsn)
 	st, _ := newMemoryRelevanceTestStore(t, dsn)
 	if err := st.Migrate(); err != nil {
 		t.Fatal("migrate isolated relevance fixture")

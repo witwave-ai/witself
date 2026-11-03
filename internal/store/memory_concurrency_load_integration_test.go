@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/witwave-ai/witself/internal/loadquality"
+	"github.com/witwave-ai/witself/internal/testenv"
 )
 
 const (
@@ -106,6 +107,7 @@ func TestNarrativeMemoryConcurrencyLoadPostgres(t *testing.T) {
 	if dsn == "" {
 		t.Fatal("WITSELF_TEST_DATABASE_URL is required when memory concurrency load testing is enabled")
 	}
+	dsn = testenv.GuardPostgresTransactions(t, dsn)
 	opts, err := loadquality.ParseConcurrencyOptions(os.Getenv)
 	if err != nil {
 		t.Fatal(err)

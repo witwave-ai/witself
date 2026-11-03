@@ -162,7 +162,11 @@ func (s *Store) InstallSyncGuards(ctx context.Context) (retErr error) {
 	if err != nil || core != SchemaVersion() {
 		return ErrSyncSchemaStateInvalid
 	}
-	fsys, err := fs.Sub(syncMigrationsFS, "sync_migrations")
+	var migrationSource fs.FS = syncMigrationsFS
+	if s.syncPrincipalTest != nil && s.syncPrincipalTest.migrations != nil {
+		migrationSource = s.syncPrincipalTest.migrations
+	}
+	fsys, err := fs.Sub(migrationSource, "sync_migrations")
 	if err != nil {
 		return ErrSyncSchemaStateInvalid
 	}
@@ -176,6 +180,11 @@ func (s *Store) InstallSyncGuards(ctx context.Context) (retErr error) {
 		if err := migrationContextError(ctx, "verify"); err != nil {
 			return err
 		}
+		if current >= 2 && (s.syncPrincipalTest == nil || s.syncPrincipalTest.migrations == nil) {
+			if err := s.VerifySyncPrincipals(ctx); err != nil {
+				return err
+			}
+		}
 		_, err := provider.UpByOne(context.Background())
 		if errors.Is(err, goose.ErrNoNextVersion) {
 			break
@@ -183,6 +192,7 @@ func (s *Store) InstallSyncGuards(ctx context.Context) (retErr error) {
 		if err != nil {
 			return errors.New("apply sync migration failed")
 		}
+		current++
 	}
 	current, err = s.AppliedSyncSchemaVersion(ctx)
 	if err != nil {

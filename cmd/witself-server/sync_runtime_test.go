@@ -62,6 +62,16 @@ func TestServerLocalRuntimeSyncStartupPostgres(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			base := testenv.RequirePostgres(t)
 			fixture := testenv.NewPostgresSchema(t, base)
+			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+			defer cancel()
+			db, err := pgx.Connect(ctx, fixture.DSN())
+			if err != nil {
+				t.Fatal("open startup schema observer failed")
+			}
+			defer func() { _ = db.Close(ctx) }()
+			if mode == "sync" && testenv.EnsureSyncPrincipalRoles(ctx, db, store.SyncPrincipalRoleNames()...) != nil {
+				t.Fatal("sync startup principal fixture provisioning failed")
+			}
 			clearServerRuntimeEnvironment(t)
 			// Exercise the real serve path without consulting any token file.
 			t.Setenv("WITSELF_BOOTSTRAP_TOKEN", "local-sync-startup-fixture-token")
@@ -142,13 +152,12 @@ func TestServerLocalRuntimeSyncStartupPostgres(t *testing.T) {
 			if status != 0 || coreCalls != 1 || syncCalls != wantSyncCalls || listeners != 1 {
 				t.Fatal("production startup migration/listener ordering failed")
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-			defer cancel()
-			db, err := pgx.Connect(ctx, fixture.DSN())
-			if err != nil {
-				t.Fatal("open startup schema observer failed")
+			if mode == "sync" {
+				var version int
+				if db.QueryRow(ctx, `SELECT max(version_id) FROM witself_sync_schema_version WHERE is_applied`).Scan(&version) != nil || version != 3 {
+					t.Fatal("sync startup fixture did not install schema 3")
+				}
 			}
-			defer func() { _ = db.Close(ctx) }()
 			var tables int
 			if err := db.QueryRow(ctx, `SELECT count(*) FROM pg_tables WHERE schemaname=current_schema() AND left(tablename,5)='sync_'`).Scan(&tables); err != nil {
 				t.Fatal("read startup table inventory failed")

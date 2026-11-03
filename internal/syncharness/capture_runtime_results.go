@@ -37,7 +37,10 @@ func captureRuntimeRecord(testName string) (RuntimeResultRecord, int, bool) {
 
 func expectedRuntimeRecord(r RuntimeResultRecord) (RuntimeResultRecord, int, bool) {
 	if r.Adapter.Package == "store" {
-		return captureRuntimeRecord(r.Adapter.Symbol)
+		if expected, checks, ok := captureRuntimeRecord(r.Adapter.Symbol); ok {
+			return expected, checks, true
+		}
+		return principalRuntimeRecord(r.Adapter.Symbol)
 	}
 	return fixtureRuntimeRecord(r.Obligation)
 }
