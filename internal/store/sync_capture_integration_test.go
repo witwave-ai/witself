@@ -19,6 +19,22 @@ import (
 
 func newSyncCaptureFixture(t *testing.T, active bool) (*Store, Principal) {
 	t.Helper()
+	st, p, work := seedSyncCaptureFixture(t, nil)
+	if _, failure := retrySyncCaptureFixtureAdmission(context.Background(), st, p.AccountID, false, work, t.Logf); failure != "" {
+		logSyncCaptureActivityTypes(t, st)
+		t.Fatal(failure)
+	}
+	if active {
+		activateSyncFixture(t, st, p.AccountID, work)
+	}
+	return st, p
+}
+
+// beforeSeed lets the retry proof pin a snapshot after migrations, but before
+// the account exists. Migrations must not run behind that retained snapshot.
+func seedSyncCaptureFixture(t *testing.T, beforeSeed func(*Store)) (*Store, Principal, time.Duration) {
+	t.Helper()
+	started := time.Now()
 	st, _ := newSyncSchemaTestStore(t)
 	ctx := context.Background()
 	if err := st.MigrateSync(ctx); err != nil {
@@ -26,6 +42,9 @@ func newSyncCaptureFixture(t *testing.T, active bool) (*Store, Principal) {
 	}
 	if err := st.SelectSyncCapture(runtimeconfig.Config{Local: true, SyncSchema: true}); err != nil {
 		t.Fatal("capture fixture selection failed")
+	}
+	if beforeSeed != nil {
+		beforeSeed(st)
 	}
 	p := Principal{Kind: PrincipalAgent, AccountID: "capture_account", RealmID: "capture_realm", ID: "capture_agent", AccountStatus: "active"}
 	for _, sql := range []string{
@@ -38,23 +57,20 @@ func newSyncCaptureFixture(t *testing.T, active bool) (*Store, Principal) {
 			t.Fatalf("capture fixture seed SQLSTATE %s", syncTestSQLState(err))
 		}
 	}
-	if err := st.EnableSyncWriter(ctx, p.AccountID, SyncPreferencesPrincipal, SyncPreferencesCapability); err != nil {
-		logSyncCaptureActivityTypes(t, st)
-		t.Fatal("capture fixture capability failed")
-	}
-	if active {
-		activateSyncFixture(t, st, p.AccountID)
-	}
-	return st, p
+	return st, p, time.Since(started)
 }
 
-func activateSyncFixture(t *testing.T, st *Store, account string) {
+func activateSyncFixture(t *testing.T, st *Store, account string, seedWork ...time.Duration) {
 	t.Helper()
 	ctx := context.Background()
-	a, err := st.ActivateSyncCapture(ctx, account, SyncCaptureOptions{LifecycleEpoch: 1, RestoreMarker: bytes.Repeat([]byte{1}, 16), Capability: SyncPreferencesCapability})
-	if err != nil {
+	var work time.Duration
+	if len(seedWork) != 0 {
+		work = seedWork[0]
+	}
+	a, failure := retrySyncCaptureFixtureAdmission(ctx, st, account, true, work, t.Logf)
+	if failure != "" {
 		logSyncCaptureActivityTypes(t, st)
-		t.Fatal("capture fixture activation failed")
+		t.Fatal(failure)
 	}
 	defer a.Close()
 	p, err := a.PinSnapshot(ctx)
