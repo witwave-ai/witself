@@ -4,14 +4,12 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"io/fs"
 	"os"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn" // LC-S6C1 fix 1 (F6)
-	"github.com/pressly/goose/v3"
 	"github.com/witwave-ai/witself/internal/runtimeconfig"
 	"github.com/witwave-ai/witself/internal/syncharness"
 	"github.com/witwave-ai/witself/internal/testenv"
@@ -111,22 +109,7 @@ func capturePoll(t *testing.T, st *Store, query string, args ...any) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	ticker := time.NewTicker(10 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		var ok bool
-		if st.pool.QueryRow(ctx, query, args...).Scan(&ok) != nil {
-			t.Fatal("capture lock observation failed")
-		}
-		if ok {
-			return
-		}
-		select {
-		case <-ctx.Done():
-			t.Fatal("capture lock observation timed out")
-		case <-ticker.C:
-		}
-	}
+	captureObserve(ctx, t, capturePoolQuery(st, query, args...))
 }
 
 func captureRefusedSQL(t *testing.T, err error) { // LC-S6C1 fix 2 (F6)
@@ -190,73 +173,11 @@ func TestSyncCaptureError(t *testing.T) { // LC-S6C1 fix 2 (F6)
 } // LC-S6C1 fix 2 (F6)
 
 func TestSyncCaptureInstallationDrain(t *testing.T) {
-	_ = testenv.RequirePostgres(t) // Skip the whole adapter before any subcase or evidence record.
+	_ = testenv.RequirePostgres(t)
 	completed := 0
 	for _, commit := range []bool{true, false} {
 		t.Run(map[bool]string{true: "commit", false: "rollback"}[commit], func(t *testing.T) {
-			ctx := context.Background()
-			st, dsn := newSyncSchemaTestStore(t)
-			db := migrationTestSQLDB(t, dsn)
-			defer func() { _ = db.Close() }()
-			fsys, err := fs.Sub(syncMigrationsFS, "sync_migrations")
-			if err != nil {
-				t.Fatal("capture drain namespace failed")
-			}
-			provider, err := goose.NewProvider(goose.DialectPostgres, db, fsys, goose.WithTableName(syncSchemaVersionTable), goose.WithDisableGlobalRegistry(true))
-			if err != nil {
-				t.Fatal("capture drain provider failed")
-			}
-			if _, err = provider.UpTo(ctx, 1); err != nil {
-				t.Fatal("capture drain base sync failed")
-			}
-			tx, err := st.pool.Begin(ctx)
-			if err != nil {
-				t.Fatal("capture drain begin failed")
-			}
-			defer func() { _ = tx.Rollback(ctx) }()
-			if _, err = tx.Exec(ctx, `INSERT INTO accounts(id,display_name,is_default) VALUES('drain_account','drain',false)`); err != nil {
-				t.Fatal("capture drain write failed")
-			}
-			var pid uint32
-			if tx.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&pid) != nil {
-				t.Fatal("capture drain backend failed")
-			}
-			result := make(chan error, 1)
-			go func() { result <- st.InstallSyncGuards(ctx) }()
-			capturePoll(t, st, `SELECT EXISTS(SELECT 1 FROM pg_locks w JOIN pg_locks h ON h.relation=w.relation WHERE w.relation='accounts'::regclass AND w.mode='AccessExclusiveLock' AND NOT w.granted AND h.granted AND h.pid=$1 AND h.mode='RowExclusiveLock')`, pid)
-			t.Log("capture observed installation relation wait on accounts")
-			if commit {
-				err = tx.Commit(ctx)
-			} else {
-				err = tx.Rollback(ctx)
-			}
-			if err != nil {
-				t.Fatal("capture drain release failed")
-			}
-			select {
-			case err = <-result:
-				if err != nil {
-					t.Fatal("capture drain install failed")
-				}
-			case <-time.After(15 * time.Second):
-				t.Fatal("capture drain completion timed out")
-			}
-			if validateInstalledSyncWriterInventory(ctx, st) != nil {
-				t.Fatal("capture drain installed guard inventory failed")
-			}
-			var found bool
-			if st.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM accounts WHERE id='drain_account')`).Scan(&found) != nil || found != commit {
-				t.Fatal("capture drain visibility differs")
-			}
-			var prepared int
-			if st.pool.QueryRow(ctx, `SELECT current_setting('max_prepared_transactions')::integer`).Scan(&prepared) != nil {
-				t.Fatal("capture prepared setting failed")
-			}
-			if prepared == 0 {
-				t.Log("NOT RUN prepared_transactions: max_prepared_transactions=0")
-			} else {
-				t.Fatal("capture prepared case needs isolated owner execution")
-			}
+			runCaptureInstallationDrain(t, commit, false)
 			completed++
 		})
 	}
