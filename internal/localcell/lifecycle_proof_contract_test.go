@@ -103,13 +103,13 @@ func realLifecycleProofContract(sources map[string][]byte) error {
 			buildIndex = index
 		}
 	}
-	if buildIndex < 0 || !lifecycleProofDirectCall(lifecycleProofBody(functions["buildRealComponents"]), "requirePostgres16(t, pgbin)") {
+	if buildIndex < 0 || !lifecycleProofDirectCall(lifecycleProofBody(functions["buildRealComponentsContext"]), "requirePostgres16(t, pgbin, ctx)") {
 		return errors.New("real lifecycle scenarios lost the shared PostgreSQL 16 preflight")
 	}
 	if lifecycleProofFailureBranch(lifecycleProofBody(functions["requirePostgres16"]), "!postgres16Version.Match(bytes.TrimSpace(output))") < 0 {
 		return errors.New("PostgreSQL executable-major preflight lost its terminating guard")
 	}
-	if !lifecycleProofStoppedWitness(lifecycleProofBody(functions["disposableCell"])) {
+	if !lifecycleProofStoppedWitness(lifecycleProofBody(functions["disposableCellWithCleanup"])) {
 		return errors.New("real lifecycle cleanup lost its deferred stopped-process witness")
 	}
 
@@ -383,7 +383,7 @@ func TestRealLifecycleProofContractMutations(t *testing.T) {
 		sources[name] = data
 	}
 	for _, mutation := range []struct{ name, file, from, to string }{
-		{"M6-executable-major-call", "lifecycle_integration_test.go", "requirePostgres16(t, pgbin)", "// requirePostgres16(t, pgbin)"},
+		{"M6-executable-major-call", "lifecycle_integration_test.go", "requirePostgres16(t, pgbin, ctx)", "// requirePostgres16(t, pgbin, ctx)"},
 		{"M6-manifest-major-branch", "lifecycle_proof_test.go", "!postgres16Version.MatchString(manifest.PostgreSQLVersion)", "false"},
 		{"M6-sql-major-predicate", "lifecycle_proof_test.go", " || version/10000 != 16", ""},
 		{"M7-install-unicode-call", "lifecycle_integration_test.go", "assertPostgresEncodingAndUnicode(t, root, manifest)", "// assertPostgresEncodingAndUnicode(t, root, manifest)"},

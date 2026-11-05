@@ -162,7 +162,7 @@ func ownerReceiptInstall(t *testing.T, cell *localcell.Cell, root, host string, 
 		t.Fatal("cannot register receipt user service")
 	}
 	registeredAt := time.Now().UTC()
-	waitServiceReady(t, cell)
+	waitServiceReadyAfter(t.Context(), t, cell, time.Now(), 0)
 	before := nativeServiceProcess(t, root)
 	manifest := ownerReceiptManifest(t, cell)
 	bearer, operatorID := ownerReceiptWriteWitness(t, root, manifest)

@@ -45,6 +45,11 @@ func postgresBinariesPresent(directory string) bool {
 
 func buildRealComponents(t *testing.T, pgbin string) localcell.Binaries {
 	t.Helper()
+	return buildRealComponentsContext(t.Context(), t, pgbin)
+}
+
+func buildRealComponentsContext(ctx context.Context, t *testing.T, pgbin string) localcell.Binaries {
+	t.Helper()
 	if pgbin == "" {
 		_, _ = fmt.Fprintf(os.Stderr, "NOT RUN %s: no PostgreSQL binaries\n", t.Name())
 		t.Skip("no PostgreSQL binaries")
@@ -52,7 +57,7 @@ func buildRealComponents(t *testing.T, pgbin string) localcell.Binaries {
 	if !postgresBinariesPresent(pgbin) {
 		t.Fatal("configured PostgreSQL distribution is incomplete")
 	}
-	requirePostgres16(t, pgbin)
+	requirePostgres16(t, pgbin, ctx)
 	buildDir := t.TempDir()
 	source, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
@@ -64,7 +69,7 @@ func buildRealComponents(t *testing.T, pgbin string) localcell.Binaries {
 		path *string
 	}{{"witself-server", &binaries.Server}, {"witself-worker", &binaries.Worker}} {
 		*component.path = filepath.Join(buildDir, lifecycleExecutableName(component.name))
-		cmd := offlineBuildCommand(t.Context(), "build", "-o", *component.path, "./cmd/"+component.name)
+		cmd := offlineBuildCommand(ctx, "build", "-o", *component.path, "./cmd/"+component.name)
 		cmd.Dir = source
 		cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
 		if err := cmd.Run(); err != nil {
@@ -76,11 +81,19 @@ func buildRealComponents(t *testing.T, pgbin string) localcell.Binaries {
 
 func offlineBuildCommand(ctx context.Context, args ...string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, "go", args...)
+	cmd.WaitDelay = time.Second
 	cmd.Env = append(os.Environ(), "GOPROXY=off", "GOSUMDB=off", "GOTOOLCHAIN=local")
 	return cmd
 }
 
-func disposableCell(t *testing.T, binaries localcell.Binaries, failpoint func(string, string) error) (*localcell.Cell, string) {
+func disposableCell(t *testing.T, binaries localcell.Binaries, failpoint func(string, string) error, configure ...func(*localcell.Config)) (*localcell.Cell, string) {
+	t.Helper()
+	return disposableCellWithCleanup(t, binaries, failpoint, nil, configure...)
+}
+
+// Host removal and cell recovery share one cleanup parent; neither can obtain
+// a fresh reserve after the other has consumed it.
+func disposableCellWithCleanup(t *testing.T, binaries localcell.Binaries, failpoint func(string, string) error, beforeCleanup func(context.Context) error, configure ...func(*localcell.Config)) (*localcell.Cell, string) {
 	t.Helper()
 	root := shortLifecycleRoot(t)
 	witness := newLifecycleProcessWitness(t, root)
@@ -91,7 +104,11 @@ func disposableCell(t *testing.T, binaries localcell.Binaries, failpoint func(st
 		}
 		return nil
 	}
-	cell, err := localcell.New(localcell.Config{Root: root, Binaries: binaries, Timeout: 60 * time.Second, Failpoint: observe})
+	config := localcell.Config{Root: root, Binaries: binaries, Timeout: 60 * time.Second, Failpoint: observe}
+	for _, option := range configure {
+		option(&config)
+	}
+	cell, err := localcell.New(config)
 	if err != nil {
 		_ = os.RemoveAll(root)
 		t.Fatalf("construct cell: %v", err)
@@ -99,8 +116,13 @@ func disposableCell(t *testing.T, binaries localcell.Binaries, failpoint func(st
 	t.Cleanup(func() {
 		witness.capture(t)
 		defer witness.assertStopped(t)
-		ctx, cancel := context.WithTimeout(context.Background(), 75*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), nativeServiceCleanupReserve)
 		defer cancel()
+		if beforeCleanup != nil {
+			if err := beforeCleanup(ctx); err != nil {
+				t.Error("native service cleanup failed")
+			}
+		}
 		cleanupCell, newErr := localcell.New(localcell.Config{Root: root, Binaries: binaries, Timeout: 30 * time.Second})
 		if newErr != nil {
 			t.Error("cannot construct cleanup cell")
@@ -325,18 +347,18 @@ func main() {
 	assertStopped(t, cell)
 }
 
-func assertReady(t *testing.T, cell *localcell.Cell) *localcell.Manifest {
+func assertReady(t *testing.T, cell *localcell.Cell, parents ...context.Context) *localcell.Manifest {
 	t.Helper()
-	status, err := cell.Status(t.Context())
+	status, err := cell.Status(lifecycleProofContext(t, parents))
 	if err != nil || !status.ServerReady || !status.WorkerReady || status.Manifest == nil {
 		t.Fatal("both local readiness endpoints must be ready when start returns")
 	}
 	return status.Manifest
 }
 
-func assertStopped(t *testing.T, cell *localcell.Cell) {
+func assertStopped(t *testing.T, cell *localcell.Cell, parents ...context.Context) {
 	t.Helper()
-	inspection, err := cell.Inspect(t.Context())
+	inspection, err := cell.Inspect(lifecycleProofContext(t, parents))
 	if err != nil {
 		t.Fatalf("inspect stopped cell: %v", err)
 	}

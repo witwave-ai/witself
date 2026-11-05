@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strconv"
@@ -154,7 +155,7 @@ func TestNativeServiceLaunchdFailureDiagnostics(t *testing.T) {
 			t.Error("launchd diagnostic would lose CI source prefixes")
 		}
 		fmt.Fprintln(&logged, line)
-	}, root, home, label, errors.New("fixture failure "+root+" "+standardToken), nil, run)
+	}, root, home, label, errors.New("fixture failure "+root+" "+standardToken), nil, nil, run)
 	want := [][]string{{"launchctl", "print", "gui/501/" + label}, {"launchctl", "print", "gui/501"}, {"child-capability"}}
 	if !reflect.DeepEqual(commands, want) {
 		t.Fatal("launchd diagnostics did not query exactly the service, gui domain and fresh child")
@@ -176,3 +177,9 @@ func TestNativeServiceLaunchdFailureDiagnostics(t *testing.T) {
 		}
 	}
 }
+
+func nativeServicePrepareForegroundCommand(*exec.Cmd)            {}
+func nativeServiceInterruptForeground(process *os.Process) error { return process.Signal(os.Interrupt) }
+func nativeServicePlatformCapabilityDiagnostic() []byte          { return nil }
+
+func nativeServiceEndpointClosureProof(*testing.T, string) func() { return func() {} }

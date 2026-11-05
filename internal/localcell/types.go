@@ -3,6 +3,7 @@ package localcell
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -109,9 +110,13 @@ type Status struct {
 
 // Cell is a handle, not a daemon. Every operation rereads its durable state.
 type Cell struct {
-	cfg        Config
-	childrenMu sync.Mutex
-	children   map[string]*childObservation
+	// Only an explicitly started Windows control host populates this state.
+	serviceControlMu       sync.Mutex
+	serviceControlOwned    *serviceControlEndpointRecord
+	serviceControlListener net.Listener //nolint:unused // Windows owns listener lifetime; Unix has no endpoint record.
+	cfg                    Config
+	childrenMu             sync.Mutex
+	children               map[string]*childObservation
 	// Test failpoint between releasing an allocation and probing it. Nil in production.
 	afterPortAllocation func(Ports)
 	// Test observers scoped to interrupted PostgreSQL recovery. Nil in production.

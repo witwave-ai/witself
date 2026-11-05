@@ -68,7 +68,7 @@ func serviceAdapterKind(goos string) (string, error) {
 	}
 }
 
-func runServiceCommandForGOOS(ctx context.Context, args []string, out io.Writer, goos string) error {
+func runServiceCommandForGOOS(ctx context.Context, args []string, out io.Writer, goos string) (result error) {
 	if os.Getenv("WITSELF_RUNTIME") != "local" {
 		return errors.New("localcellharness: service commands require explicit local runtime selection")
 	}
@@ -93,10 +93,17 @@ func runServiceCommandForGOOS(ctx context.Context, args []string, out io.Writer,
 			return err
 		}
 	}
+	site := "host_config"
+	defer func() {
+		if action != "install" && action != "remove" {
+			localcell.WriteServiceHostFailure(os.Stderr, result, site)
+		}
+	}()
 	cell, err := localcell.New(values.config())
 	if err != nil {
 		return err
 	}
+	site = "host_descriptor"
 	descriptor, descriptorErr := cell.ServiceDescriptor()
 	if descriptorErr != nil {
 		if !errors.Is(descriptorErr, os.ErrNotExist) || (action != "run" && action != "install") {
@@ -114,6 +121,7 @@ func runServiceCommandForGOOS(ctx context.Context, args []string, out io.Writer,
 			return errors.New("localcellharness: cannot resolve service host")
 		}
 		descriptor = localcell.ServiceDescriptor{Adapter: selectedAdapter, Scope: "user", Runtime: "local", DesiredState: "running", ResourceProfile: "unconfigured", Payload: localcell.ServicePayload{Host: host, Args: values.hostArgs()}}
+		site = "host_prepare"
 		if err := cell.PrepareService(ctx, descriptor); err != nil {
 			return err
 		}
@@ -138,13 +146,16 @@ func runServiceCommandForGOOS(ctx context.Context, args []string, out io.Writer,
 		return errors.New("localcellharness: service payload change refused")
 	}
 	persisted.root = descriptor.Root
+	site = "host_persisted_config"
 	cell, err = localcell.New(persisted.config())
 	if err != nil {
 		return err
 	}
 	if action == "run" {
+		site = "control_transport"
 		return cell.Run(ctx, localcell.SupervisorPolicy{})
 	}
+	site = "control_transport"
 	adapter := localcell.NewServiceAdapter()
 	switch action {
 	case "install":

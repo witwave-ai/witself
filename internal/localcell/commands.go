@@ -317,7 +317,10 @@ func (c *Cell) startChild(m *Manifest, component string) error {
 		return errors.New("cannot inspect local cell component log")
 	}
 	c.beginChildObservation(component, info.Size())
-	return c.launchChild(binary, component, environment, log)
+	if err := c.launchChild(binary, component, environment, log); err != nil {
+		return err
+	}
+	return c.bindServiceProcessBoot(component)
 }
 
 func ready(ctx context.Context, client *http.Client, port int) bool {

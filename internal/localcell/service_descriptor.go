@@ -196,7 +196,8 @@ func (c *Cell) serviceControlSecret() (string, error) {
 
 // Descriptor publication is an acknowledged journaled transition. The pending
 // record is replayed conservatively before any launch; it cannot relax a fence.
-func (c *Cell) writeServiceDescriptor(d ServiceDescriptor) error {
+func (c *Cell) writeServiceDescriptor(d ServiceDescriptor) (result error) {
+	defer func() { result = serviceFailureFallback(result, "descriptor_write") }()
 	if err := writeAtomic(c.path("service", "transition.json"), d, nil); err != nil {
 		return err
 	}
@@ -206,7 +207,10 @@ func (c *Cell) writeServiceDescriptor(d ServiceDescriptor) error {
 	if err := removePrivateFile(c.path("service", "transition.json")); err != nil {
 		return err
 	}
-	return syncDirectory(c.path("service"))
+	if err := syncDirectory(c.path("service")); err != nil {
+		return err
+	}
+	return c.refreshOwnedServiceControlEndpoint(d)
 }
 
 func (c *Cell) serviceStartFence() error {
