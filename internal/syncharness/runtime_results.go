@@ -151,6 +151,7 @@ func (r RuntimeResultRecord) Validate(manifests []ObligationManifest) error {
 			known = slices.Contains(m.MissingCapabilities, r.Capability) || slices.ContainsFunc(completedModelCapabilities[:], func(pair runtimeCapabilityPair) bool {
 				return pair.Obligation == m.ID && pair.Capability == r.Capability
 			})
+			known = known || principalRuntimeCapability(m.ID, r.Capability)
 			if r.Capability == "runtime_schedule_adapter" {
 				known = slices.ContainsFunc(CoverageSchedules(), func(s CoverageSchedule) bool { return s.ID == m.ID })
 			}
@@ -160,6 +161,9 @@ func (r RuntimeResultRecord) Validate(manifests []ObligationManifest) error {
 		return ErrRuntimeResult
 	}
 	if r.Outcome == NotRun || r.Outcome == UnsupportedScope {
+		if principalRuntimeCapability(r.Obligation, r.Capability) && r.Reason != principalRuntimePendingReason(r.Capability) {
+			return ErrRuntimeResult
+		}
 		if r.MissingCapability != r.Capability || r.EvidenceClass != "" || r.Adapter != (RuntimeAdapterSymbol{}) || r.Artifact != "" || r.Executable != "" || r.DatabaseClass != "" || r.PlatformClass != "" {
 			return ErrRuntimeResult
 		}

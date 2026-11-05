@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/witwave-ai/witself/internal/loadquality"
+	"github.com/witwave-ai/witself/internal/testenv"
 )
 
 const memoryLoadQualityEnabled = "WITSELF_MEMORY_LOAD_QUALITY"
@@ -30,6 +31,7 @@ func TestNarrativeMemoryLoadQualityPostgres(t *testing.T) {
 	if dsn == "" {
 		t.Fatal("WITSELF_TEST_DATABASE_URL is required when memory load-quality testing is enabled")
 	}
+	dsn = testenv.GuardPostgresTransactions(t, dsn)
 	opts, err := loadquality.ParseOptions(os.Getenv)
 	if err != nil {
 		t.Fatal(err)

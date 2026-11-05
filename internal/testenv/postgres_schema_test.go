@@ -43,6 +43,23 @@ func TestPostgresSchemaDSNPreservesOptionsAndOverridesSearchPath(t *testing.T) {
 
 func TestValidateHarnessPostgresDSN(t *testing.T) {
 	const base = "postgres://postgres:test@127.0.0.1:5599/"
+	for _, tc := range []struct{ name, label string }{
+		{"application_name process tag", "witself-test-1-synthetic"},
+		{"application_name other label", "other-label"},
+	} {
+		for _, guard := range []string{"", "codex_b"} {
+			mode := "unguarded"
+			if guard != "" {
+				mode = "guarded"
+			}
+			t.Run(tc.name+"/"+mode, func(t *testing.T) {
+				t.Setenv("WITSELF_SYNC_HARNESS_DB", guard)
+				if err := ValidateHarnessPostgresDSN(base + "codex_b?sslmode=disable&application_name=" + tc.label); err != nil {
+					t.Fatal("local test database with application_name refused")
+				}
+			})
+		}
+	}
 	for _, database := range []string{"gate_a", "witself", "codex_b", "fixture_without_allowlist"} {
 		t.Run("unguarded/"+database, func(t *testing.T) {
 			t.Setenv("WITSELF_SYNC_HARNESS_DB", "")
@@ -76,6 +93,7 @@ func TestValidateHarnessPostgresDSN(t *testing.T) {
 		{"guard mismatch", base + "codex_a?sslmode=disable", "codex_b"},
 		{"remote", "postgres://fixture:synthetic@db.example:5599/codex_b?sslmode=disable", ""},
 		{"host override", base + "codex_b?sslmode=disable&host=db.example", ""},
+		{"application_name host override", base + "codex_b?sslmode=disable&application_name=witself-test-1-synthetic&host=localhost", "codex_b"},
 		{"database override", base + "codex_b?sslmode=disable&dbname=postgres", ""},
 		{"startup override", base + "codex_b?sslmode=disable&options=-csearch_path%3Dpublic", ""},
 		{"malformed query", base + "codex_b?sslmode=disable&host=db.example;", ""},
@@ -84,6 +102,7 @@ func TestValidateHarnessPostgresDSN(t *testing.T) {
 		{"missing database", base + "?sslmode=disable", ""},
 		{"fragment", base + "codex_b?sslmode=disable#fragment", ""},
 		{"keyword", "host=127.0.0.1 port=5599 dbname=codex_b sslmode=disable", "codex_b"},
+		{"application_name keyword", "host=127.0.0.1 port=5599 dbname=codex_b sslmode=disable application_name=witself-test-1-synthetic", "codex_b"},
 		{"malformed", "postgres://fixture:synthetic@%", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -91,6 +110,9 @@ func TestValidateHarnessPostgresDSN(t *testing.T) {
 			err := ValidateHarnessPostgresDSN(tc.dsn)
 			if err == nil {
 				t.Fatal("unsafe fixture accepted")
+			}
+			if tc.name == "application_name host override" && err.Error() != "harness connection override is not allowed" {
+				t.Fatal("connection override refusal changed")
 			}
 			if strings.Contains(err.Error(), "synthetic") || strings.Contains(err.Error(), tc.dsn) {
 				t.Fatal("fixture error disclosed connection data")

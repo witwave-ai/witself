@@ -21,6 +21,7 @@ import (
 
 	archiveexport "github.com/witwave-ai/witself/internal/export"
 	"github.com/witwave-ai/witself/internal/loadquality"
+	"github.com/witwave-ai/witself/internal/testenv"
 )
 
 const (
@@ -115,6 +116,7 @@ func TestNarrativeMemoryArchiveLoadPostgres(t *testing.T) {
 	if dsn == "" {
 		t.Fatal("WITSELF_TEST_DATABASE_URL is required when memory archive load testing is enabled")
 	}
+	dsn = testenv.GuardPostgresTransactions(t, dsn)
 	switch os.Getenv("WITSELF_MEMORY_ARCHIVE_LOAD_PROFILE") {
 	case "", "ladder":
 	case "founder":

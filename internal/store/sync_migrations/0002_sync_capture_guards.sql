@@ -791,6 +791,11 @@ CREATE TRIGGER sync_writer_truncate BEFORE TRUNCATE ON vault_key_rotation_receip
 -- +goose Down
 -- +goose StatementBegin
 DO $$ BEGIN
+ IF NOT EXISTS (SELECT 1 FROM pg_class c JOIN pg_roles r ON r.oid=c.relowner
+   WHERE c.oid='sync_capture'::regclass AND r.rolname=current_user)
+   AND current_setting('is_superuser')<>'on' THEN
+  RAISE EXCEPTION 'sync schema downgrade permission denied' USING ERRCODE='42501';
+ END IF;
  RAISE EXCEPTION 'sync schema downgrade is forbidden' USING ERRCODE='23514';
 END $$;
 -- +goose StatementEnd

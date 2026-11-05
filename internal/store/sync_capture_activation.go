@@ -187,6 +187,9 @@ func (s *Store) ActivateSyncCapture(ctx context.Context, account string, options
 		return nil, ErrSyncWriterNotAdmitted
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
+	if err := s.verifySyncPrincipalTopology(ctx, tx); err != nil {
+		return nil, err
+	}
 	if !syncCaptureCoverageValid(ctx, tx) {
 		return nil, ErrSyncWriterNotAdmitted
 	}

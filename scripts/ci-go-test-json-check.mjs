@@ -10,6 +10,9 @@ export const expectedPackages = Object.freeze([
   'github.com/witwave-ai/witself/internal/tools/localcellharness',
 ]);
 
+const storePackage = 'github.com/witwave-ai/witself/internal/store';
+const selectablePackages = Object.freeze([...expectedPackages, storePackage]);
+
 const terminalActions = new Set(['pass', 'skip', 'fail']);
 const serviceProofTest = 'TestNativeServiceLifecycle';
 const serviceOutcomes = new Set([
@@ -60,10 +63,11 @@ function sourceLiterals(source, assertions) {
 
 function diagnosticAllowlist() {
   const errors = new Set();
-  const assertions = new Map(expectedPackages.map(name => [name, new Set()]));
-  const prefixes = new Map(expectedPackages.map(name => [name, new Map()]));
-  const testFiles = new Map(expectedPackages.map(name => [name, new Set()]));
-  for (const name of expectedPackages) {
+  const storeErrors = new Set();
+  const assertions = new Map(selectablePackages.map(name => [name, new Set()]));
+  const prefixes = new Map(selectablePackages.map(name => [name, new Map()]));
+  const testFiles = new Map(selectablePackages.map(name => [name, new Set()]));
+  for (const name of selectablePackages) {
     const directory = new URL(`../${name.slice('github.com/witwave-ai/witself/'.length)}/`, import.meta.url);
     let files;
     try { files = readdirSync(directory).filter(file => file.endsWith('.go')); } catch { continue; }
@@ -75,15 +79,24 @@ function diagnosticAllowlist() {
       if (!isTest && name === expectedPackages[2]) continue;
       const sourceDiagnostics = sourceLiterals(source, isTest);
       for (const literal of sourceDiagnostics.literals) {
-        (isTest ? assertions.get(name) : errors).add(literal);
+        (isTest ? assertions.get(name) : name === storePackage ? storeErrors : errors).add(literal);
       }
       for (const {match, message} of sourceDiagnostics.prefixes) prefixes.get(name).set(match, message);
     }
   }
+  // The store proof's cluster fixture reports setup/cleanup failures through
+  // testing.TB from one reviewed helper. Enroll only literal assertions and the
+  // same safe fixed prefixes; never enable raw helper output or native labels.
+  try {
+    const helper = readFileSync(new URL('../internal/testenv/disposable_cluster.go', import.meta.url), 'utf8');
+    const diagnostics = sourceLiterals(helper, true);
+    for (const literal of diagnostics.literals) assertions.get(storePackage).add(literal);
+    for (const {match, message} of diagnostics.prefixes) prefixes.get(storePackage).set(match, message);
+  } catch { /* Missing fixture sources never authorize arbitrary diagnostics. */ }
   // The helpers' fixed errors propagate across package boundaries. Assertions
   // remain local to their package. A copied script with no sources emits only
   // unclassified reasons; a missing source never licenses arbitrary output.
-  return {messages: new Map([...assertions].map(([name, messages]) => [name, new Set([...errors, ...messages])])), prefixes, testFiles};
+  return {messages: new Map([...assertions].map(([name, messages]) => [name, new Set([...(name === storePackage ? storeErrors : errors), ...messages])])), prefixes, testFiles};
 }
 
 const {messages: allowlist, prefixes: prefixAllowlist, testFiles} = diagnosticAllowlist();
@@ -107,15 +120,19 @@ function proofDiagnostic(line, packageName) {
   return maskedDiagnostic(line.replace(/\r$/, ''), 200);
 }
 
-// --require selects the native PostgreSQL proof, which runs only localcell.
-// The ordinary three-package unit mode retains its existing skip policy.
-export async function checkGoTestJSON(input, requiredTests = [], {diagnose = false} = {}) {
-  const packageNames = requiredTests.length === 0 ? expectedPackages : expectedPackages.slice(0, 1);
+// --require defaults to the native localcell proof. An explicit --package
+// selects one reviewed package and requires named tests; default unit coverage
+// and its skip policy remain unchanged.
+export async function checkGoTestJSON(input, requiredTests = [], {diagnose = false, packageName} = {}) {
+  const packageValid = packageName === undefined || (selectablePackages.includes(packageName) && requiredTests.length !== 0);
+  const packageNames = packageName === undefined
+    ? requiredTests.length === 0 ? expectedPackages : expectedPackages.slice(0, 1)
+    : packageValid ? [packageName] : [];
   const packages = new Map(packageNames.map(name => [name, {
     started: false, summary: null, summaryLine: null, tests: new Map(), why: new Map(), diagnostics: new Map(),
     timedOut: new Set(), serviceOutcomes: new Set(), pass: 0, skip: 0, fail: 0,
   }]));
-  let invalid = requiredTests.some(name => typeof name !== 'string' || !testNamePattern.test(name) || /[a-f0-9]{64}/i.test(name)) ||
+  let invalid = !packageValid || requiredTests.some(name => typeof name !== 'string' || !testNamePattern.test(name) || /[a-f0-9]{64}/i.test(name)) ||
     new Set(requiredTests).size !== requiredTests.length;
   let failed = false;
   let pending = '';
@@ -297,20 +314,21 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   let argumentsValid = true;
   for (let index = 0; index < args.length; index++) {
     const key = args[index];
-    if (!['--require', '--input', '--diagnose'].includes(key) || options[key] !== undefined) {
+    if (!['--require', '--input', '--diagnose', '--package'].includes(key) || options[key] !== undefined) {
       argumentsValid = false;
       break;
     }
     options[key] = key === '--diagnose' ? true : args[++index];
     if (!options[key] || (typeof options[key] === 'string' && options[key].startsWith('--'))) argumentsValid = false;
   }
-  if (options['--diagnose'] && !options['--require']) argumentsValid = false;
+  if ((options['--diagnose'] || options['--package']) && !options['--require']) argumentsValid = false;
+  if (options['--package'] && !selectablePackages.includes(options['--package'])) argumentsValid = false;
   if (!argumentsValid) {
     console.error('FAIL: invalid Go test checker arguments');
     process.exitCode = 1;
   } else {
     const input = options['--input'] ? createReadStream(options['--input'], {encoding: 'utf8'}) : process.stdin.setEncoding('utf8');
-    const result = await checkGoTestJSON(input, options['--require']?.split(',') ?? [], {diagnose: options['--diagnose']});
+    const result = await checkGoTestJSON(input, options['--require']?.split(',') ?? [], {diagnose: options['--diagnose'], packageName: options['--package']});
     console.log(result.lines.join('\n'));
     if (!result.valid) console.error(result.reason);
     process.exitCode = result.valid ? 0 : 1;

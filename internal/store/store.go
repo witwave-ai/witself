@@ -24,6 +24,7 @@ type Store struct {
 	activityMarkers                sync.Map // committed read markers, scoped to this database pool
 	activityMeteringFailures       atomic.Uint64
 	syncCaptureSelected            atomic.Bool
+	syncPrincipalTest              *syncPrincipalTestOptions
 	importObserver                 ImportObserver
 	importRowDecodeLegacy          bool
 	importRowClobber               bool

@@ -125,9 +125,22 @@ func TestWorkerLocalRuntimeSyncPostgres(t *testing.T) {
 				t.Fatal("open worker startup fixture failed")
 			}
 			defer st.Close()
+			db, err := pgx.Connect(ctx, fixture.DSN())
+			if err != nil {
+				t.Fatal("open worker schema observer failed")
+			}
+			defer func() { _ = db.Close(ctx) }()
+			if mode == "sync" && testenv.EnsureSyncPrincipalRoles(ctx, db, store.SyncPrincipalRoleNames()...) != nil {
+				t.Fatal("worker sync principal fixture provisioning failed")
+			}
 			cfg := runtimeconfig.Config{Local: mode != "hosted", SyncSchema: mode == "sync", MigrationWait: time.Minute}
 			if err := migrateWorkerStore(ctx, st, cfg); err != nil {
 				t.Fatal("worker startup migrations failed")
+			}
+			if mode == "sync" {
+				if version, err := st.AppliedSyncSchemaVersion(ctx); err != nil || version != 3 {
+					t.Fatal("worker sync fixture did not install schema 3")
+				}
 			}
 			if _, err := st.EnsureDefaultAccount(ctx); err != nil {
 				t.Fatal("create worker bootstrap account failed")
@@ -151,11 +164,6 @@ func TestWorkerLocalRuntimeSyncPostgres(t *testing.T) {
 					t.Fatal("worker serve path failed")
 				}
 			})
-			db, err := pgx.Connect(ctx, fixture.DSN())
-			if err != nil {
-				t.Fatal("open worker schema observer failed")
-			}
-			defer func() { _ = db.Close(ctx) }()
 			var tables int
 			if err := db.QueryRow(ctx, `SELECT count(*) FROM pg_tables WHERE schemaname=current_schema() AND left(tablename,5)='sync_'`).Scan(&tables); err != nil {
 				t.Fatal("read worker sync table inventory failed")

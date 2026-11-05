@@ -387,6 +387,10 @@ func syncMigrationTableContracts(source fs.FS) (map[string]syncMigrationTableCon
 			// cannot silently pass as inventory-neutral SQL. Accepted procedural
 			// bodies remain opaque; PostgreSQL's catalog certifies their effects.
 			switch {
+			case syncSQLPrincipalStatement(statement):
+				// Reviewed ownership and ACL statements do not change columns or
+				// custody order. Everything outside the exact allowlist fails closed.
+				continue
 			case statement[0].keyword("LOCK"):
 				if !syncSQLInventoryLock(statement) {
 					return nil, "", errSyncMigrationSQL

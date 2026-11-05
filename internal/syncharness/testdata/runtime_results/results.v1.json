@@ -1194,6 +1194,77 @@
       "scenario": "CurationAndKeyCustody",
       "outcome": "NOT_RUN",
       "missing_capability": "production_domain_adapter"
+    },
+    {
+      "version": 1,
+      "obligation": "H43",
+      "capability": "production_principal_separation",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "WriterGuardBypassAndDowngrade",
+      "outcome": "NOT_RUN",
+      "missing_capability": "production_principal_separation",
+      "reason": "disposable_cluster_unavailable"
+    },
+    {
+      "version": 1,
+      "obligation": "H43",
+      "capability": "production_bypass_denial",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "WriterGuardBypassAndDowngrade",
+      "outcome": "NOT_RUN",
+      "missing_capability": "production_bypass_denial",
+      "reason": "disposable_cluster_unavailable"
+    },
+    {
+      "version": 1,
+      "obligation": "H43",
+      "capability": "production_downgrade_denial",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "WriterGuardBypassAndDowngrade",
+      "outcome": "NOT_RUN",
+      "missing_capability": "production_downgrade_denial",
+      "reason": "disposable_cluster_unavailable"
+    },
+    {
+      "version": 1,
+      "obligation": "H43",
+      "capability": "production_capability_revocation",
+      "evidence_class": "real_postgres",
+      "adapter": {
+        "package": "store",
+        "symbol": "TestSyncPrincipalCapabilityRevocation"
+      },
+      "scenario": "WriterGuardBypassAndDowngrade",
+      "executable": "lc_s6c2a_go_test_v1",
+      "database_class": "postgresql",
+      "platform_class": "go_test_host",
+      "artifact": "H43_production_capability_revocation_v1",
+      "outcome": "PASS"
+    },
+    {
+      "version": 1,
+      "obligation": "H43",
+      "capability": "production_activation_topology",
+      "evidence_class": "real_postgres",
+      "adapter": {
+        "package": "store",
+        "symbol": "TestSyncPrincipalActivationTopology"
+      },
+      "scenario": "WriterGuardBypassAndDowngrade",
+      "executable": "lc_s6c2a_go_test_v1",
+      "database_class": "postgresql",
+      "platform_class": "go_test_host",
+      "artifact": "H43_production_activation_topology_v1",
+      "outcome": "PASS"
     }
   ]
 }

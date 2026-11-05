@@ -181,6 +181,10 @@ func syncSQLCreateTable(tokens []syncSQLToken) (name string, body []syncSQLToken
 	if i >= len(tokens) {
 		return "", nil, false, errSyncMigrationSQL
 	}
+	if i == 0 && len(tokens) >= 4 && tokens[0].keyword("OR") && tokens[1].keyword("REPLACE") &&
+		tokens[2].keyword("FUNCTION") && tokens[3].keyword("witself_sync_writer_guard") {
+		return "", nil, false, nil
+	}
 	if !tokens[i].keyword("TABLE") {
 		// Only these non-table CREATE forms occur in this migration namespace.
 		// Reject unfamiliar forms rather than silently losing a table inventory.

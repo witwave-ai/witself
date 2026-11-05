@@ -32,6 +32,9 @@ func syncCoverageMatches(version string, commitment []byte) bool {
 
 func syncCaptureError(err error) error {
 	var pgerr *pgconn.PgError
+	if errors.As(err, &pgerr) && pgerr.Code == "P0001" && pgerr.Message == ErrSyncCapabilityRevoked.Error() {
+		return ErrSyncCapabilityRevoked
+	}
 	if errors.As(err, &pgerr) && pgerr.Code == "P0001" && pgerr.Message == ErrSyncWriterNotAdmitted.Error() {
 		return ErrSyncWriterNotAdmitted
 	}
@@ -62,6 +65,7 @@ type SyncTx struct {
 	principal  string
 	capability string
 	sealed     bool
+	functions  bool
 }
 
 // Tx exposes the admitted transaction for the reviewed domain writer. Domain
@@ -77,7 +81,7 @@ func (s *Store) AdmitSyncTx(ctx context.Context, account, principal, capability 
 	if err != nil {
 		return nil, err
 	}
-	admitted, err := admitSyncTx(ctx, tx, account, principal, capability)
+	admitted, err := admitSyncTxPath(ctx, tx, account, principal, capability, s.syncPrincipalTest != nil && s.syncPrincipalTest.functions)
 	if err != nil {
 		_ = tx.Rollback(ctx)
 		return nil, err
@@ -89,6 +93,26 @@ func (s *Store) AdmitSyncTx(ctx context.Context, account, principal, capability 
 // proof. FOR SHARE is essential: a historical MVCC view must never authorize
 // a writer against a newer capture epoch.
 func admitSyncTx(ctx context.Context, tx pgx.Tx, account, principal, capability string) (*SyncTx, error) {
+	return admitSyncTxPath(ctx, tx, account, principal, capability, false)
+}
+
+func admitSyncTxPath(ctx context.Context, tx pgx.Tx, account, principal, capability string, forceFunctions bool) (*SyncTx, error) {
+	functions, databasePrincipal, err := syncFunctionAdmission(ctx, tx, forceFunctions)
+	if err != nil {
+		return nil, err
+	}
+	if functions {
+		if databasePrincipal != "" {
+			principal = databasePrincipal
+		}
+		out := &SyncTx{tx: tx, account: account, principal: principal, capability: capability, functions: true}
+		err := tx.QueryRow(ctx, `SELECT tx_id,capture_epoch,lifecycle_epoch,restore_marker FROM sync_admit($1,$2,$3)`, account, principal, capability).
+			Scan(&out.id, &out.epoch, &out.lifecycle, &out.restore)
+		if err != nil {
+			return nil, syncCaptureError(err)
+		}
+		return out, nil
+	}
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock_shared(capture_lock_key($1))`, account); err != nil {
 		return nil, syncCaptureError(err)
 	}
@@ -96,7 +120,7 @@ func admitSyncTx(ctx context.Context, tx pgx.Tx, account, principal, capability 
 	var state, requiredCapability, manifest string
 	var protocol, minimum int
 	var commitment []byte
-	err := tx.QueryRow(ctx, `SELECT capture_epoch,lifecycle_epoch,restore_marker,coverage_state,
+	err = tx.QueryRow(ctx, `SELECT capture_epoch,lifecycle_epoch,restore_marker,coverage_state,
 		protocol_version,min_writer_schema,min_writer_capability,coverage_manifest_version,coverage_manifest_commitment
 		FROM sync_capture WHERE account_id=$1 FOR SHARE`, account).Scan(
 		&out.epoch, &out.lifecycle, &out.restore, &state, &protocol, &minimum, &requiredCapability, &manifest, &commitment)
@@ -122,7 +146,10 @@ func admitSyncTx(ctx context.Context, tx pgx.Tx, account, principal, capability 
 	if err != nil {
 		return nil, syncCaptureError(err)
 	}
-	if !enabled || generation != 0 || epoch != out.epoch || capManifest != manifest {
+	if generation != 0 {
+		return nil, ErrSyncCapabilityRevoked
+	}
+	if !enabled || epoch != out.epoch || capManifest != manifest {
 		return nil, ErrSyncWriterNotAdmitted
 	}
 	if err := tx.QueryRow(ctx, `SELECT txid_current()`).Scan(&out.id); err != nil {
@@ -155,6 +182,9 @@ func (tx *SyncTx) Touch(ctx context.Context, operation, atomicGroup string, sema
 	if tx.sealed || operation != SyncPreferencesCapability || atomicGroup == "" ||
 		!json.Valid(semanticEffect) || !json.Valid(dependencies) {
 		return ErrSyncWriterNotAdmitted
+	}
+	if tx.functions {
+		return tx.touchProtected(ctx, operation, atomicGroup, semanticEffect, dependencies)
 	}
 	var eventID int64
 	const tableName = "agent_dashboard_preferences"
@@ -207,6 +237,17 @@ func (tx *SyncTx) Touch(ctx context.Context, operation, atomicGroup string, sema
 func (tx *SyncTx) Seal(ctx context.Context) error {
 	if tx.sealed {
 		return ErrSyncWriterNotAdmitted
+	}
+	if tx.functions {
+		bundleID, err := newSyncIdentity()
+		if err != nil {
+			return err
+		}
+		_, err = tx.tx.Exec(ctx, `SELECT sync_seal($1,$2,$3)`, tx.account, tx.id, bundleID)
+		if err == nil {
+			tx.sealed = true
+		}
+		return syncCaptureError(err)
 	}
 	var prior int64
 	if err := tx.tx.QueryRow(ctx, `SELECT last_finalized FROM sync_finalized_counter
@@ -274,7 +315,34 @@ func (tx *SyncTx) Savepoint(ctx context.Context, fn func(*SyncTx) error) error {
 
 // Commit lets the deferred coverage trigger make the final decision. A missing
 // seal is refused by PostgreSQL and the whole domain transaction is rolled back.
-func (tx *SyncTx) Commit(ctx context.Context) error { return syncCaptureError(tx.tx.Commit(ctx)) }
+func (tx *SyncTx) Commit(ctx context.Context) error {
+	if tx.functions {
+		if _, err := tx.tx.Exec(ctx, `SELECT sync_finalize($1,$2)`, tx.account, tx.id); err != nil {
+			_ = tx.tx.Rollback(ctx)
+			return syncCaptureError(err)
+		}
+	}
+	return syncCaptureError(tx.tx.Commit(ctx))
+}
+
+func (tx *SyncTx) touchProtected(ctx context.Context, operation, atomicGroup string, semanticEffect, dependencies json.RawMessage) error {
+	operationID, err := newSyncIdentity()
+	if err != nil {
+		return err
+	}
+	envelope, err := json.Marshal(struct {
+		Operation    string          `json:"operation"`
+		Effect       json.RawMessage `json:"effect"`
+		Dependencies json.RawMessage `json:"dependencies"`
+	}{operation, semanticEffect, dependencies})
+	if err != nil || len(envelope) > 65536 {
+		return ErrSyncWriterNotAdmitted
+	}
+	commitment := sha256.Sum256(envelope)
+	_, err = tx.tx.Exec(ctx, `SELECT sync_touch($1,$2,$3,$4,$5::jsonb,$6::jsonb,$7,$8,$9)`,
+		tx.account, tx.id, operation, atomicGroup, semanticEffect, dependencies, operationID, envelope, commitment[:])
+	return syncCaptureError(err)
+}
 
 // Rollback discards domain changes and all capture state atomically.
 func (tx *SyncTx) Rollback(ctx context.Context) error { return tx.tx.Rollback(ctx) }

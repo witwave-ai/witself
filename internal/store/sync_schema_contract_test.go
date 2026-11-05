@@ -291,7 +291,9 @@ func applySyncContractMigrations(t *testing.T, dsn string, source fs.FS) {
 		t.Fatal("open contract migration database failed")
 	}
 	defer func() { _ = db.Close() }()
-	fsys, err := fs.Sub(source, "sync_migrations")
+	// Preserve each mutation while projecting only the shared fixture's role
+	// topology block; the authoritative column/type checks still execute SQL.
+	fsys, err := fs.Sub(syncPrincipalLocalMigrationSource(source), "sync_migrations")
 	if err != nil {
 		t.Fatal("open contract migration filesystem failed")
 	}

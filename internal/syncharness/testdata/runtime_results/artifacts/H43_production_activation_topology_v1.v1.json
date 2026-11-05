@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "id": "H43_production_activation_topology_v1",
+  "result": {
+    "version": 1,
+    "obligation": "H43",
+    "capability": "production_activation_topology",
+    "evidence_class": "real_postgres",
+    "adapter": {
+      "package": "store",
+      "symbol": "TestSyncPrincipalActivationTopology"
+    },
+    "scenario": "WriterGuardBypassAndDowngrade",
+    "executable": "lc_s6c2a_go_test_v1",
+    "database_class": "postgresql",
+    "platform_class": "go_test_host",
+    "artifact": "H43_production_activation_topology_v1",
+    "outcome": "PASS"
+  },
+  "checks": 2
+}

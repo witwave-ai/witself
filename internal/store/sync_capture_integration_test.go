@@ -21,11 +21,11 @@ func newSyncCaptureFixture(t *testing.T, active bool) (*Store, Principal) {
 	t.Helper()
 	st, p, work := seedSyncCaptureFixture(t, nil)
 	if _, failure := retrySyncCaptureFixtureAdmission(context.Background(), st, p.AccountID, false, work, t.Logf); failure != "" {
-		logSyncCaptureActivityTypes(t, st)
+		logSyncCaptureActivityTypes(t, st, syncCaptureActivityScope{account: p.AccountID})
 		t.Fatal(failure)
 	}
 	if active {
-		activateSyncFixture(t, st, p.AccountID, work)
+		activateSyncFixture(t, st, p.AccountID, syncFixtureActivation{seedWork: work})
 	}
 	return st, p
 }
@@ -60,16 +60,24 @@ func seedSyncCaptureFixture(t *testing.T, beforeSeed func(*Store)) (*Store, Prin
 	return st, p, time.Since(started)
 }
 
-func activateSyncFixture(t *testing.T, st *Store, account string, seedWork ...time.Duration) {
+// Optional activation parameters: the fixture's measured seed work scales the
+// admission retry budget (FLAKE-8); an expected PID marks the test's own stale
+// transaction in the activity diagnostics (LC-S6C2a).
+type syncFixtureActivation struct {
+	seedWork    time.Duration
+	expectedPID uint32
+}
+
+func activateSyncFixture(t *testing.T, st *Store, account string, options ...syncFixtureActivation) {
 	t.Helper()
 	ctx := context.Background()
-	var work time.Duration
-	if len(seedWork) != 0 {
-		work = seedWork[0]
+	var option syncFixtureActivation
+	if len(options) != 0 {
+		option = options[0]
 	}
-	a, failure := retrySyncCaptureFixtureAdmission(ctx, st, account, true, work, t.Logf)
+	a, failure := retrySyncCaptureFixtureAdmission(ctx, st, account, true, option.seedWork, t.Logf)
 	if failure != "" {
-		logSyncCaptureActivityTypes(t, st)
+		logSyncCaptureActivityTypes(t, st, syncCaptureActivityScope{account: account, expectedPID: option.expectedPID})
 		t.Fatal(failure)
 	}
 	defer a.Close()
@@ -299,7 +307,7 @@ func TestSyncCaptureStaleSnapshots(t *testing.T) {
 				if v.QueryRow(ctx, `SELECT count(*) FROM sync_capture WHERE account_id=$1`, p.AccountID).Scan(&count) != nil {
 					t.Fatal("capture stale snapshot failed")
 				}
-				activateSyncFixture(t, st, p.AccountID)
+				activateSyncFixture(t, st, p.AccountID, syncFixtureActivation{expectedPID: v.Conn().PgConn().PID()})
 				_, err = admitSyncTx(ctx, v, p.AccountID, SyncPreferencesPrincipal, SyncPreferencesCapability)
 				captureRefusedSnapshot(t, err) // LC-S6C1 fix 2 (F6)
 				t.Logf("capture stale snapshot refusal SQLSTATE=%s", syncTestSQLState(err))
@@ -615,7 +623,11 @@ func TestSyncCaptureAdmissionDisabledCapability(t *testing.T) { // LC-S6C1 fix 1
 				_ = admitted.Rollback(ctx)                        // LC-S6C1 fix 1 (F2)
 				t.Fatal("f2nilhandlecheck returned an admission") // LC-S6C1 fix 1 (F2)
 			} // LC-S6C1 fix 1 (F2)
-			if err != ErrSyncWriterNotAdmitted { // LC-S6C1 fix 1 (F2)
+			want := ErrSyncWriterNotAdmitted
+			if tc.revoked != 0 {
+				want = ErrSyncCapabilityRevoked
+			}
+			if err != want { // LC-S6C1 fix 1 (F2)
 				t.Fatal("f2exacterrorcheck refusal missing") // LC-S6C1 fix 1 (F2)
 			} // LC-S6C1 fix 1 (F2)
 			var durable int                                                                                                              // LC-S6C1 fix 1 (F2)

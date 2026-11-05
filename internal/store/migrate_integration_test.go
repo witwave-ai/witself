@@ -2105,11 +2105,15 @@ func newMigrationTestStore(t migrationTestReporter, baseDSN string) (*Store, str
 			return nil, ""
 		}
 	}
+	if tb, ok := t.(testing.TB); ok {
+		baseDSN = testenv.GuardPostgresTransactions(tb, baseDSN)
+	}
 	fixture := testenv.NewPostgresSchema(t, baseDSN)
 	st, err := Open(context.Background(), fixture.DSN())
 	if err != nil {
 		t.Fatal(err)
 	}
+	st.syncPrincipalTest = &syncPrincipalTestOptions{migrations: syncPrincipalLocalMigrationFS(), singleLogin: true}
 	// Registered after schema allocation: close consumers before bounded DROP.
 	t.Cleanup(st.Close)
 	if err := st.Ping(context.Background()); err != nil {

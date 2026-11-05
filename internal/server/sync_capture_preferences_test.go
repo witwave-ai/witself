@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -66,13 +67,46 @@ func TestSyncCapturePreferencesHTTPDefaultBytesPostgres(t *testing.T) {
 	for _, phase := range []string{"core_only", "sync_installed_unselected", "sync_selected_inactive"} {
 		t.Run(phase, func(t *testing.T) {
 			if phase == "sync_installed_unselected" {
+				if testenv.EnsureSyncPrincipalRoles(ctx, observer, store.SyncPrincipalRoleNames()...) != nil {
+					t.Fatal("sync HTTP principal fixture provisioning failed")
+				}
 				if st.MigrateSync(ctx) != nil {
 					t.Fatal("sync HTTP selected schema migration failed")
 				}
 			}
 			if phase == "sync_selected_inactive" {
+				// Migration 0003 transfers ownership even when the fixture keeps its
+				// administrator connection. Model an incomplete installer handoff
+				// explicitly, with one covered table still owned by this login.
+				var migratedOwner bool
+				if observer.QueryRow(ctx, `SELECT relowner='witself_sync_owner'::regrole
+ FROM pg_class WHERE oid='agent_dashboard_preferences'::regclass`).Scan(&migratedOwner) != nil || !migratedOwner {
+					t.Fatal("sync HTTP migration did not transfer covered table ownership")
+				}
+				if _, err := observer.Exec(ctx, `ALTER TABLE agent_dashboard_preferences OWNER TO CURRENT_USER`); err != nil {
+					t.Fatal("sync HTTP incomplete ownership handoff setup failed")
+				}
+				var currentOwner bool
+				if observer.QueryRow(ctx, `SELECT relowner=current_user::regrole
+ FROM pg_class WHERE oid='agent_dashboard_preferences'::regclass`).Scan(&currentOwner) != nil || !currentOwner {
+					t.Fatal("sync HTTP incomplete ownership handoff was not established")
+				}
 				if st.SelectSyncCapture(runtimeconfig.Config{Local: true, SyncSchema: true}) != nil {
 					t.Fatal("sync HTTP explicit selection failed")
+				}
+				activation, err := st.ActivateSyncCapture(ctx, "acc_1", store.SyncCaptureOptions{
+					LifecycleEpoch: 1, RestoreMarker: bytes.Repeat([]byte{1}, 16), Capability: store.SyncPreferencesCapability,
+				})
+				if activation != nil {
+					activation.Close()
+				}
+				if !errors.Is(err, store.ErrSyncPrincipalTopologyUnverified) {
+					t.Fatal("sync HTTP incomplete handoff activation did not refuse unverified topology")
+				}
+			}
+			if phase != "core_only" {
+				if version, err := st.AppliedSyncSchemaVersion(ctx); err != nil || version != 3 {
+					t.Fatal("sync HTTP selected inactive fixture did not install schema 3")
 				}
 			}
 			r := httptest.NewRequestWithContext(ctx, http.MethodPut, "/v1/self/dashboard-preferences",
