@@ -185,6 +185,7 @@ func (c *Cell) Run(ctx context.Context, policy SupervisorPolicy) (result error) 
 			}
 			s.phase = "control"
 			commandCtx, cancel := context.WithCancel(command.ctx)
+			commandCtx = context.WithValue(commandCtx, serviceControlHostContextKey{}, ctx)
 			go func() {
 				select {
 				case <-runDone:

@@ -63,6 +63,44 @@ func TestServiceFailureReceiptJoinedIndependentFailures(t *testing.T) {
 	}
 }
 
+func TestServiceFailureReceiptClientCancellationPreservesOtherFailures(t *testing.T) {
+	for _, deadline := range []bool{false, true} {
+		name := "canceled"
+		if deadline {
+			name = "deadline"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			if deadline {
+				cancel()
+				ctx, cancel = context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
+			}
+			cancel()
+			ctx = context.WithValue(ctx, serviceControlCommandKey{}, true)
+			abandoned := serviceControlCancellation(ctx)
+			var located *serviceFailure
+			if !errors.Is(abandoned, ctx.Err()) || !errors.As(abandoned, &located) || located.site != "control_cancelled" {
+				t.Fatal("client cancellation lost its cause or site")
+			}
+			failure := serviceFailureAt(errors.New("synthetic failure"), "supervisor_stop")
+			var out bytes.Buffer
+			joined := fmt.Errorf("command: %w", errors.Join(abandoned, failure))
+			WriteServiceHostFailure(&out, joined, "supervisor_command")
+			WriteServiceHostFailure(&out, joined, "supervisor_command")
+			if out.String() != "native service host site=supervisor_stop\n" {
+				t.Fatal("client cancellation hid an independent failure or emitted a host failure receipt")
+			}
+			// Cancellation of the host itself keeps the existing site receipt.
+			hostCtx := context.WithValue(ctx, serviceControlHostContextKey{}, ctx)
+			out.Reset()
+			WriteServiceHostFailure(&out, serviceControlCancellation(hostCtx), "supervisor_command")
+			if out.String() != "native service host site=control_cancelled\n" {
+				t.Fatal("host cancellation lost its failure receipt")
+			}
+		})
+	}
+}
+
 // Reproduce the real propagation through call, command and Run. The first stop
 // is startup, the second is the sole failed authenticated control operation, and
 // the third is clean shutdown. No native service manager or child is started.
