@@ -5,6 +5,8 @@
 # libcurl CVE-2026-92392 and zlib CVE-2026-85091, so those three packages are
 # upgraded in place from the Alpine 3.24 repositories and verified against the
 # fixed revisions below; the build fails if the repositories move again.
+# Alpine 3.24 moved zlib from 1.3.2-r1 to 1.4-r0 between 2026-11-05 and
+# 2026-11-06 (observed by a fresh, cache-free build); the pin follows it.
 FROM postgres:18-alpine@sha256:10a5c69a83035ab5239f5620d708520e8b28f5aa1f2b20143e6024532edadfb5
 
 # The base supplies bash, psql, pg_dump, gzip and date. These exact age/aws-cli
@@ -19,7 +21,7 @@ RUN set -eu; \
     esac; \
     apk add --no-cache "age=$age_version" aws-cli=2.34.63-r0; \
     apk upgrade --no-cache brotli-libs libcurl zlib; \
-    for pin in brotli-libs-1.2.1-r0 libcurl-8.23.0-r0 zlib-1.3.2-r1; do \
+    for pin in brotli-libs-1.2.1-r0 libcurl-8.23.0-r0 zlib-1.4-r0; do \
       apk info -v | grep -qx "$pin" || { echo "expected $pin" >&2; exit 1; }; \
     done; \
     for tool in bash psql pg_dump gzip date age aws; do command -v "$tool" >/dev/null; done; \
