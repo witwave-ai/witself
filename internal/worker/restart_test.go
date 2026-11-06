@@ -252,6 +252,7 @@ func TestRegistryBackoffKeepsListenersAndSiblingsAliveAndCancelsPromptly(t *test
 	}}
 	healthAddr, metricsAddr := unusedWorkerAddresses(t)
 	done := make(chan error, 1)
+	runStarted := time.Now()
 	go func() {
 		done <- registry.run(ctx, Config{
 			HealthAddr: healthAddr, MetricsAddr: metricsAddr, ShutdownTimeout: time.Second, JobRestartPolicy: JobRestartOnFailure,
@@ -262,7 +263,11 @@ func TestRegistryBackoffKeepsListenersAndSiblingsAliveAndCancelsPromptly(t *test
 	case <-time.After(3 * time.Second):
 		t.Fatal("job did not enter its second backoff")
 	}
+	startupWork := time.Since(runStarted)
+	// Allow 50 times the observed launch-to-backoff work, with a 2s floor and 10s cap.
+	startupBound := min(10*time.Second, max(2*time.Second, 50*startupWork))
 	client := &http.Client{Timeout: time.Second}
+	waitWorkerStarted(t, client, healthAddr, startupBound)
 	for _, path := range []string{"/livez", "/readyz"} {
 		code, _ := getWorkerEndpoint(t, client, "http://"+healthAddr+path)
 		if code != http.StatusOK {
