@@ -71,9 +71,10 @@ func TestServiceSupervisorControlHealthCancellation(t *testing.T) {
 			if readErr != nil || strings.Contains(string(data), "site=supervisor_stop") {
 				t.Error("control cancellation emitted a stop receipt for an uninvoked hook")
 			}
-			if string(data) != "native service host site=control_cancelled\n" {
-				t.Error("control cancellation did not emit exactly one fixed receipt")
+			if len(data) != 0 {
+				t.Error("client control cancellation emitted a host failure receipt")
 			}
+			t.Logf("captured host failure bytes after client cancellation: %d", len(data))
 		})
 	}
 }
@@ -425,8 +426,8 @@ func TestServiceControlCallerBoundYieldsActualHost(t *testing.T) {
 					t.Error("caller bound expiry changed durable descriptor or failure record")
 				}
 				data, readErr := os.ReadFile(stderr.Name())
-				if readErr != nil || string(data) != "native service host site=control_cancelled\n" {
-					t.Error("caller bound yield lost its sole cancellation receipt or emitted a phantom operation")
+				if readErr != nil || len(data) != 0 {
+					t.Error("caller bound yield emitted a host failure receipt")
 				}
 				if elapsed <= callerBound || elapsed >= hostBound {
 					t.Error("healthy hook did not complete between caller and host bounds")

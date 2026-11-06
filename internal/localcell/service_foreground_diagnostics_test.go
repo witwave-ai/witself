@@ -1,6 +1,7 @@
 package localcell
 
 import (
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -13,8 +14,8 @@ import (
 )
 
 // The Windows-only logger cannot execute on Unix. Inspect its actual guard and
-// exercise its actual pattern and byte bound portably; an unconditional t.Log
-// or a broadened vocabulary fails this contract.
+// exercise its actual per-line pattern and byte bound portably; an unconditional
+// t.Log, a missing line count, or a first-line-only scan fails this contract.
 func TestWindowsForegroundExitDiagnosticGuard(t *testing.T) {
 	source, err := os.ReadFile(windowsSyntheticHarnessSource)
 	if err != nil {
@@ -38,6 +39,18 @@ func TestWindowsForegroundExitDiagnosticGuard(t *testing.T) {
 		{"health_receipt", "service_shutdown phase=control operation=health site=health_database journal_pending=false journal_read_ok=true\n", true},
 		{"private_health_site", "service_shutdown phase=control operation=health site=/private/path\n", false},
 		{"service_error", "service_manager_unavailable\n", true},
+		{"peer_pid", "service_control accept=rejected step=peer:pid\n", true},
+		{"peer_identity", "service_control accept=rejected step=peer:identity\n", true},
+		{"peer_sid", "service_control accept=rejected step=peer:sid\n", true},
+		{"duplicate", "service_control accept=rejected step=duplicate\n", true},
+		{"conn", "service_control accept=rejected step=conn\n", true},
+		{"unflushed_stop", "service_control action=stop response=unflushed\n", true},
+		{"native_command", "native service host site=supervisor_command\n", true},
+		{"native_cancelled", "native service host site=control_cancelled\n", true},
+		{"private_native_site", "native service host site=/synthetic/home\n", false},
+		{"unknown_native_site", "native service host site=not_a_site\n", false},
+		{"private_accept_step", "service_control accept=rejected step=/synthetic/home\n", false},
+		{"unknown_accept_step", "service_control accept=rejected step=peer:other\n", false},
 		{"localcell_token_at_bound", "localcell: " + strings.Repeat("a", 48), true},
 		{"receipt_value_at_bound", "service_shutdown phase=" + strings.Repeat("a", 24), true},
 		{"line_at_bound", "service_" + strings.Repeat("a", 152), true},
@@ -52,8 +65,6 @@ func TestWindowsForegroundExitDiagnosticGuard(t *testing.T) {
 		{"path_suffix", "localcell: service_lease_unavailable /synthetic/home\n", false},
 		{"stage_suffix", "localcell: service_control_unavailable: pipe:first_instance\n", false},
 		{"leading_space", " localcell: service_lease_unavailable\n", false},
-		{"rejected_first", "private diagnostic\nlocalcell: service_lease_unavailable\n", false},
-		{"accepted_first", "localcell: service_lease_unavailable\nprivate diagnostic\n", true},
 		{"embedded_cr", "localcell: service_lease\runavailable\n", false},
 		{"uppercase", "service_shutdown phase=PRIVATE\n", false},
 	} {
@@ -180,34 +191,37 @@ func windowsForegroundDiagnosticGuard(source []byte) (string, int, bool) {
 		if !ok || function.Name.Name != "windowsLogForegroundExit" || function.Body == nil {
 			continue
 		}
-		// The helper is deliberately small: Helper, first-line extraction,
-		// CRLF handling, guarded Log, then numeric exit status. Pin extraction
-		// too so a later safe line cannot conceal a rejected first line.
+		// Pin the whole-output range and numeric count before inspecting the
+		// per-line guard. Unknown lines must not stop later safe diagnostics.
 		statements := function.Body.List
-		if len(statements) != 5 {
+		if len(statements) != 4 {
 			return "", 0, false
 		}
-		cut, ok := statements[1].(*ast.AssignStmt)
-		if !ok || len(cut.Lhs) != 3 || len(cut.Rhs) != 1 || !foregroundDiagnosticIdent(cut.Lhs[0], "firstLine") {
+		count, ok := statements[1].(*ast.ExprStmt)
+		if !ok {
 			return "", 0, false
 		}
-		call, ok := cut.Rhs[0].(*ast.CallExpr)
-		if !ok || !foregroundDiagnosticSelector(call.Fun, "strings", "Cut") || len(call.Args) != 2 || !foregroundDiagnosticString(call.Args[1], "\n") {
+		countCall, ok := count.X.(*ast.CallExpr)
+		if !ok || !foregroundDiagnosticSelector(countCall.Fun, "t", "Logf") || len(countCall.Args) != 2 || !foregroundDiagnosticString(countCall.Args[0], "foreground_output_lines=%d") {
 			return "", 0, false
 		}
-		conversion, ok := call.Args[0].(*ast.CallExpr)
-		if !ok || !foregroundDiagnosticIdent(conversion.Fun, "string") || len(conversion.Args) != 1 || !foregroundDiagnosticIdent(conversion.Args[0], "captured") {
+		countLength, ok := countCall.Args[1].(*ast.CallExpr)
+		if !ok || !foregroundDiagnosticIdent(countLength.Fun, "len") || len(countLength.Args) != 1 || !foregroundDiagnosticLines(countLength.Args[0]) {
 			return "", 0, false
 		}
-		trim, ok := statements[2].(*ast.AssignStmt)
+		loop, ok := statements[2].(*ast.RangeStmt)
+		if !ok || !foregroundDiagnosticIdent(loop.Key, "_") || !foregroundDiagnosticIdent(loop.Value, "firstLine") || !foregroundDiagnosticLines(loop.X) || len(loop.Body.List) != 2 {
+			return "", 0, false
+		}
+		trim, ok := loop.Body.List[0].(*ast.AssignStmt)
 		if !ok || len(trim.Lhs) != 1 || len(trim.Rhs) != 1 || !foregroundDiagnosticIdent(trim.Lhs[0], "firstLine") {
 			return "", 0, false
 		}
-		call, ok = trim.Rhs[0].(*ast.CallExpr)
+		call, ok := trim.Rhs[0].(*ast.CallExpr)
 		if !ok || !foregroundDiagnosticSelector(call.Fun, "strings", "TrimSuffix") || len(call.Args) != 2 || !foregroundDiagnosticIdent(call.Args[0], "firstLine") || !foregroundDiagnosticString(call.Args[1], "\r") {
 			return "", 0, false
 		}
-		guard, ok := statements[3].(*ast.IfStmt)
+		guard, ok := loop.Body.List[1].(*ast.IfStmt)
 		if !ok || guard.Init != nil || guard.Else != nil || len(guard.Body.List) != 1 {
 			return "", 0, false
 		}
@@ -262,6 +276,11 @@ func windowsForegroundDiagnosticGuard(source []byte) (string, int, bool) {
 	return "", 0, false
 }
 
+func foregroundDiagnosticLines(expression ast.Expr) bool {
+	call, ok := expression.(*ast.CallExpr)
+	return ok && foregroundDiagnosticIdent(call.Fun, "foregroundOutputLines") && len(call.Args) == 1 && foregroundDiagnosticIdent(call.Args[0], "captured")
+}
+
 func foregroundDiagnosticIdent(expression ast.Expr, name string) bool {
 	identifier, ok := expression.(*ast.Ident)
 	return ok && identifier.Name == name
@@ -279,4 +298,233 @@ func foregroundDiagnosticString(expression ast.Expr, want string) bool {
 	}
 	value, err := strconv.Unquote(literal.Value)
 	return err == nil && value == want
+}
+
+// Follow captured bytes through local aliases, rather than pinning a particular
+// logging statement or buffer name. The only raw-byte sink allowed is the exact
+// per-line call already checked by the vocabulary/length contract above.
+func TestWindowsForegroundCapturedOutputContract(t *testing.T) {
+	source, err := os.ReadFile(windowsSyntheticHarnessSource)
+	if err != nil {
+		t.Fatal("cannot read Windows foreground capture source")
+	}
+	file, err := parser.ParseFile(token.NewFileSet(), windowsSyntheticHarnessSource, source, 0)
+	if err != nil {
+		t.Fatal("cannot parse Windows foreground capture source")
+	}
+	var guarded *ast.CallExpr
+	if _, _, ok := windowsForegroundDiagnosticGuard(source); ok {
+		for _, declaration := range file.Decls {
+			function, ok := declaration.(*ast.FuncDecl)
+			if !ok || function.Name.Name != "windowsLogForegroundExit" {
+				continue
+			}
+			ast.Inspect(function.Body, func(node ast.Node) bool {
+				if call, ok := node.(*ast.CallExpr); ok && foregroundDiagnosticSelector(call.Fun, "t", "Log") {
+					guarded = call
+				}
+				return true
+			})
+		}
+	}
+	// The validator returns only fixed rejection messages. Pin that property
+	// before allowing t.Fatal(failure) to consume its result without raw taint.
+	validator, err := parser.ParseFile(token.NewFileSet(), "../tools/localcellharness/service_foreground_output_test.go", nil, 0)
+	if err != nil {
+		t.Fatal("cannot parse foreground output validator")
+	}
+	fixedMessages := false
+	for _, declaration := range validator.Decls {
+		function, ok := declaration.(*ast.FuncDecl)
+		if !ok || function.Name.Name != "foregroundShutdownFailure" {
+			continue
+		}
+		fixedMessages = true
+		returns := 0
+		ast.Inspect(function.Body, func(node ast.Node) bool {
+			if statement, ok := node.(*ast.ReturnStmt); ok {
+				returns++
+				if len(statement.Results) != 1 {
+					fixedMessages = false
+				} else if literal, ok := statement.Results[0].(*ast.BasicLit); !ok || literal.Kind != token.STRING {
+					fixedMessages = false
+				}
+			}
+			return true
+		})
+		fixedMessages = fixedMessages && returns > 0
+	}
+	if !fixedMessages {
+		t.Fatal("foreground shutdown validator no longer returns only fixed messages")
+	}
+	for _, violation := range windowsForegroundCapturedOutputViolations(file, guarded) {
+		t.Error(violation)
+	}
+}
+
+func windowsForegroundCapturedOutputViolations(file *ast.File, guarded *ast.CallExpr) []string {
+	var violations []string
+	for _, declaration := range file.Decls {
+		function, ok := declaration.(*ast.FuncDecl)
+		if !ok || function.Body == nil {
+			continue
+		}
+		tainted := map[string]bool{}
+		mark := func(expression ast.Expr) bool {
+			for {
+				index, ok := expression.(*ast.IndexExpr)
+				if !ok {
+					break
+				}
+				expression = index.X
+			}
+			identifier, ok := expression.(*ast.Ident)
+			if !ok || identifier.Name == "_" || tainted[identifier.Name] {
+				return false
+			}
+			tainted[identifier.Name] = true
+			return true
+		}
+		for _, field := range function.Type.Params.List {
+			if array, ok := field.Type.(*ast.ArrayType); ok && foregroundDiagnosticIdent(array.Elt, "byte") {
+				for _, name := range field.Names {
+					mark(name)
+				}
+			}
+		}
+		ast.Inspect(function.Body, func(node ast.Node) bool {
+			if declaration, ok := node.(*ast.ValueSpec); ok && foregroundDiagnosticSelector(declaration.Type, "bytes", "Buffer") {
+				for _, name := range declaration.Names {
+					mark(name)
+				}
+			}
+			// Also find captures whose declaration uses new or a composite
+			// literal: the stdout/stderr binding identifies the actual buffer.
+			if assignment, ok := node.(*ast.AssignStmt); ok && len(assignment.Lhs) == len(assignment.Rhs) {
+				for index, left := range assignment.Lhs {
+					if selector, ok := left.(*ast.SelectorExpr); ok && (selector.Sel.Name == "Stdout" || selector.Sel.Name == "Stderr") {
+						right := assignment.Rhs[index]
+						if address, ok := right.(*ast.UnaryExpr); ok && address.Op == token.AND {
+							right = address.X
+						}
+						mark(right)
+					}
+				}
+			}
+			return true
+		})
+		// Monotone, function-local flow also covers aliases assigned inside
+		// closures and loops. Keeping earlier taint is intentionally conservative.
+		for changed := true; changed; {
+			changed = false
+			assign := func(left []ast.Expr, right []ast.Expr) {
+				for index, expression := range left {
+					values := right
+					if len(left) == len(right) {
+						values = right[index : index+1]
+					}
+					for _, value := range values {
+						if foregroundCapturedExpression(value, tainted) && mark(expression) {
+							changed = true
+						}
+					}
+				}
+			}
+			ast.Inspect(function.Body, func(node ast.Node) bool {
+				switch value := node.(type) {
+				case *ast.AssignStmt:
+					assign(value.Lhs, value.Rhs)
+				case *ast.ValueSpec:
+					var left []ast.Expr
+					for _, name := range value.Names {
+						left = append(left, name)
+					}
+					assign(left, value.Values)
+				case *ast.RangeStmt:
+					if foregroundCapturedExpression(value.X, tainted) && mark(value.Value) {
+						changed = true
+					}
+				}
+				return true
+			})
+		}
+		ast.Inspect(function.Body, func(node ast.Node) bool {
+			call, ok := node.(*ast.CallExpr)
+			if !ok || call == guarded {
+				return true
+			}
+			selector, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			testingSink := foregroundDiagnosticIdent(selector.X, "t") && slices.Contains([]string{"Log", "Logf", "Error", "Errorf", "Fatal", "Fatalf"}, selector.Sel.Name)
+			formatSink := foregroundDiagnosticIdent(selector.X, "fmt") && strings.Contains(strings.ToLower(selector.Sel.Name), "print")
+			if !testingSink && !formatSink {
+				return true
+			}
+			for _, argument := range call.Args {
+				if foregroundCapturedExpression(argument, tainted) {
+					receiver := selector.X.(*ast.Ident).Name
+					violations = append(violations, fmt.Sprintf("%s: unguarded captured-output call %s.%s", function.Name.Name, receiver, selector.Sel.Name))
+					break
+				}
+			}
+			return true
+		})
+	}
+	return violations
+}
+
+func foregroundCapturedExpression(expression ast.Expr, tainted map[string]bool) bool {
+	found := false
+	ast.Inspect(expression, func(node ast.Node) bool {
+		if call, ok := node.(*ast.CallExpr); ok {
+			if identifier, ok := call.Fun.(*ast.Ident); ok && identifier.Obj == nil && slices.Contains([]string{"len", "cap", "foregroundShutdownFailure"}, identifier.Name) {
+				return false // Numeric counts or independently pinned fixed messages.
+			}
+			if selector, ok := call.Fun.(*ast.SelectorExpr); ok && (selector.Sel.Name == "CombinedOutput" || selector.Sel.Name == "Output") {
+				found = true
+			}
+		}
+		if identifier, ok := node.(*ast.Ident); ok && tainted[identifier.Name] {
+			found = true
+		}
+		return !found
+	})
+	return found
+}
+
+func TestWindowsForegroundCapturedOutputFlow(t *testing.T) {
+	for _, test := range []struct {
+		name, body string
+		rejected   bool
+	}{
+		{"buffer", `var captured bytes.Buffer; command.Stdout = &captured; t.Logf("%s", captured)`, true},
+		{"renamed_alias", `var output bytes.Buffer; command.Stderr = &output; first := output.Bytes(); var second = first; t.Error(string(second))`, true},
+		{"assigned_index", `lines := make([]string, 1); lines[0] = string(captured); t.Log(lines[0])`, true},
+		{"split_index", `lines := strings.Split(string(captured), "\n"); t.Logf("%s", string(lines[0]))`, true},
+		{"range_line", `for _, line := range strings.Split(string(captured), "\n") { t.Fatalf("%s", line) }`, true},
+		{"closure", `alias := captured; f := func() { t.Fatal(alias) }`, true},
+		{"multi_assignment", `alias, other := captured, 0; t.Errorf("%s", alias)`, true},
+		{"combined_output", `output, err := command.CombinedOutput(); t.Log(output)`, true},
+		{"fmt_fprintf", `fmt.Fprintf(writer, "%s", captured)`, true},
+		{"fmt_sprintf", `message := fmt.Sprintf("%s", captured)`, true},
+		{"shadowed_count", `len := func(raw []byte) []byte { return raw }; t.Log(len(captured))`, true},
+		{"shadowed_validator", `foregroundShutdownFailure := func(raw []byte) string { return string(raw) }; t.Log(foregroundShutdownFailure(captured))`, true},
+		{"count", `t.Logf("%d", len(captured))`, false},
+		{"count_alias", `count := len(strings.Split(string(captured), "\n")); t.Log(count)`, false},
+		{"range_index", `for index, line := range foregroundOutputLines(captured) { t.Log(index) }`, false},
+		{"fixed_failure", `failure := foregroundShutdownFailure(captured); t.Fatal(failure)`, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			file, err := parser.ParseFile(token.NewFileSet(), "flow", "package main; func capture(captured []byte) {"+test.body+"}", 0)
+			if err != nil {
+				t.Fatal("invalid captured-output flow fixture")
+			}
+			violations := windowsForegroundCapturedOutputViolations(file, nil)
+			if (len(violations) > 0) != test.rejected {
+				t.Fatal("captured-output contract lost identifier flow or numeric-count allowance")
+			}
+		})
+	}
 }

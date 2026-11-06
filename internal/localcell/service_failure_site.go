@@ -82,6 +82,11 @@ func WriteServiceHostFailure(output io.Writer, err error, fallback string) {
 		if err == nil {
 			return
 		}
+		// Only the abandoned caller branch is silent. Host cancellation and
+		// independent failures in a joined error retain their receipts.
+		if _, abandoned := err.(*serviceControlClientCancellation); abandoned {
+			return
+		}
 		if failure, ok := err.(*serviceFailure); ok {
 			located = failure
 		}

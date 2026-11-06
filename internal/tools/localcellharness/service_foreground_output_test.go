@@ -1,0 +1,147 @@
+package main
+
+import (
+	"bytes"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"regexp"
+	"slices"
+	"strings"
+	"testing"
+)
+
+func foregroundOutputLines(captured []byte) []string {
+	if len(captured) == 0 {
+		return nil
+	}
+	return strings.Split(strings.TrimSuffix(string(captured), "\n"), "\n")
+}
+
+// An abandoned readiness probe can disconnect between named-pipe connection
+// and the Windows peer check. Accept only that existing diagnostic family;
+// resource/connection setup failures and host failures still fail this test.
+// The receipt itself remains unique, last, newline-terminated, and byte-exact.
+func foregroundShutdownFailure(captured []byte) string {
+	if len(captured) == 0 {
+		return "foreground shutdown receipt missing"
+	}
+	if !bytes.HasSuffix(captured, []byte("\n")) {
+		return "foreground shutdown receipt lacks final newline or has trailing bytes"
+	}
+	lines := foregroundOutputLines(captured)
+	for _, line := range lines[:len(lines)-1] {
+		if !regexp.MustCompile(`^service_control accept=rejected step=(peer:pid|peer:identity|peer:sid)$`).MatchString(line) {
+			return "foreground shutdown emitted unexpected output before receipt"
+		}
+	}
+	receipt := lines[len(lines)-1] + "\n"
+	if !regexp.MustCompile(`^service_shutdown phase=(startup|tick|control|idle) operation=(reconcile|repair|stop|start|health|none) journal_pending=(true|false) journal_read_ok=(true|false)\n$`).MatchString(receipt) {
+		return "foreground shutdown receipt has invalid grammar or extra bytes"
+	}
+	const wantReceipt = "service_shutdown phase=idle operation=none journal_pending=false journal_read_ok=true\n"
+	if receipt != wantReceipt {
+		return "foreground shutdown receipt has unexpected field values"
+	}
+	return ""
+}
+
+func TestForegroundOutputLines(t *testing.T) {
+	for _, test := range []struct {
+		name, input string
+		want        []string
+	}{
+		{"empty", "", nil},
+		{"one", "service_manager_unavailable\n", []string{"service_manager_unavailable"}},
+		{"all_after_rejected", "unrecognized\nservice_manager_unavailable\n", []string{"unrecognized", "service_manager_unavailable"}},
+		{"blank_and_partial", "\nservice_manager_unavailable\npartial", []string{"", "service_manager_unavailable", "partial"}},
+		{"preserve_cr", "service_manager_unavailable\r\n", []string{"service_manager_unavailable\r"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if !slices.Equal(foregroundOutputLines([]byte(test.input)), test.want) {
+				t.Fatal("foreground output scan lost, normalized, or added a line")
+			}
+		})
+	}
+}
+
+func TestForegroundShutdownOutput(t *testing.T) {
+	const receipt = "service_shutdown phase=idle operation=none journal_pending=false journal_read_ok=true\n"
+	for _, test := range []struct {
+		name, output string
+		accepted     bool
+	}{
+		{"receipt_only", receipt, true},
+		{"abandoned_peer_pid", "service_control accept=rejected step=peer:pid\n" + receipt, true},
+		{"abandoned_peer_identity", "service_control accept=rejected step=peer:identity\n" + receipt, true},
+		{"abandoned_peer_sid", "service_control accept=rejected step=peer:sid\n" + receipt, true},
+		{"repeated_abandoned_probes", strings.Repeat("service_control accept=rejected step=peer:pid\n", 3) + receipt, true},
+		{"missing", "", false},
+		{"only_diagnostic", "service_control accept=rejected step=peer:pid\n", false},
+		{"duplicate_receipt", receipt + receipt, false},
+		{"receipt_not_last", receipt + "service_control accept=rejected step=peer:pid\n", false},
+		{"missing_final_newline", strings.TrimSuffix(receipt, "\n"), false},
+		{"trailing_bytes", receipt + "partial", false},
+		{"blank_before", "\n" + receipt, false},
+		{"blank_after", receipt + "\n", false},
+		{"private_before", "private /synthetic/home\n" + receipt, false},
+		{"native_failure", "native service host site=supervisor_command\n" + receipt, false},
+		{"duplicate_handle_failure", "service_control accept=rejected step=duplicate\n" + receipt, false},
+		{"connection_setup_failure", "service_control accept=rejected step=conn\n" + receipt, false},
+		{"unflushed_stop", "service_control action=stop response=unflushed\n" + receipt, false},
+		{"unknown_peer", "service_control accept=rejected step=peer:other\n" + receipt, false},
+		{"peer_extra_bytes", "service_control accept=rejected step=peer:pid extra\n" + receipt, false},
+		{"receipt_extra_bytes", "extra " + receipt, false},
+		{"unexpected_phase", strings.Replace(receipt, "phase=idle", "phase=tick", 1), false},
+		{"missing_field", strings.Replace(receipt, " journal_pending=false", "", 1), false},
+		{"crlf_receipt", strings.ReplaceAll(receipt, "\n", "\r\n"), false},
+		{"crlf_peer", "service_control accept=rejected step=peer:pid\r\n" + receipt, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if (foregroundShutdownFailure([]byte(test.output)) == "") != test.accepted {
+				t.Fatal("foreground shutdown output violated peer-only prefixes and one exact final receipt")
+			}
+		})
+	}
+}
+
+func TestWindowsForegroundShutdownOutputContract(t *testing.T) {
+	file, err := parser.ParseFile(token.NewFileSet(), "service_subprocess_windows_test.go", nil, 0)
+	if err != nil {
+		t.Fatal("cannot parse Windows foreground output source")
+	}
+	fixture, err := parser.ParseFile(token.NewFileSet(), "contract", `package main; func contract() {
+		receipt := captured.Bytes()
+		if len(foregroundOutputLines(receipt)) > 1 {
+			windowsLogForegroundExit(t, command, receipt)
+		}
+		if failure := foregroundShutdownFailure(receipt); failure != "" {
+			t.Fatal(failure)
+		}
+	}`, 0)
+	if err != nil {
+		t.Fatal("invalid foreground output contract")
+	}
+	expected := fixture.Decls[0].(*ast.FuncDecl).Body
+	matches := 0
+	ast.Inspect(file, func(node ast.Node) bool {
+		block, ok := node.(*ast.BlockStmt)
+		if !ok {
+			return true
+		}
+		for index, statement := range block.List {
+			if foregroundSource(t, statement) != "receipt := captured.Bytes()" {
+				continue
+			}
+			matches++
+			actual := &ast.BlockStmt{List: block.List[index:]}
+			if foregroundSource(t, actual) != foregroundSource(t, expected) {
+				t.Fatal("Windows foreground multiline output lost guarded logging before exact receipt validation")
+			}
+		}
+		return true
+	})
+	if matches != 1 {
+		t.Fatal("Windows foreground output contract lost its unique assertion site")
+	}
+}

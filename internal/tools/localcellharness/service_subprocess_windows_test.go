@@ -253,21 +253,11 @@ func TestWindowsServiceForegroundSubprocessCommands(t *testing.T) {
 			t.Fatal("foreground shutdown retained its lease")
 		}
 		receipt := captured.Bytes()
-		if len(receipt) == 0 {
-			t.Fatal("foreground shutdown receipt missing")
+		if len(foregroundOutputLines(receipt)) > 1 {
+			windowsLogForegroundExit(t, command, receipt)
 		}
-		if bytes.Count(receipt, []byte("\n")) > 1 {
-			t.Fatal("foreground shutdown emitted multiple output lines")
-		}
-		if !bytes.HasSuffix(receipt, []byte("\n")) {
-			t.Fatal("foreground shutdown receipt lacks final newline or has trailing bytes")
-		}
-		if !regexp.MustCompile(`^service_shutdown phase=(startup|tick|control|idle) operation=(reconcile|repair|stop|start|health|none) journal_pending=(true|false) journal_read_ok=(true|false)\n$`).Match(receipt) {
-			t.Fatal("foreground shutdown receipt has invalid grammar or extra bytes")
-		}
-		const wantReceipt = "service_shutdown phase=idle operation=none journal_pending=false journal_read_ok=true\n"
-		if string(receipt) != wantReceipt {
-			t.Fatal("foreground shutdown receipt has unexpected field values")
+		if failure := foregroundShutdownFailure(receipt); failure != "" {
+			t.Fatal(failure)
 		}
 	}
 }
@@ -277,14 +267,17 @@ func TestWindowsServiceForegroundSubprocessCommands(t *testing.T) {
 // this closed allowlist against that emitter.
 const windowsForegroundReceiptKeys = "phase|operation|site|journal_pending|journal_read_ok"
 
-// Only call after Wait has joined both output copiers. Do not scan past a
-// rejected first line or normalize arbitrary output into the safe vocabulary.
+// Only call after Wait has joined both output copiers. Each complete or partial
+// line is independently guarded; rejected bytes are never logged or normalized
+// into the vocabulary. Diagnostic visibility does not imply shutdown acceptance.
 func windowsLogForegroundExit(t *testing.T, command *exec.Cmd, captured []byte) {
 	t.Helper()
-	firstLine, _, _ := strings.Cut(string(captured), "\n")
-	firstLine = strings.TrimSuffix(firstLine, "\r")
-	if len(firstLine) <= 160 && regexp.MustCompile(`^(localcell: [a-z_]{1,48}|service_[a-z_]+( (`+windowsForegroundReceiptKeys+`)=[a-z_0-9]{1,24})*)$`).MatchString(firstLine) {
-		t.Log(firstLine)
+	t.Logf("foreground_output_lines=%d", len(foregroundOutputLines(captured)))
+	for _, firstLine := range foregroundOutputLines(captured) {
+		firstLine = strings.TrimSuffix(firstLine, "\r")
+		if len(firstLine) <= 160 && regexp.MustCompile(`^(localcell: [a-z_]{1,48}|service_[a-z_]+( (`+windowsForegroundReceiptKeys+`)=[a-z_0-9]{1,24})*|service_control accept=rejected step=(peer:pid|peer:identity|peer:sid|duplicate|conn)|service_control action=stop response=unflushed|native service host site=(host_config|host_descriptor|host_prepare|host_persisted_config|initial_descriptor|lease_directory|lease_record|lease_write|control_secret|control_transport|control_cancelled|endpoint_descriptor|endpoint_read|endpoint_write|endpoint_lease|endpoint_remove|supervisor_load|supervisor_traversal|supervisor_save|supervisor_start|supervisor_stop|supervisor_repair|supervisor_reconcile|supervisor_health|supervisor_command|health_lock|health_tree|health_database|health_credential|health_probe|health_ready|startup_reconcile|startup_repair|startup_stop|shutdown_repair|shutdown_stop|boot_binding|descriptor_write|unknown))$`).MatchString(firstLine) {
+			t.Log(firstLine)
+		}
 	}
 	t.Logf("exit_code=%d", command.ProcessState.ExitCode())
 }

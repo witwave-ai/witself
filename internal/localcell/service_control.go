@@ -16,12 +16,25 @@ import (
 
 type serviceControlCommandKey struct{}
 type serviceControlHealthBoundKey struct{}
+type serviceControlHostContextKey struct{}
+
+// The caller abandoned this command. Preserve its error identity and site for
+// control responses, while keeping it out of the host's failure diagnostics.
+type serviceControlClientCancellation struct{ cause error }
+
+func (e *serviceControlClientCancellation) Error() string { return e.cause.Error() }
+func (e *serviceControlClientCancellation) Unwrap() error { return e.cause }
 
 var errServiceControlDeferred = errors.New("localcell: service_control_deferred")
 
 func serviceControlCancellation(ctx context.Context) error {
 	if control, _ := ctx.Value(serviceControlCommandKey{}).(bool); control && ctx.Err() != nil {
-		return serviceFailureAt(ctx.Err(), "control_cancelled")
+		err := serviceFailureAt(ctx.Err(), "control_cancelled")
+		host, _ := ctx.Value(serviceControlHostContextKey{}).(context.Context)
+		if host == nil || host.Err() == nil {
+			return &serviceControlClientCancellation{cause: err}
+		}
+		return err
 	}
 	return nil
 }
