@@ -349,8 +349,11 @@ func main() {
 
 func assertReady(t *testing.T, cell *localcell.Cell, parents ...context.Context) *localcell.Manifest {
 	t.Helper()
-	status, err := cell.Status(lifecycleProofContext(t, parents))
+	ctx := lifecycleProofContext(t, parents)
+	probeStarted := time.Now()
+	status, err := cell.Status(ctx)
 	if err != nil || !status.ServerReady || !status.WorkerReady || status.Manifest == nil {
+		t.Logf("%s", formatPostStartReadinessDiagnostic("assert_ready", -1, time.Since(probeStarted), status, err, ctx.Err() != nil))
 		t.Fatal("both local readiness endpoints must be ready when start returns")
 	}
 	return status.Manifest
