@@ -21,6 +21,11 @@ export const brochureFiles = Object.freeze([
   'web/product/assets/screenshots/manifest.json',
 ]);
 
+// Refusals specific to proving a docs event's comparison and checkout binding.
+export const REASONS = Object.freeze([
+  'merge-ref-unavailable', 'docs-checkout-mismatch', 'comparison-unavailable',
+]);
+
 const full = reason => ({application: true, website: true, website_only: false,
   docs: true, docs_only: false, docs_index: true, reason});
 const websiteInput = path => path.startsWith('web/product/') ||
@@ -131,19 +136,31 @@ function commit(ref, cwd) {
   return ref;
 }
 
-function docsCheckoutMatches(eventName, event, head, target, cwd) {
+function docsCheckoutMatches(eventName, event, head, target, cwd, declaredMerge) {
   const checkout = commit(git(['rev-parse', 'HEAD'], cwd).toString().trim(), cwd);
   if (checkout === head) return true;
   if (eventName !== 'pull_request') return false;
   // Actions normally checks out GitHub's test merge. Bind it to the event's
   // exact merge object and ordered base/head parents, not any two-parent commit.
-  const merge = commit(event?.pull_request?.merge_commit_sha, cwd);
+  const payloadMerge = event?.pull_request?.merge_commit_sha;
+  let merge;
+  if (/^[a-f0-9]{40}$/i.test(payloadMerge ?? '')) {
+    // A declared payload object governs. A missing object is still a git
+    // comparison failure; a later lookup must not replace this declaration.
+    merge = commit(payloadMerge, cwd);
+  } else {
+    try {
+      merge = commit(declaredMerge, cwd);
+    } catch {
+      throw new Error('merge-ref-unavailable');
+    }
+  }
   if (checkout !== merge) return false;
   const parents = git(['rev-list', '--parents', '-n', '1', merge], cwd).toString().trim().split(' ');
   return parents.length === 3 && parents[0] === merge && parents[1] === target && parents[2] === head;
 }
 
-export function classifyEvent(eventName, event, cwd = process.cwd()) {
+export function classifyEvent(eventName, event, cwd = process.cwd(), declaredMerge) {
   try {
     let base;
     let head;
@@ -160,9 +177,10 @@ export function classifyEvent(eventName, event, cwd = process.cwd()) {
       return full('unsupported-event');
     }
     const result = classifyChanges(changed(cwd, base, head));
-    if (result.docs_only && !docsCheckoutMatches(eventName, event, head, target, cwd)) return full('docs-checkout-mismatch');
+    if (result.docs_only && !docsCheckoutMatches(eventName, event, head, target, cwd, declaredMerge)) return full('docs-checkout-mismatch');
     return result;
-  } catch {
+  } catch (error) {
+    if (error.message === 'merge-ref-unavailable') return full('merge-ref-unavailable');
     // An unavailable comparison never permits skipping application checks.
     return full('comparison-unavailable');
   }
@@ -194,7 +212,8 @@ export function main(args = process.argv.slice(2), env = process.env) {
     throw new Error('usage: ci-product-scope.mjs [--base origin/main]');
   } else {
     try {
-      result = classifyEvent(env.GITHUB_EVENT_NAME, JSON.parse(readFileSync(env.GITHUB_EVENT_PATH, 'utf8')));
+      const declaredMerge = env.GITHUB_EVENT_NAME === 'pull_request' ? env.WITSELF_CI_PR_MERGE_SHA?.trim() : undefined;
+      result = classifyEvent(env.GITHUB_EVENT_NAME, JSON.parse(readFileSync(env.GITHUB_EVENT_PATH, 'utf8')), process.cwd(), declaredMerge);
     } catch {
       result = full('event-unavailable');
     }

@@ -80,6 +80,28 @@ brochure-only main push or its existing authorized manual path. Documentation
 changes do not publish a site, release software, deploy infrastructure, or
 change account policy.
 
+### Why a docs-only PR can still run the full matrix
+
+GitHub can deliver a PR event before it has computed `merge_commit_sha`.
+The classifier job looks up the PR's current declared merge through the GitHub
+API when it runs. That late-bound value can fill a missing or malformed payload
+value; a valid payload merge already present in the checkout takes precedence.
+The checkout must still be the PR head or that exact declared test merge, with
+the event's base and head as its two parents in that order. The lookup does not
+change the comparison range.
+
+When the evidence cannot support the documentation lane, the classifier keeps
+the full matrix and prints a reason:
+
+- `merge-ref-unavailable`: a docs-only comparison needs a declared merge, the
+  payload value is missing or malformed, and the lookup supplies no usable
+  commit in the checkout.
+- `docs-checkout-mismatch`: the checkout does not match the PR head or the exact
+  declared test merge with the required parents.
+- `comparison-unavailable`: Git cannot establish the comparison, including an
+  invalid or unavailable base or head commit, or a well-formed payload merge
+  SHA whose commit is unavailable locally.
+
 ## Changing or reverting the gate
 
 Changes to the classifier, validator, runner, workflow, tests, Makefile, or

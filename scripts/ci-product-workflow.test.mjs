@@ -69,6 +69,36 @@ function assertClassifier(job, outputs, label) {
   assert(job.steps.indexOf(check) < job.steps.indexOf(scope[0]), `${label}: test before classification`);
 }
 
+const mergeRefRun = [
+  'merge_sha=$(gh api "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}" --jq \'.merge_commit_sha // empty\' 2>/dev/null) || merge_sha=\'\'',
+  'if [[ ! "$merge_sha" =~ ^[0-9a-f]{40}$ ]]; then merge_sha=\'\'; fi',
+  'printf \'merge_sha=%s\\n\' "$merge_sha" >> "$GITHUB_OUTPUT"',
+  '',
+].join('\n');
+
+function assertMergeRefLookup(ci) {
+  const job = ci.jobs.changes;
+  assert.deepEqual(job.permissions, {contents: 'read', 'pull-requests': 'read'}, 'ci changes: exact read-only permissions');
+  for (const [name, other] of Object.entries(ci.jobs)) {
+    if (name === 'changes') continue;
+    assert.notEqual(typeof other.permissions, 'string', `${name}: no broad permission grant`);
+    assert(!Object.hasOwn(other.permissions ?? {}, 'pull-requests'), `${name}: no pull-request permission declaration`);
+  }
+  const lookups = job.steps.filter(step => step.id === 'merge-ref');
+  assert.equal(lookups.length, 1, 'ci changes: exactly one merge-ref step');
+  const lookup = lookups[0];
+  assert.equal(lookup.if, "github.event_name == 'pull_request'", 'ci changes: merge lookup only for pull requests');
+  assert.equal(lookup.shell, 'bash');
+  assert.deepEqual(lookup.env, {GH_TOKEN: '${{ github.token }}'}, 'ci changes: merge lookup uses the job token');
+  assert.equal(lookup.run.replace(/\r\n/g, '\n'), mergeRefRun, 'ci changes: exact API lookup, failure fallback, SHA validation, and merge_sha output');
+  assert.equal(lookup['continue-on-error'], undefined);
+  assert(job.steps.indexOf(lookup) > job.steps.indexOf(action(job, 'actions/checkout@', 'ci changes')), 'ci changes: lookup after checkout');
+  assert(job.steps.indexOf(lookup) > job.steps.indexOf(action(job, 'actions/setup-node@', 'ci changes')), 'ci changes: lookup after Node setup');
+  assert(job.steps.indexOf(lookup) < job.steps.findIndex(step => step.run === testCommand), 'ci changes: lookup before classification tests');
+  assert.deepEqual(job.steps.find(step => step.id === 'scope').env,
+    {WITSELF_CI_PR_MERGE_SHA: '${{ steps.merge-ref.outputs.merge_sha }}'}, 'ci changes: classifier receives only the declared merge output');
+}
+
 function assertWebsiteCall(job, label) {
   needs(job, ['changes'], label);
   assert.equal(expression(job.if), "needs.changes.outputs.website == 'true'", `${label}: positive website classification`);
@@ -963,6 +993,7 @@ function assertWorkflowContracts(sources) {
   assert.deepEqual(ci.permissions, {contents: 'read'});
   assertCIConcurrency(ci);
   assertClassifier(ci.jobs.changes, ['application', 'docs', 'docs_index', 'docs_only', 'website', 'website_only'], 'ci changes');
+  assertMergeRefLookup(ci);
   assertWebsiteCall(ci.jobs.website, 'ci website');
   assertDocsJob(ci.jobs.docs);
   assertLocalcellWindowsJob(ci);
@@ -1080,6 +1111,40 @@ function assertWorkflowContracts(sources) {
 
 test('documentation and website lanes preserve required checks, application gates, and deployment boundaries', () => {
   assertWorkflowContracts(workflows);
+});
+
+test('merge-ref shell accepts only lowercase commit SHAs and tolerates unavailable API results', () => {
+  const temporary = mkdtempSync(join(root, '.merge-ref-test-'));
+  try {
+    const lookup = workflows['ci.yml'].jobs.changes.steps.find(step => step.id === 'merge-ref');
+    const command = lookup.run
+      .replace('${{ github.repository }}', 'owner/repository')
+      .replace('${{ github.event.pull_request.number }}', '42');
+    const mock = 'gh() { printf \'%s\\n\' "$LOOKUP_RESULT"; return "$LOOKUP_STATUS"; }\n';
+    const sha = 'a'.repeat(40);
+    for (const [name, value, status, expected] of [
+      ['valid commit', sha, 0, sha],
+      ['empty result', '', 0, ''],
+      ['null result', 'null', 0, ''],
+      ['short commit', 'a'.repeat(39), 0, ''],
+      ['uppercase commit', 'A'.repeat(40), 0, ''],
+      ['non-hex commit', 'g'.repeat(40), 0, ''],
+      ['extra output', `${sha}\nunexpected`, 0, ''],
+      ['API error', '', 1, ''],
+      ['API error with output', sha, 1, ''],
+    ]) {
+      const output = join(temporary, 'output');
+      writeFileSync(output, '');
+      const result = spawnSync('bash', ['--noprofile', '--norc', '-e', '-o', 'pipefail', '-c', mock + command], {
+        encoding: 'utf8',
+        env: {GITHUB_OUTPUT: output, LOOKUP_RESULT: value, LOOKUP_STATUS: String(status)},
+      });
+      assert.equal(result.status, 0, `${name}: lookup never blocks classification`);
+      assert.equal(readFileSync(output, 'utf8'), `merge_sha=${expected}\n`, `${name}: exact validated output`);
+    }
+  } finally {
+    rmSync(temporary, {recursive: true, force: true});
+  }
 });
 
 test('main push runs remain independent while newer updates cancel only their own PR checks', () => {
@@ -1215,6 +1280,37 @@ const mutations = [
   ['mixed proof loses disposable selector', data => { delete data['ci.yml'].jobs['go-capture-mixed'].env.WITSELF_TEST_DISPOSABLE_CLUSTER; }],
   ['mixed proof ignores failed tests', data => { const step = data['ci.yml'].jobs['go-capture-mixed'].steps.find(step => step.run?.includes("-run 'CaptureMix'")); step.run = step.run.replace('then exit 1', 'then exit 0'); }],
   ['mixed proof loses private artifacts', data => { data['ci.yml'].jobs['go-capture-mixed'].steps = data['ci.yml'].jobs['go-capture-mixed'].steps.filter(step => !step.uses?.startsWith('actions/upload-artifact@')); }],
+  ['missing merge-ref lookup', data => { data['ci.yml'].jobs.changes.steps = data['ci.yml'].jobs.changes.steps.filter(step => step.id !== 'merge-ref'); }],
+  ['duplicate merge-ref lookup', data => { data['ci.yml'].jobs.changes.steps.push(structuredClone(data['ci.yml'].jobs.changes.steps.find(step => step.id === 'merge-ref'))); }],
+  ['merge-ref lookup on push', data => { data['ci.yml'].jobs.changes.steps.find(step => step.id === 'merge-ref').if = "github.event_name == 'push'"; }],
+  ['merge-ref lookup before Node setup', data => {
+    const steps = data['ci.yml'].jobs.changes.steps;
+    const index = steps.findIndex(step => step.id === 'merge-ref');
+    [steps[index - 1], steps[index]] = [steps[index], steps[index - 1]];
+  }],
+  ['merge-ref lookup after classification tests', data => {
+    const steps = data['ci.yml'].jobs.changes.steps;
+    const index = steps.findIndex(step => step.id === 'merge-ref');
+    [steps[index], steps[index + 1]] = [steps[index + 1], steps[index]];
+  }],
+  ['merge-ref token omitted', data => { delete data['ci.yml'].jobs.changes.steps.find(step => step.id === 'merge-ref').env; }],
+  ['merge-ref API target changed', data => {
+    const step = data['ci.yml'].jobs.changes.steps.find(step => step.id === 'merge-ref');
+    step.run = step.run.replace('/pulls/', '/issues/');
+  }],
+  ['merge-ref SHA validation removed', data => {
+    const step = data['ci.yml'].jobs.changes.steps.find(step => step.id === 'merge-ref');
+    step.run = step.run.split('\n').filter(line => !line.includes('^[0-9a-f]{40}$')).join('\n');
+  }],
+  ['merge-ref output renamed', data => {
+    const step = data['ci.yml'].jobs.changes.steps.find(step => step.id === 'merge-ref');
+    step.run = step.run.replace('merge_sha=%s', 'merge=%s');
+  }],
+  ['merge-ref classifier env omitted', data => { delete data['ci.yml'].jobs.changes.steps.find(step => step.id === 'scope').env; }],
+  ['merge-ref classifier output changed', data => { data['ci.yml'].jobs.changes.steps.find(step => step.id === 'scope').env.WITSELF_CI_PR_MERGE_SHA = '${{ steps.merge-ref.outputs.merge }}'; }],
+  ['merge-ref write permission', data => { data['ci.yml'].jobs.changes.permissions['pull-requests'] = 'write'; }],
+  ['merge-ref permission omitted', data => { delete data['ci.yml'].jobs.changes.permissions['pull-requests']; }],
+  ['pull-request permission on another job', data => { data['ci.yml'].jobs.website.permissions = {'pull-requests': 'read'}; }],
   ['missing Unix lifecycle job', data => { delete data['ci.yml'].jobs['localcell-unix']; }],
   ['missing Unix dependency from go', data => { data['ci.yml'].jobs.go.needs = data['ci.yml'].jobs.go.needs.filter(id => id !== 'localcell-unix'); }],
   ['Unix matrix row removed', data => { data['ci.yml'].jobs['localcell-unix'].strategy.matrix.include.pop(); }],
