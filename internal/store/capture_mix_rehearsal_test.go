@@ -86,6 +86,15 @@ func TestCaptureMixMatrix(t *testing.T) {
 			t.Log(evidence.Check())
 		}
 	}
+	if err != nil && !disposable && err.Error() == "capturemix database target refused" {
+		// The shared-database rehearsal is limited to the closed local test
+		// lanes (127.0.0.1:5599-5601, codex_a..d). A local gate database or
+		// any other target is a qualified NOT RUN, never a failure and never
+		// a PASS receipt; the role-isolated CI run (disposable) still fails.
+		t.Log("NOT RUN mixed_binaries_roles_unavailable")
+		t.Log("NOT RUN proof_profile_database_unavailable")
+		t.Skip("NOT RUN capturemix_target_outside_closed_lanes")
+	}
 	if err != nil {
 		t.Fatal(err.Error())
 	}
