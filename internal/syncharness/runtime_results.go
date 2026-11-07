@@ -36,7 +36,8 @@ type RuntimeAdapterSymbol struct {
 
 // RuntimeResultRecord is separate from the obligation allocation inventory.
 // Artifact is an opaque retained artifact ID, never a path, URL or raw digest.
-// An unexecuted capability has no adapter, evidence class or artifact.
+// Mixed binary results contain private BuildIdentity data and must never be
+// logged. An unexecuted capability has no identity, adapter, class or artifact.
 type RuntimeResultRecord struct {
 	Version           int                  `json:"version"`
 	Obligation        string               `json:"obligation"`
@@ -51,15 +52,18 @@ type RuntimeResultRecord struct {
 	Outcome           EvidenceStatus       `json:"outcome"`
 	MissingCapability string               `json:"missing_capability,omitempty"`
 	Reason            string               `json:"reason,omitempty"`
+	BuildIdentity     *MixedBuildIdentity  `json:"build_identity,omitempty"`
 }
 
-// RuntimeArtifact retains only symbolic experiment provenance and an assertion
-// count. The binding suites execute the adapter again and compare this record.
+// RuntimeArtifact retains experiment provenance and an assertion count. Mixed
+// records include private build identities; other records remain value-free.
+// The binding suites execute the adapter again and compare this record.
 type RuntimeArtifact struct {
-	Version int                 `json:"version"`
-	ID      string              `json:"id"`
-	Result  RuntimeResultRecord `json:"result"`
-	Checks  int                 `json:"checks"`
+	Version     int                 `json:"version"`
+	ID          string              `json:"id"`
+	Result      RuntimeResultRecord `json:"result"`
+	Checks      int                 `json:"checks"`
+	JobEvidence []MixedJobEvidence  `json:"job_evidence,omitempty"`
 }
 
 // RuntimeResults is the versioned, value-free runtime evidence inventory.
@@ -151,7 +155,7 @@ func (r RuntimeResultRecord) Validate(manifests []ObligationManifest) error {
 			known = slices.Contains(m.MissingCapabilities, r.Capability) || slices.ContainsFunc(completedModelCapabilities[:], func(pair runtimeCapabilityPair) bool {
 				return pair.Obligation == m.ID && pair.Capability == r.Capability
 			})
-			known = known || principalRuntimeCapability(m.ID, r.Capability)
+			known = known || principalRuntimeCapability(m.ID, r.Capability) || mixedRuntimeCapability(m.ID, r.Capability)
 			if r.Capability == "runtime_schedule_adapter" {
 				known = slices.ContainsFunc(CoverageSchedules(), func(s CoverageSchedule) bool { return s.ID == m.ID })
 			}
@@ -161,10 +165,13 @@ func (r RuntimeResultRecord) Validate(manifests []ObligationManifest) error {
 		return ErrRuntimeResult
 	}
 	if r.Outcome == NotRun || r.Outcome == UnsupportedScope {
+		if mixedRuntimeCapability(r.Obligation, r.Capability) && !validMixedPendingReason(r.Reason) {
+			return ErrRuntimeResult
+		}
 		if principalRuntimeCapability(r.Obligation, r.Capability) && r.Reason != principalRuntimePendingReason(r.Capability) {
 			return ErrRuntimeResult
 		}
-		if r.MissingCapability != r.Capability || r.EvidenceClass != "" || r.Adapter != (RuntimeAdapterSymbol{}) || r.Artifact != "" || r.Executable != "" || r.DatabaseClass != "" || r.PlatformClass != "" {
+		if r.MissingCapability != r.Capability || r.EvidenceClass != "" || r.Adapter != (RuntimeAdapterSymbol{}) || r.Artifact != "" || r.Executable != "" || r.DatabaseClass != "" || r.PlatformClass != "" || r.BuildIdentity != nil {
 			return ErrRuntimeResult
 		}
 		return nil
@@ -173,6 +180,12 @@ func (r RuntimeResultRecord) Validate(manifests []ObligationManifest) error {
 		return ErrRuntimeResult
 	}
 	expected, _, ok := expectedRuntimeRecord(r)
+	if r.EvidenceClass == MixedBinariesEvidence {
+		if r.BuildIdentity == nil || !r.BuildIdentity.valid() {
+			return ErrRuntimeResult
+		}
+		expected.BuildIdentity = r.BuildIdentity
+	}
 	expected.Outcome = r.Outcome
 	if !ok || r != expected {
 		return ErrRuntimeResult
@@ -231,7 +244,7 @@ func LoadRuntimeResults(fsys fs.FS) (RuntimeResults, error) {
 		}
 		a, err := loadRuntimeArtifact(fsys, r.Artifact)
 		_, checks, _ := expectedRuntimeRecord(r)
-		if err != nil || a.Result != r || a.Checks != checks || artifacts[r.Artifact] {
+		if err != nil || !reflect.DeepEqual(a.Result, r) || a.Checks != checks || artifacts[r.Artifact] {
 			return RuntimeResults{}, ErrRuntimeResult
 		}
 		artifacts[r.Artifact] = true
@@ -250,6 +263,13 @@ func loadRuntimeArtifact(fsys fs.FS, id string) (RuntimeArtifact, error) {
 	}
 	data, err := fs.ReadFile(fsys, "testdata/runtime_results/artifacts/"+id+".v1.json")
 	if err != nil || decodeRuntimeJSON(data, &artifact) != nil || artifact.Version != 1 || artifact.ID != id {
+		return RuntimeArtifact{}, ErrRuntimeResult
+	}
+	if artifact.Result.EvidenceClass == MixedBinariesEvidence {
+		if !validMixedJobEvidence(artifact.Result.Capability, artifact.JobEvidence) {
+			return RuntimeArtifact{}, ErrRuntimeResult
+		}
+	} else if len(artifact.JobEvidence) != 0 {
 		return RuntimeArtifact{}, ErrRuntimeResult
 	}
 	return artifact, nil

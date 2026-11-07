@@ -1024,7 +1024,7 @@ The four original native timing rows were retained in #840 and Linux arm64 in
 | LC-S4 | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | merged (disabled) | PR #826 | route/console and real API tests; executable review (10 killed mutations) | no live activation | LC-S2-P (D8), LC-S5 (M0c) |
 | LC-S2-R1 | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | merged (disabled) | PR #839 | migration-lock cancellation, worker restart policy and lifecycle readiness tests; five executable reviews (two merge-regression tests added) | no live activation | service adapters |
 | LC-S5 | Codex GPT-6 Astra (implementer); Fable (integration owner) | merged (harness-only): LC-S5A #843, LC-S5B #844, LC-S5C #845, LC-S5D #846; H03/H05 model allocations completed subsequently by LC-S6A #848 | synthetic topology/catalogs/scheduler; typed protocol; local capture/publication/accounting; transition, authority and recovery oracles; trace replay/reducer; H01–H69 manifests | scoped model/vector fixtures and opted-in PostgreSQL miniature transaction, fixture reopen and reducer tests; hosted dependency/byte baselines | [LC-S5-owned inventories and M4 proof](sync-contract.md#open-items-by-milestone); missing production adapters remain SCAFFOLD_ONLY and runtime schedules NOT_RUN | LC-S6 design: M4 owes real writer, movement, mixed-binary, role, restore and independent-witness proofs |
-| LC-S6 | Codex GPT-6 Astra (LC-S6A/B/C1/C2a implementer); Fable (integration owner) | LC-S6A merged #848; LC-S6B merged #861 (F1 answered yes 2026-10-27); LC-S6C1 merged #869; LC-S6C2a merged #875 (`be4778ee`, 2026-11-04), adding the local-only principal boundary; C2b/C3/D/E/F remain pending | A separates executable capability evidence from immutable v1 obligations; B adds the selected sync namespace; C1 adds guarded capture and committed-prefix finalization; C2a adds protected admission functions, principal topology refusal and capability revocation drain | C1 retains seven single-executable PostgreSQL capability records; C2a required PR checks include scoped disposable-cluster principal/bypass/downgrade evidence; shared-database role experiments remain NOT_RUN, distinct from owner-path results; no obligation promotion | C2b mixed executables and proof profile (F2/F4 answered yes 2026-11-02); LC-S6C3 installer role conversion; D application/accounting, E movement, F recovery; F3/D9 unresolved | The one-role Local Cell installer remains migration-refused at 0003 (`sync_principals_missing`) and activation-refused (`sync_principal_topology_unverified`); C3 must convert the installer; C2a required PR checks do not close broader M4 acceptance |
+| LC-S6 | Codex GPT-6 Astra (LC-S6A/B/C1/C2a/C2b implementer); Fable (integration owner) | LC-S6A merged #848; LC-S6B merged #861 (F1 answered yes 2026-10-27); LC-S6C1 merged #869; LC-S6C2a merged #875 (`be4778ee`, 2026-11-04), adding the local-only principal boundary; C2b adds the pinned predecessor, default-off proof profile and mixed-executable CI entry; owner acceptance and C3/D/E/F remain pending | A separates executable capability evidence from immutable v1 obligations; B adds the selected sync namespace; C1 adds guarded capture and committed-prefix finalization; C2a adds protected admission functions, principal topology refusal and capability revocation drain; C2b separates local rehearsal from disposable mixed-binary evidence | C1 retains seven single-executable PostgreSQL capability records; C2a required PR checks include scoped disposable-cluster principal/bypass/downgrade evidence; shared-database role experiments remain NOT_RUN, distinct from owner-path results; C2b allocates mixed records for H34/H36/H43 but retains NOT_RUN until all required executable assertions run; no obligation promotion | complete mixed-executable capture acceptance; LC-S6C3 installer role conversion; D application/accounting, E movement, F recovery; F3/D9 unresolved | The one-role Local Cell installer remains migration-refused at 0003 (`sync_principals_missing`) and activation-refused (`sync_principal_topology_unverified`); C3 must convert the installer; C2a required PR checks do not close broader M4 acceptance; local current processes start after guard installation without the profile, so preinstallation execution and the current-server admitted path remain NOT_RUN |
 | LC-S7 | Codex GPT-6 Astra (LC-S7A/C1 implementer); Fable (integration owner) | LC-S7A merged #850 (nine executable reviews, eight fix passes; the first real Linux CI runs replaced the `GetUnit` lookup with `LoadUnit` and removed `User=` from per-user units); LC-S7A-R #856 merged; reboot-and-login receipt recorded 2026-10-30 (Linux arm64 VM); LC-S7B1 #855, LC-S7B2 #860, LC-S7B3 #865 merged; LC-S7C1 merged #872 (three executable reviews, two fix passes, one Windows CI round: autocrlf rewrote the byte-exact `launchctl print` fixture, cured with `.gitattributes -text`; a darwin diagnostics test asserting darwin separators moved to the `!windows` file); LC-S7C2a1 merged #873 (`e5f0acc1`, 2026-11-05): Windows private named-pipe control and boot-session identity; foreground host proof wired on the Windows row; LC-S7C2a2 merged #887 (eight executable reviews, seven fix passes, three Windows CI rounds; the rebase onto FLAKE-11F ordered the fixture's shutdown-channel install before its launch-attempt accounting): console-free child shutdown channel with command cancellation, escalation policy and authenticated host-exit; the `service_shutdown_channel` proof enrolled on the Windows row | explicit foreground supervisor, Linux systemd user and macOS launchd LaunchAgent adapters; two-phase receipt driver and read-only `observe` control; component-set trust format v1 with offline Go, shell, PowerShell and Homebrew verification and channel-owned payload handoff, all dark | hermetic service ownership, authenticated control, desired-state and old-boot fences; native registration, same-boot restart, persisted write and exact removal proven on both Linux CI rows; C2a1 required PR checks are the merged CI evidence; no new independent native receipt is inferred; sanitized diagnostics on failure; C2a2 portable config, descriptor, drain and host-exit proofs; synthetic Windows channel receipt on the Windows row | task adapter C2b, two-user/reboot/sleep receipts owed; no minimum-OS or Linux x86_64 reboot acceptance yet; one arm64 VM row does not certify the glibc floor | retain required-check provenance for #873; owner session/isolation evidence remains separate; LC-S7C2b task adapter and owner session/isolation receipts; LC-S7D supervisor wiring and update/restore acceptance |
 
 LC-S6B implements the first production sync schema in a separate embedded
@@ -1078,6 +1078,42 @@ principal-isolation receipt. Everything remains local-only, explicitly selected,
 default-off and dark. F2/F4 authorize C2b's later immutable predecessor and worker
 proof profile; neither ships here, and all H obligations remain
 NOT_RUN/SCAFFOLD_ONLY.
+
+
+LC-S6C2b pins the immutable sync-schema-1 predecessor `2f1c1943` in the
+[driver](../../../internal/tools/capturemix/) and `go-capture-mixed` CI job,
+which builds both versions separately and retains their exact identities in
+private artifacts. The default-off local capture-proof profile requires selected
+sync, a positively identified disposable database and loopback provider stubs;
+ordinary local eligibility is unchanged. The proof-only marker is installed
+explicitly outside the three-version sync migration namespace and is excluded
+from archives. The four server/worker combinations bind
+[mixed capability receipts](../../../internal/syncharness/mixed_runtime_results.go)
+to `TestCaptureMixMatrix`: H34 profile registration, H36 executable versions,
+writer admission and legacy refusal, and H43 mixed downgrade denial. None of
+those H rows gains executed mixed-binary evidence from the local owner-login
+rehearsal: it records `NOT RUN mixed_binaries_roles_unavailable` and
+`NOT RUN proof_profile_database_unavailable`. Its current server and worker start
+after guard installation without the profile, recorded as
+`NOT RUN current_process_preinstall_unavailable`; the current server's admitted
+preferences path is not executed
+(`NOT RUN current_server_profile_database_unavailable`). An unavailable offline
+predecessor build records `NOT RUN predecessor_build_unavailable`. CI may issue
+all five identity-bound PASS capability receipts only after all four combinations complete every
+required check with no NOT RUN; process startup or a static job-set test cannot
+supply that evidence. Each genuine job records one fixed evidence class in the
+row checks and private artifact: `guard_cause_exact` requires the observed
+`sync writer not admitted` cause; `guard_cause_hidden` is allowed only for
+`support_ticket_age_out` (generic batch error) and
+`transcript_storage_reconcile` (failure count), whose predecessor callbacks hide
+the cause, together with unchanged candidate rows; `preguard_refusal` is allowed
+only for `account_purge`, whose nonzero-sync-version destruction refusal occurs
+before the covered-DML guard, also with unchanged rows. All other profile jobs
+require `guard_cause_exact`; these per-job qualifications do not claim an
+unobserved exact guard cause. The five allocations remain PENDING, and no H
+obligation is promoted until the owner records the CI artifact's identity.
+Acceptance of C still needs the complete executable proof and C3's installer
+conversion, with D–F separate.
 
 LC-S7A adds an explicitly selected local foreground host and a per-user Linux
 systemd adapter around the existing lifecycle. Its supervisor holds a lifetime

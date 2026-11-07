@@ -23,7 +23,7 @@ const workflows = JSON.parse(execFileSync('ruby', ['-rjson', '-ryaml', '-e', `
 `, ...files.map(file => `${root}.github/workflows/${file}`)], {encoding: 'utf8'}));
 
 const wrapperDependencies = {
-  go: ['go-rest', 'go-store', 'go-capture-principals', 'go-infra', 'localcell-windows', 'localcell-unix', 'postgres-backup-image', 'postgres-image-mirror', 'provider-contract-evidence', 'static-analysis'],
+  go: ['go-rest', 'go-store', 'go-capture-principals', 'go-capture-mixed', 'go-infra', 'localcell-windows', 'localcell-unix', 'postgres-backup-image', 'postgres-image-mirror', 'provider-contract-evidence', 'static-analysis'],
   'release-config': ['release-config-full'],
   'homebrew-formula': ['homebrew-formula-full'],
   helm: ['helm-full'],
@@ -887,6 +887,72 @@ function assertCIConcurrency(ci) {
   assert.notEqual(firstMain, firstPR, 'Main pushes and PRs must run independently');
 }
 
+function assertCaptureMixedJob(ci) {
+  const label = 'capture mixed proof';
+  const job = ci.jobs['go-capture-mixed'];
+  assert(job, 'Missing capture mixed proof job');
+  needs(job, ['changes'], label);
+  assert.equal(expression(job.if), "needs.changes.outputs.application == 'true'");
+  assert.equal(job['runs-on'], 'ubuntu-24.04');
+  assert.equal(job['timeout-minutes'], 40);
+  assert.deepEqual(job.permissions, {contents: 'read'});
+  assert.deepEqual(job.services, ci.jobs['go-capture-principals'].services);
+  assert.equal(job.env.GOTOOLCHAIN, 'local');
+  assert.equal(job.env.WITSELF_TEST_DISPOSABLE_CLUSTER, '1');
+  assert.equal(job.env.WITSELF_TEST_REQUIRE_DATABASE, '1');
+  assert.equal(job.env.WITSELF_TEST_DATABASE_URL, ci.jobs['go-capture-principals'].env.WITSELF_TEST_DATABASE_URL);
+  assert.equal(job.env.WITSELF_CAPTUREMIX_CURRENT_BIN_DIR, '${{ github.workspace }}/current/bin');
+  assert.equal(job.env.WITSELF_CAPTUREMIX_PREDECESSOR_BIN_DIR, '${{ github.workspace }}/predecessor/bin');
+  assert.equal(job.env.WITSELF_CAPTUREMIX_PREDECESSOR_COMMIT_FILE, '${{ github.workspace }}/predecessor/PREDECESSOR_COMMIT');
+  const checkouts = job.steps.filter(step => step.uses?.startsWith('actions/checkout@'));
+  assert.equal(checkouts.length, 2);
+  const predecessor = checkouts.find(step => step.with?.path === 'predecessor');
+  assert(predecessor, 'Predecessor checkout must have its own tree');
+  const driverSource = readFileSync(join(root, 'internal/tools/capturemix/capturemix.go'), 'utf8');
+  const pin = driverSource.match(/^const syncPredecessorCommit = "([a-f0-9]{40})"\r?$/m);
+  assert(pin, 'Driver must retain one reviewed immutable predecessor constant');
+  assert.equal(predecessor.with.ref, pin[1]);
+  for (const checkout of checkouts) {
+    assert.equal(checkout.uses, action(ci.jobs['go-store'], 'actions/checkout@', label).uses);
+    assert.equal(checkout.with['persist-credentials'], false);
+  }
+  for (const prefix of ['actions/setup-go@', 'actions/setup-node@']) {
+    assert.equal(action(job, prefix, label).uses, action(ci.jobs['go-store'], prefix, label).uses);
+  }
+  const priorBuild = job.steps.find(step => step.name === 'Build the predecessor with its own module and toolchain selection');
+  assert.equal(priorBuild?.['working-directory'], 'predecessor');
+  assert.match(priorBuild?.run ?? '', /git rev-parse HEAD > PREDECESSOR_COMMIT/);
+  for (const command of ['server', 'worker']) {
+    assert(priorBuild.run.includes(`go build -o bin/witself-${command} ./cmd/witself-${command}`));
+    assert(job.steps.some(step => step.run?.includes(`go build -o current/bin/witself-${command} ./cmd/witself-${command}`)));
+  }
+  const identity = job.steps.find(step => step.name === 'Record private executable build identities');
+  assert(identity?.run.includes('hashlib.sha256(binary.read_bytes()).hexdigest()'));
+  assert.equal(identity.env?.WITSELF_CAPTUREMIX_ARTIFACT_DIR, '${{ runner.temp }}/capture-mixed-artifacts');
+  assert(identity.run.includes("'build-identities.json'"));
+  assert(identity.run.includes("'predecessor build identity recorded'"));
+  assert(!identity.run.includes('print(records)'));
+  const proof = job.steps.find(step => step.run?.includes("-run 'CaptureMix'"));
+  assert.equal(proof?.shell, 'bash');
+  assert.equal(proof.env?.WITSELF_CAPTUREMIX_ARTIFACT_DIR, '${{ runner.temp }}/capture-mixed-artifacts');
+  assert.match(proof?.run ?? '', /go test -json \.\/internal\/store -run 'CaptureMix' -count=1 -timeout=25m/);
+  assert.match(proof.run, /--diagnose --package github\.com\/witwave-ai\/witself\/internal\/store --require TestCaptureMixMatrix/);
+  assert.match(proof.run, /if \(\( go_exit != 0 \|\| parser_exit != 0 \)\); then exit 1; fi/);
+  assert(job.steps.indexOf(identity) < job.steps.indexOf(proof));
+  const upload = action(job, 'actions/upload-artifact@', label);
+  assert.equal(upload.uses, action(ci.jobs['go-store'], 'actions/upload-artifact@', label).uses);
+  assert.equal(expression(upload.if), 'always()');
+  assert.equal(upload.with.path, '${{ runner.temp }}/capture-mixed-artifacts');
+  assert.equal(upload.with['if-no-files-found'], 'error');
+  for (const step of job.steps) {
+    assert.equal(step['continue-on-error'], undefined);
+    if (step !== upload) assert.equal(step.if, undefined);
+  }
+  assert.equal(job['continue-on-error'], undefined);
+  assert.equal(job.environment, undefined);
+  assert(!JSON.stringify(job).includes('secrets.'));
+}
+
 function assertWorkflowContracts(sources) {
   const ci = sources['ci.yml'];
   const reusable = sources['product-site-checks.yml'];
@@ -901,6 +967,7 @@ function assertWorkflowContracts(sources) {
   assertDocsJob(ci.jobs.docs);
   assertLocalcellWindowsJob(ci);
   assertLocalcellUnixJob(ci);
+  assertCaptureMixedJob(ci);
 
   for (const [id, dependencies] of Object.entries(wrapperDependencies)) {
     const job = ci.jobs[id];
@@ -1142,6 +1209,12 @@ test('exact launch shell guard rejects disabled, case-changed, and non-main sett
 });
 
 const mutations = [
+  ['mixed proof predecessor uses mutable ref', data => { data['ci.yml'].jobs['go-capture-mixed'].steps.find(step => step.with?.path === 'predecessor').with.ref = 'main'; }],
+  ['mixed proof predecessor builds current tree', data => { delete data['ci.yml'].jobs['go-capture-mixed'].steps.find(step => step.name === 'Build the predecessor with its own module and toolchain selection')['working-directory']; }],
+  ['mixed proof loses required test', data => { const step = data['ci.yml'].jobs['go-capture-mixed'].steps.find(step => step.run?.includes("-run 'CaptureMix'")); step.run = step.run.replace(' --require TestCaptureMixMatrix', ''); }],
+  ['mixed proof loses disposable selector', data => { delete data['ci.yml'].jobs['go-capture-mixed'].env.WITSELF_TEST_DISPOSABLE_CLUSTER; }],
+  ['mixed proof ignores failed tests', data => { const step = data['ci.yml'].jobs['go-capture-mixed'].steps.find(step => step.run?.includes("-run 'CaptureMix'")); step.run = step.run.replace('then exit 1', 'then exit 0'); }],
+  ['mixed proof loses private artifacts', data => { data['ci.yml'].jobs['go-capture-mixed'].steps = data['ci.yml'].jobs['go-capture-mixed'].steps.filter(step => !step.uses?.startsWith('actions/upload-artifact@')); }],
   ['missing Unix lifecycle job', data => { delete data['ci.yml'].jobs['localcell-unix']; }],
   ['missing Unix dependency from go', data => { data['ci.yml'].jobs.go.needs = data['ci.yml'].jobs.go.needs.filter(id => id !== 'localcell-unix'); }],
   ['Unix matrix row removed', data => { data['ci.yml'].jobs['localcell-unix'].strategy.matrix.include.pop(); }],

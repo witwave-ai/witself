@@ -50,3 +50,23 @@ func configureLocalSyncStore(cfg *server.Config, st runtimeconfig.SyncSchemaStor
 		return runtimeconfig.CheckSyncSchemaReady(ctx, st, store.SyncSchemaVersion())
 	}
 }
+
+type serverCaptureProofStore interface {
+	runtimeconfig.CaptureProofStore
+	SelectSyncCapture(runtimeconfig.Config) error
+}
+
+func configureCaptureProofStore(ctx context.Context, cfg *server.Config, st serverCaptureProofStore, runtime runtimeconfig.Config) error {
+	if err := runtimeconfig.CheckCaptureProofReady(ctx, st, runtime, store.SchemaVersion(), store.SyncSchemaVersion()); err != nil {
+		return err
+	}
+	if err := st.SelectSyncCapture(runtime); err != nil {
+		return err
+	}
+	cfg.SyncSchemaReady = func(ctx context.Context) error {
+		ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		defer cancel()
+		return runtimeconfig.CheckCaptureProofReady(ctx, st, runtime, store.SchemaVersion(), store.SyncSchemaVersion())
+	}
+	return nil
+}

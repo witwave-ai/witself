@@ -199,6 +199,9 @@ func TestStorePostgresTransactionGuard(t *testing.T) {
 			command := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestStorePostgresTransactionGuard$", "-test.v")
 			command.Env = append(os.Environ(), childKey+"="+mode)
 			output, err := command.CombinedOutput()
+			if mode == "active_transaction" && strings.Contains(string(output), "transaction guard active synchronization missing") {
+				t.Fatal("transaction guard active control missing synchronization")
+			}
 			replacedParent := strings.Contains(mode, "replaced_aborted_parent")
 			wantFailure := mode == "leaking_transaction" || mode == "direct_guard_leaking_transaction" || strings.HasPrefix(mode, "invalid_") || mode == "aborted_transaction" || replacedParent || mode == "active_transaction"
 			var exitError *exec.ExitError
@@ -244,6 +247,7 @@ func testStorePostgresActiveTransactionGuard(t *testing.T) {
 	var queryDone chan struct{}
 	var lockHeld bool
 	var lockKey int32
+	var observationComplete bool
 	// Register every recovery operation before the guard. The guard must see
 	// the blocked transaction before cancellation and lock release settle it.
 	t.Cleanup(func() {
@@ -279,6 +283,13 @@ func testStorePostgresActiveTransactionGuard(t *testing.T) {
 		}
 		if controller != nil && controller.Close(ctx) != nil {
 			t.Error("transaction guard independent recovery failed: controller close")
+		}
+	})
+	// This independent oracle runs after the guard, but before recovery. The
+	// expected guard failure cannot hide deletion of the observation loop.
+	t.Cleanup(func() {
+		if !observationComplete {
+			t.Error("transaction guard active synchronization missing")
 		}
 	})
 	dsn := testenv.RequirePostgres(t)
@@ -317,6 +328,7 @@ func testStorePostgresActiveTransactionGuard(t *testing.T) {
 			t.Fatal("transaction guard active observation failed")
 		}
 		if blocked {
+			observationComplete = true
 			return // Keep the query blocked until after the guard's assertion.
 		}
 	}

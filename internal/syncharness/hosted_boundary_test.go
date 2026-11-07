@@ -25,7 +25,7 @@ func TestHostedCommandDependencyBoundary(t *testing.T) {
 				t.Fatal("hosted command dependency inspection failed")
 			}
 			for _, dependency := range strings.Fields(string(out)) {
-				for _, forbidden := range []string{"/internal/syncharness", "/internal/syncmodel", "/internal/localcell/trust"} {
+				for _, forbidden := range []string{"/internal/syncharness", "/internal/syncmodel", "/internal/localcell/trust", "/internal/tools/capturemix"} {
 					if strings.HasSuffix(dependency, forbidden) || strings.Contains(dependency, forbidden+"/") {
 						t.Fatal("harness or trust package entered shipped command dependency graph")
 					}

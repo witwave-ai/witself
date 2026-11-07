@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -10,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/witwave-ai/witself/internal/runtimeconfig"
 	"github.com/witwave-ai/witself/internal/server"
 	"github.com/witwave-ai/witself/internal/store"
 )
@@ -61,12 +63,12 @@ func TestServerRuntimeConfiguration(t *testing.T) {
 			}
 			if selector != "local" {
 				want := server.Config{APIAddr: ":8080", HealthAddr: ":8081", MetricsAddr: ":9090"}
-				if runtime.Local || !reflect.DeepEqual(cfg, want) {
+				if runtime.Local || runtime.CaptureProof || !reflect.DeepEqual(cfg, want) {
 					t.Fatal("hosted configuration differs from pre-local snapshot")
 				}
 				return
 			}
-			if !runtime.Local || !cfg.LocalRuntime || cfg.SpoolDir != spool || cfg.SpoolRoot == nil || cfg.APIAddr != "127.0.0.1:8080" || cfg.HealthAddr != "127.0.0.1:8081" || cfg.MetricsAddr != "127.0.0.1:9090" {
+			if !runtime.Local || runtime.CaptureProof || !cfg.LocalRuntime || cfg.SpoolDir != spool || cfg.SpoolRoot == nil || cfg.APIAddr != "127.0.0.1:8080" || cfg.HealthAddr != "127.0.0.1:8081" || cfg.MetricsAddr != "127.0.0.1:9090" {
 				t.Fatal("local runtime overrides were not wired to server configuration")
 			}
 		})
@@ -246,5 +248,66 @@ func TestServerRunEntryHonorsRuntimeSelector(t *testing.T) {
 	t.Setenv("WITSELF_RUNTIME", "")
 	if code := run([]string{"version"}); code != 0 {
 		t.Fatalf("hosted run(version) = %d, want 0", code)
+	}
+}
+
+type captureProofServerStore struct {
+	markerError error
+	selected    bool
+	version     int
+	calls       []string
+}
+
+func (s *captureProofServerStore) Ping(context.Context) error { return nil }
+func (s *captureProofServerStore) AppliedSchemaVersion(context.Context) (int, error) {
+	return store.SchemaVersion(), nil
+}
+func (s *captureProofServerStore) LocalBootstrapAccount(context.Context) (string, error) {
+	return "fixture", nil
+}
+func (s *captureProofServerStore) AppliedSyncSchemaVersion(context.Context) (int, error) {
+	return s.version, nil
+}
+func (s *captureProofServerStore) VerifySyncCaptureProofDatabase(context.Context, string) error {
+	s.calls = append(s.calls, "marker")
+	return s.markerError
+}
+func (s *captureProofServerStore) SelectSyncCapture(runtimeconfig.Config) error {
+	s.calls = append(s.calls, "select")
+	s.selected = true
+	return nil
+}
+
+func TestServerCaptureProofSelectionAfterIdentification(t *testing.T) {
+	for _, identified := range []bool{false, true} {
+		st := &captureProofServerStore{version: 1}
+		if !identified {
+			st.markerError = errors.New("private-marker-detail")
+		}
+		cfg := server.Config{}
+		runtime := runtimeconfig.Config{Local: true, SyncSchema: true, CaptureProof: true, CaptureProofToken: "private-token", AccountID: "fixture"}
+		err := configureCaptureProofStore(context.Background(), &cfg, st, runtime)
+		if (err == nil) != identified || st.selected != identified || (cfg.SyncSchemaReady != nil) != identified {
+			t.Fatal("capture profile server identification did not precede selection")
+		}
+		if !identified {
+			if err.Error() != "capture_proof_database_unidentified" || !reflect.DeepEqual(st.calls, []string{"marker"}) {
+				t.Fatal("capture profile server refusal changed")
+			}
+			continue
+		}
+		if !reflect.DeepEqual(st.calls, []string{"marker", "select"}) {
+			t.Fatal("capture profile server selection order changed")
+		}
+		for _, version := range []int{1, 3} {
+			st.version = version
+			if cfg.SyncSchemaReady(context.Background()) != nil {
+				t.Fatal("capture profile server installation readiness failed")
+			}
+		}
+		st.markerError = errors.New("expired")
+		if cfg.SyncSchemaReady(context.Background()) == nil {
+			t.Fatal("capture profile server expired marker retained readiness")
+		}
 	}
 }

@@ -533,7 +533,8 @@
       },
       "scenario": "PreBeginLateFirstWrite",
       "outcome": "NOT_RUN",
-      "missing_capability": "mixed_executable_versions"
+      "missing_capability": "mixed_executable_versions",
+      "reason": "mixed_binaries_roles_unavailable"
     },
     {
       "version": 1,
@@ -1265,6 +1266,58 @@
       "platform_class": "go_test_host",
       "artifact": "H43_production_activation_topology_v1",
       "outcome": "PASS"
+    },
+    {
+      "version": 1,
+      "obligation": "H36",
+      "capability": "production_writer_admission",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "PreBeginLateFirstWrite",
+      "outcome": "NOT_RUN",
+      "missing_capability": "production_writer_admission",
+      "reason": "mixed_binaries_roles_unavailable"
+    },
+    {
+      "version": 1,
+      "obligation": "H36",
+      "capability": "legacy_writer_refusal",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "PreBeginLateFirstWrite",
+      "outcome": "NOT_RUN",
+      "missing_capability": "legacy_writer_refusal",
+      "reason": "mixed_binaries_roles_unavailable"
+    },
+    {
+      "version": 1,
+      "obligation": "H34",
+      "capability": "proof_profile_registration",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "CoverageInventoryAndSchedule",
+      "outcome": "NOT_RUN",
+      "missing_capability": "proof_profile_registration",
+      "reason": "proof_profile_database_unavailable"
+    },
+    {
+      "version": 1,
+      "obligation": "H43",
+      "capability": "production_downgrade_denial_mixed",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "WriterGuardBypassAndDowngrade",
+      "outcome": "NOT_RUN",
+      "missing_capability": "production_downgrade_denial_mixed",
+      "reason": "mixed_binaries_roles_unavailable"
     }
   ]
 }

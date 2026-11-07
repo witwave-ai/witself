@@ -138,7 +138,7 @@ func TestWorkerHostedRegistrationLogs(t *testing.T) {
 				t.Fatal(err)
 			}
 			got := captureWorkerStderr(t, func() {
-				if code := registerJobs(worker.NewRegistry(), nil, jobs); code != 0 {
+				if code := registerJobs(worker.NewRegistry(), nil, jobs, false); code != 0 {
 					t.Fatal("hosted registration failed")
 				}
 			})
@@ -359,7 +359,7 @@ func TestWorkerLocalJobsRegisterOnlySelected(t *testing.T) {
 				t.Fatal("local listener defaults not applied")
 			}
 			registry := worker.NewRegistry()
-			if code := registerJobs(registry, nil, jobs); code != 0 {
+			if code := registerJobs(registry, nil, jobs, false); code != 0 {
 				t.Fatal("job registration failed")
 			}
 			for _, name := range all {
