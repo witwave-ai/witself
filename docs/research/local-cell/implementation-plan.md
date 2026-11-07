@@ -100,7 +100,8 @@ whole-cell data upgrades need an additional lifecycle contract.
 
 Use small reviewable PRs within each milestone. Assign one integration owner and
 an independent reviewer; separate platform adapters and test harnesses can run
-in parallel once their interfaces agree. All rows start **not started**.
+in parallel once their interfaces agree. These are completion criteria; current
+implementation evidence and incomplete milestones are tracked in the living record.
 
 | ID | Deliverable | Depends on | Completion evidence |
 |---|---|---|---|
@@ -260,9 +261,9 @@ schemas the eventual enrollment design cannot preserve or migrate.
 
 ### M1 Build an isolated native cell foundation
 
-LC-S1 implements the opt-in runtime configuration, server/worker private listeners, owned archive spool, explicit worker job selection, and database/schema/bootstrap-account readiness bullets; lifecycle, child-environment construction, PostgreSQL ownership and singleton isolation: LC-S2 (merged #824); LC-S2-R1 adds bounded, cancellable migration waits and an opt-in worker job restart policy, superseding those two deferrals in the historical LC-S2 note below while process supervision remains deferred to platform service adapters.
+LC-S1 implements the opt-in runtime configuration, server/worker private listeners, owned archive spool, explicit worker job selection, and database/schema/bootstrap-account readiness bullets; lifecycle, child-environment construction, PostgreSQL ownership and singleton isolation: LC-S2 (merged #824); LC-S2-R1 adds bounded, cancellable migration waits and an opt-in worker job restart policy, superseding those two deferrals in LC-S2. Opt-in process supervision and Unix service adapters subsequently landed in LC-S7A #850 (Linux systemd user) and LC-S7C1 #872 (macOS launchd); Windows task delivery and product acceptance remain open.
 
-LC-S2 implements the disposable lifecycle module, exclusive ownership and interruption recovery, PostgreSQL/process identity, explicit child environments, private spool/temp layout, loopback ports, and bounded readiness checks through tests and a harness only; lifecycle planning, restart policy, migration cancellation, platform service adapters, downloads, installer manifest trust, Windows DACL privacy, and reclaiming a crashed cell's stale SysV shared-memory segment when it is purged (macOS allows 32 machine-wide; a normally stopped cell leaves none) remain deferred, with nothing installed or activated.
+LC-S2 #824 implements the disposable lifecycle module, exclusive ownership and interruption recovery, PostgreSQL/process identity, explicit child environments, private spool/temp layout, loopback ports and bounded readiness checks. PW1 #830 supplies Windows lifecycle/spool DACL privacy; PW2 #831 supplies child isolation; R1 #839 supplies bounded migration cancellation and worker job restart policy. Five native PostgreSQL 16 lifecycle receipts are retained below. LC-S7B1/B2/B3 #855/#860/#865 add offline component verification, opt-in bootstrap verification and channel handoff foundations, while production signing custody, Windows trust-state persistence, execution binding, clean-machine/update/restore acceptance and a supported product remain open. Reclaiming a crashed cell's stale SysV shared-memory segment on purge remains deferred (a normally stopped cell leaves none). These foundations remain dark; no live installation or activation is claimed.
 
 Interrupted PostgreSQL recovery accepts a kernel process creation time from
 60 seconds before through one second after the epoch in `postmaster.pid`.
@@ -872,19 +873,19 @@ slices, not implementation authorization; do not turn them into one long branch.
   proof for the selected OS / Dependencies: LC-S2 and the M0a platform decisions
   (D8 answered 2026-10-24) / Evidence: native / Activation: explicit synthetic harness only /
   Recovery: synthetic data only / Owner: vacant.
-  LC-S2-P PW1 implements protected Windows DACLs, private creation, and local NTFS/reparse path boundaries for lifecycle state and the archive spool. Retained handles fence renames; in-place reparse changes are detected after pathname creation with handle-bound rollback, not prevented (handle-relative creation remains deferred). PW2 still owes the launch/environment adapter, and PW3 the native executable fixtures and PostgreSQL lifecycle proof.
-  LC-S2-P PW2 implements suspended Windows launch with atomic Job Object crash cleanup, durable creation-identity fences, isolated console shutdown, and exact trusted child environments; PW3 owes real PostgreSQL 16 distribution/private-child-filesystem compatibility, executable lifecycle fixtures, and native lifecycle proof.
-  LC-S2-P PW3 implements portable executable fixtures, retained harness builds, private PostgreSQL child files, and the pinned PostgreSQL 16 Windows CI proof with required lifecycle scenarios, UTF8/Unicode and process cleanup assertions; intentional Unix test/harness changes use the process temp directory, fail configured-but-incomplete PostgreSQL distributions, require PostgreSQL 16, and retain mode-0700 harness builds until purge; native CI results remain to be recorded, and the Windows 11 receipt remains PW4.
-  LC-S2-PL1 adds the required `localcell-unix` matrix alongside `localcell-windows`, running the same PostgreSQL 16 lifecycle proof protocol on Linux x86_64, macOS arm64 and macOS x86_64; each Unix runner builds the complete runtime from the checksum-pinned PGDG 16.10 source package in its temporary directory. LC-S2-PL2 adds Linux arm64 on `ubuntu-24.04-arm` with the same source pin and proof protocol; its native receipt is pending this PR's CI run and the integration owner's timing update.
+  LC-S2-P PW1 implements protected Windows DACLs, private creation, and local NTFS/reparse path boundaries for lifecycle state and the archive spool. Retained handles fence renames; in-place reparse changes are detected after pathname creation with handle-bound rollback, not prevented (handle-relative creation remains deferred). PW2 #831 subsequently supplied the launch/environment adapter; PW3 #834 supplied native executable fixtures and PostgreSQL lifecycle proof.
+  LC-S2-P PW2 implements suspended Windows launch with atomic Job Object crash cleanup, durable creation-identity fences, isolated console shutdown, and exact trusted child environments; PW3 #834 subsequently supplied PostgreSQL 16 private-child-filesystem compatibility, executable fixtures and the native lifecycle proof.
+  LC-S2-P PW3 implements portable executable fixtures, retained harness builds, private PostgreSQL child files, and the pinned PostgreSQL 16 Windows CI proof with required lifecycle scenarios, UTF8/Unicode and process cleanup assertions; intentional Unix test/harness changes use the process temp directory, fail configured-but-incomplete PostgreSQL distributions, require PostgreSQL 16, and retain mode-0700 harness builds until purge; the retained Windows x86_64 CI receipt is recorded in LC-S2-P below; the Windows 11 owner receipt remains PW4. PW0 #829 separately supplies Windows build/vet/unit CI. Slice 164 #836 (`934c79cb`) supplies the attempt-based PostgreSQL capability probe used by Windows acceptance; the earlier maximum-value probe is superseded.
+  LC-S2-PL1 adds the required `localcell-unix` matrix alongside `localcell-windows`, running the same PostgreSQL 16 lifecycle proof protocol on Linux x86_64, macOS arm64 and macOS x86_64; each Unix runner builds the complete runtime from the checksum-pinned PGDG 16.10 source package in its temporary directory. LC-S2-PL2 adds Linux arm64 on `ubuntu-24.04-arm` with the same source pin and proof protocol; all five native lifecycle receipts are retained in LC-S2-P below (#834/#838/#841). These receipts do not establish minimum-OS, resource-budget or clean-machine acceptance.
 - **LC-S3 explicit local connection route** / Scope: CLI/MCP/hooks select a local
   cell with the directory blocked / Acceptance: atomic binding activation;
-  fail-closed partial switch / Dependencies: LC-S1, M0b route decision (pending) /
+  fail-closed partial switch / Dependencies: LC-S1; route foundation merged #825 /
   Evidence: fixture plus real API / Activation: explicitly selected synthetic
   local route only / Recovery: restore the prior complete binding; no customer
   account transition / Owner: vacant.
 - **LC-S4 offline account-console trust** / Scope: independent local manager
   binding on the existing verifier seam / Acceptance: agent-only, stale and
-  wrong-origin cases denied / Dependencies: LC-S3 (pending) / Evidence: fixture
+  wrong-origin cases denied / Dependencies: LC-S3 (merged #825) / Evidence: fixture
   plus real API / Activation: explicitly selected synthetic local manager
   binding only / Recovery: remove that binding; no privilege promotion / Owner:
   vacant.
@@ -972,6 +973,9 @@ next action`. States: proposed, in progress, blocked, complete. A merged but
 disabled slice is not an enabled capability. Edit this section only from the
 branch named in the active review record below, or after that review hands off.
 
+The following review paragraph is the historical planning baseline; its proposed
+next actions are superseded by the merged-slice records below.
+
 **PLAN-REVIEW-2026-10-23** / Fable 5.1 (planning lead); Codex GPT-6 Astra at
 `ultra` for five read-only lanes / complete for this pass / Decisions: adopt the
 M0a/M0b/M0c split and the dependency changes above; adopt connection route and local
@@ -990,13 +994,22 @@ table; no runtime evidence yet (static review only) / Next action: Scott decides
 whether to authorize LC-S1; the implementing agent claims ownership in this record
 before starting.
 
+**DOCSROW-B1, 2026-11-07:** reconciled against the frozen merged snapshot
+`dbacf2a1`. Each cited merged PR carries its required checks at the reviewed head
+under the owner's all-green merge rule. That provenance is scoped CI evidence,
+not a new native receipt or milestone acceptance. The platform timings and owner
+reboot receipt below are retained evidence; M1–M4 remain incomplete.
+The four original native timing rows were retained in #840 and Linux arm64 in
+#847; the Linux arm64 reboot/login receipt was retained in #857, executed at
+`917a2b99`. This reconciliation does not add a native run.
+
 | ID | Owner | State | PR or decision | Evidence | Unresolved gate | Next action |
 |---|---|---|---|---|---|---|
 | M0 | planning lead | in progress | M0a/M0b text; M0c contract record merged as a reviewed draft (#837); six M4-blocking design items CLOSED in #842 | static review; sync-contract.md with 84 numbered rules including 12 matrix rows and 13 OPEN rows remaining in the consolidated table | founder items O-14 (M8), O-15 (M7), O-17 (M5); CLOSED O-2/O-5/O-7/O-9/O-11/O-12 retain LC-S5/M4 implementation and runtime proof obligations | complete LC-S5 fixtures and M4 proof; resolve remaining OPEN items with their owners |
-| M1 | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | in progress | LC-S1 #822, LC-S2 #824, LC-S3 #825, LC-S4 #826, LC-S2-R1 #839 | unit, real PostgreSQL, hermetic lifecycle, native proofs on five platform rows, executable reviews | service adapters, downloads and installer manifest trust remain deferred | service adapters slice after the sync track starts |
-| M2 | vacant | proposed | none | none | identity and offline-console contract | after M1 foundation |
-| M3 | Codex GPT-6 Astra (LC-S7A implementer); Fable 5.1 (integration owner) | in progress | native lifecycle CI receipts recorded: Windows (#834), Linux x86_64, macOS arm64, macOS x86_64 (#838), Linux arm64 (#841); LC-S7A #850 merged (service descriptor, supervisor, desired-state fence, authenticated control, Linux systemd user adapter, explicit foreground host); LC-S7A-R #856 merged (owner reboot-receipt driver, read-only `observe` control action); reboot-and-login receipt recorded 2026-10-30; LC-S7B1 #855, LC-S7B2 #860 and LC-S7B3 #865 merged (component-set trust format v1 with its offline Go verifier; shell, PowerShell and Homebrew bootstrap verifiers; channel-ownership receipts, bounded private payload generations, lifecycle handoff journal and protected activation; all dark, no production root) | required `localcell-windows` and `localcell-unix` checks on all five D8 platform rows; the Linux rows now register, restart and remove a real systemd user service with an authenticated write surviving; owner receipt on a disposable Linux arm64 VM (Ubuntu 26.04, systemd 259, PostgreSQL 16.15) at 917a2b99: boot id changed, automatic authenticated readiness after the owning user's login observed without any start call, fresh process identity, write survived, removal retained the data | Windows 11 receipt (founder VM); per-platform resource budgets (D8); S7-F1 (per-user MSI, winget) and S7-F2 (organization-owned signing custody) answered 2026-10-27, vendor enrollment deferred | LC-S7C adapters and two-user receipts; LC-S7D supervisor wiring, execution protection and update/restore acceptance; S7-F1 Windows channel and S7-F2 custody enrollment stay founder-keyed |
-| M4 | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | in progress | LC-S5A #843, LC-S5B #844, LC-S5C #845, LC-S5D #846 merged (harness-only; zero production behavior change) | 42 real-PostgreSQL SyncHarness store tests plus model and catalog suites; ten executable Codex reviews; every one of the 69 obligations still reports runtime NOT_RUN | production writer capture and the capture barrier under mixed binaries, real database roles, native restore, full movement through the registries, independent witness; H03/H05 model allocations | LC-S6 design: the M4 runtime-proof slices |
+| M1 | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | in progress | LC-S1 #822, LC-S2 #824, PW0–PW3 #829/#830/#831/#834, PL1/PL2 #838/#841, LC-S2-R1 #839; Unix service foundations LC-S7A #850 and LC-S7C1 #872 | unit, real PostgreSQL, hermetic lifecycle, retained native proofs on five platform rows, executable reviews | Windows task adapter; minimum-OS, budgets, remaining session/isolation receipts and supported product integration | complete remaining platform and product acceptance; retain dark defaults |
+| M2 | Codex GPT-6 Astra (S3/S4 implementer); Fable 5.1 (integration owner) | in progress | LC-S3 #825 (`2e76f0af`, includes `internal/local/route.go` despite its docs-oriented subject); LC-S4 #826 | route/CLI/MCP/hook tests and independent console trust/real API tests retained in S3/S4 below | standalone operator bootstrap and policy; full offline operation/inventory, retrieval, restart and concurrency acceptance; lifecycle integration | complete M2 product gates; merged routes and console trust alone do not complete M2 |
+| M3 | Codex GPT-6 Astra (LC-S7A implementer); Fable 5.1 (integration owner) | in progress | native lifecycle CI receipts recorded: Windows (#834), Linux x86_64, macOS arm64, macOS x86_64 (#838), Linux arm64 (#841); LC-S7A #850 merged (service descriptor, supervisor, desired-state fence, authenticated control, Linux systemd user adapter, explicit foreground host); LC-S7A-R #856 merged (owner reboot-receipt driver, read-only `observe` control action); reboot-and-login receipt recorded 2026-10-30; LC-S7B1 #855, LC-S7B2 #860 and LC-S7B3 #865 merged (component-set trust format v1 with its offline Go verifier; shell, PowerShell and Homebrew bootstrap verifiers; channel-ownership receipts, bounded private payload generations, lifecycle handoff journal and protected activation; all dark, no production root); LC-S7C1 #872 merged (macOS LaunchAgent and native proof wiring); LC-S7C2a1 #873 merged (private Windows control and boot identity) | required `localcell-windows` and `localcell-unix` checks on all five D8 platform rows; the Linux rows now register, restart and remove a real systemd user service with an authenticated write surviving; owner receipt on a disposable Linux arm64 VM (Ubuntu 26.04, systemd 259, PostgreSQL 16.15) at 917a2b99: boot id changed, automatic authenticated readiness after the owning user's login observed without any start call, fresh process identity, write survived, removal retained the data | Windows 11 receipt (PW4, founder VM); minimum-OS and per-platform resource budgets (D8); remaining two-user, reboot/login/logout and sleep/resume receipts; S7-F1 (per-user MSI, winget) and S7-F2 (organization-owned signing custody) answered 2026-10-27, vendor enrollment deferred | Windows task adapter and child shutdown channel; owner session/isolation receipts; LC-S7D supervisor wiring, execution protection and update/restore acceptance; S7-F1 Windows channel and S7-F2 custody enrollment stay founder-keyed |
+| M4 | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | in progress | LC-S5A–D #843/#844/#845/#846; LC-S6A #848 completed H03/H05 model allocations; LC-S6B #861, C1 #869 and C2a #875 merged selected-local foundations | S5 retained 42 real-PostgreSQL SyncHarness store tests, model/catalog suites and ten executable Codex reviews; typed capability records, C1 single-executable PostgreSQL evidence and C2a scoped required CI checks; all 69 runtime obligations remain NOT_RUN/SCAFFOLD_ONLY absent separate reviewed promotion | C2b mixed executables/profile; C3 installer role conversion; D application/accounting, E movement, F recovery; native restore and independent witness; F3/D9 | complete LC-S6 runtime-proof and acceptance gates; merged foundations do not close M4 |
 | M5 | vacant | proposed | staged assertions (steps 1–4) | none | M4 barrier proof; destination admission policy | blocked on M4 |
 | M6 | vacant | proposed | none | none | deletion and conflict rules | blocked on M5 |
 | M7 | vacant | proposed | steps 5–6, keys, handoff, return | none | request-wide authority and key-custody contracts | blocked on M5/M6 |
@@ -1006,13 +1019,13 @@ before starting.
 | LC-S1 | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | merged (disabled) | PR #822 | unit, real PostgreSQL, nine killed mutations, native macOS readiness/version | no live activation | LC-S2 |
 | LC-S2 | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | merged (disabled) | PR #824; FLAKE-3 adds fixed lifecycle causes, asymmetric recovery start tolerance, saved-port preflight, Windows stop completion and Linux process-exit observation | unit, mutation, synthetic lifecycle, native real PostgreSQL 4/4 with no shared-memory leak, three executable reviews (19 killed mutations) | no live activation | LC-S3 |
 | FLAKE-11F | Codex (implementer); integration owner | implemented; owner acceptance pending | Start preflights and reallocates only the next component's ports; server/worker address-in-use exits allow one relaunch within the original readiness budget; Install allocation and probe retries are bounded | deterministic fixture port loss, occupied-port preflight, exhaustion, value-free diagnostics and proportional readiness-budget tests | native port-churn acceptance remains owner-run; no live activation | owner gate and host acceptance |
-| LC-S2-P | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | in progress | PW0 #829, PW1 #830, PW2 #831, PW3 #834, PL1 #838, PL2 #841 merged | native real-PostgreSQL 16 lifecycle proofs in CI: Windows x86_64 (5m17s), Linux x86_64 (3m49s), macOS arm64 (4m8s), macOS x86_64 (8m39s), Linux arm64 (4m5s) | Windows 11 acceptance receipt (PW4, founder VM); per-platform resource budgets (D8) | per-platform resource budgets (D8) |
+| LC-S2-P | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | in progress | PW0 #829, PW1 #830, PW2 #831, PW3 #834, slice 164 #836 (attempt-based capability probe), PL1 #838, PL2 #841 merged | native real-PostgreSQL 16 lifecycle proofs in CI: Windows x86_64 (5m17s), Linux x86_64 (3m49s), macOS arm64 (4m8s), macOS x86_64 (8m39s), Linux arm64 (4m5s) | Windows 11 acceptance receipt (PW4, founder VM); minimum-OS and per-platform resource budgets (D8) | owner PW4 receipt and platform acceptance |
 | LC-S3 | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | merged (disabled) | PR #825 | route/CLI/MCP/hook tests; executable review (9 killed mutations) plus a default-account fix pass | no live activation | LC-S4 |
 | LC-S4 | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | merged (disabled) | PR #826 | route/console and real API tests; executable review (10 killed mutations) | no live activation | LC-S2-P (D8), LC-S5 (M0c) |
 | LC-S2-R1 | Codex GPT-6 Astra (implementer); Fable 5.1 (integration owner) | merged (disabled) | PR #839 | migration-lock cancellation, worker restart policy and lifecycle readiness tests; five executable reviews (two merge-regression tests added) | no live activation | service adapters |
-| LC-S5 | Codex GPT-6 Astra (implementer); Fable (integration owner) | merged (harness-only): LC-S5A #843, LC-S5B #844, LC-S5C #845, LC-S5D #846; H03/H05 model allocations remain deferred | synthetic topology/catalogs/scheduler; typed protocol; local capture/publication/accounting; transition, authority and recovery oracles; trace replay/reducer; H01–H69 manifests | scoped model/vector fixtures and opted-in PostgreSQL miniature transaction, fixture reopen and reducer tests; hosted dependency/byte baselines | [LC-S5-owned inventories and M4 proof](sync-contract.md#open-items-by-milestone); missing production adapters remain SCAFFOLD_ONLY and runtime schedules NOT_RUN | LC-S6 design: M4 owes real writer, movement, mixed-binary, role, restore and independent-witness proofs |
-| LC-S6 | Codex GPT-6 Astra (LC-S6A/B/C1/C2a implementer); Fable (integration owner) | LC-S6A merged #848; LC-S6B merged #861 (F1 answered yes 2026-10-27); LC-S6C1 merged #869; C2a implementation adds the local-only principal boundary, with owner gate and disposable CI evidence pending; C2b–F remain pending | A separates executable capability evidence from immutable v1 obligations; B adds the selected sync namespace; C1 adds guarded capture and committed-prefix finalization; C2a adds protected admission functions, principal topology refusal and capability revocation drain | C1 retains seven single-executable PostgreSQL capability records; C2a distinguishes local owner-path results from disposable-cluster principal/bypass/downgrade NOT_RUN results; no obligation promotion | C2b mixed executables and proof profile (F2/F4 answered yes 2026-11-02); LC-S6C3 installer role conversion; D application/accounting, E movement, F recovery; F3/D9 unresolved | The one-role Local Cell installer remains migration-refused at 0003 (`sync_principals_missing`) and activation-refused (`sync_principal_topology_unverified`); disposable CI principal proof and the owner gate are required, with broader M4 acceptance still pending |
-| LC-S7 | Codex GPT-6 Astra (LC-S7A/C1 implementer); Fable (integration owner) | LC-S7A merged #850 (nine executable reviews, eight fix passes; the first real Linux CI runs replaced the `GetUnit` lookup with `LoadUnit` and removed `User=` from per-user units); LC-S7A-R #856 merged; reboot-and-login receipt recorded 2026-10-30 (Linux arm64 VM); LC-S7B1 #855, LC-S7B2 #860, LC-S7B3 #865 merged; LC-S7C1 merged #872 (three executable reviews, two fix passes, one Windows CI round: autocrlf rewrote the byte-exact `launchctl print` fixture, cured with `.gitattributes -text`; a darwin diagnostics test asserting darwin separators moved to the `!windows` file); LC-S7C2a1 implemented: Windows private named-pipe control + boot-session identity; foreground host proof enrolled on the Windows row, native execution pending | explicit foreground supervisor, Linux systemd user and macOS launchd LaunchAgent adapters; two-phase receipt driver and read-only `observe` control; component-set trust format v1 with offline Go, shell, PowerShell and Homebrew verification and channel-owned payload handoff, all dark | hermetic service ownership, authenticated control, desired-state and old-boot fences; native registration, same-boot restart, persisted write and exact removal proven on both Linux CI rows; C2a1 Windows transport/boot tests and foreground proof await the Windows row; sanitized diagnostics on failure | task adapter C2b, child shutdown channel C2a2, two-user/reboot/sleep receipts owed; no channel, minimum-OS, or Linux x86_64 reboot acceptance yet; one arm64 VM row does not certify the glibc floor | owner gate and Windows C2a1 native CI; LC-S7C2a2 child shutdown, LC-S7C2b task adapter and owner session/isolation receipts; LC-S7D supervisor wiring and update/restore acceptance |
+| LC-S5 | Codex GPT-6 Astra (implementer); Fable (integration owner) | merged (harness-only): LC-S5A #843, LC-S5B #844, LC-S5C #845, LC-S5D #846; H03/H05 model allocations completed subsequently by LC-S6A #848 | synthetic topology/catalogs/scheduler; typed protocol; local capture/publication/accounting; transition, authority and recovery oracles; trace replay/reducer; H01–H69 manifests | scoped model/vector fixtures and opted-in PostgreSQL miniature transaction, fixture reopen and reducer tests; hosted dependency/byte baselines | [LC-S5-owned inventories and M4 proof](sync-contract.md#open-items-by-milestone); missing production adapters remain SCAFFOLD_ONLY and runtime schedules NOT_RUN | LC-S6 design: M4 owes real writer, movement, mixed-binary, role, restore and independent-witness proofs |
+| LC-S6 | Codex GPT-6 Astra (LC-S6A/B/C1/C2a implementer); Fable (integration owner) | LC-S6A merged #848; LC-S6B merged #861 (F1 answered yes 2026-10-27); LC-S6C1 merged #869; LC-S6C2a merged #875 (`be4778ee`, 2026-11-04), adding the local-only principal boundary; C2b/C3/D/E/F remain pending | A separates executable capability evidence from immutable v1 obligations; B adds the selected sync namespace; C1 adds guarded capture and committed-prefix finalization; C2a adds protected admission functions, principal topology refusal and capability revocation drain | C1 retains seven single-executable PostgreSQL capability records; C2a required PR checks include scoped disposable-cluster principal/bypass/downgrade evidence; shared-database role experiments remain NOT_RUN, distinct from owner-path results; no obligation promotion | C2b mixed executables and proof profile (F2/F4 answered yes 2026-11-02); LC-S6C3 installer role conversion; D application/accounting, E movement, F recovery; F3/D9 unresolved | The one-role Local Cell installer remains migration-refused at 0003 (`sync_principals_missing`) and activation-refused (`sync_principal_topology_unverified`); C3 must convert the installer; C2a required PR checks do not close broader M4 acceptance |
+| LC-S7 | Codex GPT-6 Astra (LC-S7A/C1 implementer); Fable (integration owner) | LC-S7A merged #850 (nine executable reviews, eight fix passes; the first real Linux CI runs replaced the `GetUnit` lookup with `LoadUnit` and removed `User=` from per-user units); LC-S7A-R #856 merged; reboot-and-login receipt recorded 2026-10-30 (Linux arm64 VM); LC-S7B1 #855, LC-S7B2 #860, LC-S7B3 #865 merged; LC-S7C1 merged #872 (three executable reviews, two fix passes, one Windows CI round: autocrlf rewrote the byte-exact `launchctl print` fixture, cured with `.gitattributes -text`; a darwin diagnostics test asserting darwin separators moved to the `!windows` file); LC-S7C2a1 merged #873 (`e5f0acc1`, 2026-11-05): Windows private named-pipe control and boot-session identity; foreground host proof wired on the Windows row | explicit foreground supervisor, Linux systemd user and macOS launchd LaunchAgent adapters; two-phase receipt driver and read-only `observe` control; component-set trust format v1 with offline Go, shell, PowerShell and Homebrew verification and channel-owned payload handoff, all dark | hermetic service ownership, authenticated control, desired-state and old-boot fences; native registration, same-boot restart, persisted write and exact removal proven on both Linux CI rows; C2a1 required PR checks are the merged CI evidence; no new independent native receipt is inferred; sanitized diagnostics on failure | task adapter C2b, child shutdown channel C2a2, two-user/reboot/sleep receipts owed; no channel, minimum-OS, or Linux x86_64 reboot acceptance yet; one arm64 VM row does not certify the glibc floor | retain required-check provenance for #873; owner session/isolation evidence remains separate; LC-S7C2a2 child shutdown, LC-S7C2b task adapter and owner session/isolation receipts; LC-S7D supervisor wiring and update/restore acceptance |
 
 LC-S6B implements the first production sync schema in a separate embedded
 `internal/store/sync_migrations/` namespace with its own Goose version table.
@@ -1042,9 +1055,10 @@ against a capture-active account refuses until D supplies its admitted adapter.
 Hosted and unselected-local behavior remains unchanged. The seven C1 capability
 records are scoped to single-executable PostgreSQL experiments; prepared
 transactions remain NOT_RUN when the server reports `max_prepared_transactions=0`.
-All H obligation statuses remain NOT_RUN/SCAFFOLD_ONLY; C2's mixed executables,
-real database principals and capture-proof worker profile, plus D–F, are still
-required before capture or M4 acceptance.
+All H obligation statuses remain NOT_RUN/SCAFFOLD_ONLY. C2a subsequently added
+the principal boundary and scoped disposable-cluster CI evidence; C2b's mixed
+executables and capture-proof worker profile, C3's installer conversion and D–F
+remain required before capture or M4 acceptance.
 
 LC-S6C2a adds sync migration 0003 and typed principal preflight, protected
 admission/touch/seal/finalization functions, control-table DML revocation,
@@ -1052,7 +1066,9 @@ activation topology checks and a capability revocation drain. Its dedicated
 `go-capture-principals` CI job owns a disposable cluster for the actual principal,
 bypass and downgrade matrix. The shared local database records
 `NOT_RUN disposable_cluster_unavailable` for those role experiments; catalog
-and owner-path checks do not substitute for their execution. Migration 0003 refuses a one-role database that lacks the required principals.
+and owner-path checks do not substitute for their execution. C2a merged as
+`be4778ee` (#875, 2026-11-04); its required PR checks supply scoped CI evidence
+for the dedicated job, without promoting any H obligation or shared-database result. Migration 0003 refuses a one-role database that lacks the required principals.
 The Local Cell's current one-role install is migration-refused at 0003
 (`sync_principals_missing`) and activation-refused
 (`sync_principal_topology_unverified`) until LC-S6C3 converts the installer.
@@ -1092,9 +1108,11 @@ LC-S7C2a1 implements the opt-in Windows foreground control foundations: a privat
 owner/SYSTEM named pipe, peer PID/creation-identity/TokenUser checks before HTTP
 or bearer bytes, a private installation/generation/revision/lease-bound endpoint,
 and a validated boot-session GUID with fail-closed old-boot reconciliation. The
-Windows row now runs the existing foreground persistence proof with value-free
-boot and endpoint diagnostics; its first native result remains pending, and
-cross-compilation is not a Windows receipt. The pipe DACL and same-user peer check
+Windows row wires the existing foreground persistence proof with value-free
+boot and endpoint diagnostics. C2a1 merged as `e5f0acc1` (#873, 2026-11-05);
+its required PR checks are the CI receipt under the owner's merge rule. No new
+independent native success receipt is recorded here, and cross-compilation is
+not a Windows receipt. The pipe DACL and same-user peer check
 supplement bearer authentication; same-user compromise is outside the isolation
 claim. C2a1 registers no task and retains console CTRL_BREAK child stop, including
 its no-console refusal. C2a2 owns console-free child shutdown, C2b owns the task
@@ -1141,14 +1159,50 @@ FLAKE-6 (#871) adds the shared-gate lesson: a `pg_catalog` snapshot test must
 scope to its own fixture schema family because packages run concurrently against
 one shared gate database.
 
+Later merged gate lessons through `dbacf2a1` keep test-environment repairs,
+diagnostics and product behavior distinct:
+
+- FLAKE-8 (`ec95fa6f`, #876, 2026-11-04) gives fixture admission a bounded,
+  horizon-aware retry using the existing production predicate, with classified
+  failures and a proportional allowance; production admission remains unchanged
+  ([fixture retry](../../../internal/store/sync_capture_fixture_retry_test.go)).
+- FLAKE-7 (`22b926a9`, #880, 2026-11-05) observes the exact installation-drain
+  lock through a dedicated connection, with proportional bounds and a pool-pressure
+  regression ([drain proof](../../../internal/store/sync_capture_drain_test.go)).
+- FLAKE-10 (`304bf7ef`, #885, 2026-11-06) excludes abandoned-client cancellation
+  from host diagnostics while preserving host cancellation and independent joined
+  failures. This is a scoped diagnostic correction, not a lifecycle acceptance
+  receipt ([control diagnostics](../../../internal/localcell/service_control.go),
+  [failure classification](../../../internal/localcell/service_failure_site.go)).
+- FLAKE-9 (`7eb196e8`, #881, 2026-11-06) waits for the fixture startup signal
+  before the original strict readiness assertions; production behavior and readiness
+  requirements stay unchanged ([startup wait](../../../internal/worker/startup_wait_test.go)).
+- FLAKE-11D (`5decb873`, #886, 2026-11-06) adds a closed diagnostic line before
+  unchanged readiness failures. Instrumentation alone neither fixes readiness nor
+  closes FLAKE-11F ([hermetic lifecycle](../../../internal/localcell/lifecycle_hermetic_test.go),
+  [native helper](../../../internal/localcell/lifecycle_integration_test.go)).
+- SBX-1 (`97732ae8`, #888, 2026-11-07) disables VCS stamping only for the
+  executable-name fixture built outside a repository. It is a sandbox fixture
+  repair, not a product lifecycle change or global stamping override
+  ([harness test](../../../internal/tools/localcellharness/main_test.go)).
+- FLAKE-12 (`dbacf2a1`, #889, 2026-11-07) retries Windows transient file-sharing
+  failures while fixture records publish, within the existing reader deadline and
+  a bounded child rename allowance. The non-Windows transient errno set stays
+  empty ([publication reads](../../../internal/localcell/lifecycle_fixture_publication_read_test.go),
+  [non-Windows classification](../../../internal/localcell/lifecycle_fixture_publication_read_other_test.go),
+  [child publication](../../../internal/localcell/testdata/lifecyclefixture/publication.go)).
+
+The local-cache-first pinned-lint resolution (`303d3e5b`, #874, 2026-11-03)
+is a tooling lesson only ([Makefile](../../../Makefile)); it adds no product progress.
+
 LC-S5A/B supply four separately migrated schemas and a minimal witness in one
 disposable PostgreSQL database, an ordinary remote-only client, deterministic
 scheduling, catalogs, typed identities, strict canonical vectors and immutable
 signed receipts. LC-S5C adds synthetic transaction admission and semantic capture,
 a committed-prefix counter, compound staging and atomic inert projections,
 publication outbox/pin states, payload retirement and evidence pins, and original
-action/hour/day accounting. LC-S5D adds the recovery and reproducibility skeleton (inherited
-H03/H05 model allocations remain deferred) with distinct
+action/hour/day accounting. LC-S5D adds the recovery and reproducibility skeleton (its inherited
+H03/H05 model deferrals were completed by LC-S6A #848) with distinct
 adoption/join/enrollment transitions, restore markers, graph authority transfer,
 recovery evidence intervals and overrides, signed continuation proofs, recorded
 schedule replay/reduction, and miniature PostgreSQL persistence/reopen evidence.
@@ -1175,8 +1229,9 @@ distinguish fixture, real PostgreSQL, mixed binaries, native lifecycle and
 independent failure-domain evidence. No obligation's runtime status changes in
 this slice: the v1 scaffold inventory retains `NOT_RUN` and `SCAFFOLD_ONLY`, and
 capability evidence cannot promote those fields without a separate explicit,
-reviewed promotion step. LC-S6A activates no production behavior; B–F remain
-specced/planned under the LC-S6 design and their unresolved acceptance gates.
+reviewed promotion step. LC-S6A activates no production behavior. B #861, C1 #869 and C2a #875 have
+subsequently merged selected-local foundations; C2b, C3 and D/E/F remain open,
+with the runtime and M4 acceptance gates unchanged.
 
 ## Founder decisions (answered)
 
@@ -1191,6 +1246,11 @@ is recorded here with its date.
   schema only, an explicit opt-in lets the real production worker run its genuine job registrations against the capture guards in
   a positively identified disposable database with isolated test principals and fake provider endpoints; hosted behavior unchanged,
   off by default, never against a real account, nothing ships enabled.
+
+F2/F4 retain these dated YES answers. The owner reconciled the earlier part-C2
+scheduling note on 2026-11-07: no scheduling hold remains. F3 is unresolved,
+but its question text is not retained in this plan; the owner must supply it
+before dependent work. No F3 question is inferred here.
 
 - **D1 — Authorize LC-S1:** YES (2026-10-23). LC-S1 through LC-S4 are merged.
 - **D2 — Identity adoption, namespace join and collisions:** adoption preserves

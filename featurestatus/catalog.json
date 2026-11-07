@@ -1624,7 +1624,7 @@
       "id": "local-cell-lifecycle-core",
       "name": "Disposable local cell lifecycle core",
       "area": "Local cell",
-      "summary": "A caller-owned lifecycle package and test-only harness manage isolated PostgreSQL, server and worker processes with private state, explicit child environments, advisory locking, readiness waits and journal recovery. Implemented for disposable tests; nothing is installed or activated.",
+      "summary": "A caller-owned lifecycle core and opt-in Unix service adapters manage isolated PostgreSQL, server and worker processes. Five native lifecycle receipts, Windows control foundations and offline delivery verification are recorded. Supported product installation and acceptance remain open; no live activation is claimed.",
       "implementation": "implemented",
       "managed_rollout": "dark",
       "docs": [
@@ -1634,8 +1634,9 @@
       "gates": {
         "behavior": {
           "state": "conditional",
-          "summary": "Synthetic process lifecycle, exclusive ownership, interruption repair and data-preserving removal are covered. Native PostgreSQL proof is blocked by sandbox shared-memory denial; the integration owner must rerun the real lifecycle before acceptance.",
+          "summary": "Disposable lifecycle, ownership, interruption repair and data-preserving removal are covered. The plan retains native PostgreSQL 16 receipts on five platform rows; Windows 11 owner acceptance and supported product integration remain open.",
           "evidence": [
+            "docs/research/local-cell/implementation-plan.md",
             "internal/localcell/lifecycle.go",
             "internal/localcell/lifecycle_hermetic_test.go",
             "internal/localcell/lifecycle_integration_test.go",
@@ -1644,19 +1645,21 @@
         },
         "entitlement_policy": {
           "state": "conditional",
-          "summary": "Only tests and the internal harness reach this package. Standalone product policy, client authorization, enrollment authority and supported routing remain separate decisions.",
+          "summary": "Lifecycle and explicit service foundations remain opt-in and dark. Local routes and console trust are implemented separately; standalone policy, operator bootstrap and enrollment authority remain product gates.",
           "evidence": [
             "docs/research/local-cell/implementation-plan.md"
           ]
         },
         "bounds_abuse": {
           "state": "conditional",
-          "summary": "Advisory locks, process identity checks, a private root, explicit child environments, loopback ports and separate spools bound disposable cells. Windows DACL privacy and native platform acceptance remain deferred.",
+          "summary": "Locks, process identity, private roots/spools, explicit child environments and loopback ports bound disposable cells. Windows lifecycle/spool DACL privacy and Job Object child isolation are implemented; two-user and minimum-OS acceptance remain open.",
           "evidence": [
             "internal/localcell/environment_test.go",
-            "internal/localcell/files.go",
+            "internal/localcell/files_windows.go",
+            "internal/localcell/launch_windows.go",
             "internal/localcell/lock_test.go",
-            "internal/localcell/safety_test.go"
+            "internal/localcell/safety_test.go",
+            "internal/runtimeconfig/spool_windows.go"
           ]
         },
         "observability": {
@@ -1669,17 +1672,20 @@
         },
         "recovery": {
           "state": "conditional",
-          "summary": "Journal repair and failed-start rollback preserve PostgreSQL data. Start preflights each component and retries an attributable bind conflict once within the original readiness budget; port allocation is bounded. Only explicit purge removes data.",
+          "summary": "Journal repair and failed-start rollback preserve PostgreSQL data. Start preflights each component and retries an attributable bind conflict once within the readiness budget. Bounded migration cancellation and opt-in worker restart landed; systemd and launchd adapters exist. Only explicit purge removes data.",
           "evidence": [
-            "internal/localcell/files_test.go",
             "internal/localcell/lifecycle.go",
             "internal/localcell/lifecycle_integration_test.go",
-            "internal/localcell/lifecycle_lost_port_test.go"
+            "internal/localcell/lifecycle_lost_port_test.go",
+            "internal/localcell/service_launchd.go",
+            "internal/localcell/service_systemd.go",
+            "internal/store/migrate.go",
+            "internal/worker/restart_test.go"
           ]
         },
         "rollout_canaries": {
           "state": "conditional",
-          "summary": "Test-harness only, with no installer, service registration, download or live activation. Native platform, clean-machine and local-product acceptance remain separate gates.",
+          "summary": "Dark foundations include opt-in Unix services, offline component verification and channel handoff. Windows task/service delivery, trust-state ACL persistence, production signing custody, clean-machine acceptance and local-product canaries remain open.",
           "evidence": [
             "docs/research/local-cell/implementation-plan.md"
           ]
@@ -1702,7 +1708,7 @@
             "recovery",
             "rollout_canaries"
           ],
-          "summary": "Rerun native PostgreSQL lifecycle outside the sandbox, then complete platform and Windows DACL proof, restart policy, migration cancellation, service adapters, downloads and installer manifest trust before a separately authorized rollout.",
+          "summary": "Complete Windows task delivery and trust-state ACL persistence, production signing custody, execution binding, clean-machine/update/restore proof, minimum-OS and resource budgets, and remaining session/isolation receipts before a separately authorized rollout.",
           "ref": "docs/research/local-cell/implementation-plan.md"
         },
         {
@@ -1710,7 +1716,7 @@
           "gate_ids": [
             "entitlement_policy"
           ],
-          "summary": "Resolve standalone policy, client authorization, routing and enrollment authority before exposing a supported local product.",
+          "summary": "Complete standalone policy, operator bootstrap, full offline acceptance, lifecycle/route integration and enrollment authority before exposing a supported local product.",
           "ref": "docs/research/local-cell/implementation-plan.md"
         }
       ]
@@ -1772,7 +1778,7 @@
         },
         "rollout_canaries": {
           "state": "conditional",
-          "summary": "No live activation. Standalone operator bootstrap, offline inventory proof, lifecycle integration and a supported local-product canary remain separate work.",
+          "summary": "S3 routes and S4 console trust are merged, with no live activation. Standalone operator bootstrap and policy, full offline inventory proof, lifecycle integration and a supported local-product canary remain separate work.",
           "evidence": [
             "docs/research/local-cell/implementation-plan.md"
           ]
@@ -1793,7 +1799,7 @@
           "gate_ids": [
             "rollout_canaries"
           ],
-          "summary": "Complete standalone operator bootstrap, offline inventory proof and lifecycle integration, then separately authorize a local-product canary. Live MCP re-binding is deferred.",
+          "summary": "Complete standalone operator bootstrap and policy, full offline inventory proof and lifecycle integration, then separately authorize a local-product canary. Live MCP re-binding is deferred.",
           "ref": "docs/research/local-cell/implementation-plan.md"
         }
       ]
@@ -1822,17 +1828,20 @@
         },
         "entitlement_policy": {
           "state": "conditional",
-          "summary": "This foundation does not define a standalone plan/policy snapshot, installation identity, enrollment authority, or local connection routing. The account-id check is limited to the bootstrap account.",
+          "summary": "S2 supplies installation identity; S3/S4 supply explicit local routes and console trust. Standalone policy, operator bootstrap and enrollment authority remain open; the runtime account-id check is limited to the bootstrap account.",
           "evidence": [
-            "docs/research/local-cell/implementation-plan.md"
+            "docs/research/local-cell/implementation-plan.md",
+            "internal/local/route.go",
+            "internal/localcell/lifecycle.go"
           ]
         },
         "bounds_abuse": {
           "state": "pass",
-          "summary": "Local startup requires loopback listeners and a private owned spool directory (Windows: directory ownership (SID) check only; DACL privacy is pending), refuses hosted provision/backup/billing/email configuration, and excludes purge, retention, outbound dispatch, and support age-out jobs.",
+          "summary": "Local startup requires loopback listeners and a private owned spool, including Windows DACL checks. It refuses hosted provision/backup/billing/email configuration and excludes purge, retention, outbound dispatch and support age-out jobs.",
           "evidence": [
             "internal/runtimeconfig/config.go",
             "internal/runtimeconfig/spool.go",
+            "internal/runtimeconfig/spool_windows.go",
             "internal/server/local_runtime_test.go",
             "internal/server/spool_sweep.go"
           ]
@@ -1849,14 +1858,17 @@
         },
         "recovery": {
           "state": "conditional",
-          "summary": "Removing the explicit switch restores hosted configuration. Installation lifecycle ownership, interruption recovery, bounded migration waits, and worker restart policy remain later slices.",
+          "summary": "Removing the explicit switch restores hosted configuration. S2 owns disposable lifecycle/interruption recovery; R1 adds bounded migration cancellation and opt-in job restarts. Unix service adapters exist; product update/restore acceptance remains open.",
           "evidence": [
-            "docs/research/local-cell/implementation-plan.md"
+            "docs/research/local-cell/implementation-plan.md",
+            "internal/localcell/lifecycle.go",
+            "internal/store/migrate.go",
+            "internal/worker/restart_test.go"
           ]
         },
         "rollout_canaries": {
           "state": "conditional",
-          "summary": "Inactive by default with no live activation. Native lifecycle, platform packaging, clean-machine acceptance, and local-product canaries remain separate work.",
+          "summary": "Inactive by default. Five native PostgreSQL lifecycle receipts and opt-in Unix service foundations are recorded; Windows task delivery, platform packaging, clean-machine acceptance and local-product canaries remain open.",
           "evidence": [
             "docs/research/local-cell/implementation-plan.md"
           ]
@@ -1877,7 +1889,7 @@
             "recovery",
             "rollout_canaries"
           ],
-          "summary": "Complete lifecycle ownership and recovery, platform installers and clean-machine proof, then separately authorize a local-product canary. This inactive foundation does not activate a live cell.",
+          "summary": "Complete platform delivery, execution binding, update/restore and clean-machine proof, remaining native session/isolation receipts and resource budgets, then separately authorize a local-product canary. Existing lifecycle foundations remain dark.",
           "ref": "docs/research/local-cell/implementation-plan.md"
         },
         {
@@ -1885,7 +1897,7 @@
           "gate_ids": [
             "entitlement_policy"
           ],
-          "summary": "Define standalone policy, installation identity, connection routing and enrollment authority before enabling a supported local product.",
+          "summary": "Complete standalone policy, operator bootstrap, full offline acceptance and enrollment authority; integrate the implemented installation identity, routes and console trust before enabling a supported local product.",
           "ref": "docs/research/local-cell/implementation-plan.md"
         }
       ]
