@@ -45,7 +45,7 @@ func TestLostPortLifecycle(t *testing.T) {
 			cell, root := installedLostPortCell(t, binaries)
 			writeLostPortMarker(t, root, "fixture-steal-port-"+component, "always")
 			err := cell.Start(t.Context())
-			want := "local cell start: " + component + "_ready failed: local cell " + component + " exited before readiness (exit status 1): witself-" + component + ": listener bind failed: address in use"
+			want := "local cell start: " + component + "_ready failed: local cell " + component + " exited before readiness (exit status 1): witself-" + component + ": listener bind failed: address in use; wait_observation=wait_completed recovered_alive=false" // owner merge adaptation: C2a2 readinessExitError carries the observation diagnostic
 			if err == nil || err.Error() != want {
 				t.Fatalf("lost-port exhaustion discarded attributable error: %v", err)
 			}
@@ -59,7 +59,7 @@ func TestLostPortLifecycle(t *testing.T) {
 			before := lostPortManifest(t, cell).Ports
 			writeLostPortMarker(t, root, "fixture-bind-other-"+component, "")
 			err := cell.Start(t.Context())
-			want := "local cell start: " + component + "_ready failed: local cell " + component + " exited before readiness (exit status 1): witself-" + component + ": listener bind failed: other"
+			want := "local cell start: " + component + "_ready failed: local cell " + component + " exited before readiness (exit status 1): witself-" + component + ": listener bind failed: other; wait_observation=wait_completed recovered_alive=false" // owner merge adaptation: C2a2 readinessExitError carries the observation diagnostic
 			if err == nil || err.Error() != want {
 				t.Fatalf("other bind failure discarded attributable error: %v", err)
 			}
@@ -164,7 +164,7 @@ func testExistingChildDiesDuringStart(t *testing.T, binaries localcell.Binaries,
 		t.Fatal("cannot construct existing-child recovery cell")
 	}
 	err = restarted.Start(t.Context())
-	want := "local cell start: " + component + "_ready failed: local cell " + component + " exited before readiness (exit status 1): witself-" + component + ": listener bind failed: address in use"
+	want := "local cell start: " + component + "_ready failed: local cell " + component + " exited before readiness (exit status 1): witself-" + component + ": listener bind failed: address in use; wait_observation=wait_completed recovered_alive=false" // owner merge adaptation: C2a2 readinessExitError carries the observation diagnostic
 	if !killed || err == nil || err.Error() != want {
 		t.Fatalf("existing-child death did not retain replacement failure attribution: %v", err)
 	}
