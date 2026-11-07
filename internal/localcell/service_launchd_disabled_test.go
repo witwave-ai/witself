@@ -133,6 +133,13 @@ func launchdDisabledPlist(t *testing.T, a *launchdAgentAdapter, d ServiceDescrip
 	if err != nil {
 		t.Fatal("private plist identity unavailable")
 	}
+	// On Windows os.Lstat defers the volume/file-index identity until the first
+	// SameFile call and resolves it through the stored path; a caller that
+	// renames the file and writes a replacement at the same path before
+	// comparing would observe the replacement's identity. Pin it now.
+	if !os.SameFile(info, info) {
+		t.Fatal("private plist identity unavailable")
+	}
 	data, err := os.ReadFile(a.plistPath(d))
 	if err != nil {
 		t.Fatal("private plist bytes unavailable")
