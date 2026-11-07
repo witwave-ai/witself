@@ -39,7 +39,7 @@ const (
 	offlineAPIPredicate  = "project/status"
 	offlineAPISource     = "witself://transcripts/offline-transcript/entries/1"
 	offlineAPICursor     = "offline-next-page"
-	offlineAPIRequest    = "offline-request"
+	offlineAPIRequestID  = "offline-request"
 	offlineAPIRun        = "offline-run"
 	offlineAPIPlanHash   = "offline-plan-hash"
 )
@@ -806,7 +806,7 @@ func (s *offlineAPICorpus) curationConfig(cfg *Config) {
 		if in.IdempotencyKey != "offline-request-key" || in.TriggerReason != "offline-proof" || !reflect.DeepEqual(in.Scope.Sources, []string{"memories", "transcripts"}) {
 			s.t.Error("curation request input changed")
 		}
-		s.request = client.MemoryCurationRequest{ID: offlineAPIRequest, AccountID: p.AccountID, RealmID: p.RealmID, OwnerKind: p.Kind, OwnerID: p.ID, ActorKind: p.Kind, ActorID: p.ID, State: "queued", RequestGeneration: 1}
+		s.request = client.MemoryCurationRequest{ID: offlineAPIRequestID, AccountID: p.AccountID, RealmID: p.RealmID, OwnerKind: p.Kind, OwnerID: p.ID, ActorKind: p.Kind, ActorID: p.ID, State: "queued", RequestGeneration: 1}
 		s.requestReceipt = client.MemoryCurationMutationReceipt{Operation: "request", ActorID: p.ID, RequestID: s.request.ID, RequestGeneration: s.request.RequestGeneration, IdempotencyKey: in.IdempotencyKey, ResultState: s.request.State}
 		return client.RequestMemoryCurationResult{Request: s.request, Receipt: s.requestReceipt}, nil
 	}
