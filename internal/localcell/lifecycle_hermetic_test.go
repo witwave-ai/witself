@@ -312,12 +312,22 @@ func runConcurrentStartIndependentRoots(fixture *testing.T, t concurrentStartRep
 			t.Fatalf("independent concurrent Start did not finish: %v", err)
 		}
 	}
-	for _, cell := range []*localcell.Cell{first, second} {
+	for rootIndex, cell := range []*localcell.Cell{first, second} {
+		probeStarted := time.Now()
 		status, err := cell.Status(fixture.Context())
 		if err != nil || !status.ServerReady || !status.WorkerReady || status.Manifest == nil {
+			t.Logf("%s", formatPostStartReadinessDiagnostic("concurrent_start", rootIndex, time.Since(probeStarted), status, err, fixture.Context().Err() != nil))
 			t.Fatalf("both local readiness endpoints must be ready when start returns")
 		}
 	}
+}
+
+// Render only the probe's timing and boolean observations, never status payloads.
+func formatPostStartReadinessDiagnostic(site string, rootIndex int, elapsed time.Duration, status localcell.Status, statusErr error, contextDone bool) string {
+	server, worker := status.Processes["server"], status.Processes["worker"]
+	return fmt.Sprintf("site=%s root_index=%d probe_elapsed=%.6fs status_error=%t manifest_present=%t server_ready=%t worker_ready=%t server_alive=%t server_matches=%t worker_alive=%t worker_matches=%t context_done=%t",
+		site, rootIndex, elapsed.Seconds(), statusErr != nil, status.Manifest != nil, status.ServerReady, status.WorkerReady,
+		server.Alive, server.Matches, worker.Alive, worker.Matches, contextDone)
 }
 
 type concurrentStartFatal struct{}
