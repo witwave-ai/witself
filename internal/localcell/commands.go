@@ -331,10 +331,10 @@ func (c *Cell) waitReady(ctx context.Context, component string, port int) error 
 	ticker := time.NewTicker(50 * time.Millisecond)
 	defer ticker.Stop()
 	for {
-		state, err := c.processState(component)
+		state, record, err := c.processStateWithRecord(component)
 		if err != nil || !state.Alive || !state.Matches {
 			if err == nil && !state.Alive {
-				return c.childReadinessExit(ctx, component, state.PID)
+				return c.childReadinessExit(ctx, component, record)
 			}
 			return &readinessError{component: component, state: state, observationFailed: err != nil}
 		}

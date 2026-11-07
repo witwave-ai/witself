@@ -581,21 +581,28 @@ func (c *Cell) Status(ctx context.Context) (Status, error) {
 }
 
 func (c *Cell) processState(component string) (ProcessState, error) {
+	state, _, err := c.processStateWithRecord(component)
+	return state, err
+}
+
+// Return the exact record used by the observation. Readiness retains this
+// fence even if rollback or another actor later changes the durable record.
+func (c *Cell) processStateWithRecord(component string) (ProcessState, ProcessRecord, error) {
 	var record ProcessRecord
 	if err := readJSON(c.path("run", component+".json"), &record); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return ProcessState{}, nil
+			return ProcessState{}, record, nil
 		}
-		return ProcessState{}, err
+		return ProcessState{}, record, err
 	}
 	if record.PID <= 1 || record.StartTime == "" {
-		return ProcessState{}, errors.New("invalid local cell process record")
+		return ProcessState{}, record, errors.New("invalid local cell process record")
 	}
 	identity, alive, err := processIdentity(record.PID)
 	if err != nil {
-		return ProcessState{}, errors.New("cannot verify local cell process identity")
+		return ProcessState{}, record, errors.New("cannot verify local cell process identity")
 	}
-	return ProcessState{PID: record.PID, Alive: alive, Matches: alive && identity == record.StartTime && record.Root == c.cfg.Root && record.Component == component}, nil
+	return ProcessState{PID: record.PID, Alive: alive, Matches: alive && identity == record.StartTime && record.Root == c.cfg.Root && record.Component == component}, record, nil
 }
 
 func (c *Cell) postmaster() (int, error) {

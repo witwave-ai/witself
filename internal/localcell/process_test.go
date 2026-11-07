@@ -13,8 +13,13 @@ import (
 	"time"
 )
 
-func TestMain(m *testing.M) {
+// Helpers must dispatch before runtime.main releases the initial OS thread.
+// Keep this initializer test-only: hosted imports of localcell stay inert.
+func init() {
 	DispatchProcessHelper()
+}
+
+func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
