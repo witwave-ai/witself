@@ -52,7 +52,8 @@ func TestFixtureEmptyPostgresRecordPublication(t *testing.T) {
 		}) // FLAKE-3 fix 4 (F9)
 		// Match the fixture's unchanged publication deadline; wait for exit, not elapsed-time proof. // FLAKE-3 fix 4 (F9)
 		const fixturePublicationTimeout = 5 * time.Second // FLAKE-3 fix 4 (F9)
-		select {                                          // FLAKE-3 fix 4 (F9)
+		deadline := time.Now().Add(2 * fixturePublicationTimeout)
+		select { // FLAKE-3 fix 4 (F9)
 		case <-done: // FLAKE-3 fix 4 (F9)
 		case <-time.After(2 * fixturePublicationTimeout): // FLAKE-3 fix 4 (F9)
 			t.Fatal("pubhold-a05 fixture did not exit within its deadline bound") // FLAKE-3 fix 4 (F9)
@@ -63,9 +64,12 @@ func TestFixtureEmptyPostgresRecordPublication(t *testing.T) {
 		if exitErr, ok := commandErr.(*exec.ExitError); !ok || exitErr.ExitCode() <= 0 { // FLAKE-3 fix 4 (F9)
 			t.Error("pubhold-a07 fixture did not exit with nonzero status") // FLAKE-3 fix 4 (F9)
 		} // FLAKE-3 fix 4 (F9)
-		if pending, err := os.ReadFile(pidfile + ".pending"); err != nil || len(pending) != 0 { // FLAKE-3 fix 4 (F9)
+		pending := pollFixturePublication(t, deadline, fixturePublicationPresent, func() ([]byte, fixturePublicationReadState) {
+			return readFixturePublication(t, pidfile+".pending", os.ReadFile, fixturePublicationTransientErrno, fixturePublicationExpiredReadFailure)
+		}, nil, "pubhold-a08 empty pending record missing after gate expiry")
+		if len(pending) != 0 {
 			t.Error("pubhold-a08 empty pending record missing after gate expiry") // FLAKE-3 fix 4 (F9)
-		} // FLAKE-3 fix 4 (F9)
+		}
 		if _, err := os.Stat(pidfile); !os.IsNotExist(err) { // FLAKE-3 fix 4 (F9)
 			t.Error("pubhold-a09 final record appeared without gate release") // FLAKE-3 fix 4 (F9)
 		} // FLAKE-3 fix 4 (F9)
@@ -112,31 +116,29 @@ func testFixtureEmptyPostgresRecordPublicationReleased(t *testing.T, binaries lo
 			t.Error("cannot remove publication fixture empty record")
 		}
 	})
-	for deadline := time.Now().Add(5 * time.Second); ; {
-		if _, err := os.Stat(pidfile); !os.IsNotExist(err) {
+	staged := pollFixturePublication(t, time.Now().Add(5*time.Second), fixturePublicationPresent, func() ([]byte, fixturePublicationReadState) {
+		_, finalState := readFixturePublication(t, pidfile, os.ReadFile, fixturePublicationTransientErrno, fixturePublicationPrematureReadFailure)
+		if finalState == fixturePublicationPresent {
 			t.Fatal("publication gate exposed the final record before release")
 		}
-		if staged, err := os.ReadFile(pidfile + ".pending"); err == nil {
-			if len(staged) != 0 {
-				t.Fatal("publication gate staged a nonempty negative record")
-			}
-			break
-		} else if !os.IsNotExist(err) {
-			t.Fatal("cannot read publication fixture pending record")
+		if finalState != fixturePublicationAbsent {
+			return nil, finalState
 		}
+		return readFixturePublication(t, pidfile+".pending", os.ReadFile, fixturePublicationTransientErrno, fixturePublicationPendingReadFailure)
+	}, func() {
 		select {
 		case <-done:
 			t.Fatal("publication fixture exited before staging its pending record")
 		default:
 		}
-		if !time.Now().Before(deadline) {
-			t.Fatal("publication fixture did not stage its pending record")
-		}
-		time.Sleep(10 * time.Millisecond)
+	}, "publication fixture did not stage its pending record")
+	if len(staged) != 0 {
+		t.Fatal("publication gate staged a nonempty negative record")
 	}
 	if err := lifecycleWriteFile(filepath.Join(root, "fixture-postgres-publication-release"), nil); err != nil {
 		t.Fatal("cannot release publication fixture gate")
 	}
+	deadline := time.Now().Add(5 * time.Second)
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
@@ -145,12 +147,15 @@ func testFixtureEmptyPostgresRecordPublicationReleased(t *testing.T, binaries lo
 	if commandErr != nil {
 		t.Fatal("publication fixture failed after gate release")
 	}
-	if published, err := os.ReadFile(pidfile); err != nil || len(published) != 0 {
+	published := pollFixturePublication(t, deadline, fixturePublicationPresent, func() ([]byte, fixturePublicationReadState) {
+		return readFixturePublication(t, pidfile, os.ReadFile, fixturePublicationTransientErrno, fixturePublicationFinalReadFailure)
+	}, nil, "publication fixture did not publish its empty final record")
+	if len(published) != 0 {
 		t.Fatal("publication fixture did not publish its empty final record")
 	}
-	if _, err := os.Stat(pidfile + ".pending"); !os.IsNotExist(err) {
-		t.Fatal("publication fixture retained its pending name after rename")
-	}
+	pollFixturePublication(t, deadline, fixturePublicationAbsent, func() ([]byte, fixturePublicationReadState) {
+		return readFixturePublication(t, pidfile+".pending", os.ReadFile, fixturePublicationTransientErrno, fixturePublicationRetainedReadFailure)
+	}, nil, "publication fixture retained its pending name after rename")
 	// Retain the product's exact returned and journaled cause assertions after
 	// proving the fixture's publication protocol independently of launch speed.
 	testEmptyPostgresRecordCause(t, binaries)
