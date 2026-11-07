@@ -118,6 +118,72 @@ func trustHarnessRun(t *testing.T, clock trust.Clock, args []string) (string, er
 	return output.String(), err
 }
 
+// Admit only exact trust refusal codes; neither a forged Reason nor a wrapped
+// error may send caller values into a diagnostic log.
+func harnessTrustDiagnostic(err error) string {
+	if err == nil {
+		return "none"
+	}
+	reason := trust.Reason(err.Error())
+	switch reason {
+	case trust.ReasonAccepted, trust.ReasonNoTrustRoot, trust.ReasonDocumentTooLarge,
+		trust.ReasonEnvelopeTooLarge, trust.ReasonInvalidJSON, trust.ReasonDuplicateKey,
+		trust.ReasonProfileViolation, trust.ReasonUnknownCritical, trust.ReasonUnknownField,
+		trust.ReasonInvalidDocument, trust.ReasonWrongKind, trust.ReasonWrongAlgorithm,
+		trust.ReasonInvalidKey, trust.ReasonInvalidEncoding, trust.ReasonSignatureLength,
+		trust.ReasonSignatureCount, trust.ReasonSignatureInvalid, trust.ReasonUnknownKey,
+		trust.ReasonRevokedKey, trust.ReasonWrongSigner, trust.ReasonStateInvalid,
+		trust.ReasonStateIO, trust.ReasonSequence, trust.ReasonReplay,
+		trust.ReasonRollbackDenied, trust.ReasonWrongTag, trust.ReasonWrongPlatform,
+		trust.ReasonSchema, trust.ReasonPostgreSQL, trust.ReasonExtensions, trust.ReasonRoles,
+		trust.ReasonPath, trust.ReasonInventory, trust.ReasonMode, trust.ReasonNotInstalled,
+		trust.ReasonMixedSet, trust.ReasonExpired, trust.ReasonNotYetValid, trust.ReasonUnknownClock,
+		trust.ReasonChannelReceiptInvalid, trust.ReasonChannelRevision, trust.ReasonChannelActionRequired,
+		trust.ReasonChannelNotImplemented, trust.ReasonOwnershipOverlap, trust.ReasonHandoffTransition,
+		trust.ReasonGenerationReferenced, trust.ReasonProcessObservationUnavailable,
+		trust.ReasonPayloadRetention, trust.ReasonPayloadBudget, trust.ReasonGenerationExists,
+		trust.ReasonGenerationInvalid:
+		return string(reason)
+	default:
+		return "unclassified"
+	}
+}
+
+func TestHarnessTrustDiagnostic(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"nil", nil, "none"},
+		{"known", trust.ReasonStateIO, "state_io"},
+		{"generation", trust.ReasonGenerationReferenced, "generation_referenced"},
+		{"exact_text", errors.New("no_trust_root"), "no_trust_root"},
+		{"unknown_lowercase", errors.New("private_value"), "unclassified"},
+		{"forged_reason", trust.Reason("private_value"), "unclassified"},
+		{"private_suffix", errors.New("state_io /private/fixture"), "unclassified"},
+		{"private_prefix", errors.New("private state_io"), "unclassified"},
+		{"private_hex", errors.New(strings.Repeat("ab", 32)), "unclassified"},
+		{"changing_error", &harnessTrustChangingError{}, "state_io"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if harnessTrustDiagnostic(test.err) != test.want {
+				t.Fatal("trust diagnostic lost a fixed cause or exposed an unreviewed value")
+			}
+		})
+	}
+}
+
+type harnessTrustChangingError struct{ calls int }
+
+func (e *harnessTrustChangingError) Error() string {
+	e.calls++
+	if e.calls == 1 {
+		return "state_io"
+	}
+	return "private_value"
+}
+
 func TestTrustHarnessRequiresExplicitInputs(t *testing.T) {
 	for _, pair := range [][2]string{{"payload", "stage"}, {"payload", "activate"}, {"payload", "retire"}, {"payload", "inspect"}, {"channel", "receipt"}, {"channel", "inspect"}, {"channel", "preflight"}} {
 		t.Run(pair[0]+"_"+pair[1], func(t *testing.T) {
@@ -149,7 +215,8 @@ func TestPayloadHarnessStagesActivatesInspects(t *testing.T) {
 	}
 	clock := harnessTrustClock()
 	if _, err := trustHarnessRun(t, clock, trustHarnessArgs("payload", "stage", root, directory, key)); err != nil {
-		t.Fatal("stage refused:", err)
+		t.Logf("trust cause=%s", harnessTrustDiagnostic(err))
+		t.Fatal("stage refused")
 	}
 	journal, err := trust.InspectHandoff(t.Context(), root)
 	if err != nil || len(journal.Generations) != 1 {
@@ -160,7 +227,8 @@ func TestPayloadHarnessStagesActivatesInspects(t *testing.T) {
 		generation = name
 	}
 	if _, err := trustHarnessRun(t, clock, trustHarnessArgs("payload", "activate", root, directory, key, "--generation", generation, "--launch-check")); err != nil {
-		t.Fatal("activation refused:", err)
+		t.Logf("trust cause=%s", harnessTrustDiagnostic(err))
+		t.Fatal("activation refused")
 	}
 	output, err := trustHarnessRun(t, clock, trustHarnessArgs("payload", "inspect", root, directory, key))
 	if err != nil || !strings.Contains(output, `"activated":1`) {
@@ -171,7 +239,8 @@ func TestPayloadHarnessStagesActivatesInspects(t *testing.T) {
 	}
 	clock.Now = clock.Now.AddDate(20, 0, 0)
 	if _, err := trustHarnessRun(t, clock, trustHarnessArgs("payload", "activate", root, directory, key, "--generation", generation, "--launch-check")); err != nil {
-		t.Fatal("committed offline activation refused:", err)
+		t.Logf("trust cause=%s", harnessTrustDiagnostic(err))
+		t.Fatal("committed offline activation refused")
 	}
 }
 
@@ -182,7 +251,8 @@ func TestPayloadHarnessExpiredFirstActivationAndWrongRootRefuse(t *testing.T) {
 	}
 	clock := harnessTrustClock()
 	if _, err := trustHarnessRun(t, clock, trustHarnessArgs("payload", "stage", root, directory, key)); err != nil {
-		t.Fatal("stage refused:", err)
+		t.Logf("trust cause=%s", harnessTrustDiagnostic(err))
+		t.Fatal("stage refused")
 	}
 	journal, err := trust.InspectHandoff(t.Context(), root)
 	if err != nil {
@@ -214,7 +284,8 @@ func TestChannelHarnessReceiptInspectPreflight(t *testing.T) {
 		t.Fatal("cannot write owned fixture")
 	}
 	if _, err := trustHarnessRun(t, clock, trustHarnessArgs("channel", "receipt", root, directory, key, "--channel", "homebrew", "--owned-path", owned, "--installing-identity", strconv.Itoa(os.Getuid()), "--revision", "1")); err != nil {
-		t.Fatal("receipt refused:", err)
+		t.Logf("trust cause=%s", harnessTrustDiagnostic(err))
+		t.Fatal("receipt refused")
 	}
 	receipt, err := trust.ReadChannelReceipt(root)
 	if err != nil || receipt.ComponentSet == nil || receipt.ComponentSet.Sequence == 0 {
@@ -302,7 +373,8 @@ func TestChannelHarnessDoesNotInferOwnedPaths(t *testing.T) {
 			// Commit the signed fixture using its fixed clock so the top-level
 			// dispatch below can authenticate it offline after fixture expiry.
 			if _, err := trustHarnessRun(t, harnessTrustClock(), trustHarnessArgs("payload", "stage", root, directory, key)); err != nil {
-				t.Fatal("cannot prepare committed fixture:", err)
+				t.Logf("trust cause=%s", harnessTrustDiagnostic(err))
+				t.Fatal("cannot prepare committed fixture")
 			}
 			ambient := t.TempDir()
 			pathDir := filepath.Join(ambient, "path-bin")
@@ -320,7 +392,8 @@ func TestChannelHarnessDoesNotInferOwnedPaths(t *testing.T) {
 			args := trustHarnessArgs("channel", "receipt", root, directory, key, "--channel", channel, "--installing-identity", strconv.Itoa(os.Getuid()), "--revision", "1")
 			var output bytes.Buffer
 			if err := run(t.Context(), args, &output); err != nil {
-				t.Fatal("empty ownership declaration dispatch refused:", err)
+				t.Logf("trust cause=%s", harnessTrustDiagnostic(err))
+				t.Fatal("empty ownership declaration dispatch refused")
 			}
 			if regexp.MustCompile(`[0-9a-fA-F]{64}`).Match(output.Bytes()) {
 				t.Fatal("receipt dispatch revealed a private value")

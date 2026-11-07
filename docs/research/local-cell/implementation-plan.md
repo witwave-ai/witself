@@ -1099,6 +1099,7 @@ claim. C2a1 registers no task and retains console CTRL_BREAK child stop, includi
 its no-console refusal. C2a2 owns console-free child shutdown, C2b owns the task
 adapter, and two-user/reboot/login/sleep/Fast-Startup and minimum-OS receipts remain
 owed. Empty `WITSELF_RUNTIME` remains hosted.
+RECEIPT-1 pins one shutdown receipt per successful stop helper call and two for the synthetic two-host proof, with CI projecting at most four validated receipts per package from a passing native service proof.
 
 | LC-S7 | Codex GPT-6 Astra (B3 implementer); Fable (integration owner) | LC-S7B3 merged #865: channel receipts/adapters, private payload generations, handoff journal, protected activation (dark); two executable coverage reviews and one fix pass (a lexical ownership-overlap check that could claim a case alias of a package-owned path was replaced by observed file identity; 14/14 mutations killed) | [component-set trust v1](component-set-trust.md#channel-ownership-and-payload-handoff) | hermetic ownership, generation and handoff checks; B1/B2 corpus unchanged; native evidence remains separate | LC-S7D supervisor execution protection and update flow; Windows ACL persistence/MSI; production signing custody | LC-S7D supervisor integration; LC-S7C adapters |
 
