@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/witwave-ai/witself/internal/localcell"
 )
 
 func TestNativeServiceProofRowTimeout(t *testing.T) {
@@ -97,6 +99,9 @@ func nativeServiceProofWindowsRowTimeout(source []byte) (time.Duration, error) {
 }
 
 func TestNativeServiceProofAccounting(t *testing.T) {
+	if nativeServiceCleanupReserve != localcell.ServiceHostExitBudget(nativeServiceHostBound) || nativeServiceCleanupReserve != 2*nativeServiceHostBound+localcell.ServiceShutdownTimeout {
+		t.Fatal("native cleanup reserve omitted host-exit admission or changed the drain allocation")
+	}
 	if nativeServiceProofBound+nativeServiceCleanupReserve+nativeServiceHostBound != nativeServiceProofRowTimeout {
 		t.Fatal("native proof bound plus cleanup reserve plus host margin must equal the CI row timeout")
 	}
@@ -505,5 +510,25 @@ func TestNativeServiceProofHelperParentsSourceContract(t *testing.T) {
 				return true
 			})
 		})
+	}
+}
+
+func TestNativeServiceHostExitBudgetSourceContract(t *testing.T) {
+	source := nativeServiceProofContractSource(t, "service_native_proof_budget_test.go")
+	check := func(source []byte) bool {
+		source = bytes.ReplaceAll(source, []byte("\r\n"), []byte("\n"))
+		return bytes.Contains(source, []byte("var nativeServiceCleanupReserve = localcell.ServiceHostExitBudget(nativeServiceHostBound)\nvar nativeServiceProofBound = nativeServiceProofRowTimeout - nativeServiceCleanupReserve - nativeServiceHostBound\n"))
+	}
+	if !check(source) || !check(bytes.ReplaceAll(source, []byte("\n"), []byte("\r\n"))) {
+		t.Fatal("native proof reserve does not select the production transaction allowance within the row bound")
+	}
+	for _, mutation := range [][2]string{
+		{"localcell.ServiceHostExitBudget(nativeServiceHostBound)", "localcell.ServiceShutdownTimeout"},
+		{"nativeServiceProofRowTimeout - nativeServiceCleanupReserve - nativeServiceHostBound", "nativeServiceProofRowTimeout - nativeServiceHostBound"},
+	} {
+		mutant := bytes.Replace(source, []byte(mutation[0]), []byte(mutation[1]), 1)
+		if bytes.Equal(mutant, source) || check(mutant) {
+			t.Fatal("native proof reserve contract survived omitted admission or cleanup allocation")
+		}
 	}
 }

@@ -290,7 +290,11 @@ func TestWindowsNoConsoleProbeSourceContractMutations(t *testing.T) {
 		{"ignore-child-failure", `code = exit.ExitCode()`, `code = 0`},
 		{"unbounded-probe", `context.WithTimeout(ctx, probeBudget)`, `context.WithCancel(ctx)`},
 		{"fixed-probe-budget", `args = append(args, c.cfg.Timeout.String())`, `args = append(args, "20s")`},
-		{"outer-expires-first", `waitShutdownMarker(t, probeResult, f.cell.cfg.Timeout+10*f.startup)`, `waitShutdownMarker(t, probeResult, 10*f.startup)`},
+		{"second-unprotected-read", `switch string(result) {`, "result, err = readPrivateFile(probeResult)\n\tswitch string(result) {"},
+		{"one-shot-result", `result, observation, err := readShutdownProbeResult(probeCtx,`, `result, observation, err := oneShotProbeResult(probeCtx,`},
+		{"unvalidated-result", `func() ([]byte, error) { return readPrivateFile(probeResult) }`, `func() ([]byte, error) { return os.ReadFile(probeResult) }`},
+		{"unclassified-retry", `windowsShutdownProbeReadClass, func(ctx context.Context) error {`, `retryEveryError, func(ctx context.Context) error {`},
+		{"outer-expires-first", `context.WithTimeout(t.Context(), f.cell.cfg.Timeout+10*f.startup)`, `context.WithTimeout(t.Context(), 10*f.startup)`},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			if strings.Count(original, row.from) != 1 {
@@ -348,8 +352,12 @@ func windowsNoConsoleProbeSourceContract(source string) bool {
 	}
 	testSource := source[fset.Position(test.Pos()).Offset:fset.Position(test.End()).Offset]
 	return strings.Contains(testSource, `f := launchShutdownFixture(t, "normal-probe", false)`) &&
-		strings.Contains(testSource, `result, err := readPrivateFile(probeResult)`) &&
-		strings.Contains(testSource, `waitShutdownMarker(t, probeResult, f.cell.cfg.Timeout+10*f.startup)`) &&
+		strings.Contains(testSource, `result, observation, err := readShutdownProbeResult(probeCtx,`) &&
+		strings.Contains(testSource, `func() ([]byte, error) { return readPrivateFile(probeResult) }`) &&
+		strings.Count(testSource, `readPrivateFile(probeResult)`) == 1 &&
+		strings.Contains(testSource, `windowsShutdownProbeReadClass, func(ctx context.Context) error {`) &&
+		strings.Contains(testSource, `probeCtx, probeCancel := context.WithTimeout(t.Context(), f.cell.cfg.Timeout+10*f.startup)`) &&
+		!strings.Contains(testSource, `waitShutdownMarker(t, probeResult,`) &&
 		strings.Contains(testSource, "case \"73\":\n\t\tt.Fatal(\"detached probe unexpectedly attached to parent console\")") &&
 		strings.Contains(testSource, "case \"74\":\n\t\tt.Fatal(\"detached AttachConsole probe did not prove ERROR_INVALID_HANDLE\")") &&
 		strings.Contains(testSource, "default:\n\t\tt.Fatal(\"no-console probe exited unexpectedly\")")

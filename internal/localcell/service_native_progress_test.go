@@ -18,6 +18,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/witwave-ai/witself/internal/localcell"
 )
 
 // The wait result is independent of the shutdown channel, so failure reporting
@@ -102,7 +104,7 @@ func nativeServiceStep(step string) string {
 }
 
 func (d *nativeServiceFailureDiagnostic) enter(step string) {
-	d.step, d.controlErr = nativeServiceStep(step), nil
+	d.step, d.controlErr, d.hostExit = nativeServiceStep(step), nil, nil
 }
 
 // Keep the subprocess failure available to errors.As while retaining only an
@@ -135,6 +137,13 @@ func nativeServiceControlDiagnostic(err error) string {
 		return "none"
 	}
 	line := err.Error()
+	if errors.Is(err, context.DeadlineExceeded) {
+		line = context.DeadlineExceeded.Error()
+	} else if errors.Is(err, context.Canceled) {
+		line = context.Canceled.Error()
+	} else if errors.Is(err, localcell.ErrServiceShutdownForced) {
+		line = localcell.ErrServiceShutdownForced.Error()
+	}
 	var invocation *nativeServiceInvocationError
 	if errors.As(err, &invocation) {
 		line = invocation.control
@@ -142,7 +151,9 @@ func nativeServiceControlDiagnostic(err error) string {
 	switch line {
 	case "private Windows filesystem object required":
 		return "windows_private_object"
-	case "localcell: service_control_unavailable", "localcell: service_control_refused", "localcell: service_control_action_failed", "localcell: service_control_deferred", "localcell: service_unhealthy",
+	case "context deadline exceeded", "context canceled", "localcell: service_shutdown_forced",
+		"localcell: service_control_refused: host_exit:envelope", "localcell: service_control_refused: host_exit:drain",
+		"localcell: service_control_unavailable", "localcell: service_control_refused", "localcell: service_control_action_failed", "localcell: service_control_deferred", "localcell: service_unhealthy",
 		"localcell: service_control_unavailable: transport:dial", "localcell: service_control_unavailable: transport:deadline",
 		"localcell: service_control_unavailable: transport:eof", "localcell: service_control_unavailable: transport:response",
 		"localcell: service_control_refused: endpoint:record", "localcell: service_control_refused: endpoint:random", "localcell: service_control_refused: endpoint:host_identity",
@@ -152,6 +163,9 @@ func nativeServiceControlDiagnostic(err error) string {
 		"localcell: service_control_refused: pipe:connect", "localcell: service_control_refused: pipe:open":
 		return line
 	default:
+		if errors.Is(err, localcell.ErrServiceControlRefused) {
+			return "localcell: service_control_refused"
+		}
 		return "localcell: service_control_child_error_unclassified"
 	}
 }
@@ -218,7 +232,7 @@ func (d *nativeServiceFailureDiagnostic) logStep() {
 	d.logf("native service step=%s host_exit=%s control=%s", nativeServiceStep(d.step), d.foregroundExit.classification(), nativeServiceControlDiagnostic(d.controlErr))
 }
 
-var nativeServiceStepDiagnosticLine = regexp.MustCompile(`^native service step=(unknown|setup|ready|endpoint_closure|observe|stop|restart|write_witness) host_exit=(not_started|running|success|exit_error|other_error) control=(none|windows_private_object|localcell: service_unhealthy|localcell: service_control_(unavailable|refused|action_failed|deferred|child_error_unclassified)|localcell: service_control_unavailable: transport:(dial|deadline|eof|response)|localcell: service_control_refused: (endpoint:(record|random|host_identity)|peer:(pid|identity|sid)|pipe:(name|policy|event|wait|io|create|connect|open)))$`)
+var nativeServiceStepDiagnosticLine = regexp.MustCompile(`^native service step=(unknown|setup|ready|endpoint_closure|observe|stop|restart|write_witness) host_exit=(not_started|running|success|exit_error|other_error) control=(none|windows_private_object|context deadline exceeded|context canceled|localcell: service_shutdown_forced|localcell: service_control_refused: host_exit:(envelope|drain)|localcell: service_unhealthy|localcell: service_control_(unavailable|refused|action_failed|deferred|child_error_unclassified)|localcell: service_control_unavailable: transport:(dial|deadline|eof|response)|localcell: service_control_refused: (endpoint:(record|random|host_identity)|peer:(pid|identity|sid)|pipe:(name|policy|event|wait|io|create|connect|open)))$`)
 
 func TestNativeServiceStepDiagnosticGuard(t *testing.T) {
 	source, err := os.ReadFile("service_native_progress_test.go")
@@ -302,6 +316,8 @@ func TestNativeServiceStepDiagnosticGuard(t *testing.T) {
 		}
 	}
 	allowed := []string{
+		"context deadline exceeded", "context canceled", "localcell: service_shutdown_forced",
+		"localcell: service_control_refused: host_exit:envelope", "localcell: service_control_refused: host_exit:drain",
 		"localcell: service_control_unavailable", "localcell: service_control_refused", "localcell: service_control_action_failed", "localcell: service_control_deferred", "localcell: service_unhealthy",
 		"localcell: service_control_unavailable: transport:dial", "localcell: service_control_unavailable: transport:deadline",
 		"localcell: service_control_unavailable: transport:eof", "localcell: service_control_unavailable: transport:response",
@@ -684,6 +700,7 @@ func nativeServiceProgressSourceContract(source []byte) bool {
 		"logFailure(err, diagnostics.foregroundStderr.snapshot())",
 		"logFailure(err, diagnostics.foregroundStderr.snapshot())",
 		"logFailure(err, diagnostics.foregroundStderr.snapshot())",
+		"logFailure(err, diagnostics.foregroundStderr.snapshot())",
 		`logFailure(errors.New("native service proof failed"), stderr)`,
 		"logFailure(planErr, nil)",
 		"logFailure(proofCtx.Err(), nil)",
@@ -755,4 +772,242 @@ func nativeServiceStepReceiptContract(source []byte) bool {
 		})
 	}
 	return bridges == 1 && calls == 1
+}
+
+// The first attempt in a stop step owns its observation. A cleanup retry must
+// not replace the original status/error before failure reporting consumes it.
+type nativeServiceHostExitObservation struct {
+	status                        localcell.ServiceStatus
+	err                           error
+	phase, cause, contextState    string
+	ackSeen, waitDone             bool
+	elapsed, admission, remaining time.Duration
+}
+
+type nativeServiceHostExitDiagnostic interface {
+	ServiceHostExitDiagnostic() (phase, cause string, ackSeen bool)
+}
+
+func nativeServiceHostExitPhase(phase string) string {
+	switch phase {
+	case "identity_tree", "endpoint", "retain", "admission", "terminal", "lease_validate", "lease_lock", "observe", "drain":
+		return phase
+	default:
+		return "other"
+	}
+}
+
+func nativeServiceHostExitCause(cause string) string {
+	switch cause {
+	case "none", "deadline", "canceled", "forced", "refused", "missing", "privacy", "identity", "sharing", "io", "unavailable":
+		return cause
+	default:
+		return "other"
+	}
+}
+
+func nativeServiceHostExitStatus(status string) string {
+	switch status {
+	case "accepted", "exited", "refused":
+		return status
+	default:
+		return "empty"
+	}
+}
+
+func (d *nativeServiceFailureDiagnostic) exitForeground(ctx context.Context, health time.Duration, exit func(context.Context) (localcell.ServiceStatus, error)) (localcell.ServiceStatus, error) {
+	started := time.Now()
+	admission := localcell.ServiceHostExitBudget(health) - localcell.ServiceShutdownTimeout
+	if deadline, ok := ctx.Deadline(); ok {
+		admission = min(admission, max(time.Duration(0), deadline.Sub(started)))
+	}
+	status, err := exit(ctx)
+	if d.hostExit == nil {
+		observation := &nativeServiceHostExitObservation{status: status, err: err, phase: "other", cause: "none", contextState: "live", admission: admission, elapsed: time.Since(started), waitDone: d.foregroundExit.finished()}
+		if deadline, ok := ctx.Deadline(); ok {
+			observation.remaining = max(time.Duration(0), time.Until(deadline))
+		}
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			observation.contextState = "deadline"
+		} else if errors.Is(ctx.Err(), context.Canceled) {
+			observation.contextState = "canceled"
+		}
+		var detail nativeServiceHostExitDiagnostic
+		if errors.As(err, &detail) {
+			phase, cause, ackSeen := detail.ServiceHostExitDiagnostic()
+			observation.phase, observation.cause, observation.ackSeen = nativeServiceHostExitPhase(phase), nativeServiceHostExitCause(cause), ackSeen
+		} else if err != nil {
+			observation.cause = "other"
+		}
+		// Typed causes take precedence over any wrapper's diagnostic claims.
+		if errors.Is(err, context.DeadlineExceeded) {
+			observation.cause = "deadline"
+		} else if errors.Is(err, context.Canceled) {
+			observation.cause = "canceled"
+		} else if errors.Is(err, localcell.ErrServiceShutdownForced) {
+			observation.cause = "forced"
+		} else if errors.Is(err, localcell.ErrServiceControlRefused) && observation.cause == "other" {
+			observation.cause = "refused"
+		}
+		if status.HostExit == "accepted" || status.HostExit == "exited" {
+			observation.ackSeen = true
+		}
+		if err == nil && status.HostExit == "exited" {
+			observation.phase = "terminal"
+		}
+		d.controlErr, d.hostExit = err, observation
+		d.logHostExit()
+	}
+	return status, err
+}
+
+func nativeServiceHostExitContext(state string) string {
+	switch state {
+	case "canceled", "deadline":
+		return state
+	default:
+		return "live"
+	}
+}
+
+func (d *nativeServiceFailureDiagnostic) logHostExit() {
+	o := d.hostExit
+	if o == nil {
+		return
+	}
+	terminal := "none"
+	if o.status.HostExit == "exited" && o.err == nil {
+		terminal = "drained"
+	} else if errors.Is(o.err, localcell.ErrServiceShutdownForced) {
+		terminal = "forced"
+	} else if o.phase == "terminal" && errors.Is(o.err, localcell.ErrServiceControlRefused) {
+		terminal = "refused"
+	}
+	d.logf("native_exit phase=%s cause=%s ack_seen=%t elapsed_ms=%d ack_budget_ms=%d remaining_ms=%d ctx=%s", nativeServiceHostExitPhase(o.phase), nativeServiceHostExitCause(o.cause), o.ackSeen, max(0, o.elapsed.Milliseconds()), max(0, o.admission.Milliseconds()), max(0, o.remaining.Milliseconds()), nativeServiceHostExitContext(o.contextState))
+	d.logf("native_exit phase=%s status=%s cause=%s terminal=%s wait_done=%t", nativeServiceHostExitPhase(o.phase), nativeServiceHostExitStatus(o.status.HostExit), nativeServiceHostExitCause(o.cause), terminal, o.waitDone)
+}
+
+// The injected failure supports the same structural interface as production;
+// its text deliberately has no bearing on the closed diagnostic fields.
+type nativeServiceExitFixtureError struct {
+	cause                 error
+	phase, classification string
+	ack                   bool
+}
+
+func (e *nativeServiceExitFixtureError) Error() string { return "fixture exit error" }
+func (e *nativeServiceExitFixtureError) Unwrap() error { return e.cause }
+func (e *nativeServiceExitFixtureError) ServiceHostExitDiagnostic() (string, string, bool) {
+	return e.phase, e.classification, e.ack
+}
+
+func TestNativeServiceFirstStopObservation(t *testing.T) {
+	for _, test := range []struct {
+		name, status, cause, phase, terminal string
+		err                                  error
+	}{
+		{"refused", "", "refused", "identity_tree", "none", localcell.ErrServiceControlRefused},
+		{"forced", "exited", "forced", "terminal", "forced", localcell.ErrServiceShutdownForced},
+		{"terminal_refused", "accepted", "refused", "terminal", "refused", localcell.ErrServiceControlRefused},
+		{"deadline", "accepted", "deadline", "drain", "none", context.DeadlineExceeded},
+		{"canceled", "accepted", "canceled", "observe", "none", context.Canceled},
+		{"exited", "exited", "none", "terminal", "drained", nil},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+			defer cancel()
+			var logged []string
+			d := nativeServiceFailureDiagnostic{foregroundExit: &nativeServiceDiagnosticExit{}, logf: func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) }}
+			d.enter("stop")
+			original := test.err
+			if original != nil {
+				original = &nativeServiceExitFixtureError{cause: original, phase: test.phase, classification: test.cause, ack: test.status != ""}
+			}
+			status := localcell.ServiceStatus{HostExit: test.status}
+			gotStatus, gotErr := d.exitForeground(ctx, time.Millisecond, func(context.Context) (localcell.ServiceStatus, error) { return status, original })
+			if d.hostExit == nil || d.controlErr != original || d.hostExit.err != original || d.hostExit.status.HostExit != status.HostExit || gotErr != original || gotStatus.HostExit != status.HostExit {
+				t.Fatal("first-stop recording lost the original cause or returned status")
+			}
+			if len(logged) != 2 || d.hostExit.phase != test.phase || d.hostExit.cause != test.cause || !strings.Contains(logged[1], "terminal="+test.terminal+" wait_done=false") {
+				t.Fatal("first-stop diagnostic was not logged with its observed phase and terminal disposition")
+			}
+			_, _ = d.exitForeground(ctx, time.Millisecond, func(context.Context) (localcell.ServiceStatus, error) {
+				return localcell.ServiceStatus{HostExit: "refused"}, errors.New("cleanup replacement")
+			})
+			if len(logged) != 2 || d.controlErr != original || d.hostExit.status.HostExit != status.HostExit {
+				t.Fatal("cleanup replaced the first-stop cause or status")
+			}
+		})
+	}
+}
+
+func nativeServiceFirstStopContract(source []byte) bool {
+	text := strings.ReplaceAll(string(source), "\r\n", "\n")
+	return strings.Contains(text, "status, err := diagnostics.exitForeground(stopCtx, nativeServiceHostBound, cell.ExitServiceHost)\n\t\t\t\tif err != nil || status.HostExit != \"exited\" {\n\t\t\t\t\tlogFailure(err, diagnostics.foregroundStderr.snapshot())\n\t\t\t\t\treturn errors.New(\"native foreground authenticated exit failed\")")
+}
+
+func TestNativeServiceFirstStopSourceContract(t *testing.T) {
+	source, err := os.ReadFile("service_native_test.go")
+	if err != nil {
+		t.Fatal("cannot read first-stop source contract")
+	}
+	source = bytes.ReplaceAll(source, []byte("\r\n"), []byte("\n"))
+	for _, input := range [][]byte{source, bytes.ReplaceAll(source, []byte("\n"), []byte("\r\n"))} {
+		if !nativeServiceFirstStopContract(input) {
+			t.Fatal("first-stop source omitted recording or immediate diagnostics before the generic failure")
+		}
+	}
+	for _, mutation := range [][2]string{
+		{"diagnostics.exitForeground(stopCtx, nativeServiceHostBound, cell.ExitServiceHost)", "cell.ExitServiceHost(stopCtx)"},
+		{"diagnostics.exitForeground(stopCtx, nativeServiceHostBound, cell.ExitServiceHost)", "diagnostics.exitForeground(context.Background(), nativeServiceHostBound, cell.ExitServiceHost)"},
+		{"logFailure(err, diagnostics.foregroundStderr.snapshot())\n\t\t\t\t\treturn errors.New(\"native foreground authenticated exit failed\")", "return errors.New(\"native foreground authenticated exit failed\")"},
+		{"logFailure(err, diagnostics.foregroundStderr.snapshot())\n\t\t\t\t\treturn errors.New(\"native foreground authenticated exit failed\")", "logFailure(errors.New(\"replacement\"), diagnostics.foregroundStderr.snapshot())\n\t\t\t\t\treturn errors.New(\"native foreground authenticated exit failed\")"},
+	} {
+		mutant := bytes.Replace(source, []byte(mutation[0]), []byte(mutation[1]), 1)
+		if bytes.Equal(source, mutant) || nativeServiceFirstStopContract(mutant) {
+			t.Fatal("first-stop source contract survived a recording or original-cause bypass")
+		}
+	}
+}
+
+func TestNativeServiceExitDiagnosticPreservesTypedCause(t *testing.T) {
+	for _, test := range []struct {
+		err  error
+		want string
+	}{
+		{fmt.Errorf("fixture: %w", context.DeadlineExceeded), "context deadline exceeded"},
+		{fmt.Errorf("fixture: %w", context.Canceled), "context canceled"},
+		{fmt.Errorf("fixture: %w", localcell.ErrServiceShutdownForced), "localcell: service_shutdown_forced"},
+		{fmt.Errorf("fixture: %w", localcell.ErrServiceControlRefused), "localcell: service_control_refused"},
+	} {
+		if nativeServiceControlDiagnostic(test.err) != test.want {
+			t.Fatal("native service step classifier erased a wrapped stop cause")
+		}
+	}
+	private := "postgres://fixture:private-password@localhost/private-database pid=914723 " + strings.Repeat("a5", 32)
+	for _, ctxState := range []string{"live", "canceled", "deadline"} {
+		ctx, cancel := context.WithCancel(t.Context())
+		switch ctxState {
+		case "deadline":
+			cancel()
+			ctx, cancel = context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
+		case "canceled":
+			cancel()
+		}
+		d := nativeServiceFailureDiagnostic{logf: func(format string, args ...any) {
+			line := fmt.Sprintf(format, args...)
+			if !nativeServiceExitBudgetLine.MatchString(line) && !nativeServiceExitStatusLine.MatchString(line) {
+				t.Fatal("untrusted host-exit detail escaped the observation boundary")
+			}
+		}}
+		original := &nativeServiceExitFixtureError{cause: context.DeadlineExceeded, phase: private, classification: private}
+		_, _ = d.exitForeground(ctx, time.Millisecond, func(context.Context) (localcell.ServiceStatus, error) { return localcell.ServiceStatus{}, original })
+		cancel()
+		if d.hostExit == nil || d.hostExit.phase != "other" || d.hostExit.cause != "deadline" || d.hostExit.contextState != ctxState || d.hostExit.ackSeen {
+			t.Fatal("host-exit observation lost typed cause, safe fallback, context state, or ACK evidence")
+		}
+		if ctxState == "deadline" && (d.hostExit.admission != 0 || d.hostExit.remaining != 0) {
+			t.Fatal("host-exit diagnostic budget escaped the caller deadline")
+		}
+	}
 }

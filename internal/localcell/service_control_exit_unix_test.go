@@ -17,11 +17,14 @@ import (
 	"time"
 )
 
-func hostExitSocketFixture(t *testing.T) (*Cell, chan serviceCommand) {
+func hostExitSocketFixture(t *testing.T, bounds ...time.Duration) (*Cell, chan serviceCommand) {
 	t.Helper()
 	t.Setenv("WITSELF_HOME", t.TempDir())
 	t.Setenv("DSH_HOME", t.TempDir())
 	c := shortServiceTestCell(t)
+	if len(bounds) > 0 {
+		c.cfg.Timeout = bounds[0]
+	}
 	d, err := c.ServiceDescriptor()
 	if err != nil {
 		t.Fatal("descriptor unavailable")
@@ -543,6 +546,262 @@ func TestServiceSupervisorWindowsStopFaultSuppressesDeferredDrain(t *testing.T) 
 			}
 			if stops.Load() != 2 || starts.Load() != 1 {
 				t.Fatal("fresh tick or deferred context retried unsafe shutdown")
+			}
+		})
+	}
+}
+
+// Exercise the real Run command queue while health is still live. The hold is
+// three quarters of H: beyond the old native ACK/H ratio of one half, without a
+// thirty-second sleep. The source contract separately kills a literal fixed ACK
+// timer, which is more permissive than this scaled fixture's admission budget.
+func TestServiceHostExitQueuedHealthKeepsDrainAllocationUnix(t *testing.T) {
+	t.Setenv("WITSELF_HOME", t.TempDir())
+	t.Setenv("DSH_HOME", t.TempDir())
+	c := shortServiceTestCell(t)
+	h, _, _, _, _ := supervisorTestHooks()
+	ticks := make(chan time.Time)
+	h.ticks = ticks
+	entered, release := make(chan struct{}), make(chan struct{})
+	var healths, stops atomic.Int32
+	h.health = func(ctx context.Context) error {
+		if healths.Add(1) == 1 {
+			return nil
+		}
+		close(entered)
+		select {
+		case <-release:
+			return ctx.Err()
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	drainAllowance := make(chan time.Duration, 1)
+	h.stop = func(ctx context.Context) error {
+		if stops.Add(1) != 2 {
+			return nil
+		}
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			drainAllowance <- 0
+		} else {
+			drainAllowance <- time.Until(deadline)
+		}
+		return nil
+	}
+	hostCtx, stopHost := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- c.Run(hostCtx, SupervisorPolicy{hooks: &h}) }()
+	hostDone := false
+	defer func() {
+		stopHost()
+		if !hostDone {
+			<-done
+		}
+	}()
+	readyCtx, readyCancel := context.WithTimeout(t.Context(), 3*c.cfg.Timeout)
+	defer readyCancel()
+	for {
+		status, err := c.Control(readyCtx, "observe")
+		if err == nil && status.State == "running" {
+			break
+		}
+		select {
+		case <-readyCtx.Done():
+			t.Fatal("queued host fixture did not become ready")
+		case <-time.After(time.Millisecond):
+		}
+	}
+	ticks <- time.Now()
+	<-entered
+	type exitResult struct {
+		status ServiceStatus
+		err    error
+	}
+	exited := make(chan exitResult, 1)
+	go func() {
+		status, err := c.ExitServiceHost(t.Context())
+		exited <- exitResult{status, err}
+	}()
+	timer := time.NewTimer(3 * c.cfg.Timeout / 4)
+	defer timer.Stop()
+	select {
+	case result := <-exited:
+		_ = result
+		close(release)
+		t.Fatal("exit request completed while live health still owned the supervisor queue")
+	case <-timer.C:
+	}
+	close(release)
+	result := <-exited
+	if result.err != nil || result.status.HostExit != "exited" {
+		t.Fatal("queued exit request did not complete ACK, drain and terminal observation")
+	}
+	if allowance := <-drainAllowance; allowance < ServiceShutdownTimeout-c.cfg.Timeout/4 || allowance > ServiceShutdownTimeout {
+		t.Fatal("queued admission consumed the reserved tree-drain allocation")
+	}
+	hostErr := <-done
+	hostDone = true
+	if hostErr != nil {
+		t.Fatal("queued host did not exit gracefully")
+	}
+}
+
+func TestServiceHostExitAdmissionDeadlineUnix(t *testing.T) {
+	bound := serviceHealthMeasuredBound(t, 50*time.Millisecond)
+	for _, preCanceled := range []bool{false, true} {
+		name := "admission_deadline"
+		if preCanceled {
+			name = "caller_canceled"
+		}
+		t.Run(name, func(t *testing.T) {
+			// An unconsumed command queue models a busy supervisor without a sleep.
+			c, _ := hostExitSocketFixture(t, bound)
+			envelope, _, err := c.newHostExitEnvelope()
+			if err != nil {
+				t.Fatal("cannot prepare admission-deadline envelope")
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), 10*bound)
+			defer cancel()
+			want, wantCause := error(context.DeadlineExceeded), "deadline"
+			if preCanceled {
+				cancel()
+				want, wantCause = context.Canceled, "canceled"
+			}
+			session, err := c.startHostExitRequest(ctx, envelope)
+			if session != nil {
+				session.cancel()
+			}
+			if !errors.Is(err, want) {
+				t.Fatal("admission lost the original deadline or caller cancellation")
+			}
+			if !preCanceled && (ctx.Err() != nil || errors.Is(err, context.Canceled)) {
+				t.Fatal("admission timeout was confused with caller cancellation or its later deadline")
+			}
+			var diagnostic *serviceHostExitError
+			if !errors.As(err, &diagnostic) {
+				t.Fatal("admission failure omitted its safe recorded cause")
+			}
+			phase, cause, ackSeen := diagnostic.ServiceHostExitDiagnostic()
+			if phase != "admission" || cause != wantCause || ackSeen {
+				t.Fatal("admission failure recorded the wrong phase, cause or acceptance")
+			}
+		})
+	}
+}
+
+func TestServiceHostExitAdmissionTimeoutResponseUnix(t *testing.T) {
+	bound := serviceHealthMeasuredBound(t, 50*time.Millisecond)
+	for _, awaitingReply := range []bool{false, true} {
+		name := "queue"
+		serverBound := time.Duration(0)
+		if awaitingReply {
+			name, serverBound = "reply", bound
+		}
+		t.Run(name, func(t *testing.T) {
+			serverCell, commands := hostExitSocketFixture(t, serverBound)
+			// A distinct client allowance proves the wire result is sufficient
+			// before the client's own admission deadline can expire.
+			clientCell := &Cell{cfg: serverCell.cfg}
+			clientCell.cfg.Timeout = 20 * bound
+			var deliveries atomic.Int32
+			if awaitingReply {
+				go func() {
+					for range 2 {
+						select {
+						case <-commands:
+							deliveries.Add(1)
+						case <-t.Context().Done():
+							return
+						}
+					}
+				}()
+			}
+			envelope, _, err := clientCell.newHostExitEnvelope()
+			if err != nil {
+				t.Fatal("cannot prepare timeout response envelope")
+			}
+			body, err := json.Marshal(envelope)
+			if err != nil {
+				t.Fatal("cannot encode timeout response envelope")
+			}
+			status, _, detail := hostExitRawRequest(t, clientCell, body)
+			if status != http.StatusRequestTimeout || detail != serviceHostExitAdmissionTimeout {
+				t.Fatal("server admission timeout omitted its explicit closed result")
+			}
+			envelope, _, err = clientCell.newHostExitEnvelope()
+			if err != nil {
+				t.Fatal("cannot prepare timeout round-trip envelope")
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), 10*clientCell.cfg.Timeout)
+			defer cancel()
+			deadline := time.Now().Add(serviceHostExitBudgets(clientCell.cfg.Timeout).admission)
+			session, err := clientCell.startHostExitRequest(ctx, envelope)
+			if session != nil {
+				session.cancel()
+			}
+			var diagnostic *serviceHostExitError
+			if !errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) || !errors.As(err, &diagnostic) || diagnostic.phase != "admission" || diagnostic.cause != "deadline" || diagnostic.accepted {
+				t.Fatal("explicit server timeout did not round-trip as an admission deadline")
+			}
+			if ctx.Err() != nil || !time.Now().Before(deadline) {
+				t.Fatal("wire timeout oracle exhausted the client allowance")
+			}
+			if awaitingReply && deliveries.Load() != 2 {
+				t.Fatal("reply-timeout oracle did not reach both reply waits")
+			}
+		})
+	}
+}
+
+func TestServiceHostExitAdmissionEarlyRefusalUnix(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{"eof", http.StatusOK, ""},
+		{"malformed", http.StatusOK, "{}\n"},
+		{"permanent", http.StatusConflict, serviceHostExitAdmissionTimeout + "\n"},
+		{"timeout_wrong_body", http.StatusRequestTimeout, "{}\n"},
+		{"timeout_trailing_body", http.StatusRequestTimeout, serviceHostExitAdmissionTimeout + "\n{}\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("WITSELF_HOME", t.TempDir())
+			t.Setenv("DSH_HOME", t.TempDir())
+			c := shortServiceTestCell(t)
+			c.cfg.Timeout = serviceHealthMeasuredBound(t, 50*time.Millisecond) * 20
+			d, err := c.ServiceDescriptor()
+			if err != nil {
+				t.Fatal("refusal fixture descriptor unavailable")
+			}
+			lease, err := c.acquireServiceLease(d)
+			if err != nil {
+				t.Fatal("refusal fixture lease unavailable")
+			}
+			t.Cleanup(func() { _ = lease.Close() })
+			listener, err := c.listenServiceControl()
+			if err != nil {
+				t.Fatal("refusal fixture listener unavailable")
+			}
+			server := &http.Server{ReadHeaderTimeout: c.cfg.Timeout, Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = io.WriteString(w, tc.body)
+			})}
+			done := make(chan struct{})
+			go func() { defer close(done); _ = server.Serve(listener) }()
+			t.Cleanup(func() { _ = server.Close(); <-done })
+			envelope, _, err := c.newHostExitEnvelope()
+			if err != nil {
+				t.Fatal("refusal fixture envelope unavailable")
+			}
+			session, err := c.startHostExitRequest(t.Context(), envelope)
+			if session != nil {
+				session.cancel()
+			}
+			var diagnostic *serviceHostExitError
+			if !errors.Is(err, ErrServiceControlRefused) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) || !errors.As(err, &diagnostic) || diagnostic.phase != "admission" || diagnostic.cause != "refused" || diagnostic.accepted {
+				t.Fatal("early EOF, malformed result or permanent refusal became a deadline")
 			}
 		})
 	}

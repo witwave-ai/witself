@@ -464,6 +464,7 @@ type nativeServiceFailureDiagnostic struct {
 	foregroundExit          *nativeServiceDiagnosticExit
 	step                    string
 	controlErr              error
+	hostExit                *nativeServiceHostExitObservation
 }
 
 func (d *nativeServiceFailureDiagnostic) logFailure(processErr error, stderr []byte) {
@@ -1774,5 +1775,58 @@ func TestNativeServiceCapabilityCommandRecorder(t *testing.T) {
 	}
 	if strings.Contains(logged.String(), "TestNativeServiceCapabilityDiagnostic") {
 		t.Fatal("capability diagnostic exposed its flag value")
+	}
+}
+
+var nativeServiceExitBudgetLine = regexp.MustCompile(`^native_exit phase=(identity_tree|endpoint|retain|admission|terminal|lease_validate|lease_lock|observe|drain|other) cause=(none|deadline|canceled|forced|refused|missing|privacy|identity|sharing|io|unavailable|other) ack_seen=(true|false) elapsed_ms=[0-9]+ ack_budget_ms=[0-9]+ remaining_ms=[0-9]+ ctx=(live|canceled|deadline)$`)
+var nativeServiceExitStatusLine = regexp.MustCompile(`^native_exit phase=(identity_tree|endpoint|retain|admission|terminal|lease_validate|lease_lock|observe|drain|other) status=(empty|accepted|exited|refused) cause=(none|deadline|canceled|forced|refused|missing|privacy|identity|sharing|io|unavailable|other) terminal=(none|drained|forced|refused) wait_done=(true|false)$`)
+
+func TestNativeServiceExitDiagnosticGuard(t *testing.T) {
+	private := "postgres://fixture:private-password@localhost/private-database pid=914723 " + strings.Repeat("a5", 32)
+	phases := []string{"identity_tree", "endpoint", "retain", "admission", "terminal", "lease_validate", "lease_lock", "observe", "drain", "other"}
+	causes := []string{"none", "deadline", "canceled", "forced", "refused", "missing", "privacy", "identity", "sharing", "io", "unavailable", "other"}
+	for _, phase := range phases {
+		if nativeServiceHostExitPhase(phase) != phase {
+			t.Fatal("native exit phase omitted a reviewed stage")
+		}
+	}
+	for _, cause := range causes {
+		if nativeServiceHostExitCause(cause) != cause {
+			t.Fatal("native exit cause omitted a reviewed classification")
+		}
+	}
+	for _, value := range []string{private, "unrecognized", ""} {
+		if nativeServiceHostExitPhase(value) != "other" || nativeServiceHostExitCause(value) != "other" || nativeServiceHostExitStatus(value) != "empty" {
+			t.Fatal("native exit diagnostic accepted an unknown or private field")
+		}
+	}
+	for _, phase := range append(phases, private) {
+		for _, cause := range append(causes, private) {
+			for _, state := range []string{"", "accepted", "exited", "refused", private} {
+				d := nativeServiceFailureDiagnostic{logf: func(format string, args ...any) {
+					line := fmt.Sprintf(format, args...)
+					if (!nativeServiceExitBudgetLine.MatchString(line) && !nativeServiceExitStatusLine.MatchString(line)) || strings.Contains(line, private) {
+						t.Fatal("native exit diagnostic escaped its closed vocabulary")
+					}
+					if sanitizeNativeServiceDiagnostic(line, "", "") != line {
+						t.Fatal("native exit diagnostic is not value-free under the existing sanitizer")
+					}
+				}}
+				d.hostExit = &nativeServiceHostExitObservation{phase: phase, cause: cause, status: localcell.ServiceStatus{HostExit: state, Generation: private}, contextState: "live", elapsed: -time.Second, admission: time.Second, remaining: -time.Second}
+				d.logHostExit()
+			}
+		}
+	}
+	for _, line := range []string{
+		"native_exit phase=" + private + " cause=none ack_seen=false elapsed_ms=0 ack_budget_ms=1 remaining_ms=1 ctx=live",
+		"native_exit phase=unrecognized cause=none ack_seen=false elapsed_ms=0 ack_budget_ms=1 remaining_ms=1 ctx=live",
+		"native_exit phase=terminal status=exited cause=" + private + " terminal=drained wait_done=false",
+		"native_exit phase=terminal status=exited cause=none terminal=" + private + " wait_done=false",
+		"native_exit phase=other cause=none ack_seen=false elapsed_ms=-1 ack_budget_ms=1 remaining_ms=1 ctx=live",
+		"native_exit phase=other cause=none ack_seen=false elapsed_ms=0 ack_budget_ms=1 remaining_ms=1 ctx=" + private,
+	} {
+		if nativeServiceExitBudgetLine.MatchString(line) || nativeServiceExitStatusLine.MatchString(line) {
+			t.Fatal("native exit line guard accepted an unreviewed or private field")
+		}
 	}
 }
