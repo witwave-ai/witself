@@ -13,7 +13,8 @@ import (
 
 const childLaunchArgument = "--localcell-internal-exec"
 
-// DispatchProcessHelper is called explicitly by the harness and its test binary.
+// DispatchProcessHelper must be called from an executable initializer so exec
+// stays on the initial OS thread. The harness and its test binary opt in.
 // Importing localcell must never dispatch process arguments in hosted commands.
 // Re-exec publishes the child PID fence before exec replaces it with the real
 // component, closing the parent's spawn-before-record crash window.
