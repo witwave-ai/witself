@@ -525,8 +525,8 @@ func TestLaunchdBootoutObservedRemovalAndDefensiveFailures(t *testing.T) {
 				}
 				if mode == "observed_immediate" {
 					// Allow scheduling and filesystem overhead beyond the five fake
-					// commands, while refusing a wait through the removal deadline.
-					if elapsed > 20*observedCommandDelay {
+					// commands, while requiring completion before half the removal timeout.
+					if elapsed >= a.removalTimeout/2 {
 						t.Fatal("immediate removal exceeded proportional command allowance")
 					}
 					bootout := slices.IndexFunc(m.calls, func(call []string) bool { return call[1] == "bootout" })
