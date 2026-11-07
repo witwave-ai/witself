@@ -3,9 +3,9 @@ import {execFileSync} from 'node:child_process';
 import {chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {dirname, join} from 'node:path';
-import {fileURLToPath} from 'node:url';
+import {fileURLToPath, pathToFileURL} from 'node:url';
 import test from 'node:test';
-import {brochureFiles, classifyEvent, classifyLocal, classifyPaths, classifyChanges, parseChanges, parsePaths} from './ci-product-scope.mjs';
+import {REASONS, brochureFiles, classifyEvent, classifyLocal, classifyPaths, classifyChanges, parseChanges, parsePaths} from './ci-product-scope.mjs';
 import {captureDocsSnapshot, collectDocsInputs, isDocsPath} from './docs-scope.mjs';
 import {cleanupGitFixture, configureFixtureGit, fixtureGitArgs} from './test-support/git-fixture.mjs';
 
@@ -51,6 +51,24 @@ function fixture(t) {
 }
 const push = (before, after) => ({before, after});
 const pull = (base, head) => ({pull_request: {base: {sha: base}, head: {sha: head}}});
+
+function docsMergeFixture(t) {
+  const f = fixture(t);
+  f.git('switch', '--quiet', '-c', 'research');
+  f.write(docsPath, '# Branch research\n');
+  const head = f.commit('research');
+  f.git('switch', '--quiet', 'main');
+  f.write('cmd/witself/main.go', 'main advances\n');
+  const target = f.commit('new base');
+  f.git('-c', 'commit.gpgsign=false', 'merge', '--quiet', '--no-ff', 'research', '-m', 'synthetic test merge');
+  const merge = f.git('rev-parse', 'HEAD');
+  return {...f, head, target, merge};
+}
+
+test('docs event refusal reasons are an exact frozen contract', () => {
+  assert(Object.isFrozen(REASONS));
+  assert.deepEqual(REASONS, ['merge-ref-unavailable', 'docs-checkout-mismatch', 'comparison-unavailable']);
+});
 
 test('Git fixtures disable background maintenance for direct and indirect commands', t => {
   const f = fixture(t);
@@ -277,14 +295,56 @@ test('CLI writes explicit outputs and fails closed for missing or malformed even
       `application=${result.application}\nwebsite=${result.website}\nwebsite_only=${result.website_only}\ndocs=${result.docs}\ndocs_only=${result.docs_only}\ndocs_index=${result.docs_index}\n`);
     return result;
   };
-  scope(run(), full);
+  scope(run(), {...full, reason: 'event-unavailable'});
   writeFileSync(eventPath, '{ invalid JSON');
-  scope(run(), full);
+  scope(run(), {...full, reason: 'event-unavailable'});
   writeFileSync(eventPath, JSON.stringify(push(f.base, head)));
-  scope(run(), site);
+  scope(run(), {...site, reason: 'brochure-only'});
   assert.throws(() => execFileSync(process.execPath, [script, '--unknown'], {
     cwd: f.cwd, stdio: ['ignore', 'pipe', 'pipe'],
   }));
+});
+
+test('CLI reads the trimmed declared merge for PRs and never reads it for push', t => {
+  const f = docsMergeFixture(t);
+  const eventPath = join(f.cwd, '.git', 'event.json');
+  const outputPath = join(f.cwd, '.git', 'outputs');
+  const run = (eventName, event, declaredMerge, guardPush = false) => {
+    writeFileSync(eventPath, JSON.stringify(event));
+    writeFileSync(outputPath, '');
+    // Observe main's env boundary as well as its result: forwarding this value
+    // to push is otherwise invisible because classifyEvent also ignores it.
+    const guardedMain = `
+      import {main} from ${JSON.stringify(pathToFileURL(script).href)};
+      const guardedEnv = new Proxy(process.env, {
+        get(target, key) {
+          if (key === 'WITSELF_CI_PR_MERGE_SHA') throw new Error('push read the PR merge environment');
+          return target[key];
+        },
+      });
+      main([], guardedEnv);
+    `;
+    const args = guardPush ? ['--input-type=module', '--eval', guardedMain] : [script];
+    const stdout = execFileSync(process.execPath, args, {
+      cwd: f.cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+      env: {PATH: process.env.PATH, SystemRoot: process.env.SystemRoot,
+        GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null',
+        GITHUB_EVENT_NAME: eventName, GITHUB_EVENT_PATH: eventPath, GITHUB_OUTPUT: outputPath,
+        WITSELF_CI_PR_MERGE_SHA: declaredMerge},
+    });
+    const result = JSON.parse(stdout);
+    assert.equal(readFileSync(outputPath, 'utf8'),
+      `application=${result.application}\nwebsite=${result.website}\nwebsite_only=${result.website_only}\ndocs=${result.docs}\ndocs_only=${result.docs_only}\ndocs_index=${result.docs_index}\n`);
+    return result;
+  };
+  const event = pull(f.target, f.head);
+  event.pull_request.merge_commit_sha = null;
+  assert.deepEqual(run('pull_request', event, ` \t${f.merge}\n`), {...docs, reason: 'research-docs-only'}, 'PR trims and uses the environment merge');
+  assert.deepEqual(run('pull_request', event, ''), {...full, reason: 'merge-ref-unavailable'}, 'PR without a declaration refuses truthfully');
+  assert.deepEqual(run('push', push(f.base, f.head), f.merge), {...full, reason: 'docs-checkout-mismatch'}, 'push cannot use the PR merge checkout');
+  f.git('switch', '--quiet', '--detach', f.head);
+  assert.deepEqual(run('push', push(f.base, f.head), f.merge), {...docs, reason: 'research-docs-only'}, 'push keeps the head binding');
+  assert.deepEqual(run('push', push(f.base, f.head), f.merge, true), {...docs, reason: 'research-docs-only'}, 'push must not read WITSELF_CI_PR_MERGE_SHA');
 });
 
 test('docs allowlist is direct-child Markdown and the exact docs index', () => {
@@ -367,30 +427,75 @@ test('docs PR and local comparisons use the merge base when main advances', t =>
   scope(classifyLocal('main', f.cwd), docs);
 });
 
-test('docs event grants bind to head checkout or the exact declared PR test merge', t => {
-  const f = fixture(t);
-  f.git('switch', '--quiet', '-c', 'research');
-  f.write(docsPath, '# Branch research\n');
-  const head = f.commit('research');
-  scope(classifyEvent('push', push(f.base, head), f.cwd), docs);
-  f.git('switch', '--quiet', 'main');
-  // A comparison may be available while the working checkout is unrelated.
-  scope(classifyEvent('push', push(f.base, head), f.cwd), full);
-  scope(classifyEvent('pull_request', pull(f.base, head), f.cwd), full);
-  f.write('cmd/witself/main.go', 'main advances\n');
-  const target = f.commit('new base');
-  f.git('-c', 'commit.gpgsign=false', 'merge', '--quiet', '--no-ff', 'research', '-m', 'synthetic test merge');
-  const merge = f.git('rev-parse', 'HEAD');
-  const event = pull(target, head);
-  event.pull_request.merge_commit_sha = merge;
-  scope(classifyEvent('pull_request', event, f.cwd), docs);
-  scope(classifyEvent('pull_request', pull(target, head), f.cwd), full);
-  scope(classifyEvent('pull_request', {...event, pull_request: {...event.pull_request, merge_commit_sha: target}}, f.cwd), full);
-  scope(classifyEvent('pull_request', {...event, pull_request: {...event.pull_request, base: {sha: f.base}}}, f.cwd), full);
-  // A valid merge object is not sufficient if a different commit is checked out.
+test('docs event grants bind to head checkout or the exact declared PR test merge', async t => {
+  const f = docsMergeFixture(t);
+  const {head, target, merge} = f;
+  const tree = f.git('rev-parse', `${merge}^{tree}`);
+  const reversed = f.git('commit-tree', tree, '-p', head, '-p', target, '-m', 'reversed parents');
+  const differentBase = f.git('commit-tree', tree, '-p', f.base, '-p', head, '-m', 'different base');
+  const differentHead = f.git('commit-tree', tree, '-p', target, '-p', f.base, '-m', 'different head');
   f.write('cmd/witself/main.go', 'later runtime commit\n');
-  f.commit('later');
-  scope(classifyEvent('pull_request', event, f.cwd), full);
+  const later = f.commit('later');
+  const cases = [
+    {name: 'head checkout needs no declared merge', checkout: head, payload: null, expected: docs, reason: 'research-docs-only'},
+    {name: 'payload null without declared merge', payload: null, reason: 'merge-ref-unavailable'},
+    {name: 'payload absent without declared merge', reason: 'merge-ref-unavailable'},
+    {name: 'payload malformed without declared merge', payload: 'invalid', reason: 'merge-ref-unavailable'},
+    {name: 'payload null with exact declared merge', payload: null, declared: merge, expected: docs, reason: 'research-docs-only'},
+    {name: 'payload absent with exact declared merge', declared: merge, expected: docs, reason: 'research-docs-only'},
+    {name: 'payload malformed with exact declared merge', payload: 'a'.repeat(39), declared: merge, expected: docs, reason: 'research-docs-only'},
+    {name: 'declared base commit is not the merge', payload: null, declared: target, reason: 'docs-checkout-mismatch'},
+    {name: 'declared 39-character value is unavailable', payload: null, declared: 'a'.repeat(39), reason: 'merge-ref-unavailable'},
+    {name: 'declared nonexistent commit is unavailable', payload: null, declared: 'f'.repeat(40), reason: 'merge-ref-unavailable'},
+    {name: 'declared reversed parents refuse at the parent check', payload: null, declared: reversed, checkout: reversed, reason: 'docs-checkout-mismatch'},
+    {name: 'declared different base refuses at the parent check', payload: null, declared: differentBase, checkout: differentBase, reason: 'docs-checkout-mismatch'},
+    {name: 'declared different head refuses at the parent check', payload: null, declared: differentHead, checkout: differentHead, reason: 'docs-checkout-mismatch'},
+    {name: 'payload different head refuses at the parent check', payload: differentHead, checkout: differentHead, reason: 'docs-checkout-mismatch'},
+    {name: 'payload governs matching checkout despite different declared merge', payload: merge, declared: target, expected: docs, reason: 'research-docs-only'},
+    {name: 'payload governs mismatch even when declared merge matches checkout', payload: target, declared: merge, reason: 'docs-checkout-mismatch'},
+    {name: 'well-formed unavailable payload cannot be replaced by declared merge', payload: 'f'.repeat(40), declared: merge, reason: 'comparison-unavailable'},
+    {name: 'payload merge must have the event base', payload: merge, base: f.base, reason: 'docs-checkout-mismatch'},
+    {name: 'declared merge cannot authorize a later checkout', payload: null, declared: merge, checkout: later, reason: 'docs-checkout-mismatch'},
+    {name: 'payload merge cannot authorize a later checkout', payload: merge, checkout: later, reason: 'docs-checkout-mismatch'},
+    {name: 'invalid comparison precedes merge availability', payload: null, base: 'invalid', reason: 'comparison-unavailable'},
+  ];
+  for (const row of cases) await t.test(row.name, () => {
+    f.git('switch', '--quiet', '--detach', row.checkout ?? merge);
+    const event = pull(row.base ?? target, head);
+    if (row.payload !== undefined) event.pull_request.merge_commit_sha = row.payload;
+    const result = classifyEvent('pull_request', event, f.cwd, row.declared);
+    assert.deepEqual(result, {...(row.expected ?? full), reason: row.reason}, row.name);
+    if (!result.docs_only) assert(REASONS.includes(result.reason), 'refusal is in the frozen contract');
+  });
+});
+
+test('non-docs PRs retain their reasons when the payload merge is null', t => {
+  const f = fixture(t);
+  for (const row of [
+    {name: 'application', path: 'cmd/witself/main.go', expected: application, reason: 'application-or-shared-change'},
+    {name: 'brochure', path: 'web/product/content.mjs', expected: site, reason: 'brochure-only'},
+    {name: 'empty comparison', expected: full, reason: 'empty-comparison'},
+  ]) {
+    f.git('switch', '--quiet', '--detach', f.base);
+    if (row.path) f.write(row.path, 'updated\n');
+    const head = row.path ? f.commit(row.name) : f.base;
+    const event = pull(f.base, head);
+    event.pull_request.merge_commit_sha = null;
+    for (const declared of [undefined, 'a'.repeat(39), f.base]) {
+      assert.deepEqual(classifyEvent('pull_request', event, f.cwd, declared), {...row.expected, reason: row.reason}, row.name);
+    }
+  }
+});
+
+test('push events ignore declared merges for matching and mismatched checkouts', t => {
+  const f = docsMergeFixture(t);
+  for (const checkout of [f.head, f.merge]) {
+    f.git('switch', '--quiet', '--detach', checkout);
+    for (const declared of [undefined, f.merge, f.head, 'a'.repeat(39), 'f'.repeat(40)]) {
+      assert.deepEqual(classifyEvent('push', push(f.base, f.head), f.cwd, declared),
+        checkout === f.head ? {...docs, reason: 'research-docs-only'} : {...full, reason: 'docs-checkout-mismatch'});
+    }
+  }
 });
 
 test('docs comparison includes more than 300 paths and a final runtime change', t => {

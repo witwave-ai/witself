@@ -17,6 +17,9 @@ concurrency:
 jobs:
   changes:
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pull-requests: read
     outputs:
       application: ${{ steps.scope.outputs.application }}
       docs: ${{ steps.scope.outputs.docs }}
@@ -32,10 +35,22 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
+      - name: Look up the declared PR test merge
+        id: merge-ref
+        if: github.event_name == 'pull_request'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          merge_sha=$(gh api "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}" --jq '.merge_commit_sha // empty' 2>/dev/null) || merge_sha=''
+          if [[ ! "$merge_sha" =~ ^[0-9a-f]{40}$ ]]; then merge_sha=''; fi
+          printf 'merge_sha=%s\n' "$merge_sha" >> "$GITHUB_OUTPUT"
       - name: Test change classification and required gates
         run: node --test scripts/ci-product-scope.test.mjs scripts/ci-product-gate.test.mjs scripts/ci-product-workflow.test.mjs scripts/check-docs.test.mjs scripts/run-docs-check.test.mjs
       - name: Classify the complete change set
         id: scope
+        env:
+          WITSELF_CI_PR_MERGE_SHA: ${{ steps.merge-ref.outputs.merge_sha }}
         run: node scripts/ci-product-scope.mjs
 
   website:
