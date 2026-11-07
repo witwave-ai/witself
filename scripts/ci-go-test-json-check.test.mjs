@@ -219,6 +219,26 @@ for (const mutation of [
     });
   });
 }
+
+test('Windows shutdown channel requirement needs its own observed persistence outcome', async () => {
+  const name = 'TestNativeServiceLifecycle';
+  const foreground = ['NOT_RUN service_manager_unavailable', 'PASS service_foreground_persistence'];
+  for (const [outcomes, required, valid] of [
+    [[...foreground, 'PASS service_shutdown_channel'], [name, 'service_shutdown_channel'], true],
+    [foreground, [name, 'service_shutdown_channel'], false],
+    [['NOT_RUN service_adapter_unsupported'], [name, 'service_shutdown_channel'], false],
+    [['PASS service_manager_available', 'PASS service_manager_persistence', 'PASS service_shutdown_channel'], [name, 'service_shutdown_channel'], false],
+    [[...foreground, 'PASS service_shutdown_channel'], ['service_shutdown_channel'], false],
+    [[...foreground, 'PASS service_shutdown_channel'], [name, 'service_shutdown_channel', 'service_shutdown_channel'], false],
+    [[...foreground, 'PASS service_shutdown_channel'], [name], true],
+  ]) {
+    const events = [event('start', packages[0]), event('run', packages[0], name),
+      ...outcomes.map(message => event('output', packages[0], name, {Output: `    service_native_test.go:10: ${message}\n`})),
+      event('pass', packages[0], name), event('pass', packages[0])];
+    const result = await checkGoTestJSON([stream(events)], required);
+    assert.equal(result.valid, valid);
+  }
+});
 const failures = [
   {name: 'one failing test', input: stream(packages.flatMap((name, index) => packageEvents(name, index === 0 ? 'fail' : 'pass'))),
     output: summary({[packages[0]]: {pass: 0, fail: 1, failedNames: ['TestFixture']}}), stderr: failureDiagnostic},

@@ -36,12 +36,15 @@ var ErrJobRestartLimit = errors.New("worker job restart limit exceeded")
 
 // Config controls the worker's private listeners and optional job supervision.
 type Config struct {
-	HealthAddr       string
-	MetricsAddr      string
-	Ready            func(context.Context) error
-	SyncSchemaReady  func(context.Context) error
-	ShutdownTimeout  time.Duration
-	JobRestartPolicy string
+	// LocalRuntimeReady is nil for hosted callers. Local children use the exact
+	// runtime context to publish their post-initialization shutdown phase fence.
+	LocalRuntimeReady func(context.Context) error
+	HealthAddr        string
+	MetricsAddr       string
+	Ready             func(context.Context) error
+	SyncSchemaReady   func(context.Context) error
+	ShutdownTimeout   time.Duration
+	JobRestartPolicy  string
 }
 
 type healthState struct {
@@ -109,6 +112,13 @@ func (r *Registry) run(ctx context.Context, cfg Config, timing jobRestartTiming)
 		listenerdiagnostic.Write(os.Stderr, "worker", err)
 		_ = healthListener.Close()
 		return fmt.Errorf("worker metrics listener %s: %w", cfg.MetricsAddr, err)
+	}
+	if cfg.LocalRuntimeReady != nil {
+		if err := cfg.LocalRuntimeReady(ctx); err != nil {
+			_ = healthListener.Close()
+			_ = metricsListener.Close()
+			return err
+		}
 	}
 
 	state := &healthState{ready: cfg.Ready, syncReady: cfg.SyncSchemaReady}

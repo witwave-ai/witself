@@ -18,8 +18,10 @@ import (
 
 	"github.com/witwave-ai/witself/internal/cliout"
 	"github.com/witwave-ai/witself/internal/export"
+	"github.com/witwave-ai/witself/internal/localcell"
 	"github.com/witwave-ai/witself/internal/memlimit"
 	"github.com/witwave-ai/witself/internal/placement"
+	"github.com/witwave-ai/witself/internal/runtimeconfig"
 	"github.com/witwave-ai/witself/internal/server"
 	"github.com/witwave-ai/witself/internal/store"
 	"github.com/witwave-ai/witself/internal/tokenfile"
@@ -146,6 +148,56 @@ type serverStartup struct {
 	run           func(context.Context, server.Config) error
 }
 
+// The nil seam uses the production channel only for an explicit local opt-in.
+// Hosted startup never calls a factory, opens a descriptor, or adds a context.
+var shutdownChannelFactory func(context.Context, context.CancelFunc, runtimeconfig.LocalShutdown, string) (localcell.LocalShutdownChannel, error)
+
+func installCommandShutdown(ctx context.Context, cfg runtimeconfig.Config) (context.Context, localcell.LocalShutdownChannel, func(), error) {
+	if cfg.LocalShutdown == (runtimeconfig.LocalShutdown{}) {
+		return ctx, nil, func() {}, nil
+	}
+	if !cfg.Local {
+		return ctx, nil, func() {}, fmt.Errorf("%w: shutdown:config", runtimeconfig.ErrLocalShutdownConfigInvalid)
+	}
+	factory := shutdownChannelFactory
+	if factory == nil {
+		factory = localcell.InstallLocalShutdown
+	}
+	childCtx, cancel := context.WithCancel(ctx)
+	channel, err := factory(childCtx, cancel, cfg.LocalShutdown, "server")
+	if err != nil {
+		cancel()
+		return ctx, nil, func() {}, err
+	}
+	cleanup := func() {
+		cancel()
+		if channel != nil {
+			_ = channel.Close()
+		}
+	}
+	if channel == nil {
+		cleanup()
+		return ctx, nil, func() {}, fmt.Errorf("%w: shutdown:config", runtimeconfig.ErrLocalShutdownConfigInvalid)
+	}
+	if err := channel.WaitRelease(childCtx); err != nil {
+		cleanup()
+		return ctx, nil, func() {}, err
+	}
+	return childCtx, channel, cleanup, nil
+}
+
+func serverConfigWithShutdown(cfg server.Config, channel localcell.LocalShutdownChannel) server.Config {
+	if channel != nil {
+		cfg.LocalRuntimeReady = func(runtimeCtx context.Context) error {
+			if err := runtimeCtx.Err(); err != nil {
+				return err
+			}
+			return channel.RuntimeReady()
+		}
+	}
+	return cfg
+}
+
 func serve() int {
 	return serveWithStartup(serverStartup{
 		migrator:      func(st *store.Store) startupMigrator { return st },
@@ -205,6 +257,12 @@ func serveWithStartup(startup serverStartup) int {
 	}
 	ctx, stop := startup.notifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	ctx, shutdownChannel, closeShutdown, err := installCommandShutdown(ctx, runtime)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself-server: %v\n", err)
+		return 1
+	}
+	defer closeShutdown()
 
 	cfg.AccountImportJobTimeout, cfg.AccountImportJobConcurrency, err = accountImportJobConfig()
 	if err != nil {
@@ -2125,6 +2183,7 @@ func serveWithStartup(startup serverStartup) int {
 		fmt.Fprintln(os.Stderr, "witself-server: no database configured (WITSELF_DATABASE_URL unset); /readyz unconditional")
 	}
 
+	cfg = serverConfigWithShutdown(cfg, shutdownChannel)
 	runErr := startup.run(ctx, cfg)
 	if runErr != nil {
 		fmt.Fprintf(os.Stderr, "witself-server: %v\n", runErr)

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"runtime"
 	"slices"
 	"time"
 )
@@ -25,6 +26,7 @@ type ServiceStatus struct {
 	Healthy         bool                     `json:"healthy"`
 	Restarts        int                      `json:"restarts"`
 	Generation      string                   `json:"generation"`
+	HostExit        string                   `json:"host_exit,omitempty"`
 	LastStepOutcome string                   `json:"last_step_outcome"`
 	Processes       []ServiceProcessIdentity `json:"processes,omitempty"`
 }
@@ -51,6 +53,7 @@ type supervisorHooks struct {
 	shutdownContext                           func(context.Context, time.Duration) (context.Context, context.CancelFunc)
 	ticks                                     <-chan time.Time
 	initialBackoff, maxBackoff, failureWindow time.Duration
+	windowsShutdownPolicy                     bool
 }
 
 type supervisorRecord struct {
@@ -62,9 +65,13 @@ type supervisorRecord struct {
 }
 
 type serviceCommand struct {
-	ctx    context.Context
-	action string
-	reply  chan serviceReply
+	ctx       context.Context
+	action    string
+	reply     chan serviceReply
+	exit      *serviceHostExitEnvelope
+	delivered <-chan struct{}
+	completed chan string
+	finalized <-chan struct{}
 }
 
 type serviceReply struct {
@@ -73,13 +80,17 @@ type serviceReply struct {
 }
 
 type supervisor struct {
-	cell             *Cell
-	hooks            supervisorHooks
-	record           supervisorRecord
-	status           ServiceStatus
-	running          bool
-	phase, operation string
-	healthProgress   serviceHealthProgress
+	cell                 *Cell
+	hooks                supervisorHooks
+	record               supervisorRecord
+	status               ServiceStatus
+	running              bool
+	phase, operation     string
+	healthProgress       serviceHealthProgress
+	exitDrained          bool
+	exitDrainResult      error
+	shutdownBlocked      bool
+	shutdownFaultPending bool
 }
 
 // Run hosts exactly one owned tree. The lifetime lease is distinct from the
@@ -121,10 +132,17 @@ func (c *Cell) Run(ctx context.Context, policy SupervisorPolicy) (result error) 
 		return err
 	}
 	shutdown := policy.ShutdownTimeout
-	if shutdown <= 0 || shutdown > 30*time.Second {
-		shutdown = 30 * time.Second
+	maximumShutdown := 30 * time.Second
+	if runtime.GOOS == "windows" {
+		maximumShutdown = ServiceShutdownTimeout
+	}
+	if shutdown <= 0 || shutdown > maximumShutdown {
+		shutdown = maximumShutdown
 	}
 	defer func() {
+		if s.exitDrained || s.shutdownBlocked {
+			return
+		}
 		if ctx.Err() != nil {
 			progress, journalErr := c.readJournal()
 			// Only fixed supervisor labels and journal shape cross stderr.
@@ -186,6 +204,9 @@ func (c *Cell) Run(ctx context.Context, policy SupervisorPolicy) (result error) 
 			s.phase = "control"
 			commandCtx, cancel := context.WithCancel(command.ctx)
 			commandCtx = context.WithValue(commandCtx, serviceControlHostContextKey{}, ctx)
+			if command.exit != nil {
+				commandCtx = context.WithValue(commandCtx, serviceHostExitKey{}, *command.exit)
+			}
 			go func() {
 				select {
 				case <-runDone:
@@ -197,6 +218,27 @@ func (c *Cell) Run(ctx context.Context, policy SupervisorPolicy) (result error) 
 			cancel()
 			WriteServiceHostFailure(os.Stderr, err, "supervisor_command")
 			command.reply <- serviceReply{status: status, err: err}
+			if command.action == "exit-host" && err == nil {
+				exited := s.finishHostExitCommand(ctx, command)
+				if command.completed != nil {
+					disposition := "refused"
+					if exited {
+						disposition = "drained"
+						if s.exitDrainResult != nil {
+							disposition = "forced"
+						}
+					}
+					command.completed <- disposition
+					select {
+					case <-command.finalized:
+					case <-command.ctx.Done():
+					}
+				}
+				cancel()
+				if exited {
+					return s.exitDrainResult
+				}
+			}
 			if ctx.Err() == nil {
 				s.phase, s.operation = "idle", "none"
 			}
@@ -236,6 +278,7 @@ func newSupervisor(c *Cell, policy SupervisorPolicy) *supervisor {
 	if h.shutdownContext == nil {
 		h.shutdownContext = context.WithTimeout
 	}
+	h.windowsShutdownPolicy = h.windowsShutdownPolicy || runtime.GOOS == "windows"
 	return &supervisor{cell: c, hooks: h, phase: "startup", operation: "none"}
 }
 
@@ -306,6 +349,7 @@ func (s *supervisor) call(ctx context.Context, operation string, hook func(conte
 		hookCtx = withServiceHealthProgress(hookCtx, &s.healthProgress)
 	}
 	err := hook(hookCtx)
+	s.latchServiceShutdownRefusal(ctx, operation, err)
 	if cancellation := serviceControlCancellation(ctx); cancellation != nil {
 		return cancellation
 	}
@@ -365,6 +409,9 @@ func (s *supervisor) step(ctx context.Context) (result error) {
 		}
 	}
 	s.status = ServiceStatus{DesiredState: d.DesiredState, State: d.DesiredState, Restarts: max(0, s.record.Attempts-1), Generation: d.Payload.Generation}
+	if s.blockedServiceShutdown(ctx) {
+		return nil
+	}
 	// A crash can occur after the fifth failure is synced but before the
 	// descriptor is marked faulted. Preserve that circuit decision on restart.
 	if len(s.record.Failures) >= 5 && !d.Faulted {
@@ -549,8 +596,13 @@ func (s *supervisor) command(ctx context.Context, action string) (ServiceStatus,
 	if err := serviceControlCancellation(ctx); err != nil {
 		return s.status, err
 	}
+	if s.shutdownBlocked && (action == "stop" || action == "start" || action == "exit-host") {
+		return s.status, hostExitRefused("drain")
+	}
 	var err error
 	switch action {
+	case "exit-host":
+		return s.acceptHostExit(ctx)
 	case "observe":
 		// Return the last completed supervisor snapshot, including its health
 		// result. Periodic supervision alone refreshes this observational view.
@@ -585,6 +637,7 @@ func (s *supervisor) command(ctx context.Context, action string) (ServiceStatus,
 	case "repair":
 		err = s.cell.RepairService(ctx)
 		if err == nil {
+			s.shutdownBlocked, s.shutdownFaultPending = false, false
 			s.running = false
 			err = s.step(ctx)
 		}

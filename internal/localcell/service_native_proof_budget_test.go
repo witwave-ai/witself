@@ -7,10 +7,12 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/witwave-ai/witself/internal/localcell"
 )
 
 const nativeServiceProofRowTimeout = 15 * time.Minute
-const nativeServiceCleanupReserve = 75 * time.Second
+const nativeServiceCleanupReserve = localcell.ServiceShutdownTimeout
 const nativeServiceProofBound = nativeServiceProofRowTimeout - nativeServiceCleanupReserve - nativeServiceHostBound
 
 // One absolute deadline bounds the composition, even when phase caps sum to

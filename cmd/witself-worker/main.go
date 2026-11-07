@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/witwave-ai/witself/internal/agentemailoutbound"
+	"github.com/witwave-ai/witself/internal/localcell"
 	"github.com/witwave-ai/witself/internal/memlimit"
 	"github.com/witwave-ai/witself/internal/runtimeconfig"
 	"github.com/witwave-ai/witself/internal/store"
@@ -149,6 +150,55 @@ func runWith(args []string, lookup func(string) (string, bool), stdout, stderr i
 	}
 }
 
+// Nil preserves the hosted path; only a configured local child installs a channel.
+var shutdownChannelFactory func(context.Context, context.CancelFunc, runtimeconfig.LocalShutdown, string) (localcell.LocalShutdownChannel, error)
+
+func installCommandShutdown(ctx context.Context, cfg runtimeconfig.Config) (context.Context, localcell.LocalShutdownChannel, func(), error) {
+	if cfg.LocalShutdown == (runtimeconfig.LocalShutdown{}) {
+		return ctx, nil, func() {}, nil
+	}
+	if !cfg.Local {
+		return ctx, nil, func() {}, fmt.Errorf("%w: shutdown:config", runtimeconfig.ErrLocalShutdownConfigInvalid)
+	}
+	factory := shutdownChannelFactory
+	if factory == nil {
+		factory = localcell.InstallLocalShutdown
+	}
+	childCtx, cancel := context.WithCancel(ctx)
+	channel, err := factory(childCtx, cancel, cfg.LocalShutdown, "worker")
+	if err != nil {
+		cancel()
+		return ctx, nil, func() {}, err
+	}
+	cleanup := func() {
+		cancel()
+		if channel != nil {
+			_ = channel.Close()
+		}
+	}
+	if channel == nil {
+		cleanup()
+		return ctx, nil, func() {}, fmt.Errorf("%w: shutdown:config", runtimeconfig.ErrLocalShutdownConfigInvalid)
+	}
+	if err := channel.WaitRelease(childCtx); err != nil {
+		cleanup()
+		return ctx, nil, func() {}, err
+	}
+	return childCtx, channel, cleanup, nil
+}
+
+func runWorkerWithShutdown(ctx context.Context, registry *worker.Registry, cfg worker.Config, channel localcell.LocalShutdownChannel) error {
+	if channel != nil {
+		cfg.LocalRuntimeReady = func(runtimeCtx context.Context) error {
+			if err := runtimeCtx.Err(); err != nil {
+				return err
+			}
+			return channel.RuntimeReady()
+		}
+	}
+	return registry.Run(ctx, cfg)
+}
+
 func serve() int {
 	memlimit.Configure(os.Stderr, "witself-worker")
 	runtime, jobs, err := workerConfigFromEnv(os.LookupEnv, os.Environ())
@@ -167,6 +217,12 @@ func serve() int {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	ctx, shutdownChannel, closeShutdown, err := installCommandShutdown(ctx, runtime)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witself-worker: %v\n", err)
+		return 1
+	}
+	defer closeShutdown()
 
 	st, err := store.Open(ctx, dsn)
 	if err != nil {
@@ -182,7 +238,9 @@ func serve() int {
 		fmt.Fprintf(os.Stderr, "witself-worker: database readiness: %v\n", err)
 		return 1
 	}
-	return serveWorker(ctx, st, st, runtime, jobs, os.LookupEnv, (*worker.Registry).Run)
+	return serveWorker(ctx, st, st, runtime, jobs, os.LookupEnv, func(registry *worker.Registry, runtimeCtx context.Context, cfg worker.Config) error {
+		return runWorkerWithShutdown(runtimeCtx, registry, cfg, shutdownChannel)
+	})
 }
 
 // serveWorker keeps the account check and the selected readiness callback in
