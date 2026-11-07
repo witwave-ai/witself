@@ -1110,10 +1110,12 @@ the cause, together with unchanged candidate rows; `preguard_refusal` is allowed
 only for `account_purge`, whose nonzero-sync-version destruction refusal occurs
 before the covered-DML guard, also with unchanged rows. All other profile jobs
 require `guard_cause_exact`; these per-job qualifications do not claim an
-unobserved exact guard cause. The five allocations remain PENDING, and no H
-obligation is promoted until the owner records the CI artifact's identity.
-Acceptance of C still needs the complete executable proof and C3's installer
-conversion, with D–F separate.
+unobserved exact guard cause. The owner recorded the identity from post-merge
+run 42407817035 (artifact `capture-mixed-evidence`, 2026-11-07) in the repository
+runtime results. The five allocations are PASS with evidence class
+`mixed_binaries`; H34/H36/H43 gain only these capability rows. Acceptance of C
+still needs C3's installer conversion, with D–F separate. This evidence promotion
+changed no production behavior.
 
 LC-S7A adds an explicitly selected local foreground host and a per-user Linux
 systemd adapter around the existing lifecycle. Its supervisor holds a lifetime

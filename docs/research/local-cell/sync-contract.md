@@ -506,12 +506,14 @@ only for `account_purge`, whose nonzero-sync-version destruction refusal occurs
 before the covered-DML guard, together with unchanged rows. All remaining
 profile jobs require `guard_cause_exact`; a hidden cause on those jobs fails the
 row. These fixed per-job qualifications do not claim an unobserved exact guard
-cause. The five allocations remain PENDING, with no H promotion until the owner
-records the CI artifact's identity. The
+cause. The owner recorded the identity from post-merge run 42407817035 (artifact
+`capture-mixed-evidence`, 2026-11-07) in the repository runtime results. The five
+allocations are PASS with evidence class `mixed_binaries`; H34/H36/H43 gain only
+these capability rows. This evidence promotion changed no production behavior. The
 [proof-only marker](../../../internal/store/sync_proof/0004_capture_proof_marker.sql)
 is installed explicitly outside ordinary sync migrations and excluded from
-archives. The installer role conversion and complete mixed-executable acceptance
-remain pending; a profile declaration or orchestration rehearsal supplies neither.
+archives. Acceptance of C still needs C3's installer conversion; a profile
+declaration or orchestration rehearsal supplies no executable evidence.
 
 ### Open items
 
