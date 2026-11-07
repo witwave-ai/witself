@@ -23,6 +23,12 @@ import (
 	"github.com/witwave-ai/witself/internal/localcell"
 )
 
+// Unix exec helpers must run on the initial OS thread. Executable-only
+// initialization preserves that guarantee without affecting hosted imports.
+func init() {
+	localcell.DispatchProcessHelper()
+}
+
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()

@@ -13,6 +13,16 @@ import (
 	"time"
 )
 
+// Helpers must dispatch before runtime.main releases the initial OS thread.
+// Keep this initializer test-only: hosted imports of localcell stay inert.
+func init() {
+	DispatchProcessHelper()
+}
+
+func TestMain(m *testing.M) {
+	os.Exit(m.Run())
+}
+
 func TestProcessIdentityHelperProcess(_ *testing.T) {
 	if len(os.Args) < 2 || os.Args[len(os.Args)-1] != "localcell-process-helper" {
 		return

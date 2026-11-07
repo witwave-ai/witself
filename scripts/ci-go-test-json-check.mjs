@@ -19,7 +19,7 @@ const serviceShutdownReceipt = /^service_shutdown phase=(startup|tick|control|id
 const serviceOutcomes = new Set([
   'PASS service_manager_available', 'NOT_RUN service_manager_unavailable',
   'NOT_RUN service_adapter_unsupported', 'NOT_RUN native_postgres_unconfigured',
-  'PASS service_manager_persistence', 'PASS service_foreground_persistence',
+  'PASS service_manager_persistence', 'PASS service_foreground_persistence', 'PASS service_shutdown_channel',
 ]);
 // Go replaces whitespace in subtest names with underscores. Accept the names
 // used by these suites, including empty subtest segments, addresses, and #NN.
@@ -125,7 +125,12 @@ function proofDiagnostic(line, packageName) {
 // selects one reviewed package and requires named tests; default unit coverage
 // and its skip policy remain unchanged.
 export async function checkGoTestJSON(input, requiredTests = [], {diagnose = false, packageName} = {}) {
-  const packageValid = packageName === undefined || (selectablePackages.includes(packageName) && requiredTests.length !== 0);
+  const channelRequirements = requiredTests.filter(name => name === 'service_shutdown_channel').length;
+  const requireShutdownChannel = channelRequirements === 1;
+  requiredTests = requiredTests.filter(name => name !== 'service_shutdown_channel');
+  const channelValid = channelRequirements <= 1 && (!requireShutdownChannel ||
+    (requiredTests.includes(serviceProofTest) && (packageName === undefined || packageName === expectedPackages[0])));
+  const packageValid = channelValid && (packageName === undefined || (selectablePackages.includes(packageName) && requiredTests.length !== 0));
   const packageNames = packageName === undefined
     ? requiredTests.length === 0 ? expectedPackages : expectedPackages.slice(0, 1)
     : packageValid ? [packageName] : [];
@@ -281,7 +286,9 @@ export async function checkGoTestJSON(input, requiredTests = [], {diagnose = fal
       const foreground = outcomes.has('NOT_RUN service_manager_unavailable') && outcomes.has('PASS service_foreground_persistence');
       const unsupported = outcomes.has('NOT_RUN service_adapter_unsupported');
       if (outcomes.has('NOT_RUN native_postgres_unconfigured') || Number(supported) + Number(foreground) + Number(unsupported) !== 1 ||
-        outcomes.size !== (unsupported ? 1 : 2)) invalid = true;
+        outcomes.size !== (unsupported ? 1 : 2) + Number(outcomes.has('PASS service_shutdown_channel')) ||
+        (outcomes.has('PASS service_shutdown_channel') && !foreground) ||
+        (requireShutdownChannel && (!foreground || !outcomes.has('PASS service_shutdown_channel')))) invalid = true;
     }
     if (invalid && firstInvalidLine === null && state.summaryLine !== null &&
       (state.tests.size === 0 || [...state.tests.values()].some(action => !terminalActions.has(action)) ||

@@ -39,8 +39,8 @@ func (c *Cell) launchChild(ctx context.Context, binary, component string, enviro
 }
 
 // launchWindows creates the actual executable, never a shell or reexec proxy.
-// The parent exclusively owns a non-inherited kill-on-close job through resume
-// and final durable publication. Any crash before transfer kills the whole job,
+// The parent exclusively owns a non-inherited kill-on-close job through resume,
+// the child's pre-store barrier, and final durable publication. A crash before transfer kills the whole job,
 // including PostgreSQL descendants; Repair reconciles the fenced dead record.
 // Repair also terminates any identity-verified pending launch still alive.
 // Successful children outlive the harness: only after final publication is the
@@ -60,6 +60,13 @@ func (c *Cell) launchWindows(binary string, args []string, component string, env
 	directory, err := windows.UTF16PtrFromString(c.cfg.Root)
 	if err != nil {
 		return errors.New("invalid local cell component directory")
+	}
+	shutdown, shutdownPath, err := c.prepareShutdownLaunch(component)
+	if err != nil {
+		return err
+	}
+	if shutdownPath != "" {
+		environment = appendEnvironment(environment, "WITSELF_LOCAL_SHUTDOWN_DESCRIPTOR="+shutdownPath)
 	}
 	block, err := windowsEnvironmentBlock(environment)
 	if err != nil {
@@ -109,11 +116,14 @@ func (c *Cell) launchWindows(binary string, args []string, component string, env
 	startup.Flags = windows.STARTF_USESTDHANDLES
 	startup.StdInput, startup.StdOutput, startup.StdErr = input, output, output
 	var process windows.ProcessInformation
-	// Share the console association for CTRL_BREAK, but create an isolated
-	// process group. No NEW_CONSOLE (which ignores NEW_PROCESS_GROUP), detached
-	// process, or ambient stdio inheritance. If the target has no console,
-	// graceful stop explicitly refuses; service semantics remain deferred.
+	// Recorded legacy launches retain their isolated console process group.
+	// An explicit service child instead owns a private shutdown pipe and has
+	// no console: DETACHED_PROCESS supplies none; CREATE_NO_WINDOW would create
+	// a hidden console. Neither path inherits ambient standard handles.
 	flags := uint32(windows.CREATE_SUSPENDED | windows.CREATE_NEW_PROCESS_GROUP | windows.CREATE_UNICODE_ENVIRONMENT | windows.EXTENDED_STARTUPINFO_PRESENT)
+	if shutdownPath != "" {
+		flags |= windows.DETACHED_PROCESS
+	}
 	if component == "postgres" {
 		token, tokenErr := windowsPostgresToken()
 		if tokenErr != nil {
@@ -149,6 +159,17 @@ func (c *Cell) launchWindows(binary string, args []string, component string, env
 		return errors.New("cannot identify suspended local cell component")
 	}
 	record := ProcessRecord{PID: int(process.ProcessId), StartTime: identity, Root: c.cfg.Root, Component: component, LaunchPending: true}
+	if component != "postgres" {
+		record.LaunchKind = shutdownLaunchLegacy
+	}
+	if shutdownPath != "" {
+		shutdown.PID, shutdown.StartIdentity = record.PID, record.StartTime
+		record.LaunchKind, record.ShutdownEndpoint, record.ShutdownDescriptor = shutdownLaunchPipe, shutdown.PipeName, shutdownPath
+		record.BootID, record.InstallationID, record.Generation = shutdown.BootID, shutdown.InstallationID, shutdown.Generation
+		if err := writeAtomic(shutdownPath, shutdown, nil); err != nil {
+			return shutdownRefused("shutdown:descriptor")
+		}
+	}
 	if err := writeAtomic(c.path("run", component+".json"), record, nil); err != nil {
 		return err
 	}
@@ -160,6 +181,14 @@ func (c *Cell) launchWindows(binary string, args []string, component string, env
 	}
 	if err := launchCheckpoint("resumed", process); err != nil {
 		return err
+	}
+	if shutdownPath != "" {
+		ctx, cancel := c.deadline(context.Background())
+		err := waitShutdownReady(ctx, shutdownPath, shutdown, process.Process)
+		cancel()
+		if err != nil {
+			return err
+		}
 	}
 	if ready != nil {
 		if err := ready(record); err != nil {
@@ -184,10 +213,38 @@ func (c *Cell) launchWindows(binary string, args []string, component string, env
 	if _, err := windows.SetInformationJobObject(job, windows.JobObjectExtendedLimitInformation, uintptr(unsafe.Pointer(&limits)), uint32(unsafe.Sizeof(limits))); err != nil {
 		return errors.New("cannot transfer local cell launch ownership")
 	}
+	if shutdownPath != "" {
+		// Once the job is disarmed the durable pipe owns pre-release recovery.
+		// Even a reporting error at the transfer checkpoint must not kill it.
+		completed = true
+		if err := retainShutdownProcess(record, process.Process); err != nil {
+			return err
+		}
+	}
 	if err := launchCheckpoint("transferred", process); err != nil {
 		return err
 	}
 	completed = true
+	if shutdownPath != "" {
+		// The durable record and disarmed job precede release. From this point
+		// no deferred launch failure may kill a child that may be migrating.
+		id, err := shutdownRandom(16)
+		if err != nil {
+			return err
+		}
+		ctx, cancel := c.deadline(context.Background())
+		defer cancel()
+		request := shutdown.request("release", id)
+		for {
+			_, err := windowsShutdownRequest(ctx, shutdown, request)
+			if err == nil {
+				return nil
+			}
+			if !errors.Is(err, errShutdownAckLost) || ctx.Err() != nil {
+				return shutdownRefused("shutdown:ack")
+			}
+		}
+	}
 	return nil
 }
 

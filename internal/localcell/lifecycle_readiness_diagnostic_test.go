@@ -196,3 +196,45 @@ func TestPostStartReadinessDiagnosticContract(t *testing.T) {
 		})
 	}
 }
+
+func TestPostStartReadinessExitObservationContract(t *testing.T) {
+	for _, site := range []string{"concurrent_start", "assert_ready"} {
+		for _, completed := range []bool{false, true} {
+			for _, recovered := range []bool{false, true} {
+				failure := localcell.ReadinessExitForTest(completed, recovered)
+				wrapped := fmt.Errorf("untrusted wrapper: %w", failure)
+				line := formatPostStartReadinessDiagnostic(site, -1, time.Second, localcell.Status{}, wrapped, true)
+				outcome := "context_expired"
+				if completed {
+					outcome = "wait_completed"
+				}
+				base := formatPostStartReadinessDiagnostic(site, -1, time.Second, localcell.Status{}, errors.New("untrusted wrapper"), true)
+				want := base + fmt.Sprintf(" wait_observation=%s recovered_alive=%t", outcome, recovered)
+				if line != want || strings.Contains(line, "untrusted") {
+					t.Fatal("shared readiness diagnostic lost or disclosed exit observations")
+				}
+				if strings.Contains(base, "wait_observation=") || strings.Contains(base, "recovered_alive=") {
+					t.Fatal("shared readiness diagnostic invented absent exit observations")
+				}
+			}
+		}
+	}
+}
+
+func TestEarlyReadinessExitObservationDiagnostic(t *testing.T) {
+	root := t.TempDir()
+	cell, err := localcell.New(localcell.Config{Root: root})
+	if err != nil {
+		t.Fatal("cannot construct readiness diagnostic fixture")
+	}
+	for _, completed := range []bool{false, true} {
+		for _, recovered := range []bool{false, true} {
+			failure := fmt.Errorf("start failed: %w", localcell.ReadinessExitForTest(completed, recovered))
+			lines := lifecycleFailureDiagnostics(cell, root, failure)
+			want := localcell.ReadinessExitDiagnosticForTest(failure)
+			if len(lines) == 0 || !strings.HasSuffix(lines[0], "; "+want) || strings.Count(lines[0], "wait_observation=") != 1 {
+				t.Fatal("early Start diagnostics lost the shared exit observation")
+			}
+		}
+	}
+}
