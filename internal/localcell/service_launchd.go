@@ -243,6 +243,66 @@ type launchdPrint struct {
 	arguments     []string
 }
 
+type launchdDisabledState uint8
+
+const (
+	launchdOverrideAbsent launchdDisabledState = iota
+	launchdOverrideEnabled
+	launchdOverrideDisabled
+)
+
+const (
+	launchdDisabledMaxBytes   = 1 << 20
+	launchdDisabledMaxEntries = 4096
+)
+
+// print-disabled is not a stable protocol. The owner observed this exact
+// line-oriented grammar on macOS 26.6.2 (2026-11-07): one empty line, a tab
+// followed by "disabled services = {", zero or more double-tab-indented
+// quoted-label => enabled/disabled entries, and a tab-indented closing brace.
+// Older macOS output uses false/true respectively; accept only those two pairs.
+// A final LF is optional; CRLF, escaped/ambiguous label quoting, controls,
+// nesting, duplicate labels and any other material refuse registration. Native
+// macOS CI must confirm the grammar and fresh-label bootstrap without enable.
+func parseLaunchdDisabled(raw []byte, label string) (launchdDisabledState, error) {
+	bad := func() (launchdDisabledState, error) {
+		return launchdOverrideAbsent, serviceSystemdError(ErrServiceRegistrationFailed, "inspect_disabled:parse", "unsupported_or_incomplete_print_disabled")
+	}
+	if len(raw) > launchdDisabledMaxBytes || !utf8.Valid(raw) || bytes.IndexByte(raw, 0) >= 0 || bytes.ContainsRune(raw, '\r') {
+		return bad()
+	}
+	lines := strings.Split(strings.TrimSuffix(string(raw), "\n"), "\n")
+	if len(lines) < 3 || lines[0] != "" || lines[1] != "\tdisabled services = {" || lines[len(lines)-1] != "\t}" || len(lines)-3 > launchdDisabledMaxEntries {
+		return bad()
+	}
+	result := launchdOverrideAbsent
+	seen := make(map[string]bool, len(lines)-3)
+	for _, line := range lines[2 : len(lines)-1] {
+		entry, ok := strings.CutPrefix(line, "\t\t\"")
+		if !ok {
+			return bad()
+		}
+		key, value, ok := strings.Cut(entry, "\" => ")
+		if !ok || key == "" || strings.ContainsAny(key, "\"\\{}") || strings.IndexFunc(key, unicode.IsControl) >= 0 || seen[key] {
+			return bad()
+		}
+		seen[key] = true
+		var state launchdDisabledState
+		switch value {
+		case "enabled", "false":
+			state = launchdOverrideEnabled
+		case "disabled", "true":
+			state = launchdOverrideDisabled
+		default:
+			return bad()
+		}
+		if key == label {
+			result = state
+		}
+	}
+	return result, nil
+}
+
 // launchctl(1), print and CAVEATS, explicitly disclaims a stable output format.
 // Accept only this bounded structural shape; never trim/unquote argument bytes
 // or search substrings that could match nested environment fields. Native CI
@@ -452,9 +512,10 @@ func (a *launchdAgentAdapter) Apply(ctx context.Context, plan ServicePlan) error
 		}
 		identity = created
 	}
+	bootstrapAttempted := false
 	fail := func(step string, err error) error {
 		if created != nil {
-			a.cleanupPartial(ctx, d, created)
+			a.cleanupPartial(ctx, d, created, bootstrapAttempted)
 		}
 		return fmt.Errorf("%w: %s: %w", ErrServiceRegistrationFailed, step, err)
 	}
@@ -468,17 +529,39 @@ func (a *launchdAgentAdapter) Apply(ctx context.Context, plan ServicePlan) error
 		}
 		return nil
 	}
-	if err := checkIdentity("pre_enable"); err != nil {
+	if err := checkIdentity("pre_disabled"); err != nil {
+		return err
+	}
+	raw, err := a.command(ctx, a.launchctl, "print-disabled", a.domain())
+	if err != nil {
+		commandErr := a.commandError(ErrServiceRegistrationFailed, "inspect_disabled", err, d.Root)
+		// Preserve cancellation identity without wrapping unsanitized command
+		// output. Cleanup retains the private record if inspection is unavailable.
+		if errors.Is(err, context.Canceled) {
+			commandErr = errors.Join(commandErr, context.Canceled)
+		} else if errors.Is(err, context.DeadlineExceeded) {
+			commandErr = errors.Join(commandErr, context.DeadlineExceeded)
+		}
+		return fail("inspect_disabled", commandErr)
+	}
+	disabled, err := parseLaunchdDisabled(raw, serviceLaunchdLabel(d))
+	if err != nil {
+		return fail("inspect_disabled", err)
+	}
+	if err := checkIdentity("post_disabled"); err != nil {
 		return err
 	}
 	// launchctl(1), enable/disable: a disabled service cannot load until enabled;
-	// overrides persist across boots. Clear that override before bootstrap.
-	if _, err := a.command(ctx, a.launchctl, "enable", a.target(d)); err != nil {
-		return fail("enable", a.commandError(ErrServiceRegistrationFailed, "enable", err, d.Root))
+	// overrides persist across boots. Clear only an explicitly disabled target.
+	if disabled == launchdOverrideDisabled {
+		if _, err := a.command(ctx, a.launchctl, "enable", a.target(d)); err != nil {
+			return fail("enable", a.commandError(ErrServiceRegistrationFailed, "enable", err, d.Root))
+		}
 	}
 	if err := checkIdentity("pre_bootstrap"); err != nil {
 		return err
 	}
+	bootstrapAttempted = true
 	if _, err := a.command(ctx, a.launchctl, "bootstrap", a.domain(), a.plistPath(d)); err != nil {
 		return fail("bootstrap", a.commandError(ErrServiceRegistrationFailed, "bootstrap", err, d.Root))
 	}
@@ -511,7 +594,7 @@ func (a *launchdAgentAdapter) removePlistIdentity(d ServiceDescriptor, identity 
 	return nil
 }
 
-func (a *launchdAgentAdapter) cleanupPartial(ctx context.Context, d ServiceDescriptor, created os.FileInfo) {
+func (a *launchdAgentAdapter) cleanupPartial(ctx context.Context, d ServiceDescriptor, created os.FileInfo, bootstrapAttempted bool) {
 	// A foreign print result never authorizes bootout. Only the original file
 	// identity can be removed, including when bootstrap exposed a foreign label.
 	obs, err := a.Inspect(ctx, d)
@@ -521,6 +604,12 @@ func (a *launchdAgentAdapter) cleanupPartial(ctx context.Context, d ServiceDescr
 		return
 	}
 	if err == nil && obs.Registered && obs.Owned {
+		// Before this Apply attempts bootstrap, a failed read or identity check
+		// cannot authorize a bootout of a concurrently loaded registration.
+		// Retain its private recovery record instead.
+		if !bootstrapAttempted {
+			return
+		}
 		if err := a.bootout(ctx, d); err != nil {
 			// Retain the exact ownership record if the verified registration
 			// could not be removed; a later explicit Remove must remain usable.
