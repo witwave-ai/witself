@@ -140,3 +140,59 @@ func TestWindowsPrivateRollbackDoesNotFollowReparseLeaf(t *testing.T) {
 	}
 	assertSpoolPrivateDescriptor(t, target)
 }
+
+// The source DELETE handle remains open through post-rename validation in the
+// production publisher. Model that exact primitive window without weakening
+// the private reader's sharing or path protections.
+func TestWindowsPrivateRenameVisibleBeforePrivateReadable(t *testing.T) {
+	root := windowsPrivateTestRoot(t)
+	target := filepath.Join(root, "published")
+	const content = "synthetic complete publication"
+	source, err := WindowsPrivateCreateTemp(root)
+	if err != nil {
+		t.Fatal("cannot create staged publication fixture")
+	}
+	defer func() { _ = source.Close() }()
+	if _, err := source.WriteString(content); err != nil || source.Sync() != nil {
+		t.Fatal("cannot persist staged publication fixture")
+	}
+	if source.Close() != nil {
+		t.Fatal("cannot close staged publication fixture")
+	}
+	handle, err := windowsPrivateOpenMetadata(source.Name(), windows.DELETE|windows.READ_CONTROL)
+	if err != nil {
+		t.Fatal("cannot retain publication metadata handle")
+	}
+	defer func() {
+		if handle != windows.InvalidHandle {
+			_ = windows.CloseHandle(handle)
+		}
+	}()
+	if windowsPrivateValidateHandle(handle, false) != nil || windowsPrivateReplace(handle, target) != nil {
+		t.Fatal("cannot publish retained-handle fixture")
+	}
+	if _, err := os.Stat(target); err != nil {
+		t.Fatal("published name was not visible with retained DELETE handle")
+	}
+	reader, err := WindowsPrivateOpenFile(target, os.O_RDONLY)
+	if reader != nil {
+		_ = reader.Close()
+	}
+	if !errors.Is(err, windows.ERROR_SHARING_VIOLATION) {
+		t.Fatal("visible publication did not refuse private open while DELETE handle was retained")
+	}
+	if windows.CloseHandle(handle) != nil {
+		t.Fatal("cannot release publication metadata handle")
+	}
+	handle = windows.InvalidHandle
+	reader, err = WindowsPrivateOpenFile(target, os.O_RDONLY)
+	if err != nil {
+		t.Fatal("settled publication remained privately unreadable")
+	}
+	defer func() { _ = reader.Close() }()
+	data, err := io.ReadAll(reader)
+	if err != nil || string(data) != content {
+		t.Fatal("settled publication did not retain complete bytes")
+	}
+	assertSpoolPrivateDescriptor(t, target)
+}

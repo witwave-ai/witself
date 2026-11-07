@@ -184,8 +184,9 @@ func TestNativeServiceLifecycle(t *testing.T) {
 		}
 		return stopWithReceipt(func() error {
 			if runtime.GOOS == "windows" {
-				status, err := cell.ExitServiceHost(stopCtx)
+				status, err := diagnostics.exitForeground(stopCtx, nativeServiceHostBound, cell.ExitServiceHost)
 				if err != nil || status.HostExit != "exited" {
+					logFailure(err, diagnostics.foregroundStderr.snapshot())
 					return errors.New("native foreground authenticated exit failed")
 				}
 			} else if err := nativeServiceInterruptForeground(command.Process); err != nil {

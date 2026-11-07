@@ -12,8 +12,9 @@ import (
 )
 
 const nativeServiceProofRowTimeout = 15 * time.Minute
-const nativeServiceCleanupReserve = localcell.ServiceShutdownTimeout
-const nativeServiceProofBound = nativeServiceProofRowTimeout - nativeServiceCleanupReserve - nativeServiceHostBound
+
+var nativeServiceCleanupReserve = localcell.ServiceHostExitBudget(nativeServiceHostBound)
+var nativeServiceProofBound = nativeServiceProofRowTimeout - nativeServiceCleanupReserve - nativeServiceHostBound
 
 // One absolute deadline bounds the composition, even when phase caps sum to
 // more than the row permits. Cleanup keeps its independent reserved parent.

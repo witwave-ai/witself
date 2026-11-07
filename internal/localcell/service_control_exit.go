@@ -12,9 +12,11 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -39,6 +41,74 @@ type serviceHostExitRequests struct {
 
 func hostExitRefused(step string) error { return &serviceControlRefusal{step: "host_exit:" + step} }
 
+const serviceHostExitAdmissionTimeout = "service_control_refused: host_exit:admission"
+
+// A timer's deadline can pass before its callback publishes Err. Check the
+// selected ACK deadline with the same monotonic clock, preserving published
+// cancellation first. An early transport failure is still a refusal.
+func serviceHostExitAdmissionCause(admission, caller context.Context, now time.Time) error {
+	if err := admission.Err(); err != nil {
+		return err
+	}
+	if err := caller.Err(); err != nil {
+		return err
+	}
+	if deadline, ok := admission.Deadline(); ok && !now.Before(deadline) {
+		return context.DeadlineExceeded
+	}
+	return nil
+}
+
+// Preserve the failure boundary without exposing paths, process identities or
+// transport error text to a caller's diagnostics.
+type serviceHostExitError struct {
+	err      error
+	phase    string
+	cause    string
+	accepted bool
+}
+
+func (e *serviceHostExitError) Error() string {
+	return "service host exit: " + e.phase + ": " + e.cause
+}
+func (e *serviceHostExitError) Unwrap() error { return e.err }
+func (e *serviceHostExitError) ServiceHostExitDiagnostic() (phase, cause string, ackSeen bool) {
+	return e.phase, e.cause, e.accepted
+}
+
+func hostExitFailure(phase string, accepted bool, err error) error {
+	if err == nil {
+		return nil
+	}
+	var recorded *serviceHostExitError
+	if errors.As(err, &recorded) {
+		return err
+	}
+	switch phase {
+	case "identity_tree", "endpoint", "retain", "admission", "terminal", "lease_validate", "lease_lock", "observe", "drain":
+	default:
+		phase = "other"
+	}
+	cause := "other"
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		cause = "deadline"
+	case errors.Is(err, context.Canceled):
+		cause = "canceled"
+	case errors.Is(err, ErrServiceShutdownForced):
+		cause = "forced"
+	case runtime.GOOS == "windows" && errors.Is(err, syscall.Errno(32)):
+		cause = "sharing"
+	case errors.Is(err, os.ErrNotExist):
+		cause = "missing"
+	case errors.Is(err, os.ErrPermission):
+		cause = "privacy"
+	case errors.Is(err, ErrServiceControlRefused):
+		cause = "refused"
+	}
+	return &serviceHostExitError{err: err, phase: phase, cause: cause, accepted: accepted}
+}
+
 func validHostExitChallenge(challenge string) bool {
 	if len(challenge) != 26 || challenge != strings.ToLower(challenge) {
 		return false
@@ -50,11 +120,14 @@ func validHostExitChallenge(challenge string) bool {
 func (c *Cell) serviceHostExitIdentity() (ServiceDescriptor, serviceLeaseRecord, error) {
 	d, err := c.ServiceDescriptor()
 	if err != nil {
-		return d, serviceLeaseRecord{}, hostExitRefused("envelope")
+		return d, serviceLeaseRecord{}, hostExitFailure("identity_tree", false, errors.Join(hostExitRefused("envelope"), err))
 	}
 	var lease serviceLeaseRecord
-	if servicePrivateRecord(c.path("service", "lease.json")) != nil || readJSON(c.path("service", "lease.json"), &lease) != nil {
-		return d, lease, hostExitRefused("envelope")
+	if err := servicePrivateRecord(c.path("service", "lease.json")); err != nil {
+		return d, lease, hostExitFailure("lease_validate", false, errors.Join(hostExitRefused("envelope"), err))
+	}
+	if err := readJSON(c.path("service", "lease.json"), &lease); err != nil {
+		return d, lease, hostExitFailure("lease_validate", false, errors.Join(hostExitRefused("envelope"), err))
 	}
 	boot, err := serviceBootID()
 	if err != nil || boot == "" || lease.Version != 1 || lease.BootID != boot || lease.InstallationID != d.InstallationID || lease.Owner != d.UID || lease.PID <= 1 || lease.StartIdentity == "" {
@@ -77,7 +150,13 @@ func (c *Cell) validateHostExitEnvelope(envelope serviceHostExitEnvelope) error 
 }
 
 func (c *Cell) serveHostExit(w http.ResponseWriter, r *http.Request, commands chan<- serviceCommand, closed <-chan struct{}, requests *serviceHostExitRequests) {
-	if http.NewResponseController(w).SetWriteDeadline(time.Now().Add(ServiceShutdownTimeout)) != nil {
+	budgets := serviceHostExitBudgets(c.cfg.Timeout)
+	ctx, cancel := context.WithTimeout(r.Context(), serviceHostExitPhaseBudget(r.Context(), budgets.transaction))
+	defer cancel()
+	admissionCtx, admissionCancel := context.WithTimeout(ctx, serviceHostExitPhaseBudget(ctx, budgets.admission))
+	defer admissionCancel()
+	deadline, _ := ctx.Deadline()
+	if http.NewResponseController(w).SetWriteDeadline(deadline) != nil {
 		http.Error(w, "service_control_refused: host_exit:envelope", http.StatusConflict)
 		return
 	}
@@ -99,8 +178,6 @@ func (c *Cell) serveHostExit(w http.ResponseWriter, r *http.Request, commands ch
 		http.Error(w, "service_control_refused: host_exit:envelope", http.StatusConflict)
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), ServiceShutdownTimeout)
-	defer cancel()
 	delivered := make(chan struct{})
 	completed := make(chan string, 1)
 	finalized := make(chan struct{})
@@ -110,7 +187,10 @@ func (c *Cell) serveHostExit(w http.ResponseWriter, r *http.Request, commands ch
 	command := serviceCommand{ctx: ctx, action: "exit-host", reply: make(chan serviceReply, 1), exit: &envelope, delivered: delivered, completed: completed, finalized: finalized}
 	select {
 	case commands <- command:
-	case <-ctx.Done():
+	case <-admissionCtx.Done():
+		if admissionCtx.Err() == context.DeadlineExceeded {
+			http.Error(w, serviceHostExitAdmissionTimeout, http.StatusRequestTimeout)
+		}
 		return
 	case <-closed:
 		return
@@ -135,6 +215,12 @@ func (c *Cell) serveHostExit(w http.ResponseWriter, r *http.Request, commands ch
 		if flush, ok := w.(http.Flusher); ok {
 			flush.Flush()
 		}
+		completionCtx, completionCancel := context.WithTimeout(ctx, serviceHostExitPhaseBudget(ctx, ServiceShutdownTimeout))
+		defer completionCancel()
+		completionDeadline, _ := completionCtx.Deadline()
+		if http.NewResponseController(w).SetWriteDeadline(completionDeadline) != nil {
+			return
+		}
 		deliver()
 		select {
 		case disposition := <-completed:
@@ -151,10 +237,13 @@ func (c *Cell) serveHostExit(w http.ResponseWriter, r *http.Request, commands ch
 			if flush, ok := w.(http.Flusher); ok {
 				flush.Flush()
 			}
-		case <-ctx.Done():
+		case <-completionCtx.Done():
 		case <-closed:
 		}
-	case <-ctx.Done():
+	case <-admissionCtx.Done():
+		if admissionCtx.Err() == context.DeadlineExceeded {
+			http.Error(w, serviceHostExitAdmissionTimeout, http.StatusRequestTimeout)
+		}
 	case <-closed:
 	}
 }
@@ -191,7 +280,7 @@ func (s *supervisor) finishHostExit(ctx context.Context, delivered <-chan struct
 	case <-ctx.Done():
 		return false
 	}
-	drainCtx, cancel := s.hooks.shutdownContext(ctx, ServiceShutdownTimeout)
+	drainCtx, cancel := s.hooks.shutdownContext(ctx, serviceHostExitPhaseBudget(ctx, ServiceShutdownTimeout))
 	defer cancel()
 	err := retryServiceContention(drainCtx, func(ctx context.Context) error { return s.call(ctx, "stop", s.hooks.stop) })
 	if !serviceStopPermitsHostExit(err) || drainCtx.Err() != nil {
@@ -208,6 +297,7 @@ func (s *supervisor) finishHostExit(ctx context.Context, delivered <-chan struct
 }
 
 type serviceHostExitSession struct {
+	ctx         context.Context
 	body        io.ReadCloser
 	limited     *io.LimitedReader
 	cancel      context.CancelFunc
@@ -241,7 +331,7 @@ func readServiceHostExitLine(body io.Reader) (serviceHostExitResponse, error) {
 	return receipt, nil
 }
 func (s *serviceHostExitSession) finish() {
-	defer func() { _ = s.body.Close(); s.cancel(); s.transport.CloseIdleConnections() }()
+	defer func() { _ = s.body.Close(); s.transport.CloseIdleConnections() }()
 	reader := io.Reader(s.body)
 	if s.limited != nil {
 		reader = s.limited
@@ -278,10 +368,14 @@ func (c *Cell) startHostExitRequest(ctx context.Context, envelope serviceHostExi
 	if err != nil {
 		return nil, hostExitRefused("envelope")
 	}
-	requestCtx, cancel := context.WithTimeout(ctx, ServiceShutdownTimeout)
-	ackTimer := time.AfterFunc(30*time.Second, cancel)
-	defer ackTimer.Stop()
-	transport := &http.Transport{Proxy: nil, DisableKeepAlives: true, ResponseHeaderTimeout: 30 * time.Second, DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) { return c.dialServiceControl(ctx) }}
+	budgets := serviceHostExitBudgets(c.cfg.Timeout)
+	requestCtx, cancel := context.WithTimeout(ctx, serviceHostExitPhaseBudget(ctx, budgets.transaction))
+	admission := serviceHostExitPhaseBudget(requestCtx, budgets.admission)
+	ackCtx, ackCancel := context.WithTimeout(requestCtx, admission)
+	defer ackCancel()
+	stopACK := context.AfterFunc(ackCtx, cancel)
+	defer stopACK()
+	transport := &http.Transport{Proxy: nil, DisableKeepAlives: true, ResponseHeaderTimeout: admission, DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) { return c.dialServiceControl(ctx) }}
 	client := &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	request, err := http.NewRequestWithContext(requestCtx, http.MethodPost, "http://localcell/exit-host", bytes.NewReader(body))
 	if err != nil {
@@ -292,28 +386,48 @@ func (c *Cell) startHostExitRequest(ctx context.Context, envelope serviceHostExi
 	request.Header.Set("Authorization", "Bearer "+string(secret))
 	response, err := client.Do(request)
 	if err != nil {
+		cause := errors.Join(hostExitRefused("envelope"), serviceHostExitAdmissionCause(ackCtx, ctx, time.Now()))
 		cancel()
 		transport.CloseIdleConnections()
-		return nil, hostExitRefused("envelope")
+		return nil, hostExitFailure("admission", false, cause)
 	}
 	limited := &io.LimitedReader{R: response.Body, N: 4097}
 	session := &serviceHostExitSession{body: response.Body, limited: limited, cancel: cancel, transport: transport, challenge: envelope.Challenge}
-	refuse := func(step string) (*serviceHostExitSession, error) {
+	refuse := func(step string, resultErr error) (*serviceHostExitSession, error) {
+		cause := serviceHostExitAdmissionCause(ackCtx, ctx, time.Now())
+		if cause == nil {
+			cause = resultErr
+		}
+		cause = errors.Join(hostExitRefused(step), cause)
 		cancel()
 		_ = response.Body.Close()
 		transport.CloseIdleConnections()
-		return nil, hostExitRefused(step)
+		return nil, hostExitFailure("admission", false, cause)
 	}
 	if response.StatusCode != http.StatusOK {
-		return refuse("drain")
+		var resultErr error
+		if response.StatusCode == http.StatusRequestTimeout {
+			data, readErr := io.ReadAll(limited)
+			if readErr == nil && limited.N > 0 && string(data) == serviceHostExitAdmissionTimeout+"\n" {
+				resultErr = context.DeadlineExceeded
+			}
+		}
+		return refuse("drain", resultErr)
 	}
 	// A single bounded ACK line is flushed while the request stays open. Closing
 	// this response or canceling the caller cancels the exact drain context.
 	receipt, err := readServiceHostExitLine(limited)
 	if err != nil || limited.N == 0 || receipt.Disposition != "accepted" || receipt.Challenge != envelope.Challenge {
-		return refuse("envelope")
+		return refuse("envelope", nil)
 	}
 
+	if !stopACK() || serviceHostExitAdmissionCause(ackCtx, ctx, time.Now()) != nil {
+		return refuse("envelope", serviceHostExitAdmissionCause(ackCtx, ctx, time.Now()))
+	}
+	completionCtx, completionCancel := context.WithTimeout(requestCtx, serviceHostExitPhaseBudget(requestCtx, ServiceShutdownTimeout))
+	stopCompletion := context.AfterFunc(completionCtx, cancel)
+	session.ctx = completionCtx
+	session.cancel = func() { stopCompletion(); completionCancel(); cancel() }
 	return session, nil
 }
 
@@ -324,7 +438,7 @@ func (c *Cell) hostExitRequest(ctx context.Context, envelope serviceHostExitEnve
 	}
 	// ACK-only callers retain this bounded stream through completion. Their
 	// context still cancels it; no background observer can outlive the tree bound.
-	go session.finish()
+	go func() { defer session.cancel(); session.finish() }()
 	return nil
 }
 
@@ -359,27 +473,31 @@ func (c *Cell) controlExitHost(ctx context.Context) (ServiceStatus, error) {
 // ExitServiceHost requests an authenticated drain and then observes the exact
 // host's exit. It preserves desired state so a same-boot restart can resume.
 func (c *Cell) ExitServiceHost(ctx context.Context) (ServiceStatus, error) {
+	ctx, cancel := context.WithTimeout(ctx, serviceHostExitPhaseBudget(ctx, ServiceHostExitBudget(c.cfg.Timeout)))
+	defer cancel()
 	envelope, lease, err := c.newHostExitEnvelope()
 	if err != nil {
-		return ServiceStatus{}, err
+		return ServiceStatus{}, hostExitFailure("identity_tree", false, err)
 	}
 	observer, err := retainServiceExitHost(lease)
 	if err != nil {
-		return ServiceStatus{}, err
+		return ServiceStatus{}, hostExitFailure("retain", false, err)
 	}
 	defer observer.close()
 	session, err := c.startHostExitRequest(ctx, envelope)
 	if err != nil {
-		return ServiceStatus{}, err
+		return ServiceStatus{}, hostExitFailure("endpoint", false, errors.Join(err, ctx.Err()))
 	}
+	status := ServiceStatus{Generation: envelope.Generation, HostExit: "accepted"}
 	streamDone := make(chan struct{})
 	go func() { defer close(streamDone); session.finish() }()
 	defer func() { session.cancel(); <-streamDone }()
-	if err := c.waitServiceHostExit(ctx, lease, observer); err != nil {
-		return ServiceStatus{}, err
+	if err := c.waitServiceHostExit(session.ctx, lease, observer); err != nil {
+		return status, hostExitFailure("observe", true, errors.Join(err, session.ctx.Err()))
 	}
 	<-streamDone
-	return ServiceStatus{Generation: envelope.Generation, HostExit: "exited"}, session.err
+	status.HostExit = "exited"
+	return status, hostExitFailure("terminal", true, errors.Join(session.err, session.ctx.Err()))
 }
 
 // Probe the stable lock without creating, rewriting, or unlinking its identity.
@@ -440,7 +558,7 @@ func (c *Cell) exitServiceHostForRemoval(ctx context.Context) error {
 	streamDone := make(chan struct{})
 	go func() { defer close(streamDone); session.finish() }()
 	defer func() { session.cancel(); <-streamDone }()
-	if err := c.waitServiceHostExit(ctx, lease, observer); err != nil {
+	if err := c.waitServiceHostExit(session.ctx, lease, observer); err != nil {
 		return err
 	}
 	<-streamDone
@@ -453,21 +571,22 @@ type serviceExitHostObserver interface {
 }
 
 func (c *Cell) waitServiceHostExit(ctx context.Context, lease serviceLeaseRecord, observer serviceExitHostObserver) error {
-	ctx, cancel := context.WithTimeout(ctx, ServiceShutdownTimeout)
-	defer cancel()
 	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
 	for {
 		if ctx.Err() != nil {
-			return hostExitRefused("drain")
+			return hostExitFailure("observe", true, errors.Join(hostExitRefused("drain"), ctx.Err()))
 		}
 		var current serviceLeaseRecord
-		if servicePrivateRecord(c.path("service", "lease.json")) != nil || readJSON(c.path("service", "lease.json"), &current) != nil || current != lease {
-			return hostExitRefused("envelope")
+		if err := servicePrivateRecord(c.path("service", "lease.json")); err != nil {
+			return hostExitFailure("lease_validate", true, errors.Join(hostExitRefused("envelope"), err))
+		}
+		if err := readJSON(c.path("service", "lease.json"), &current); err != nil || current != lease {
+			return hostExitFailure("lease_validate", true, errors.Join(hostExitRefused("envelope"), err))
 		}
 		held, err := c.serviceHostLeaseHeld()
 		if err != nil {
-			return err
+			return hostExitFailure("lease_lock", true, err)
 		}
 		exited, err := observer.exited()
 		if err != nil {
@@ -479,13 +598,13 @@ func (c *Cell) waitServiceHostExit(ctx context.Context, lease serviceLeaseRecord
 				if err := readJSON(c.path("run", component+".json"), &record); errors.Is(err, os.ErrNotExist) {
 					continue
 				} else if err != nil {
-					return hostExitRefused("drain")
+					return hostExitFailure("observe", true, errors.Join(hostExitRefused("drain"), ctx.Err()))
 				}
 				if record.Root != c.cfg.Root || record.Component != component || record.PID <= 1 || record.StartTime == "" {
-					return hostExitRefused("drain")
+					return hostExitFailure("observe", true, errors.Join(hostExitRefused("drain"), ctx.Err()))
 				}
 				if _, alive, err := processIdentity(record.PID); err != nil || alive {
-					return hostExitRefused("drain")
+					return hostExitFailure("observe", true, errors.Join(hostExitRefused("drain"), ctx.Err()))
 				}
 			}
 			return nil
@@ -497,12 +616,12 @@ func (c *Cell) waitServiceHostExit(ctx context.Context, lease serviceLeaseRecord
 			status, statusErr := c.Control(observeCtx, "observe")
 			observeCancel()
 			if statusErr == nil && (status.HostExit == "refused" || status.State == "faulted") {
-				return hostExitRefused("drain")
+				return hostExitFailure("observe", true, errors.Join(hostExitRefused("drain"), ctx.Err()))
 			}
 		}
 		select {
 		case <-ctx.Done():
-			return hostExitRefused("drain")
+			return hostExitFailure("observe", true, errors.Join(hostExitRefused("drain"), ctx.Err()))
 		case <-ticker.C:
 		}
 	}

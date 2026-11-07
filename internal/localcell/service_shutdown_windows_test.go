@@ -279,10 +279,23 @@ func TestWindowsNoConsoleShutdown(t *testing.T) {
 		t.Fatal("child did not prove absent console")
 	}
 	probeResult := f.cell.path("tmp", "console-probe-result")
-	waitShutdownMarker(t, probeResult, f.cell.cfg.Timeout+10*f.startup)
-	result, err := readPrivateFile(probeResult)
+	probeCtx, probeCancel := context.WithTimeout(t.Context(), f.cell.cfg.Timeout+10*f.startup)
+	defer probeCancel()
+	result, observation, err := readShutdownProbeResult(probeCtx,
+		func() ([]byte, error) { return readPrivateFile(probeResult) },
+		windowsShutdownProbeReadClass, func(ctx context.Context) error {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(time.Millisecond):
+				return nil
+			}
+		})
 	if err != nil {
-		t.Fatal("no-console probe result unavailable")
+		t.Logf("probe_result phase=%s cause=%s retries=%d", observation.phase, observation.cause, observation.retries)
+		if observation.phase != "complete" {
+			t.Fatal("no-console probe result unavailable")
+		}
 	}
 	switch string(result) {
 	case "0":
@@ -668,5 +681,40 @@ func TestWindowsShutdownParentDeadline(t *testing.T) {
 	}
 	if _, alive, err := windowsProcessIdentity(f.handle); err != nil || !alive {
 		t.Fatal("whole-tree exhaustion permitted force")
+	}
+}
+
+// Only missing publication and the exact sharing class are transient. A policy,
+// reparse, access or other I/O refusal never authorizes another private read.
+func windowsShutdownProbeReadClass(err error) string {
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return "missing"
+	case errors.Is(err, windows.ERROR_SHARING_VIOLATION):
+		return "sharing"
+	case errors.Is(err, windows.ERROR_ACCESS_DENIED), errors.Is(err, os.ErrPermission):
+		return "access"
+	default:
+		return "other"
+	}
+}
+
+func TestWindowsShutdownProbeReadClass(t *testing.T) {
+	for _, row := range []struct {
+		err   error
+		class string
+	}{
+		{os.ErrNotExist, "missing"},
+		{windows.ERROR_FILE_NOT_FOUND, "missing"},
+		{windows.ERROR_PATH_NOT_FOUND, "missing"},
+		{windows.ERROR_SHARING_VIOLATION, "sharing"},
+		{errors.Join(errors.New("synthetic wrapper"), windows.ERROR_SHARING_VIOLATION), "sharing"},
+		{windows.ERROR_ACCESS_DENIED, "access"},
+		{windows.ERROR_LOCK_VIOLATION, "other"},
+		{errors.New("private Windows sharing-violation"), "other"},
+	} {
+		if windowsShutdownProbeReadClass(row.err) != row.class {
+			t.Fatal("probe read retry classifier accepted an inexact Windows error class")
+		}
 	}
 }
