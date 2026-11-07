@@ -13,6 +13,11 @@ import (
 	"time"
 )
 
+func TestMain(m *testing.M) {
+	DispatchProcessHelper()
+	os.Exit(m.Run())
+}
+
 func TestProcessIdentityHelperProcess(_ *testing.T) {
 	if len(os.Args) < 2 || os.Args[len(os.Args)-1] != "localcell-process-helper" {
 		return

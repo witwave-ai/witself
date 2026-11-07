@@ -226,6 +226,24 @@ func TestServiceRunInterruptedTickShutdownRepairsBeforeStop(t *testing.T) {
 			t.Cleanup(func() { os.Stderr = previous; _ = stderr.Close() })
 			err = c.Run(ctx, SupervisorPolicy{hooks: &h, ShutdownTimeout: time.Second})
 			os.Stderr = previous
+			if runtime.GOOS == "windows" {
+				// A canceled Windows app stop is no authority for a second
+				// automatic stop with fresh escalation time. Preserve its
+				// journal and durable fault until explicit repair.
+				descriptor, descriptorErr := c.ServiceDescriptor()
+				progress, journalErr := c.readJournal()
+				if !errors.Is(err, context.Canceled) || descriptorErr != nil || !descriptor.Faulted || journalErr != nil || progress.pending == nil {
+					t.Fatal("canceled Windows stop did not preserve fault and journal")
+				}
+				if len(events) != 0 || stops != 2 || healths != 2 {
+					t.Fatal("Windows refusal retried shutdown under a fresh context")
+				}
+				data, readErr := os.ReadFile(stderr.Name())
+				if readErr != nil || string(data) != "native service host site=supervisor_health\nnative service host site=supervisor_stop\n" {
+					t.Fatal("Windows stop refusal lost fixed failure receipts")
+				}
+				return
+			}
 			if (!failStop && err != nil) || (failStop && (err == nil || err.Error() != stopFailure.Error())) {
 				t.Fatal("Run retained cancellation or lost the shutdown result")
 			}

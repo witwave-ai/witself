@@ -22,6 +22,7 @@ const (
 // Config contains local-only overrides. Hosted callers receive its zero value.
 type Config struct {
 	Local                            bool
+	LocalShutdown                    LocalShutdown
 	SyncSchema                       bool
 	APIAddr, HealthAddr, MetricsAddr string
 	DatabaseURL, SpoolDir, AccountID string
@@ -61,6 +62,10 @@ var localJobEligibility = map[string]bool{
 // wildcard refusals; its values never appear in diagnostics.
 func FromEnv(role string, lookup func(string) (string, bool), environ []string) (Config, error) {
 	runtime, _ := lookup("WITSELF_RUNTIME")
+	shutdown, err := localShutdownFromEnv(role, runtime, lookup, environ)
+	if err != nil {
+		return Config{}, err
+	}
 	const syncVariable = "WITSELF_LOCAL_SYNC_SCHEMA"
 	syncValue, syncPresent := lookup(syncVariable)
 	for _, entry := range environ {
@@ -101,7 +106,7 @@ func FromEnv(role string, lookup func(string) (string, bool), environ []string) 
 			}
 		}
 	}
-	cfg := Config{Local: true, MigrationWait: DefaultMigrationWait, JobRestartPolicy: JobRestartNever}
+	cfg := Config{Local: true, LocalShutdown: shutdown, MigrationWait: DefaultMigrationWait, JobRestartPolicy: JobRestartNever}
 	if syncPresent {
 		if syncValue != "1" {
 			return Config{}, fmt.Errorf("%s must be 1 when explicitly selected", syncVariable)

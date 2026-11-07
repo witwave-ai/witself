@@ -15,6 +15,11 @@ import (
 	"github.com/witwave-ai/witself/internal/localcell"
 )
 
+func TestMain(m *testing.M) {
+	localcell.DispatchProcessHelper()
+	os.Exit(m.Run())
+}
+
 func TestRejectsInvalidArgumentsBeforeMutation(t *testing.T) {
 	for _, args := range [][]string{
 		{}, {"-operation", "unknown"}, {"-operation", "start", "-root", "relative"},

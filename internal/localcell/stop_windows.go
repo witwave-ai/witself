@@ -22,13 +22,15 @@ var (
 	errWindowsConsoleUnavailable = errors.New("localcell: component console unavailable; graceful stop refused")
 )
 
+// DispatchProcessHelper is called explicitly by the harness and its test binary.
+// Importing localcell must never dispatch process arguments in hosted commands.
 // A separate detached helper attaches only to the verified target's console.
 // It leaves the invoking harness's console unchanged, including when that
 // harness is a later invocation in a different terminal. CTRL_BREAK is scoped
 // to the component's CREATE_NEW_PROCESS_GROUP, and Go maps it to os.Interrupt,
 // which both server and worker already handle. A closed or absent target console
 // is an explicit refusal, not authority to force-kill a running component.
-func init() {
+func DispatchProcessHelper() {
 	if len(os.Args) != 6 || os.Args[1] != windowsStopArgument {
 		return
 	}
@@ -41,7 +43,7 @@ func init() {
 		os.Exit(125)
 	}
 	record, err := c.windowsStopRecord(os.Args[3], ProcessState{PID: pid, Alive: true, Matches: true})
-	if err != nil || record.StartTime != os.Args[5] || record.LaunchPending {
+	if err != nil || record.StartTime != os.Args[5] || record.LaunchPending || record.LaunchKind != shutdownLaunchLegacy {
 		os.Exit(125)
 	}
 	handle, alive, err := openVerifiedWindowsProcess(record, 0)
@@ -64,7 +66,7 @@ func (c *Cell) windowsStopRecord(component string, state ProcessState) (ProcessR
 	if err := readJSON(c.path("run", component+".json"), &record); err != nil {
 		return record, errors.New("localcell: cannot read process control identity")
 	}
-	if !state.Alive || !state.Matches || record.PID != state.PID || record.PID <= 1 ||
+	if (state.Alive && !state.Matches) || record.PID != state.PID || record.PID <= 1 ||
 		record.StartTime == "" || record.Root != c.cfg.Root || record.Component != component {
 		return record, errors.New("localcell: process identity mismatch; refusing to signal")
 	}
@@ -112,9 +114,23 @@ func windowsConsoleBreak(handle windows.Handle, record ProcessRecord) int {
 }
 
 func (c *Cell) terminateChild(ctx context.Context, component string, state ProcessState) error {
+	return c.stopChildOutcome(ctx, component, state).err()
+}
+
+// Native mutation witness. Entry is observed before any legacy guard, so a
+// downstream refusal cannot hide an attempted pipe-to-console fallback.
+var windowsLegacyStopAttempt func()
+
+func (c *Cell) terminateLegacyChild(ctx context.Context, component string, state ProcessState) error {
+	if windowsLegacyStopAttempt != nil {
+		windowsLegacyStopAttempt()
+	}
 	record, err := c.windowsStopRecord(component, state)
 	if err != nil {
 		return err
+	}
+	if record.LaunchKind != shutdownLaunchLegacy {
+		return shutdownRefused("shutdown:pipe")
 	}
 	if record.LaunchPending {
 		return terminateWindowsPending(ctx, record)

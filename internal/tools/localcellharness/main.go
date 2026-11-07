@@ -24,6 +24,7 @@ import (
 )
 
 func main() {
+	localcell.DispatchProcessHelper()
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	if err := run(ctx, os.Args[1:], os.Stdout); err != nil {

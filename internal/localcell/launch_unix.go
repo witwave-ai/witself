@@ -13,11 +13,11 @@ import (
 
 const childLaunchArgument = "--localcell-internal-exec"
 
-// The package is linked only into tests and the explicit harness. Re-exec gives
-// the child a chance to publish its own PID fence BEFORE exec replaces it with
-// the real component, closing the parent's spawn-before-record crash window.
-// It receives the same scratch environment that the final binary will receive.
-func init() {
+// DispatchProcessHelper is called explicitly by the harness and its test binary.
+// Importing localcell must never dispatch process arguments in hosted commands.
+// Re-exec publishes the child PID fence before exec replaces it with the real
+// component, closing the parent's spawn-before-record crash window.
+func DispatchProcessHelper() {
 	if len(os.Args) != 5 || os.Args[1] != childLaunchArgument {
 		return
 	}

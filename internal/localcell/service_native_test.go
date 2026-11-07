@@ -183,7 +183,12 @@ func TestNativeServiceLifecycle(t *testing.T) {
 			return nil
 		}
 		return stopWithReceipt(func() error {
-			if err := nativeServiceInterruptForeground(command.Process); err != nil {
+			if runtime.GOOS == "windows" {
+				status, err := cell.ExitServiceHost(stopCtx)
+				if err != nil || status.HostExit != "exited" {
+					return errors.New("native foreground authenticated exit failed")
+				}
+			} else if err := nativeServiceInterruptForeground(command.Process); err != nil {
 				logFailure(err, diagnostics.foregroundStderr.snapshot())
 				return errors.New("native foreground interrupt failed")
 			}
@@ -234,6 +239,14 @@ func TestNativeServiceLifecycle(t *testing.T) {
 	before := nativeServiceProcess(t, root)
 	hostBefore := nativeServiceHostProcess(t, root)
 	childrenBefore := nativeServiceChildren(t, root)
+	if runtime.GOOS == "windows" {
+		for _, role := range []string{"server", "worker"} {
+			record := childrenBefore[role]
+			if record.LaunchKind != "private_pipe" || record.ShutdownEndpoint == "" || record.ShutdownDescriptor == "" || record.BootID == "" {
+				t.Fatal("native service child lacks shutdown channel ownership")
+			}
+		}
+	}
 	manifest := assertReady(t, cell, proofPhase(nativeServiceHostBound))
 	diagnostics.enter("write_witness")
 	read := nativeServiceWriteWitness(proofCtx, t, proof, root, manifest)
@@ -308,6 +321,9 @@ func TestNativeServiceLifecycle(t *testing.T) {
 		t.Log("PASS service_manager_persistence")
 	} else {
 		t.Log("PASS service_foreground_persistence")
+		if runtime.GOOS == "windows" {
+			t.Log("PASS service_shutdown_channel")
+		}
 	}
 }
 

@@ -35,6 +35,9 @@ import (
 
 // Config holds the listen addresses for the three witself-server listeners.
 type Config struct {
+	// LocalRuntimeReady is the optional local child's post-initialization phase
+	// fence. Hosted callers leave it nil. It observes Run's cancellation context.
+	LocalRuntimeReady func(context.Context) error
 	// LocalRuntime selects the standalone local runtime configuration.
 	LocalRuntime bool
 	// SpoolDir is the private local archive directory; empty preserves hosted temp behavior.
@@ -2406,6 +2409,14 @@ func Run(ctx context.Context, cfg Config) error {
 		})
 	}
 
+	if cfg.LocalRuntimeReady != nil {
+		if err := cfg.LocalRuntimeReady(ctx); err != nil {
+			for _, running := range servers {
+				_ = running.ln.Close()
+			}
+			return err
+		}
+	}
 	errc := make(chan error, len(servers))
 	for _, r := range servers {
 		fmt.Fprintf(os.Stderr, "witself-server: %s listening on %s\n", r.name, r.ln.Addr())
