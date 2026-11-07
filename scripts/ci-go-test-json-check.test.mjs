@@ -74,6 +74,151 @@ test('native service capability output cannot disclose arbitrary diagnostics', a
   assert.equal(result.valid, false);
   assert(!result.lines.join('\n').includes('private-marker'));
 });
+
+const serviceTest = 'TestNativeServiceLifecycle';
+const serviceReceiptArgs = ['--diagnose', '--require', serviceTest];
+const serviceReceipts = [
+  'service_shutdown phase=idle operation=none journal_pending=false journal_read_ok=true',
+  'service_shutdown phase=control operation=stop journal_pending=true journal_read_ok=false',
+];
+
+function serviceReceiptEvents(outputs, action = 'pass', name = serviceTest, packageName = packages[0]) {
+  return [event('start', packageName), event('run', packageName, name),
+    event('output', packageName, name, {Output: '    service_native_test.go:10: NOT_RUN service_manager_unavailable\n'}),
+    event('output', packageName, name, {Output: '    service_native_test.go:11: PASS service_foreground_persistence\n'}),
+    ...outputs.map(Output => event('output', packageName, name, {Output})),
+    event(action, packageName, name), event(action === 'fail' ? 'fail' : 'pass', packageName)];
+}
+
+function serviceReceiptSummary(receipts = []) {
+  return [`package ${packages[0]} pass=1 skip=0 fail=0`,
+    `capability ${packages[0]} ${serviceTest} :: NOT_RUN service_manager_unavailable`,
+    `capability ${packages[0]} ${serviceTest} :: PASS service_foreground_persistence`,
+    ...receipts.map(receipt => `diagnose ${packages[0]} ${serviceTest} :: ${receipt}`), ''].join('\n');
+}
+
+test('passing native service proof projects two shutdown receipts verbatim after the Go prefix', () => {
+  assertFixture(script, {args: serviceReceiptArgs, status: 0,
+    input: stream(serviceReceiptEvents([
+      `    service_native_test.go:20: ${serviceReceipts[0]}\r\n`,
+      `    service_native_diagnostics_test.go:21: ${serviceReceipts[1]}\n`,
+      '    service_native_test.go:22: private-fixture-marker\n',
+    ])), output: serviceReceiptSummary(serviceReceipts)});
+});
+
+test('passing native service receipts reject extra, missing and non-vocabulary fields without rejecting the stream', async () => {
+  const receipt = serviceReceipts[0];
+  const invalid = [
+    `${receipt} private-fixture-marker`, `private-fixture-marker ${receipt}`,
+    `${receipt} site=health_ready`, `${receipt} `,
+    receipt.replace(' phase=idle', ''), receipt.replace(' operation=none', ''),
+    receipt.replace(' journal_pending=false', ''), receipt.replace(' journal_read_ok=true', ''),
+    receipt.replace('phase=idle', 'phase=unknown'), receipt.replace('operation=none', 'operation=unknown'),
+    receipt.replace('journal_pending=false', 'journal_pending=unknown'), receipt.replace('journal_read_ok=true', 'journal_read_ok=unknown'),
+    receipt.replace('journal_pending=false', 'journal_pending=False'), receipt.replace('journal_read_ok=true', 'journal_read_ok=True'),
+  ];
+  const result = await checkGoTestJSON([stream(serviceReceiptEvents([
+    ...invalid.map(line => `    service_native_test.go:20: ${line}\n`),
+    `    service_native_test.go:21: ${receipt}\n`,
+  ]))], [serviceTest], {diagnose: true});
+  assert.equal(result.valid, true);
+  assert.equal(`${result.lines.join('\n')}\n`, serviceReceiptSummary([receipt]));
+});
+
+test('passing native service receipts accept each closed vocabulary value', async () => {
+  for (const phase of ['startup', 'tick', 'control', 'idle']) {
+    for (const operation of ['none', 'reconcile', 'repair', 'stop', 'start', 'health']) {
+      const receipts = ['true', 'false'].flatMap(pending => ['true', 'false'].map(read =>
+        `service_shutdown phase=${phase} operation=${operation} journal_pending=${pending} journal_read_ok=${read}`));
+      const result = await checkGoTestJSON([stream(serviceReceiptEvents(receipts.map(line => `${line}\n`)))], [serviceTest], {diagnose: true});
+      assert.equal(result.valid, true);
+      assert.equal(`${result.lines.join('\n')}\n`, serviceReceiptSummary(receipts));
+    }
+  }
+});
+
+test('passing native service proof caps receipts at four across output events without deduplicating stops', () => {
+  const receipts = [...serviceReceipts, ...serviceReceipts, ...serviceReceipts];
+  assertFixture(script, {args: serviceReceiptArgs, status: 0,
+    input: stream(serviceReceiptEvents([
+      `${receipts[0]}\n${receipts[1]}\n`, ...receipts.slice(2).map(line => `${line}\n`),
+    ])), output: serviceReceiptSummary(receipts.slice(0, 4))});
+});
+
+test('failed native service receipts retain the existing uncapped failure diagnostic path only', async () => {
+  const outputs = [...serviceReceipts, ...serviceReceipts, ...serviceReceipts,
+    `${serviceReceipts[0]} private-fixture-marker`, 'service_shutdown phase=unknown']
+    .map(line => `    service_native_test.go:20: ${line}\n`);
+  const result = await checkGoTestJSON([stream(serviceReceiptEvents(outputs, 'fail'))], [serviceTest], {diagnose: true});
+  assert.equal(result.valid, false);
+  assert.equal(result.reason, failureDiagnostic.trimEnd());
+  assert.deepEqual(result.lines.filter(line => line.startsWith('diagnose ')), [
+    '    service_native_test.go:10: NOT_RUN service_manager_unavailable',
+    '    service_native_test.go:11: PASS service_foreground_persistence',
+    ...outputs.map(line => line.trimEnd()),
+  ].map(line => `diagnose ${packages[0]} ${serviceTest} :: ${line}`));
+});
+
+test('shutdown receipt projection remains exclusive to the selected passing native proof', async () => {
+  const output = `    service_native_test.go:20: ${serviceReceipts[0]}\n`;
+  for (const name of ['TestFixture', `${serviceTest}/Child`]) {
+    const result = await checkGoTestJSON([stream(serviceReceiptEvents([output], 'pass', name))], [name], {diagnose: true});
+    assert.equal(result.valid, true);
+    assert(!result.lines.some(line => line.startsWith('diagnose ')));
+  }
+  for (const packageName of packages.slice(1)) {
+    const result = await checkGoTestJSON([stream(serviceReceiptEvents([output], 'pass', serviceTest, packageName))],
+      [serviceTest], {diagnose: true, packageName});
+    assert(!result.lines.some(line => line.startsWith('diagnose ')));
+  }
+  const skipped = await checkGoTestJSON([stream(serviceReceiptEvents([output], 'skip'))], [serviceTest], {diagnose: true});
+  assert(!skipped.lines.some(line => line.startsWith('diagnose ')));
+  assertFixture(script, {args: ['--require', serviceTest], status: 0,
+    input: stream(serviceReceiptEvents([output])), output: serviceReceiptSummary()});
+});
+
+test('three-package unit mode remains byte-identical with native proof receipt noise', async () => {
+  const events = [...serviceReceiptEvents([]), ...packages.slice(1).flatMap(name => packageEvents(name))];
+  const noisy = events.flatMap(value => value.Action === 'run'
+    ? [value, event('output', value.Package, value.Test, {Output: `${serviceReceipts[0]}\n${serviceReceipts[1]} private-fixture-marker\n`})] : [value]);
+  for (const diagnose of [false, true]) {
+    const expected = await checkGoTestJSON([stream(events)], [], {diagnose});
+    const result = await checkGoTestJSON([stream(noisy)], [], {diagnose});
+    assert.equal(result.valid, true);
+    assert.deepEqual(result, expected);
+    assert(!result.lines.some(line => line.startsWith('diagnose ')));
+  }
+});
+
+for (const mutation of [
+  {name: 'shutdown receipt leading anchor removed', from: '= /^service_shutdown phase=', to: '= /service_shutdown phase=',
+    outputs: [`private-fixture-marker ${serviceReceipts[0]}\n`]},
+  {name: 'shutdown receipt trailing anchor removed', from: 'journal_read_ok=(true|false)$/;', to: 'journal_read_ok=(true|false)/;',
+    outputs: [`${serviceReceipts[0]} private-fixture-marker\n`]},
+  {name: 'fifth shutdown receipt allowed', from: 'state.shutdownReceipts.length === 4', to: 'state.shutdownReceipts.length === 5',
+    outputs: Array.from({length: 5}, () => `${serviceReceipts[0]}\n`)},
+  {name: 'failed native receipts also projected as success receipts',
+    from: "if (action === 'pass' && testName === serviceProofTest)", to: "if (['pass', 'fail'].includes(action) && testName === serviceProofTest)",
+    action: 'fail', outputs: [`    service_native_test.go:20: ${serviceReceipts[0]}\n`]},
+]) {
+  test(`mutation killed: ${mutation.name}`, () => {
+    withDiagnosticSources(target => {
+      // Keep the original failure path enrolled in the copied checker, so a
+      // missing source allowlist cannot accidentally kill the failure mutant.
+      writeFileSync(join(target, '..', '..', 'internal', 'localcell', 'service_native_test.go'), 'package localcell\n');
+      const input = stream(serviceReceiptEvents(mutation.outputs, mutation.action));
+      const expected = spawnSync(process.execPath, [target, ...serviceReceiptArgs], {input, encoding: 'utf8'});
+      assert.equal(expected.status, mutation.action === 'fail' ? 1 : 0);
+      const fixture = {args: serviceReceiptArgs, input, output: expected.stdout, stderr: expected.stderr,
+        status: expected.status};
+      assertFixture(script, fixture);
+      const source = readFileSync(target, 'utf8');
+      assert.equal(source.split(mutation.from).length, 2, 'mutation must target exactly one guard');
+      writeFileSync(target, source.replace(mutation.from, mutation.to));
+      assert.throws(() => assertFixture(target, fixture), {code: 'ERR_ASSERTION'});
+    });
+  });
+}
 const failures = [
   {name: 'one failing test', input: stream(packages.flatMap((name, index) => packageEvents(name, index === 0 ? 'fail' : 'pass'))),
     output: summary({[packages[0]]: {pass: 0, fail: 1, failedNames: ['TestFixture']}}), stderr: failureDiagnostic},

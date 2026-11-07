@@ -966,6 +966,40 @@ func TestNativeServiceSuccessfulStopDiagnostics(t *testing.T) {
 	}
 }
 
+// A proof stops its original host and its replacement. Per-stop cardinality
+// intentionally produces two receipts even when each host has private log text.
+func TestNativeServiceTwoHostShutdownReceipts(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("WITSELF_HOME", t.TempDir())
+	t.Setenv("DSH_HOME", t.TempDir())
+	want := []string{
+		"service_shutdown phase=idle operation=none journal_pending=false journal_read_ok=true",
+		"service_shutdown phase=tick operation=stop journal_pending=true journal_read_ok=false",
+	}
+	var logged []string
+	stops := 0
+	for _, receipt := range want {
+		foreground := &nativeServiceDiagnosticBuffer{}
+		_, _ = foreground.Write([]byte("private host startup\n"))
+		err := nativeServiceStopWithShutdownReceipt("windows", root, "fixture", foreground, func(format string, args ...any) {
+			logged = append(logged, fmt.Sprintf(format, args...))
+		}, func(context.Context, string, ...string) ([]byte, error) {
+			t.Fatal("synthetic proof queried a native service manager")
+			return nil, nil
+		}, func() error {
+			stops++
+			_, _ = foreground.Write([]byte("private host stop\n" + receipt + "\n"))
+			return nil
+		})
+		if err != nil {
+			t.Fatal("synthetic two-host proof lost a successful stop receipt")
+		}
+	}
+	if stops != 2 || !reflect.DeepEqual(logged, want) {
+		t.Fatal("two-host proof did not emit exactly two ordered value-free receipts")
+	}
+}
+
 func TestNativeServiceForegroundFailureDiagnostics(t *testing.T) {
 	for _, goos := range []string{"windows", "darwin", "linux"} {
 		t.Run(goos, func(t *testing.T) {

@@ -15,6 +15,7 @@ const selectablePackages = Object.freeze([...expectedPackages, storePackage]);
 
 const terminalActions = new Set(['pass', 'skip', 'fail']);
 const serviceProofTest = 'TestNativeServiceLifecycle';
+const serviceShutdownReceipt = /^service_shutdown phase=(startup|tick|control|idle) operation=(none|reconcile|repair|stop|start|health) journal_pending=(true|false) journal_read_ok=(true|false)$/;
 const serviceOutcomes = new Set([
   'PASS service_manager_available', 'NOT_RUN service_manager_unavailable',
   'NOT_RUN service_adapter_unsupported', 'NOT_RUN native_postgres_unconfigured',
@@ -130,7 +131,7 @@ export async function checkGoTestJSON(input, requiredTests = [], {diagnose = fal
     : packageValid ? [packageName] : [];
   const packages = new Map(packageNames.map(name => [name, {
     started: false, summary: null, summaryLine: null, tests: new Map(), why: new Map(), diagnostics: new Map(),
-    timedOut: new Set(), serviceOutcomes: new Set(), pass: 0, skip: 0, fail: 0,
+    timedOut: new Set(), serviceOutcomes: new Set(), shutdownReceipts: [], pass: 0, skip: 0, fail: 0,
   }]));
   let invalid = !packageValid || requiredTests.some(name => typeof name !== 'string' || !testNamePattern.test(name) || /[a-f0-9]{64}/i.test(name)) ||
     new Set(requiredTests).size !== requiredTests.length;
@@ -210,6 +211,13 @@ export async function checkGoTestJSON(input, requiredTests = [], {diagnose = fal
           }
         }
         if (diagnoseProof && required.has(name)) {
+          if (name === serviceProofTest && event.Package === expectedPackages[0]) {
+            for (const outputLine of event.Output.split('\n')) {
+              if (state.shutdownReceipts.length === 4) break;
+              const message = outputLine.replace(/^[ \t]*(?:[A-Za-z0-9_.-]+\.go:[0-9]+: )?/, '').replace(/\r$/, '');
+              if (serviceShutdownReceipt.test(message)) state.shutdownReceipts.push(maskedDiagnostic(message, 200));
+            }
+          }
           const diagnostics = state.diagnostics.get(name) ?? [];
           for (const outputLine of event.Output.split('\n')) {
             // Three forty-line log tails plus bounded cause/identity details.
@@ -282,6 +290,11 @@ export async function checkGoTestJSON(input, requiredTests = [], {diagnose = fal
     for (const outcome of [...state.serviceOutcomes].sort()) lines.push(`capability ${name} ${serviceProofTest} :: ${outcome}`);
     for (const [testName, action] of [...state.tests].sort(([left], [right]) => left.localeCompare(right))) {
       if (action === 'skip') lines.push(`skip ${name} ${testName}`);
+      // Successful native stops retain only their bounded, closed-vocabulary
+      // receipts. Failed proofs keep the existing full diagnostic path below.
+      if (action === 'pass' && testName === serviceProofTest) {
+        for (const receipt of state.shutdownReceipts) lines.push(`diagnose ${name} ${testName} :: ${receipt}`);
+      }
       if (action === 'fail') {
         lines.push(`fail ${name} ${testName}`);
         let reason = state.timedOut.has(testName) ? 'test timed out' : state.why.get(testName);
