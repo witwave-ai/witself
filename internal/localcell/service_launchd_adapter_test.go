@@ -51,10 +51,14 @@ func launchdFixtureError(t *testing.T, code int, detail string) error {
 }
 
 type launchdFixtureManager struct {
-	t                    *testing.T
-	a                    *launchdAgentAdapter
-	d                    ServiceDescriptor
-	calls                [][]string
+	t *testing.T
+	a *launchdAgentAdapter
+	d ServiceDescriptor
+	// calls preserves the existing print/mutation history used by legacy
+	// lifecycle assertions; allCalls also records the new read-only query.
+	calls    [][]string
+	allCalls [][]string
+	// Full GUI-domain targets: absent means no override; present false is disabled.
 	enabled              map[string]bool
 	loaded               bool
 	noGUI                bool
@@ -73,10 +77,13 @@ type launchdFixtureManager struct {
 // 26.6.2; this remains a hermetic model, not a native registration receipt.
 // Explicit fault injections and defensive EINPROGRESS behavior are unobserved.
 func (m *launchdFixtureManager) command(ctx context.Context, binary string, args ...string) ([]byte, error) {
+	m.allCalls = append(m.allCalls, append([]string{binary}, args...))
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	m.calls = append(m.calls, append([]string{binary}, args...))
+	if len(args) == 0 || args[0] != "print-disabled" {
+		m.calls = append(m.calls, append([]string{binary}, args...))
+	}
 	if binary != "/bin/launchctl" || len(args) < 2 {
 		m.t.Fatal("unexpected launchd fixture command")
 	}
@@ -88,11 +95,40 @@ func (m *launchdFixtureManager) command(ctx context.Context, binary string, args
 		// reports/LC-S7C1-owner-premise-evidence.md, read-only probes, logged-in GUI-domain bullet: exit 0.
 		return []byte("fixture gui domain\n"), nil
 	}
+	if args[0] == "print-disabled" {
+		if len(args) != 2 || args[1] != m.a.domain() {
+			m.t.Fatal("print-disabled must use exactly the owning GUI domain")
+		}
+		if m.noGUI {
+			return nil, launchdFixtureError(m.t, 112, "Bad request. Could not find domain for user gui: "+m.a.uid)
+		}
+		// Synthetic model of the owner's 2026-11-07 read-only observation on
+		// macOS 26.6.2; this is not native no-enable bootstrap evidence.
+		var output strings.Builder
+		output.WriteString("\n\tdisabled services = {\n")
+		var targets []string
+		for target := range m.enabled {
+			if strings.HasPrefix(target, m.a.domain()+"/") {
+				targets = append(targets, target)
+			}
+		}
+		slices.Sort(targets)
+		for _, target := range targets {
+			state := "disabled"
+			if m.enabled[target] {
+				state = "enabled"
+			}
+			fmt.Fprintf(&output, "\t\t%q => %s\n", strings.TrimPrefix(target, m.a.domain()+"/"), state)
+		}
+		output.WriteString("\t}\n")
+		return []byte(output.String()), nil
+	}
 	if args[0] == "bootstrap" {
 		if len(args) != 3 || args[1] != m.a.domain() || args[2] != m.a.plistPath(m.d) {
 			m.t.Fatal("bootstrap escaped exact fixture domain or plist")
 		}
-		if m.loaded || !m.enabled[m.a.target(m.d)] || m.failBootstrap {
+		enabled, overridden := m.enabled[m.a.target(m.d)]
+		if m.loaded || (overridden && !enabled) || m.failBootstrap {
 			// reports/LC-S7C1-owner-premise-evidence.md, Bootstrap-path observations,
 			// bootstrap(duplicate while loaded) and bootstrap(disabled): 5/message.
 			detail := "Bootstrap failed: 5: Input/output error\nTry re-running the command as root for richer errors."
@@ -104,6 +140,7 @@ func (m *launchdFixtureManager) command(ctx context.Context, binary string, args
 		}
 		// reports/LC-S7C1-owner-premise-evidence.md, Bootstrap-path observations, bootstrap(first) and
 		// bootstrap(after re-enable) bullets: exit 0 after per-label enable.
+		// Bootstrap with no override is modelled pending native CI.
 		m.loaded = true
 		m.mismatch = m.postMismatch
 		return nil, nil
@@ -190,6 +227,9 @@ func launchdFixture(t *testing.T) (*launchdAgentAdapter, ServiceDescriptor, *lau
 		}
 	}
 	m := &launchdFixtureManager{t: t, a: a, d: d, enabled: make(map[string]bool)}
+	// Preserve the legacy lifecycle fixture's enable-before-bootstrap baseline
+	// as an explicit override. Absent-state proofs delete this entry.
+	m.enabled[a.target(d)] = false
 	a.command = m.command
 	return a, d, m
 }
@@ -215,7 +255,7 @@ func launchdRequireError(t *testing.T, err, sentinel error, step string) {
 func launchdRequireNoMutation(t *testing.T, m *launchdFixtureManager) {
 	t.Helper()
 	for _, call := range m.calls {
-		if call[1] != "print" {
+		if call[1] != "print" && call[1] != "print-disabled" {
 			t.Fatal("refusal issued a manager mutation")
 		}
 	}
@@ -300,6 +340,7 @@ func launchdRequireObservedFailure(t *testing.T, err error, code int, stderr str
 
 func TestLaunchdFakeModelsDisabledAndDuplicateBootstrap(t *testing.T) {
 	a, d, m := launchdFixture(t)
+	m.enabled[a.target(d)] = false
 	// reports/LC-S7C1-owner-premise-evidence.md, Bootstrap-path observations,
 	// bootstrap(disabled) and bootstrap(duplicate while loaded): identical pairs.
 	const stderr = "Bootstrap failed: 5: Input/output error\nTry re-running the command as root for richer errors."
@@ -405,6 +446,7 @@ func TestLaunchdApplyFailureCleansOnlyCreatedIdentity(t *testing.T) {
 			case "bootstrap":
 				m.failBootstrap = true
 			case "enable":
+				m.enabled[a.target(d)] = false
 				m.failEnable = true
 			case "foreign_print":
 				m.postMismatch = "argument"
@@ -657,6 +699,7 @@ func TestLaunchdReplacementBeforeBootstrapRefused(t *testing.T) {
 	for _, stage := range []string{"persist", "enable"} {
 		t.Run(stage, func(t *testing.T) {
 			a, d, m := launchdFixture(t)
+			m.enabled[a.target(d)] = false
 			replace := func() {
 				if err := os.Rename(a.plistPath(d), a.plistPath(d)+".original"); err != nil {
 					t.Fatal(err)
