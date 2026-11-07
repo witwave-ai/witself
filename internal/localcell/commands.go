@@ -25,68 +25,7 @@ func (p Ports) all() []int {
 	return []int{p.Postgres, p.ServerAPI, p.ServerHealth, p.ServerMetrics, p.WorkerHealth, p.WorkerMetrics}
 }
 
-func allocatePorts() (Ports, error) {
-	listeners := make([]net.Listener, 0, 6)
-	defer func() {
-		for _, listener := range listeners {
-			_ = listener.Close()
-		}
-	}()
-	ports := make([]int, 0, 6)
-	for range 6 {
-		listener, err := net.Listen("tcp4", "127.0.0.1:0")
-		if err != nil {
-			return Ports{}, fixedCause("cannot allocate local cell loopback ports")
-		}
-		listeners = append(listeners, listener)
-		ports = append(ports, listener.Addr().(*net.TCPAddr).Port)
-	}
-	return Ports{ports[0], ports[1], ports[2], ports[3], ports[4], ports[5]}, nil
-}
-
 func addr(port int) string { return net.JoinHostPort("127.0.0.1", strconv.Itoa(port)) }
-
-// Probe without retaining reservations: the eventual bind remains authoritative.
-// Already-running, identity-verified components own their ports and are not
-// launched again by Start, so their ports are excluded from this preflight.
-func probePorts(ports Ports, running map[string]bool) error {
-	for _, group := range []struct {
-		component string
-		ports     []int
-	}{
-		{"postgres", []int{ports.Postgres}},
-		{"server", []int{ports.ServerAPI, ports.ServerHealth, ports.ServerMetrics}},
-		{"worker", []int{ports.WorkerHealth, ports.WorkerMetrics}},
-	} {
-		if running[group.component] {
-			continue
-		}
-		for _, port := range group.ports {
-			listener, err := net.Listen("tcp4", addr(port))
-			if err != nil {
-				return fixedCause("saved local cell port is occupied")
-			}
-			_ = listener.Close()
-		}
-	}
-	return nil
-}
-
-func (c *Cell) allocateAvailablePorts() (Ports, error) {
-	for range 3 {
-		ports, err := allocatePorts()
-		if err != nil {
-			return Ports{}, err
-		}
-		if c.afterPortAllocation != nil {
-			c.afterPortAllocation(ports)
-		}
-		if probePorts(ports, nil) == nil {
-			return ports, nil
-		}
-	}
-	return Ports{}, fixedCause("cannot allocate local cell loopback ports")
-}
 
 func (c *Cell) password() (string, error) {
 	path := c.path("run", "postgres.password")
@@ -286,6 +225,17 @@ func (c *Cell) psql(ctx context.Context, m *Manifest, query string) (string, err
 }
 
 func (c *Cell) startChild(m *Manifest, component string) error {
+	return c.startChildContext(context.Background(), m, component)
+}
+
+func (c *Cell) startChildContext(ctx context.Context, m *Manifest, component string) error {
+	return c.startChildPrepared(ctx, m, component, nil)
+}
+
+func (c *Cell) startChildPrepared(ctx context.Context, m *Manifest, component string, prepare func() error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	state, err := c.processState(component)
 	if err != nil {
 		return err
@@ -295,6 +245,16 @@ func (c *Cell) startChild(m *Manifest, component string) error {
 			return errors.New("local cell process identity mismatch")
 		}
 		return nil
+	}
+	// Decide whether this step launches before preflighting. An entry snapshot
+	// can be stale if a previously running component exits during Start.
+	if prepare != nil {
+		if err := prepare(); err != nil {
+			return err
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	binary := c.cfg.Binaries.Server
 	if component == "worker" {
@@ -317,7 +277,7 @@ func (c *Cell) startChild(m *Manifest, component string) error {
 		return errors.New("cannot inspect local cell component log")
 	}
 	c.beginChildObservation(component, info.Size())
-	if err := c.launchChild(binary, component, environment, log); err != nil {
+	if err := c.launchChild(ctx, binary, component, environment, log); err != nil {
 		return err
 	}
 	return c.bindServiceProcessBoot(component)

@@ -147,6 +147,16 @@ func valueFreeDiagnostic(component, line string) string {
 			line = line[20:]
 		}
 	}
+	if component == "server" || component == "worker" {
+		prefix := "witself-" + component + ": listener bind failed: "
+		if category, ok := strings.CutPrefix(line, prefix); ok {
+			switch category {
+			case "address in use", "other":
+				return prefix + category
+			}
+			return ""
+		}
+	}
 	if component == "worker" {
 		job, ok := strings.CutPrefix(line, "witself-worker: worker job restart limit exceeded: ")
 		if ok {
