@@ -64,6 +64,10 @@ func TestBuildFailureIsValueFree(t *testing.T) {
 }
 
 func TestBuildBinariesUseNativeExecutableNames(t *testing.T) {
+	// The fixture module is not a repository. Keep an ancestor of the temporary
+	// directory (for example a sandbox that mounts an empty read-only .git over
+	// /tmp) from turning the fixture build into a failed VCS-status lookup.
+	t.Setenv("GOFLAGS", strings.TrimSpace(os.Getenv("GOFLAGS")+" -buildvcs=false"))
 	source := t.TempDir()
 	if err := os.WriteFile(filepath.Join(source, "go.mod"), []byte("module fixture\n\ngo 1.24\n"), 0o600); err != nil {
 		t.Fatal("cannot prepare build fixture")
