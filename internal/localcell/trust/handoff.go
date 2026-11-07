@@ -149,26 +149,14 @@ func readPrivateJSON(dir, name string, out any) error {
 	if filepath.Base(name) != name || privateReadDirectory(dir) != nil {
 		return ReasonStateIO
 	}
-	path := filepath.Join(dir, name)
-	info, err := os.Lstat(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return os.ErrNotExist
-	}
-	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 || !privateOwned(info) || info.Size() > maxStateBytes {
-		return ReasonStateIO
-	}
-	f, err := openArchiveFile(path)
+	ops, err := newPrivateRecordOps(dir, true)
 	if err != nil {
-		return ReasonStateIO
+		return err
 	}
-	defer func() { _ = f.Close() }()
-	actual, err := f.Stat()
-	if err != nil || !os.SameFile(info, actual) {
-		return ReasonStateIO
-	}
-	b, err := io.ReadAll(io.LimitReader(f, maxStateBytes+1))
-	if err != nil || len(b) > maxStateBytes {
-		return ReasonStateIO
+	defer func() { _ = ops.close() }()
+	b, err := readPrivateRecord(ops, name)
+	if err != nil {
+		return err
 	}
 	if err := localJSONProfile(b); err != nil {
 		return err
@@ -185,17 +173,12 @@ func withPrivateTransaction(ctx context.Context, dir, lockName string, fn func()
 	if ctx.Err() != nil || filepath.Base(lockName) != lockName || privateDirectory(dir, false) != nil {
 		return ReasonStateIO
 	}
-	lockPath := filepath.Join(dir, lockName)
-	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	ops, err := newPrivateRecordOps(dir, true)
 	if err != nil {
-		return ReasonStateIO
+		return err
 	}
-	if err = f.Close(); err != nil {
-		_ = os.Remove(lockPath)
-		return ReasonStateIO
-	}
-	defer func() { _ = os.Remove(lockPath) }()
-	return fn()
+	defer func() { _ = ops.close() }()
+	return withPrivateRecordTransaction(ops, lockName, fn)
 }
 
 func writePrivateJSON(dir, name string, value any) error {
@@ -206,34 +189,12 @@ func writePrivateJSON(dir, name string, value any) error {
 	if err != nil || len(b) > maxStateBytes {
 		return ReasonStateInvalid
 	}
-	f, err := os.CreateTemp(dir, ".handoff-tmp-")
+	ops, err := newPrivateRecordOps(dir, true)
 	if err != nil {
-		return ReasonStateIO
+		return err
 	}
-	defer func() { _ = os.Remove(f.Name()) }()
-	if err = f.Chmod(0600); err == nil {
-		_, err = f.Write(b)
-	}
-	if err == nil {
-		err = f.Sync()
-	}
-	closeErr := f.Close()
-	if err != nil || closeErr != nil {
-		return ReasonStateIO
-	}
-	if privateDirectory(dir, false) != nil || os.Rename(f.Name(), filepath.Join(dir, name)) != nil {
-		return ReasonStateIO
-	}
-	d, err := os.Open(dir)
-	if err != nil {
-		return ReasonStateIO
-	}
-	err = d.Sync()
-	closeErr = d.Close()
-	if err != nil || closeErr != nil {
-		return ReasonStateIO
-	}
-	return nil
+	defer func() { _ = ops.close() }()
+	return writePrivateRecord(ops, name, ".handoff-tmp-", b, nil)
 }
 
 func loadHandoff(root string) (HandoffJournal, error) {

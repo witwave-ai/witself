@@ -6,7 +6,6 @@ import (
 	"errors"
 	"io"
 	"os"
-	"path/filepath"
 	"runtime"
 	"sync"
 )
@@ -116,7 +115,7 @@ type FileState struct {
 }
 
 // NewFileState opens or creates a caller-selected 0700 Unix private directory.
-// Windows persistence refuses until a native private-ACL adapter is available.
+// Windows persistence refuses until the full native persistence boundary is proven.
 func NewFileState(dir string) (*FileState, error) {
 	// The standard library cannot establish owner-private Windows ACLs through
 	// chmod. Refuse that unsupported persistence boundary rather than imply it.
@@ -154,29 +153,17 @@ func (s *FileState) Load() (StateSnapshot, error) {
 const maxStateBytes = 8 << 20
 
 func (s *FileState) load() (StateSnapshot, error) {
-	if err := s.checkDirectory(); err != nil {
+	ops, err := newPrivateRecordOps(s.dir, false)
+	if err != nil {
 		return StateSnapshot{}, err
 	}
-	name := filepath.Join(s.dir, "trust-state.json")
-	info, err := os.Lstat(name)
+	defer func() { _ = ops.close() }()
+	b, err := readPrivateRecord(ops, "trust-state.json")
 	if errors.Is(err, os.ErrNotExist) {
 		return emptyState(), nil
 	}
-	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 || info.Size() > maxStateBytes {
-		return StateSnapshot{}, ReasonStateIO
-	}
-	f, err := os.Open(name)
 	if err != nil {
-		return StateSnapshot{}, ReasonStateIO
-	}
-	defer func() { _ = f.Close() }()
-	opened, err := f.Stat()
-	if err != nil || !os.SameFile(info, opened) {
-		return StateSnapshot{}, ReasonStateIO
-	}
-	b, err := io.ReadAll(io.LimitReader(f, maxStateBytes+1))
-	if err != nil || len(b) > maxStateBytes {
-		return StateSnapshot{}, ReasonStateIO
+		return StateSnapshot{}, err
 	}
 	if err := StrictProfile(b); err != nil {
 		return StateSnapshot{}, ReasonStateInvalid
@@ -200,68 +187,23 @@ func (s *FileState) load() (StateSnapshot, error) {
 func (s *FileState) Update(fn func(*StateSnapshot) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := s.checkDirectory(); err != nil {
-		return err
-	}
-	lockPath := filepath.Join(s.dir, ".trust-state.lock")
-	lock, err := os.OpenFile(lockPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
-	if err != nil {
-		return ReasonStateIO
-	}
-	if err := lock.Close(); err != nil {
-		_ = os.Remove(lockPath)
-		return ReasonStateIO
-	}
-	defer func() { _ = os.Remove(lockPath) }()
-	next, err := s.load()
+	ops, err := newPrivateRecordOps(s.dir, false)
 	if err != nil {
 		return err
 	}
-	if err := fn(&next); err != nil {
-		return err
-	}
-	b, err := json.Marshal(next)
-	if err != nil || len(b) > maxStateBytes {
-		return ReasonStateInvalid
-	}
-	f, err := os.CreateTemp(s.dir, ".trust-state-*")
-	if err != nil {
-		return ReasonStateIO
-	}
-	defer func() { _ = os.Remove(f.Name()) }()
-	if err := f.Chmod(0600); err != nil {
-		_ = f.Close()
-		return ReasonStateIO
-	}
-	if _, err := f.Write(b); err != nil {
-		_ = f.Close()
-		return ReasonStateIO
-	}
-	if err := f.Sync(); err != nil {
-		_ = f.Close()
-		return ReasonStateIO
-	}
-	if err := f.Close(); err != nil {
-		return ReasonStateIO
-	}
-	if s.beforeRename != nil {
-		if err := s.beforeRename(); err != nil {
-			return ReasonStateIO
+	defer func() { _ = ops.close() }()
+	return withPrivateRecordTransaction(ops, ".trust-state.lock", func() error {
+		next, err := s.load()
+		if err != nil {
+			return err
 		}
-	}
-	if err := os.Rename(f.Name(), filepath.Join(s.dir, "trust-state.json")); err != nil {
-		return ReasonStateIO
-	}
-	directory, err := os.Open(s.dir)
-	if err != nil {
-		return ReasonStateIO
-	}
-	if err := directory.Sync(); err != nil {
-		_ = directory.Close()
-		return ReasonStateIO
-	}
-	if err := directory.Close(); err != nil {
-		return ReasonStateIO
-	}
-	return nil
+		if err := fn(&next); err != nil {
+			return err
+		}
+		b, err := json.Marshal(next)
+		if err != nil || len(b) > maxStateBytes {
+			return ReasonStateInvalid
+		}
+		return writePrivateRecord(ops, "trust-state.json", ".trust-state-", b, s.beforeRename)
+	})
 }
