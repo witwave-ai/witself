@@ -24,6 +24,9 @@ type Config struct {
 	Local                            bool
 	LocalShutdown                    LocalShutdown
 	SyncSchema                       bool
+	CaptureProof                     bool
+	CaptureProofToken                string
+	CaptureProofStubEmail            string
 	APIAddr, HealthAddr, MetricsAddr string
 	DatabaseURL, SpoolDir, AccountID string
 	Jobs                             map[string]bool
@@ -63,6 +66,10 @@ var localJobEligibility = map[string]bool{
 func FromEnv(role string, lookup func(string) (string, bool), environ []string) (Config, error) {
 	runtime, _ := lookup("WITSELF_RUNTIME")
 	shutdown, err := localShutdownFromEnv(role, runtime, lookup, environ)
+	if err != nil {
+		return Config{}, err
+	}
+	proof, err := captureProofFromEnv(role, runtime, lookup, environ)
 	if err != nil {
 		return Config{}, err
 	}
@@ -106,7 +113,8 @@ func FromEnv(role string, lookup func(string) (string, bool), environ []string) 
 			}
 		}
 	}
-	cfg := Config{Local: true, LocalShutdown: shutdown, MigrationWait: DefaultMigrationWait, JobRestartPolicy: JobRestartNever}
+	cfg := Config{Local: true, LocalShutdown: shutdown, MigrationWait: DefaultMigrationWait, JobRestartPolicy: JobRestartNever,
+		CaptureProof: proof.CaptureProof, CaptureProofToken: proof.CaptureProofToken, CaptureProofStubEmail: proof.CaptureProofStubEmail}
 	if syncPresent {
 		if syncValue != "1" {
 			return Config{}, fmt.Errorf("%s must be 1 when explicitly selected", syncVariable)

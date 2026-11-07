@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"errors"
 	"strconv"
 
 	"github.com/witwave-ai/witself/internal/envconfig"
 	"github.com/witwave-ai/witself/internal/runtimeconfig"
+	"github.com/witwave-ai/witself/internal/store"
 )
 
 type workerStartupMigrator interface {
@@ -14,6 +16,15 @@ type workerStartupMigrator interface {
 }
 
 func migrateWorkerStore(ctx context.Context, st workerStartupMigrator, runtime runtimeconfig.Config) error {
+	if runtime.CaptureProof {
+		ctx, cancel := context.WithTimeout(ctx, runtime.MigrationWait)
+		defer cancel()
+		proof, ok := st.(runtimeconfig.CaptureProofStore)
+		if !ok {
+			return errors.New("capture_proof_database_unidentified")
+		}
+		return runtimeconfig.CheckCaptureProofReady(ctx, proof, runtime, store.SchemaVersion(), store.SyncSchemaVersion())
+	}
 	if err := st.Migrate(); err != nil {
 		return err
 	}
@@ -61,5 +72,8 @@ func workerConfigFromEnv(lookup func(string) (string, bool), environ []string) (
 		}
 	}
 	jobs, err := jobConfigFromEnv(lookup)
+	if err == nil && runtime.CaptureProof {
+		jobs.agentEmailOutboundClient, err = captureProofDispatchClient(runtime.CaptureProofStubEmail)
+	}
 	return runtime, jobs, err
 }

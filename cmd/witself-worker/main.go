@@ -226,6 +226,10 @@ func serve() int {
 
 	st, err := store.Open(ctx, dsn)
 	if err != nil {
+		if runtime.CaptureProof {
+			fmt.Fprintln(os.Stderr, "witself-worker: capture_proof_database_unidentified")
+			return 1
+		}
 		fmt.Fprintf(os.Stderr, "witself-worker: database: %v\n", err)
 		return 1
 	}
@@ -235,6 +239,10 @@ func serve() int {
 		return 1
 	}
 	if err := st.Ping(ctx); err != nil {
+		if runtime.CaptureProof {
+			fmt.Fprintln(os.Stderr, "witself-worker: capture_proof_database_unidentified")
+			return 1
+		}
 		fmt.Fprintf(os.Stderr, "witself-worker: database readiness: %v\n", err)
 		return 1
 	}
@@ -246,6 +254,13 @@ func serve() int {
 // serveWorker keeps the account check and the selected readiness callback in
 // the production path while allowing tests to observe the registry boundary.
 func serveWorker(ctx context.Context, jobStore *store.Store, st runtimeconfig.BootstrapStore, runtime runtimeconfig.Config, jobs jobConfig, lookup func(string) (string, bool), runRegistry func(*worker.Registry, context.Context, worker.Config) error) int {
+	if runtime.CaptureProof {
+		proof, ok := st.(runtimeconfig.CaptureProofStore)
+		if !ok || runtimeconfig.CheckCaptureProofReady(ctx, proof, runtime, store.SchemaVersion(), store.SyncSchemaVersion()) != nil {
+			fmt.Fprintln(os.Stderr, "witself-worker: capture_proof_database_unidentified")
+			return 1
+		}
+	}
 	if runtime.Local {
 		if err := runtimeconfig.ValidateAccount(ctx, st, runtime.AccountID); err != nil {
 			fmt.Fprintf(os.Stderr, "witself-worker: %v\n", err)
@@ -254,7 +269,7 @@ func serveWorker(ctx context.Context, jobStore *store.Store, st runtimeconfig.Bo
 	}
 
 	registry := worker.NewRegistry()
-	if code := registerJobs(registry, jobStore, jobs); code != 0 {
+	if code := registerJobs(registry, jobStore, jobs, runtime.CaptureProof); code != 0 {
 		return code
 	}
 
@@ -278,6 +293,9 @@ func serveWorker(ctx context.Context, jobStore *store.Store, st runtimeconfig.Bo
 			syncReady = func(ctx context.Context) error {
 				ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 				defer cancel()
+				if runtime.CaptureProof {
+					return runtimeconfig.CheckCaptureProofReady(ctx, st.(runtimeconfig.CaptureProofStore), runtime, store.SchemaVersion(), store.SyncSchemaVersion())
+				}
 				return runtimeconfig.CheckSyncSchemaReady(ctx, syncStore, store.SyncSchemaVersion())
 			}
 		}
@@ -300,7 +318,10 @@ func serveWorker(ctx context.Context, jobStore *store.Store, st runtimeconfig.Bo
 }
 
 // registerJobs preserves the hosted registration order and log messages.
-func registerJobs(registry *worker.Registry, st *store.Store, jobs jobConfig) int {
+func registerJobs(registry *worker.Registry, st *store.Store, jobs jobConfig, proof bool) int {
+	if proof {
+		jobs = captureProofJobs(jobs)
+	}
 	metrics := registry.Metrics()
 	metrics.SetAuditAppendFailuresReader(st.AuditAppendFailures)
 	if jobs.avatarEnabled {
@@ -412,7 +433,17 @@ func registerJobs(registry *worker.Registry, st *store.Store, jobs jobConfig) in
 	if jobs.agentEmailOutboundEnabled {
 		cfg := jobs.agentEmailOutbound
 		dispatchClient := jobs.agentEmailOutboundClient
-		dispatchClient.HTTPClient = &http.Client{Timeout: cfg.ProviderTimeout}
+		if proof {
+			if dispatchClient.HTTPClient == nil {
+				fmt.Fprintln(os.Stderr, "witself-worker: capture_proof_stub_unavailable")
+				return 1
+			}
+			client := *dispatchClient.HTTPClient
+			client.Timeout = cfg.ProviderTimeout
+			dispatchClient.HTTPClient = &client
+		} else {
+			dispatchClient.HTTPClient = &http.Client{Timeout: cfg.ProviderTimeout}
+		}
 		if err := registry.Register(worker.Job{
 			Name: agentEmailOutboundJob,
 			Run: func(jobCtx context.Context) error {

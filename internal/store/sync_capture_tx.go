@@ -41,8 +41,9 @@ func syncCaptureError(err error) error {
 	return err
 }
 
-// SelectSyncCapture selects only the dark store API. No shipped command calls
-// this method, and schema installation alone never enables a writer.
+// SelectSyncCapture selects the dark store API. The server's positively
+// identified capture-proof profile is its only shipped caller; schema
+// installation alone never enables a writer.
 func (s *Store) SelectSyncCapture(config runtimeconfig.Config) error {
 	if !config.SyncCaptureSelected() {
 		return ErrSyncWriterNotAdmitted

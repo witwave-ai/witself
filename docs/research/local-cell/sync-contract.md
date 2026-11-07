@@ -481,6 +481,38 @@ matrix; a one-role installation remains migration-refused at 0003
 materialization, mixed binaries, installer role conversion and native recovery
 remain separate acceptance work.
 
+**CURRENT CODE** — C2b adds the default-off
+[capture-proof runtime selection](../../../internal/runtimeconfig/config.go),
+[production worker registration branch](../../../cmd/witself-worker/main.go),
+and [mixed executable driver](../../../internal/tools/capturemix/), invoked by
+[`TestCaptureMixMatrix`](../../../internal/store/capture_mix_rehearsal_test.go).
+The [dedicated CI job](../../../.github/workflows/ci.yml) builds the pinned
+schema-1 predecessor separately from current binaries and retains build identity
+privately. [Mixed capability records](../../../internal/syncharness/mixed_runtime_results.go)
+keep the local owner-login rehearsal and unavailable proof-profile database as
+NOT_RUN; they cannot promote any H obligation. In the local rehearsal, current
+server and worker processes start after guard installation without the profile
+(`NOT RUN current_process_preinstall_unavailable`), and the current server's
+admitted preferences path is not executed
+(`NOT RUN current_server_profile_database_unavailable`). Disposable-cluster CI
+produces all five identity-bound PASS receipts only after all four rows complete
+every check with no NOT RUN. The row checks and private artifact retain one
+fixed evidence class per genuine job: `guard_cause_exact` requires the observed
+`sync writer not admitted` cause; `guard_cause_hidden` is permitted only for
+`support_ticket_age_out`, whose predecessor callback returns a generic batch
+error, and `transcript_storage_reconcile`, whose callback reports a failure
+count, together with unchanged candidate rows. `preguard_refusal` is permitted
+only for `account_purge`, whose nonzero-sync-version destruction refusal occurs
+before the covered-DML guard, together with unchanged rows. All remaining
+profile jobs require `guard_cause_exact`; a hidden cause on those jobs fails the
+row. These fixed per-job qualifications do not claim an unobserved exact guard
+cause. The five allocations remain PENDING, with no H promotion until the owner
+records the CI artifact's identity. The
+[proof-only marker](../../../internal/store/sync_proof/0004_capture_proof_marker.sql)
+is installed explicitly outside ordinary sync migrations and excluded from
+archives. The installer role conversion and complete mixed-executable acceptance
+remain pending; a profile declaration or orchestration rehearsal supplies neither.
+
 ### Open items
 
 | ID | item | owner | blocks |

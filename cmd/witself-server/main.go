@@ -300,13 +300,23 @@ func serveWithStartup(startup serverStartup) int {
 		st, err := store.Open(ctx, dsn,
 			serverStoreOptions(avatarPayloadCompactionEnabled, supportTicketRateLimit, os.Stderr)...)
 		if err != nil {
+			if runtime.CaptureProof {
+				fmt.Fprintln(os.Stderr, "witself-server: capture_proof_database_unidentified")
+				return 1
+			}
 			fmt.Fprintf(os.Stderr, "witself-server: database: %v\n", err)
 			return 1
 		}
 		defer st.Close()
 		migrator := startup.migrator(st)
 		var migrationErr error
-		if runtime.Local {
+		if runtime.CaptureProof {
+			// The disposable owner installs guards after both versions are ready.
+			// Runtime principals only verify the explicit profile marker and schema.
+			migrationCtx, cancel := context.WithTimeout(ctx, runtime.MigrationWait)
+			migrationErr = configureCaptureProofStore(migrationCtx, &cfg, st, runtime)
+			cancel()
+		} else if runtime.Local {
 			migrationCtx, cancel := context.WithTimeout(ctx, runtime.MigrationWait)
 			migrationErr = migrator.MigrateContext(migrationCtx)
 			if migrationErr == nil && runtime.SyncSchema {
@@ -405,7 +415,7 @@ func serveWithStartup(startup serverStartup) int {
 				fmt.Fprintf(os.Stderr, "witself-server: %v\n", err)
 				return 1
 			}
-			if runtime.SyncSchema {
+			if runtime.SyncSchema && !runtime.CaptureProof {
 				configureLocalSyncStore(&cfg, st)
 			}
 		}

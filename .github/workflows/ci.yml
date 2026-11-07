@@ -69,7 +69,7 @@ jobs:
   go:
     name: go
     if: ${{ always() }}
-    needs: [changes, website, docs, go-rest, go-store, go-capture-principals, go-infra, localcell-windows, localcell-unix, postgres-backup-image, postgres-image-mirror, provider-contract-evidence, static-analysis]
+    needs: [changes, website, docs, go-rest, go-store, go-capture-principals, go-capture-mixed, go-infra, localcell-windows, localcell-unix, postgres-backup-image, postgres-image-mirror, provider-contract-evidence, static-analysis]
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -488,6 +488,115 @@ jobs:
           parser_exit=0
           node scripts/ci-go-test-json-check.mjs --input "$proof_json" --diagnose --package github.com/witwave-ai/witself/internal/store --require TestSyncPrincipalSeparation,TestSyncPrincipalBypassDenied,TestSyncPrincipalDowngradeDenied,TestSyncPrincipalCapabilityRevocation,TestSyncPrincipalActivationTopology || parser_exit=$?
           if (( go_exit != 0 || parser_exit != 0 )); then exit 1; fi
+
+  go-capture-mixed:
+    needs: changes
+    if: needs.changes.outputs.application == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: witself
+          POSTGRES_PASSWORD: witself
+          POSTGRES_DB: witself
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U witself -d witself"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      GOTOOLCHAIN: local
+      WITSELF_TEST_DATABASE_URL: postgres://witself:witself@localhost:5432/witself?sslmode=disable
+      WITSELF_TEST_DISPOSABLE_CLUSTER: "1"
+      WITSELF_TEST_REQUIRE_DATABASE: "1"
+      WITSELF_CAPTUREMIX_CURRENT_BIN_DIR: ${{ github.workspace }}/current/bin
+      WITSELF_CAPTUREMIX_PREDECESSOR_BIN_DIR: ${{ github.workspace }}/predecessor/bin
+      WITSELF_CAPTUREMIX_PREDECESSOR_COMMIT_FILE: ${{ github.workspace }}/predecessor/PREDECESSOR_COMMIT
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Check out the reviewed immutable predecessor
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: 2f1c194398c5df943c305b8e11c9ab32db0e7f3e
+          path: predecessor
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      - name: Warm the module cache so download notices never enter the proof stream
+        run: go mod download
+      - name: Warm the predecessor module cache from its own module
+        working-directory: predecessor
+        run: go mod download
+      - name: Build the predecessor with its own module and toolchain selection
+        working-directory: predecessor
+        shell: bash
+        run: |
+          mkdir -p bin
+          git rev-parse HEAD > PREDECESSOR_COMMIT
+          go build -o bin/witself-server ./cmd/witself-server
+          go build -o bin/witself-worker ./cmd/witself-worker
+      - name: Build the current executables separately
+        shell: bash
+        run: |
+          mkdir -p current/bin
+          go build -o current/bin/witself-server ./cmd/witself-server
+          go build -o current/bin/witself-worker ./cmd/witself-worker
+      - name: Record private executable build identities
+        env:
+          WITSELF_CAPTUREMIX_ARTIFACT_DIR: ${{ runner.temp }}/capture-mixed-artifacts
+        shell: bash
+        run: |
+          mkdir -p "$WITSELF_CAPTUREMIX_ARTIFACT_DIR"
+          python3 - <<'PYCODE'
+          import hashlib, json, os, pathlib, subprocess
+          records = {'predecessor_commit': pathlib.Path('predecessor/PREDECESSOR_COMMIT').read_text().strip(), 'binaries': {}}
+          for generation in ('current', 'predecessor'):
+              for command in ('witself-server', 'witself-worker'):
+                  binary = pathlib.Path(generation, 'bin', command)
+                  version = subprocess.check_output(['go', 'version', str(binary)], text=True).split()[-1]
+                  records['binaries'][generation + '_' + command] = {
+                      'digest': hashlib.sha256(binary.read_bytes()).hexdigest(),
+                      'go_version': version, 'goos': 'linux', 'goarch': 'amd64'}
+          target = pathlib.Path(os.environ['WITSELF_CAPTUREMIX_ARTIFACT_DIR'], 'build-identities.json')
+          target.write_text(json.dumps(records, sort_keys=True) + '\n')
+          target.chmod(0o600)
+          PYCODE
+          printf '%s\n' 'predecessor build identity recorded'
+      - name: Test mixed proof result checker
+        run: node --test scripts/ci-go-test-json-check.test.mjs
+      - name: Prove the isolated mixed executable capture matrix
+        env:
+          WITSELF_CAPTUREMIX_ARTIFACT_DIR: ${{ runner.temp }}/capture-mixed-artifacts
+        shell: bash
+        run: |
+          proof_json="$RUNNER_TEMP/capture-mixed.json"
+          go_exit=0
+          go test -json ./internal/store -run 'CaptureMix' -count=1 -timeout=25m > "$proof_json" 2>&1 || go_exit=$?
+          parser_exit=0
+          node scripts/ci-go-test-json-check.mjs --input "$proof_json" --diagnose --package github.com/witwave-ai/witself/internal/store --require TestCaptureMixMatrix || parser_exit=$?
+          if (( go_exit != 0 || parser_exit != 0 )); then exit 1; fi
+
+      - name: Retain private mixed build identity and value-free stub requests
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7
+        with:
+          name: capture-mixed-evidence
+          path: ${{ runner.temp }}/capture-mixed-artifacts
+          if-no-files-found: error
 
   go-store:
     needs: changes
