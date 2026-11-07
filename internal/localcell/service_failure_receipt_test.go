@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -102,28 +103,63 @@ func TestServiceFailureReceiptClientCancellationPreservesOtherFailures(t *testin
 }
 
 // Reproduce the real propagation through call, command and Run. The first stop
-// is startup, the second is the sole failed authenticated control operation, and
-// the third is clean shutdown. No native service manager or child is started.
+// is startup and the second is the sole failed authenticated control operation.
+// Windows must latch that refusal instead of retrying it during host shutdown.
+// No native service manager or child is started.
 func TestServiceFailureReceiptOnceActualControlPath(t *testing.T) {
+	testServiceFailureReceiptActualControlPath(t, runtime.GOOS == "windows")
+}
+
+// Execute the Windows refusal policy through the real local control transport
+// on every platform, so a Linux run also covers its deferred-shutdown boundary.
+func TestServiceFailureReceiptOnceWindowsPolicyActualControlPath(t *testing.T) {
+	testServiceFailureReceiptActualControlPath(t, true)
+}
+
+func testServiceFailureReceiptActualControlPath(t *testing.T, windowsPolicy bool) {
+	t.Helper()
 	t.Setenv("WITSELF_HOME", t.TempDir())
 	t.Setenv("DSH_HOME", t.TempDir())
-	cell, manifest := unitCell(t)
+	t.Setenv("WITSELF_RUNTIME", "local")
+	root := filepath.Join(t.TempDir(), "cell")
 	if runtime.GOOS != "windows" {
-		root, err := os.MkdirTemp("/tmp", "lc-receipt-")
+		var err error
+		root, err = os.MkdirTemp("/tmp", "lc-receipt-")
 		if err != nil {
-			t.Fatal("cannot create short private fixture")
+			t.Fatal("cannot create failure receipt fixture")
 		}
 		t.Cleanup(func() { _ = os.RemoveAll(root) })
-		cell, err = New(Config{Root: root, Timeout: time.Second})
-		if err != nil || cell.layout() != nil || writeAtomic(cell.path("manifest.json"), manifest, nil) != nil {
-			t.Fatal("cannot prepare short private fixture")
-		}
 	}
-	prepareSupervisorTest(t, cell)
+	if privateDir(root, true) != nil {
+		t.Fatal("cannot secure failure receipt fixture")
+	}
+	cell, err := New(Config{Root: root, Timeout: time.Second})
+	if err != nil {
+		t.Fatal("cannot configure failure receipt fixture")
+	}
+	if cell.layout() != nil {
+		t.Fatal("cannot prepare failure receipt fixture layout")
+	}
+	manifest := &Manifest{
+		LayoutVersion: LayoutVersion, InstallationID: "lc_test", CreatedAt: time.Now().UTC(),
+		Database: localDatabaseName, Role: "localcell", Installed: true,
+		Ports: Ports{Postgres: 21101, ServerAPI: 21102, ServerHealth: 21103, ServerMetrics: 21104, WorkerHealth: 21105, WorkerMetrics: 21106},
+	}
+	if writeAtomic(cell.path("manifest.json"), manifest, nil) != nil {
+		t.Fatal("cannot write failure receipt fixture manifest")
+	}
+	host, err := os.Executable()
+	if err != nil {
+		t.Fatal("failure receipt fixture executable unavailable")
+	}
+	if cell.PrepareService(t.Context(), ServiceDescriptor{Adapter: "foreground", Payload: ServicePayload{Host: host, Args: []string{"run", "--root", cell.cfg.Root}}}) != nil {
+		t.Fatal("cannot prepare failure receipt service")
+	}
 	hooks, _, _, _, _ := supervisorTestHooks()
 	if runtime.GOOS != "windows" {
 		hooks.boot = func() (string, error) { return "synthetic-boot", nil }
 	}
+	hooks.windowsShutdownPolicy = windowsPolicy
 	hooks.ticks = make(chan time.Time)
 	ready := make(chan struct{})
 	hooks.health = func(context.Context) error { close(ready); return nil }
@@ -172,8 +208,25 @@ func TestServiceFailureReceiptOnceActualControlPath(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("foreground did not stop")
 	}
-	if hostErr != nil || controlErr == nil || stops != 3 {
-		t.Fatal("fixture failed to exercise one rejected stop and clean startup/shutdown")
+	if hostErr != nil {
+		t.Fatal("failure receipt host did not exit cleanly")
+	}
+	if controlErr == nil {
+		t.Fatal("failed control stop was not rejected")
+	}
+	wantStops := 3
+	if windowsPolicy {
+		wantStops = 2
+	}
+	if stops != wantStops {
+		t.Fatal("failed control stop did not preserve shutdown policy")
+	}
+	descriptor, err := cell.ServiceDescriptor()
+	if err != nil {
+		t.Fatal("cannot read failure receipt service descriptor")
+	}
+	if descriptor.Faulted != windowsPolicy || descriptor.DesiredState != "stopped" {
+		t.Fatal("failed control stop did not preserve durable fault and stopped intent")
 	}
 	data, err := os.ReadFile(stderr.Name())
 	if err != nil {
@@ -181,7 +234,7 @@ func TestServiceFailureReceiptOnceActualControlPath(t *testing.T) {
 	}
 	count := strings.Count(string(data), "native service host site=")
 	if count != 1 {
-		t.Fatalf("one failed control operation emitted %d site receipts, want 1", count)
+		t.Fatal("one failed control operation did not emit exactly one site receipt")
 	}
 	if strings.Count(string(data), "native service host site=supervisor_stop\n") != 1 {
 		t.Fatal("failed control operation lost its inner supervisor_stop site")

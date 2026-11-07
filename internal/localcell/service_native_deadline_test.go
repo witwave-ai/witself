@@ -3,6 +3,9 @@ package localcell
 import (
 	"context"
 	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"runtime"
 	"strings"
@@ -27,15 +30,28 @@ func (c *serviceShutdownDeadlineContext) Err() error {
 }
 
 func TestServiceRunShutdownSharedDeadline(t *testing.T) {
+	t.Setenv("WITSELF_HOME", t.TempDir())
+	t.Setenv("DSH_HOME", t.TempDir())
+	// P5 enlarges the Windows whole-tree budget to include both app waits,
+	// PostgreSQL, and exit slack. Unix retains the original thirty-second cap.
+	maximum := 30 * time.Second
+	if runtime.GOOS == "windows" {
+		maximum = ServiceShutdownTimeout
+	}
 	for _, tc := range []struct {
 		name          string
 		timeout       time.Duration
+		want          time.Duration
+		wantWindows   time.Duration
 		exhaust       bool
 		repairReturns bool
 	}{
-		{name: "remaining_budget"},
-		{name: "exhausted_repair_returns_nil", timeout: 30 * time.Second, exhaust: true},
-		{name: "exhausted_repair_returns_deadline", timeout: time.Minute, exhaust: true, repairReturns: true},
+		{name: "remaining_budget", want: maximum},
+		{name: "negative_policy_uses_default", timeout: -time.Second, want: maximum},
+		{name: "oversized_policy_is_capped", timeout: 2 * ServiceShutdownTimeout, want: maximum},
+		{name: "smaller_policy_is_preserved", timeout: time.Second, want: time.Second},
+		{name: "exhausted_repair_returns_nil", timeout: 30 * time.Second, want: 30 * time.Second, exhaust: true},
+		{name: "exhausted_repair_returns_deadline", timeout: time.Minute, want: 30 * time.Second, wantWindows: time.Minute, exhaust: true, repairReturns: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c, m := unitCell(t)
@@ -52,7 +68,9 @@ func TestServiceRunShutdownSharedDeadline(t *testing.T) {
 				}
 			}
 			prepareSupervisorTest(t, c)
-			ctx, cancel := context.WithCancel(t.Context())
+			// The canceled caller is itself deadline-bound. Neither property may
+			// reach the one fresh shutdown parent shared by repair and stop.
+			ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
 			defer cancel()
 			h, _, _, _, _ := supervisorTestHooks()
 			if runtime.GOOS != "windows" {
@@ -61,11 +79,15 @@ func TestServiceRunShutdownSharedDeadline(t *testing.T) {
 			var budget *serviceShutdownDeadlineContext
 			var expire context.CancelFunc
 			factories, repairs, stops, canceled := 0, 0, 0, false
-			deadline := time.Now().Add(30 * time.Second)
+			want := tc.want
+			if runtime.GOOS == "windows" && tc.wantWindows != 0 {
+				want = tc.wantWindows
+			}
+			deadline := time.Now().Add(want)
 			h.shutdownContext = func(parent context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
 				factories++
-				if factories != 1 || timeout != 30*time.Second || parent.Err() != nil || parent.Done() != nil || ctx.Err() == nil {
-					t.Fatal("shutdown did not create one fresh signal-independent 30 second parent budget")
+				if factories != 1 || timeout != want || parent.Err() != nil || parent.Done() != nil || ctx.Err() == nil {
+					t.Fatal("shutdown did not create one fresh signal-independent platform budget")
 				}
 				if _, bounded := parent.Deadline(); bounded {
 					t.Fatal("shutdown parent inherited a deadline")
@@ -118,4 +140,64 @@ func TestServiceRunShutdownSharedDeadline(t *testing.T) {
 			}
 		})
 	}
+}
+
+// This source contract exposes the Windows selection to Linux, without making
+// the native shared-context fixture pretend to execute Windows APIs.
+func TestServiceRunShutdownDeadlinePolicySourceContract(t *testing.T) {
+	source, err := os.ReadFile("service_supervisor.go")
+	if err != nil {
+		t.Fatal("cannot read supervisor shutdown budget source")
+	}
+	normalized := strings.ReplaceAll(string(source), "\r\n", "\n")
+	if !serviceRunShutdownDeadlinePolicySourceContract(normalized) {
+		t.Fatal("supervisor shutdown budget lost platform cap or independent parent")
+	}
+	for _, tc := range []struct{ name, from, to string }{
+		{"windows_cap", "maximumShutdown = ServiceShutdownTimeout", "maximumShutdown = 30 * time.Second"},
+		{"unix_cap", "maximumShutdown := 30 * time.Second", "maximumShutdown := ServiceShutdownTimeout"},
+		{"platform_selector", `runtime.GOOS == "windows"`, `runtime.GOOS == "linux"`},
+		{"oversized_policy", "shutdown > maximumShutdown", "shutdown < maximumShutdown"},
+		{"caller_parent", "s.hooks.shutdownContext(context.Background(), shutdown)", "s.hooks.shutdownContext(ctx, shutdown)"},
+		{"reset_stop_budget", "stopErr := retryServiceContention(stopCtx, s.hooks.stop)", "stopErr := retryServiceContention(context.Background(), s.hooks.stop)"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mutant := strings.Replace(normalized, tc.from, tc.to, 1)
+			if mutant == normalized {
+				t.Fatal("supervisor shutdown budget mutation did not apply")
+			}
+			if serviceRunShutdownDeadlinePolicySourceContract(mutant) {
+				t.Fatal("supervisor shutdown budget contract accepted a broken policy")
+			}
+		})
+	}
+}
+
+func serviceRunShutdownDeadlinePolicySourceContract(source string) bool {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "service_supervisor.go", source, 0)
+	if err != nil {
+		return false
+	}
+	for _, declaration := range file.Decls {
+		function, ok := declaration.(*ast.FuncDecl)
+		if !ok || function.Name.Name != "Run" || function.Body == nil {
+			continue
+		}
+		body := source[fset.Position(function.Body.Pos()).Offset:fset.Position(function.Body.End()).Offset]
+		const policy = `shutdown := policy.ShutdownTimeout
+	maximumShutdown := 30 * time.Second
+	if runtime.GOOS == "windows" {
+		maximumShutdown = ServiceShutdownTimeout
+	}
+	if shutdown <= 0 || shutdown > maximumShutdown {
+		shutdown = maximumShutdown
+	}`
+		return strings.Contains(body, policy) &&
+			strings.Count(body, "s.hooks.shutdownContext(") == 1 &&
+			strings.Contains(body, "stopCtx, cancel := s.hooks.shutdownContext(context.Background(), shutdown)") &&
+			strings.Contains(body, "repairErr := retryServiceContention(stopCtx, s.hooks.repair)") &&
+			strings.Contains(body, "stopErr := retryServiceContention(stopCtx, s.hooks.stop)")
+	}
+	return false
 }
