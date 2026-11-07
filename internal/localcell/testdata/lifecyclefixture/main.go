@@ -134,6 +134,10 @@ func controlPostgres() error {
 }
 
 func servePostgres() error {
+	return servePostgresWithPublication(os.Rename, fixturePublicationTransient)
+}
+
+func servePostgresWithPublication(rename func(string, string) error, transient func(error) bool) error {
 	data := argument("-D")
 	config, err := os.ReadFile(filepath.Join(data, "postgresql.conf"))
 	if err != nil {
@@ -179,7 +183,7 @@ func servePostgres() error {
 	if argument("--fixture-publication-gate") == "held" {
 		// This explicit fixture-only argument never enters production launch
 		// paths. The release signal is always scoped to this fixture's root.
-		deadline := time.Now().Add(5 * time.Second)
+		deadline := time.Now().Add(fixturePublicationTimeout)
 		for {
 			if _, err := os.Stat("fixture-postgres-publication-release"); err == nil {
 				break
@@ -195,7 +199,7 @@ func servePostgres() error {
 			time.Sleep(10 * time.Millisecond)
 		}
 	}
-	if err := os.Rename(pidfile+".pending", pidfile); err != nil {
+	if err := fixtureRenamePublication(pidfile+".pending", pidfile, rename, transient, time.Now, time.Sleep); err != nil {
 		return err
 	}
 	if emptyErr == nil {
