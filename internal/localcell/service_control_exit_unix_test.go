@@ -284,7 +284,7 @@ func TestServiceHostExitAcceptedThenExitedUnix(t *testing.T) {
 		}
 		select {
 		case err := <-restartDone:
-			t.Fatal("same-boot successor failed", err)
+			t.Fatalf("same-boot successor failed: %v", err)
 		case <-time.After(time.Millisecond):
 		}
 	}
@@ -352,7 +352,7 @@ func TestServiceRemoveWaitsForObservedHostExitUnix(t *testing.T) {
 	}
 	close(release)
 	if err := <-removed; err != nil {
-		t.Fatal("removal failed after observed host exit", err)
+		t.Fatalf("removal failed after observed host exit: %v", err)
 	}
 	if err := <-done; err != nil {
 		t.Fatal("host failed graceful removal")

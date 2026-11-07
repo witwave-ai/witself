@@ -118,10 +118,11 @@ func (c *Cell) launchWindows(binary string, args []string, component string, env
 	var process windows.ProcessInformation
 	// Recorded legacy launches retain their isolated console process group.
 	// An explicit service child instead owns a private shutdown pipe and has
-	// no console at all; neither path inherits ambient standard handles.
+	// no console: DETACHED_PROCESS supplies none; CREATE_NO_WINDOW would create
+	// a hidden console. Neither path inherits ambient standard handles.
 	flags := uint32(windows.CREATE_SUSPENDED | windows.CREATE_NEW_PROCESS_GROUP | windows.CREATE_UNICODE_ENVIRONMENT | windows.EXTENDED_STARTUPINFO_PRESENT)
 	if shutdownPath != "" {
-		flags |= windows.CREATE_NO_WINDOW
+		flags |= windows.DETACHED_PROCESS
 	}
 	if component == "postgres" {
 		token, tokenErr := windowsPostgresToken()

@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/witwave-ai/witself/internal/runtimeconfig"
 	"golang.org/x/sys/windows"
@@ -34,7 +35,7 @@ func TestWindowsShutdownChildHelper(_ *testing.T) {
 		os.Exit(70)
 	}
 	if args[0] == "probe" {
-		// The probe is a detached child of the CREATE_NO_WINDOW fixture, so
+		// The probe is a detached child of the DETACHED_PROCESS fixture, so
 		// ATTACH_PARENT_PROCESS always selects that fixture, never the runner.
 		getConsole := windows.NewLazySystemDLL("kernel32.dll").NewProc("GetConsoleWindow")
 		if window, _, _ := getConsole.Call(); window != 0 {
@@ -59,9 +60,14 @@ func TestWindowsShutdownChildHelper(_ *testing.T) {
 	if err != nil {
 		os.Exit(76)
 	}
-	getConsole := windows.NewLazySystemDLL("kernel32.dll").NewProc("GetConsoleWindow")
-	window, _, _ := getConsole.Call()
-	if window != 0 {
+	// GetConsoleWindow can also return zero for a hidden console. Every console
+	// has at least one process, so require this console query to fail with the
+	// exact no-console error before publishing the witness. The buffer is valid
+	// even if more than one process is attached; any positive count fails.
+	var consoleProcess uint32
+	getConsoleProcesses := windows.NewLazySystemDLL("kernel32.dll").NewProc("GetConsoleProcessList")
+	count, _, consoleErr := getConsoleProcesses.Call(uintptr(unsafe.Pointer(&consoleProcess)), 1)
+	if count != 0 || !errors.Is(consoleErr, windows.ERROR_INVALID_HANDLE) {
 		os.Exit(77)
 	}
 	if writeAtomicBytes(filepath.Join(root, "tmp", "console-absent"), []byte("absent"), nil) != nil {
@@ -121,7 +127,7 @@ func TestWindowsShutdownChildHelper(_ *testing.T) {
 		os.Exit(82)
 	}
 	if mode == "normal-probe" {
-		// Run from the real shutdown fixture: its own CREATE_NO_WINDOW launch
+		// Run from the real shutdown fixture: its own DETACHED_PROCESS launch
 		// is the parent whose console absence the detached probe observes.
 		if len(args) != 2 {
 			os.Exit(83)
@@ -270,7 +276,7 @@ func TestWindowsNoConsoleShutdown(t *testing.T) {
 	legacyAttempts = 0
 	f := launchShutdownFixture(t, "normal-probe", false)
 	if _, err := os.Stat(f.cell.path("tmp", "console-absent")); err != nil {
-		t.Fatal("child did not prove absent console window")
+		t.Fatal("child did not prove absent console")
 	}
 	probeResult := f.cell.path("tmp", "console-probe-result")
 	waitShutdownMarker(t, probeResult, f.cell.cfg.Timeout+10*f.startup)
