@@ -12,22 +12,21 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"unicode/utf16"
 	"unsafe"
-
-	"golang.org/x/sys/windows"
 )
 
 // Hooks observe actual native objects. They are per-adapter, unexported and nil
 // in production; metadata can replace one observation for bounded race tests.
 type windowsRecordHooks struct {
 	before   func(string) error
-	observe  func(string, windows.Handle, privateRecordPolicy) error
-	metadata func(string, *windows.ByHandleFileInformation)
+	observe  func(string, syscall.Handle, privateRecordPolicy) error
+	metadata func(string, *syscall.ByHandleFileInformation)
 }
 type windowsRecordGuard struct {
 	path     string
-	handle   windows.Handle
+	handle   syscall.Handle
 	identity [3]uint64
 }
 type windowsRecordOps struct {
@@ -50,53 +49,146 @@ func (f *windowsRecordFile) Write(b []byte) (int, error) { return f.file.Write(b
 func (f *windowsRecordFile) Sync() error                 { return f.file.Sync() }
 func (f *windowsRecordFile) Close() error                { return f.file.Close() }
 
+// Native constants below retain their Win32/NT names in comments. The syscall
+// package supplies the ordinary file and token operations; these bindings cover
+// only the documented entry points and layouts it does not expose.
+const (
+	windowsRecordReadAttributes      = 0x0080     // FILE_READ_ATTRIBUTES
+	windowsRecordReadControl         = 0x00020000 // READ_CONTROL
+	windowsRecordTraverse            = 0x0020     // FILE_TRAVERSE
+	windowsRecordDelete              = 0x00010000 // DELETE
+	windowsRecordDriveFixed          = 3          // DRIVE_FIXED
+	windowsRecordOwnerSecurity       = 0x00000001 // OWNER_SECURITY_INFORMATION
+	windowsRecordDACLSecurity        = 0x00000004 // DACL_SECURITY_INFORMATION
+	windowsRecordFileDispositionInfo = 4          // FileDispositionInfo
+	windowsRecordFileRenameInfoEx    = 22         // FileRenameInfoEx
+	windowsRecordCaseInsensitive     = 0x00000040 // OBJ_CASE_INSENSITIVE
+	windowsRecordDontReparse         = 0x00001000 // OBJ_DONT_REPARSE
+	windowsRecordDirectoryFile       = 0x00000001 // FILE_DIRECTORY_FILE
+	windowsRecordSynchronousIO       = 0x00000020 // FILE_SYNCHRONOUS_IO_NONALERT
+	windowsRecordNonDirectoryFile    = 0x00000040 // FILE_NON_DIRECTORY_FILE
+	windowsRecordOpenReparsePoint    = 0x00200000 // FILE_OPEN_REPARSE_POINT
+	windowsRecordFileCreate          = 2          // FILE_CREATE
+)
+
+// These are Windows KnownDLLs; only documented system exports are resolved.
+var (
+	windowsRecordKernel32          = syscall.NewLazyDLL("kernel32.dll")
+	windowsRecordAdvapi32          = syscall.NewLazyDLL("advapi32.dll")
+	windowsRecordNTDLL             = syscall.NewLazyDLL("ntdll.dll")
+	windowsRecordGetSecurity       = windowsRecordAdvapi32.NewProc("GetKernelObjectSecurity")
+	windowsRecordConvertDescriptor = windowsRecordAdvapi32.NewProc("ConvertStringSecurityDescriptorToSecurityDescriptorW")
+	windowsRecordValidSID          = windowsRecordAdvapi32.NewProc("IsValidSid")
+	windowsRecordSetInformation    = windowsRecordKernel32.NewProc("SetFileInformationByHandle")
+	windowsRecordVolumeInformation = windowsRecordKernel32.NewProc("GetVolumeInformationByHandleW")
+	windowsRecordDriveType         = windowsRecordKernel32.NewProc("GetDriveTypeW")
+	windowsRecordNTCreate          = windowsRecordNTDLL.NewProc("NtCreateFile")
+	windowsRecordNTError           = windowsRecordNTDLL.NewProc("RtlNtStatusToDosError")
+)
+
+// UNICODE_STRING, OBJECT_ATTRIBUTES and IO_STATUS_BLOCK follow their native
+// pointer alignment on both 32-bit and 64-bit Windows.
+type windowsRecordUnicodeString struct {
+	Length        uint16
+	MaximumLength uint16
+	Buffer        *uint16
+}
+type windowsRecordObjectAttributes struct {
+	Length                   uint32
+	RootDirectory            syscall.Handle
+	ObjectName               *windowsRecordUnicodeString
+	Attributes               uint32
+	SecurityDescriptor       *byte
+	SecurityQualityOfService unsafe.Pointer
+}
+type windowsRecordIOStatusBlock struct {
+	// Native union of NTSTATUS and a pointer; pointer width preserves alignment.
+	Status      uintptr
+	Information uintptr
+}
+
 func windowsRecordFailure(err error) error {
-	var status windows.NTStatus
-	if errors.As(err, &status) {
-		err = status.Errno()
-	}
-	if errors.Is(err, windows.ERROR_FILE_NOT_FOUND) || errors.Is(err, windows.ERROR_PATH_NOT_FOUND) {
+	if errors.Is(err, syscall.ERROR_FILE_NOT_FOUND) || errors.Is(err, syscall.ERROR_PATH_NOT_FOUND) {
 		return os.ErrNotExist
 	}
 	return ReasonStateIO
 }
-func windowsRecordPrincipals() (*windows.SID, *windows.SID, error) {
-	token, err := windows.GetCurrentProcessToken().GetTokenUser()
-	if err != nil || token == nil || token.User.Sid == nil || !token.User.Sid.IsValid() {
-		return nil, nil, ReasonStateIO
-	}
-	system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
+func windowsRecordPrincipals() (*syscall.SID, *syscall.SID, error) {
+	token, err := syscall.OpenCurrentProcessToken()
 	if err != nil {
 		return nil, nil, ReasonStateIO
 	}
-	return token.User.Sid, system, nil
+	user, userErr := token.GetTokenUser()
+	closeErr := token.Close()
+	if userErr != nil || closeErr != nil || user == nil || user.User.Sid == nil || windowsRecordValidSID.Find() != nil {
+		return nil, nil, ReasonStateIO
+	}
+	valid, _, _ := windowsRecordValidSID.Call(uintptr(unsafe.Pointer(user.User.Sid)))
+	if valid == 0 {
+		return nil, nil, ReasonStateIO
+	}
+	// S-1-5-18 is the well-known LocalSystem SID, not an account lookup.
+	system, err := syscall.StringToSid("S-1-5-18")
+	if err != nil {
+		return nil, nil, ReasonStateIO
+	}
+	return user.User.Sid, system, nil
 }
-func windowsRecordDescriptor() (*windows.SECURITY_DESCRIPTOR, error) {
+func windowsRecordDescriptor() ([]byte, error) {
 	user, system, err := windowsRecordPrincipals()
 	if err != nil {
 		return nil, err
 	}
-	text := "O:" + user.String() + "D:P(A;;FA;;;" + user.String() + ")"
-	if !user.Equals(system) {
-		text += "(A;;FA;;;SY)"
-	}
-	sd, err := windows.SecurityDescriptorFromString(text)
+	userText, err := user.String()
 	if err != nil {
 		return nil, ReasonStateIO
 	}
-	return sd, nil
+	text := "O:" + userText + "D:P(A;;FA;;;" + userText + ")"
+	userBytes := unsafe.Slice((*byte)(unsafe.Pointer(user)), user.Len())
+	systemBytes := unsafe.Slice((*byte)(unsafe.Pointer(system)), system.Len())
+	if !bytes.Equal(userBytes, systemBytes) {
+		text += "(A;;FA;;;SY)"
+	}
+	encoded, err := syscall.UTF16PtrFromString(text)
+	if err != nil || windowsRecordConvertDescriptor.Find() != nil {
+		return nil, ReasonStateIO
+	}
+	var native *byte
+	var size uint32
+	// SDDL_REVISION_1. The API owns this allocation until LocalFree; return a
+	// Go-owned copy so no native allocation escapes this bounded operation.
+	r, _, _ := windowsRecordConvertDescriptor.Call(uintptr(unsafe.Pointer(encoded)), 1, uintptr(unsafe.Pointer(&native)), uintptr(unsafe.Pointer(&size)))
+	if native != nil {
+		defer func() { _, _ = syscall.LocalFree(syscall.Handle(unsafe.Pointer(native))) }()
+	}
+	if r == 0 || native == nil || size < 20 || size > 65536 {
+		return nil, ReasonStateIO
+	}
+	return append([]byte(nil), unsafe.Slice(native, int(size))...), nil
 }
 
-var windowsRecordGetSecurity = windows.NewLazySystemDLL("advapi32.dll").NewProc("GetKernelObjectSecurity")
+func windowsRecordSetFileInformation(handle syscall.Handle, class uint32, data *byte, size uint32) error {
+	if windowsRecordSetInformation.Find() != nil {
+		return ReasonStateIO
+	}
+	r, _, _ := windowsRecordSetInformation.Call(uintptr(handle), uintptr(class), uintptr(unsafe.Pointer(data)), uintptr(size))
+	if r == 0 {
+		return ReasonStateIO
+	}
+	return nil
+}
 
 // GetKernelObjectSecurity reports a bounded self-relative descriptor. Parsing
 // offsets and lengths before forming any SID/ACE view avoids trusting embedded
 // native pointers. The Windows allocation is not retained: this is a Go buffer.
-func windowsRecordSecurity(handle windows.Handle) ([]byte, error) {
-	const wanted = windows.OWNER_SECURITY_INFORMATION | windows.DACL_SECURITY_INFORMATION
+func windowsRecordSecurity(handle syscall.Handle) ([]byte, error) {
+	if windowsRecordGetSecurity.Find() != nil {
+		return nil, ReasonStateIO
+	}
+	const wanted = windowsRecordOwnerSecurity | windowsRecordDACLSecurity
 	var needed uint32
 	r, _, callErr := windowsRecordGetSecurity.Call(uintptr(handle), uintptr(wanted), 0, 0, uintptr(unsafe.Pointer(&needed)))
-	if r != 0 || !errors.Is(callErr, windows.ERROR_INSUFFICIENT_BUFFER) || needed < 20 || needed > 65536 {
+	if r != 0 || !errors.Is(callErr, syscall.ERROR_INSUFFICIENT_BUFFER) || needed < 20 || needed > 65536 {
 		return nil, ReasonStateIO
 	}
 	b := make([]byte, needed)
@@ -106,105 +198,24 @@ func windowsRecordSecurity(handle windows.Handle) ([]byte, error) {
 	}
 	return b[:needed], nil
 }
-func windowsRecordSID(b []byte, offset int) ([]byte, bool) {
-	if offset < 0 || offset > len(b)-8 || b[offset] != 1 || b[offset+1] > 15 {
-		return nil, false
-	}
-	length := 8 + int(b[offset+1])*4
-	if length > len(b)-offset {
-		return nil, false
-	}
-	return b[offset : offset+length], true
-}
 func windowsRecordPolicyFromSecurity(b []byte) (privateRecordPolicy, error) {
-	p := privateRecordPolicy{}
-	if len(b) < 20 || b[0] != 1 {
-		return p, ReasonStateIO
-	}
-	control := binary.LittleEndian.Uint16(b[2:4])
-	if control&uint16(windows.SE_SELF_RELATIVE) == 0 {
-		return p, ReasonStateIO
-	}
-	ownerOffset := int(binary.LittleEndian.Uint32(b[4:8]))
-	aclOffset := int(binary.LittleEndian.Uint32(b[16:20]))
-	if ownerOffset < 20 || ownerOffset%4 != 0 || aclOffset < 20 || aclOffset%4 != 0 || aclOffset > len(b)-8 {
-		return p, ReasonStateIO
-	}
-	owner, ok := windowsRecordSID(b, ownerOffset)
-	if !ok {
-		return p, ReasonStateIO
-	}
-	// Validate all optional offsets too, even though this query requests only
-	// owner and DACL. No offset may point into the descriptor's fixed header.
-	groupOffset := int(binary.LittleEndian.Uint32(b[8:12]))
-	if groupOffset != 0 {
-		if groupOffset < 20 || groupOffset%4 != 0 {
-			return p, ReasonStateIO
-		}
-		if _, ok := windowsRecordSID(b, groupOffset); !ok {
-			return p, ReasonStateIO
-		}
-	}
-	if binary.LittleEndian.Uint32(b[12:16]) != 0 {
-		return p, ReasonStateIO
-	}
-	aclSize := int(binary.LittleEndian.Uint16(b[aclOffset+2 : aclOffset+4]))
-	count := int(binary.LittleEndian.Uint16(b[aclOffset+4 : aclOffset+6]))
-	if (b[aclOffset] != 2 && b[aclOffset] != 4) || aclSize < 8 || aclSize > len(b)-aclOffset || count > 1024 {
-		return p, ReasonStateIO
-	}
-	if ownerOffset < aclOffset+aclSize && ownerOffset+len(owner) > aclOffset {
-		return p, ReasonStateIO
-	}
 	user, system, err := windowsRecordPrincipals()
 	if err != nil {
-		return p, err
+		return privateRecordPolicy{}, err
 	}
 	userBytes := unsafe.Slice((*byte)(unsafe.Pointer(user)), user.Len())
 	systemBytes := unsafe.Slice((*byte)(unsafe.Pointer(system)), system.Len())
-	p.ownerUser = bytes.Equal(owner, userBytes)
-	p.userIsSystem = bytes.Equal(userBytes, systemBytes)
-	p.protected = control&uint16(windows.SE_DACL_PROTECTED) != 0
-	p.daclPresent = control&uint16(windows.SE_DACL_PRESENT) != 0
-	end, pos := aclOffset+aclSize, aclOffset+8
-	for range count {
-		if pos > end-8 {
-			return privateRecordPolicy{}, ReasonStateIO
-		}
-		size := int(binary.LittleEndian.Uint16(b[pos+2 : pos+4]))
-		if size < 8 || size%4 != 0 || size > end-pos {
-			return privateRecordPolicy{}, ReasonStateIO
-		}
-		ace := privateRecordACE{kind: b[pos], flags: b[pos+1], rights: binary.LittleEndian.Uint32(b[pos+4 : pos+8])}
-		if ace.kind == windows.ACCESS_ALLOWED_ACE_TYPE {
-			sid, ok := windowsRecordSID(b[pos:pos+size], 8)
-			if !ok || len(sid)+8 != size {
-				return privateRecordPolicy{}, ReasonStateIO
-			}
-			switch {
-			case bytes.Equal(sid, userBytes):
-				ace.principal = recordUser
-			case bytes.Equal(sid, systemBytes):
-				ace.principal = recordSystem
-			}
-		}
-		p.aces = append(p.aces, ace)
-		pos += size
-	}
-	if pos > end {
-		return privateRecordPolicy{}, ReasonStateIO
-	}
-	p.valid = true
+	policy, err := privateRecordPolicyFromSecurity(b, userBytes, systemBytes)
 	runtime.KeepAlive(user)
 	runtime.KeepAlive(system)
-	return p, nil
+	return policy, err
 }
-func windowsRecordIdentity(info windows.ByHandleFileInformation) [3]uint64 {
+func windowsRecordIdentity(info syscall.ByHandleFileInformation) [3]uint64 {
 	return [3]uint64{uint64(info.VolumeSerialNumber), uint64(info.FileIndexHigh), uint64(info.FileIndexLow)}
 }
-func windowsRecordProjection(handle windows.Handle, directory bool) (privateRecordPolicy, privateRecordInfo, error) {
-	var info windows.ByHandleFileInformation
-	if windows.GetFileInformationByHandle(handle, &info) != nil {
+func windowsRecordProjection(handle syscall.Handle, directory bool) (privateRecordPolicy, privateRecordInfo, error) {
+	var info syscall.ByHandleFileInformation
+	if syscall.GetFileInformationByHandle(handle, &info) != nil {
 		return privateRecordPolicy{}, privateRecordInfo{}, ReasonStateIO
 	}
 	b, err := windowsRecordSecurity(handle)
@@ -212,9 +223,9 @@ func windowsRecordProjection(handle windows.Handle, directory bool) (privateReco
 		return privateRecordPolicy{}, privateRecordInfo{}, err
 	}
 	p, err := windowsRecordPolicyFromSecurity(b)
-	p.directory = info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0
+	p.directory = info.FileAttributes&syscall.FILE_ATTRIBUTE_DIRECTORY != 0
 	p.wantDirectory = directory
-	p.reparse = info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0
+	p.reparse = info.FileAttributes&syscall.FILE_ATTRIBUTE_REPARSE_POINT != 0
 	p.identity = windowsRecordIdentity(info)
 	p.observedIdentity = p.identity
 	size := uint64(info.FileSizeHigh)<<32 | uint64(info.FileSizeLow)
@@ -229,19 +240,19 @@ func (o *windowsRecordOps) before(stage string) error {
 	}
 	return nil
 }
-func (o *windowsRecordOps) project(stage string, h windows.Handle, directory bool) (privateRecordInfo, error) {
+func (o *windowsRecordOps) project(stage string, h syscall.Handle, directory bool) (privateRecordInfo, error) {
 	p, info, err := windowsRecordProjection(h, directory)
 	if err != nil {
 		return privateRecordInfo{}, ReasonStateIO
 	}
 	if o.hooks != nil && o.hooks.metadata != nil {
-		var observed windows.ByHandleFileInformation
-		if windows.GetFileInformationByHandle(h, &observed) != nil {
+		var observed syscall.ByHandleFileInformation
+		if syscall.GetFileInformationByHandle(h, &observed) != nil {
 			return privateRecordInfo{}, ReasonStateIO
 		}
 		o.hooks.metadata("projection", &observed)
-		p.reparse = observed.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0
-		p.directory = observed.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0
+		p.reparse = observed.FileAttributes&syscall.FILE_ATTRIBUTE_REPARSE_POINT != 0
+		p.directory = observed.FileAttributes&syscall.FILE_ATTRIBUTE_DIRECTORY != 0
 		p.observedIdentity = windowsRecordIdentity(observed)
 	}
 	if o.hooks != nil && o.hooks.observe != nil && o.hooks.observe(stage, h, p) != nil {
@@ -290,25 +301,25 @@ func windowsRecordLeafName(name string) bool {
 	_, err := windowsRecordCleanPath(`C:\` + name)
 	return err == nil
 }
-func windowsRecordOpenMetadata(path string, access, share uint32) (windows.Handle, error) {
-	p, err := windows.UTF16PtrFromString(path)
+func windowsRecordOpenMetadata(path string, access, share uint32) (syscall.Handle, error) {
+	p, err := syscall.UTF16PtrFromString(path)
 	if err != nil {
-		return windows.InvalidHandle, ReasonStateIO
+		return syscall.InvalidHandle, ReasonStateIO
 	}
-	h, err := windows.CreateFile(p, access|windows.FILE_READ_ATTRIBUTES|windows.READ_CONTROL, share, nil, windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	h, err := syscall.CreateFile(p, access|windowsRecordReadAttributes|windowsRecordReadControl, share, nil, syscall.OPEN_EXISTING, syscall.FILE_FLAG_BACKUP_SEMANTICS|syscall.FILE_FLAG_OPEN_REPARSE_POINT, 0)
 	if err != nil {
-		return windows.InvalidHandle, windowsRecordFailure(err)
+		return syscall.InvalidHandle, windowsRecordFailure(err)
 	}
 	return h, nil
 }
 func (o *windowsRecordOps) appendGuard(path string) error {
-	h, err := windowsRecordOpenMetadata(path, windows.FILE_TRAVERSE, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE)
+	h, err := windowsRecordOpenMetadata(path, windowsRecordTraverse, syscall.FILE_SHARE_READ|syscall.FILE_SHARE_WRITE)
 	if err != nil {
 		return err
 	}
-	var info windows.ByHandleFileInformation
-	if windows.GetFileInformationByHandle(h, &info) != nil || info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 || info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 {
-		_ = windows.CloseHandle(h)
+	var info syscall.ByHandleFileInformation
+	if syscall.GetFileInformationByHandle(h, &info) != nil || info.FileAttributes&syscall.FILE_ATTRIBUTE_REPARSE_POINT != 0 || info.FileAttributes&syscall.FILE_ATTRIBUTE_DIRECTORY == 0 {
+		_ = syscall.CloseHandle(h)
 		return ReasonStateIO
 	}
 	o.guards = append(o.guards, windowsRecordGuard{path: path, handle: h, identity: windowsRecordIdentity(info)})
@@ -330,15 +341,23 @@ func newWindowsPrivateRecordOps(dir string, create bool, hooks *windowsRecordHoo
 		}
 	}()
 	root := clean[:3]
-	ptr, _ := windows.UTF16PtrFromString(root)
-	if windows.GetDriveType(ptr) != windows.DRIVE_FIXED {
+	ptr, _ := syscall.UTF16PtrFromString(root)
+	if windowsRecordDriveType.Find() != nil {
+		return nil, ReasonStateIO
+	}
+	driveType, _, _ := windowsRecordDriveType.Call(uintptr(unsafe.Pointer(ptr)))
+	if driveType != windowsRecordDriveFixed {
 		return nil, ReasonStateIO
 	}
 	if o.appendGuard(root) != nil {
 		return nil, ReasonStateIO
 	}
 	var filesystem [32]uint16
-	if windows.GetVolumeInformationByHandle(o.guards[0].handle, nil, 0, nil, nil, nil, &filesystem[0], uint32(len(filesystem))) != nil || windows.UTF16ToString(filesystem[:]) != "NTFS" {
+	if windowsRecordVolumeInformation.Find() != nil {
+		return nil, ReasonStateIO
+	}
+	volumeOK, _, _ := windowsRecordVolumeInformation.Call(uintptr(o.guards[0].handle), 0, 0, 0, 0, 0, uintptr(unsafe.Pointer(&filesystem[0])), uintptr(len(filesystem)))
+	if volumeOK == 0 || syscall.UTF16ToString(filesystem[:]) != "NTFS" {
 		return nil, ReasonStateIO
 	}
 	current := root
@@ -365,33 +384,33 @@ func newWindowsPrivateRecordOps(dir string, create bool, hooks *windowsRecordHoo
 		}
 		if err != nil {
 			_ = windowsRecordDeleteHandle(h)
-			_ = windows.CloseHandle(h)
+			_ = syscall.CloseHandle(h)
 			return nil, ReasonStateIO
 		}
 		// Acquire a compatible metadata guard while the exact rollback handle
 		// is still live. The selected-directory guard permits delete sharing;
 		// ancestors deny it. Neither prevents in-place reparse conversion, so
 		// verify the retained and current observations at every boundary.
-		guard, openErr := windowsRecordOpenMetadata(current, windows.FILE_TRAVERSE, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE)
-		var currentInfo windows.ByHandleFileInformation
+		guard, openErr := windowsRecordOpenMetadata(current, windowsRecordTraverse, syscall.FILE_SHARE_READ|syscall.FILE_SHARE_WRITE|syscall.FILE_SHARE_DELETE)
+		var currentInfo syscall.ByHandleFileInformation
 		if openErr == nil {
-			openErr = windows.GetFileInformationByHandle(guard, &currentInfo)
+			openErr = syscall.GetFileInformationByHandle(guard, &currentInfo)
 		}
 		if openErr != nil || windowsRecordIdentity(currentInfo) != observed.identity {
-			if guard != windows.InvalidHandle {
-				_ = windows.CloseHandle(guard)
+			if guard != syscall.InvalidHandle {
+				_ = syscall.CloseHandle(guard)
 			}
 			_ = windowsRecordDeleteHandle(h)
-			_ = windows.CloseHandle(h)
+			_ = syscall.CloseHandle(h)
 			return nil, ReasonStateIO
 		}
 		o.guards = append(o.guards, windowsRecordGuard{path: current, handle: guard, identity: observed.identity})
 		if o.verifyGuards(false) != nil {
 			_ = windowsRecordDeleteHandle(h)
-			_ = windows.CloseHandle(h)
+			_ = syscall.CloseHandle(h)
 			return nil, ReasonStateIO
 		}
-		if windows.CloseHandle(h) != nil {
+		if syscall.CloseHandle(h) != nil {
 			return nil, ReasonStateIO
 		}
 	}
@@ -405,48 +424,50 @@ func newWindowsPrivateRecordOps(dir string, create bool, hooks *windowsRecordHoo
 // NtCreateFile is a documented ntdll export. A relative name and retained
 // RootDirectory bind creation to that directory, and return the exact created
 // handle for rollback. Every object receives its security before any payload.
-func (o *windowsRecordOps) createNative(name string, directory bool) (windows.Handle, error) {
+func (o *windowsRecordOps) createNative(name string, directory bool) (syscall.Handle, error) {
 	if len(o.guards) == 0 || !windowsRecordLeafName(name) {
-		return windows.InvalidHandle, ReasonStateIO
+		return syscall.InvalidHandle, ReasonStateIO
 	}
 	sd, err := windowsRecordDescriptor()
 	if err != nil {
-		return windows.InvalidHandle, err
+		return syscall.InvalidHandle, err
 	}
-	ntname, err := windows.NewNTUnicodeString(name)
-	if err != nil {
-		return windows.InvalidHandle, ReasonStateIO
+	chars, err := syscall.UTF16FromString(name)
+	if err != nil || len(chars)*2 > 65535 || windowsRecordNTCreate.Find() != nil || windowsRecordNTError.Find() != nil {
+		return syscall.InvalidHandle, ReasonStateIO
 	}
-	oa := windows.OBJECT_ATTRIBUTES{RootDirectory: o.guards[len(o.guards)-1].handle, ObjectName: ntname, Attributes: windows.OBJ_CASE_INSENSITIVE | windows.OBJ_DONT_REPARSE, SecurityDescriptor: sd}
+	ntname := windowsRecordUnicodeString{Length: uint16((len(chars) - 1) * 2), MaximumLength: uint16(len(chars) * 2), Buffer: &chars[0]}
+	oa := windowsRecordObjectAttributes{RootDirectory: o.guards[len(o.guards)-1].handle, ObjectName: &ntname, Attributes: windowsRecordCaseInsensitive | windowsRecordDontReparse, SecurityDescriptor: &sd[0]}
 	oa.Length = uint32(unsafe.Sizeof(oa))
-	options := uint32(windows.FILE_SYNCHRONOUS_IO_NONALERT | windows.FILE_OPEN_REPARSE_POINT | windows.FILE_NON_DIRECTORY_FILE)
-	access := uint32(windows.GENERIC_READ | windows.GENERIC_WRITE | windows.READ_CONTROL | windows.DELETE | windows.SYNCHRONIZE)
+	options := uint32(windowsRecordSynchronousIO | windowsRecordOpenReparsePoint | windowsRecordNonDirectoryFile)
+	access := uint32(syscall.GENERIC_READ | syscall.GENERIC_WRITE | windowsRecordReadControl | windowsRecordDelete | syscall.SYNCHRONIZE)
 	if directory {
-		options = windows.FILE_SYNCHRONOUS_IO_NONALERT | windows.FILE_OPEN_REPARSE_POINT | windows.FILE_DIRECTORY_FILE
+		options = windowsRecordSynchronousIO | windowsRecordOpenReparsePoint | windowsRecordDirectoryFile
 	}
-	var h windows.Handle
-	var iosb windows.IO_STATUS_BLOCK
-	err = windows.NtCreateFile(&h, access, &oa, &iosb, nil, windows.FILE_ATTRIBUTE_NORMAL, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, windows.FILE_CREATE, options, 0, 0)
+	var h syscall.Handle
+	var iosb windowsRecordIOStatusBlock
+	status, _, _ := windowsRecordNTCreate.Call(uintptr(unsafe.Pointer(&h)), uintptr(access), uintptr(unsafe.Pointer(&oa)), uintptr(unsafe.Pointer(&iosb)), 0, syscall.FILE_ATTRIBUTE_NORMAL, syscall.FILE_SHARE_READ|syscall.FILE_SHARE_WRITE|syscall.FILE_SHARE_DELETE, windowsRecordFileCreate, uintptr(options), 0, 0)
 	runtime.KeepAlive(sd)
-	runtime.KeepAlive(ntname)
-	if err != nil {
-		return windows.InvalidHandle, windowsRecordFailure(err)
+	runtime.KeepAlive(chars)
+	if uint32(status) != 0 {
+		errno, _, _ := windowsRecordNTError.Call(uintptr(uint32(status)))
+		return syscall.InvalidHandle, windowsRecordFailure(syscall.Errno(errno))
 	}
 	return h, nil
 }
 func (o *windowsRecordOps) verifyGuards(prepublication bool) error {
 	for i, g := range o.guards {
-		var retained windows.ByHandleFileInformation
-		if windows.GetFileInformationByHandle(g.handle, &retained) != nil || retained.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 || retained.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 || windowsRecordIdentity(retained) != g.identity {
+		var retained syscall.ByHandleFileInformation
+		if syscall.GetFileInformationByHandle(g.handle, &retained) != nil || retained.FileAttributes&syscall.FILE_ATTRIBUTE_REPARSE_POINT != 0 || retained.FileAttributes&syscall.FILE_ATTRIBUTE_DIRECTORY == 0 || windowsRecordIdentity(retained) != g.identity {
 			return ReasonStateIO
 		}
-		h, err := windowsRecordOpenMetadata(g.path, 0, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE)
+		h, err := windowsRecordOpenMetadata(g.path, 0, syscall.FILE_SHARE_READ|syscall.FILE_SHARE_WRITE|syscall.FILE_SHARE_DELETE)
 		if err != nil {
 			return ReasonStateIO
 		}
-		var observed windows.ByHandleFileInformation
-		err = windows.GetFileInformationByHandle(h, &observed)
-		closeErr := windows.CloseHandle(h)
+		var observed syscall.ByHandleFileInformation
+		err = syscall.GetFileInformationByHandle(h, &observed)
+		closeErr := syscall.CloseHandle(h)
 		if err != nil || closeErr != nil {
 			return ReasonStateIO
 		}
@@ -457,7 +478,7 @@ func (o *windowsRecordOps) verifyGuards(prepublication bool) error {
 			}
 			o.hooks.metadata(stage, &observed)
 		}
-		if observed.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 || observed.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 || windowsRecordIdentity(observed) != g.identity {
+		if observed.FileAttributes&syscall.FILE_ATTRIBUTE_REPARSE_POINT != 0 || observed.FileAttributes&syscall.FILE_ATTRIBUTE_DIRECTORY == 0 || windowsRecordIdentity(observed) != g.identity {
 			return ReasonStateIO
 		}
 	}
@@ -474,11 +495,11 @@ func (o *windowsRecordOps) inspect(name string) (privateRecordInfo, error) {
 	if !windowsRecordLeafName(name) || o.checkDirectory(false) != nil {
 		return privateRecordInfo{}, ReasonStateIO
 	}
-	h, err := windowsRecordOpenMetadata(filepath.Join(o.dir, name), 0, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE)
+	h, err := windowsRecordOpenMetadata(filepath.Join(o.dir, name), 0, syscall.FILE_SHARE_READ|syscall.FILE_SHARE_WRITE|syscall.FILE_SHARE_DELETE)
 	if err != nil {
 		return privateRecordInfo{}, err
 	}
-	defer func() { _ = windows.CloseHandle(h) }()
+	defer func() { _ = syscall.CloseHandle(h) }()
 	info, err := o.project("leaf-inspect", h, false)
 	if err == nil {
 		err = o.verifyGuards(false)
@@ -490,7 +511,7 @@ func (o *windowsRecordOps) open(name string) (privateRecordHandle, error) {
 		return nil, ReasonStateIO
 	}
 	path := filepath.Join(o.dir, name)
-	h, err := windowsRecordOpenMetadata(path, windows.GENERIC_READ, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE)
+	h, err := windowsRecordOpenMetadata(path, syscall.GENERIC_READ, syscall.FILE_SHARE_READ|syscall.FILE_SHARE_WRITE|syscall.FILE_SHARE_DELETE)
 	if err != nil {
 		return nil, err
 	}
@@ -499,7 +520,7 @@ func (o *windowsRecordOps) open(name string) (privateRecordHandle, error) {
 		err = o.verifyGuards(false)
 	}
 	if err != nil {
-		_ = windows.CloseHandle(h)
+		_ = syscall.CloseHandle(h)
 		return nil, ReasonStateIO
 	}
 	return &windowsRecordFile{file: os.NewFile(uintptr(h), path), path: path, identity: info.identity}, nil
@@ -509,7 +530,7 @@ func (o *windowsRecordOps) inspectHandle(handle privateRecordHandle) (privateRec
 	if !ok {
 		return privateRecordInfo{}, ReasonStateIO
 	}
-	info, err := o.project("handle", windows.Handle(f.file.Fd()), false)
+	info, err := o.project("handle", syscall.Handle(f.file.Fd()), false)
 	if err != nil || info.identity != f.identity || o.verifyGuards(false) != nil {
 		return privateRecordInfo{}, ReasonStateIO
 	}
@@ -541,15 +562,15 @@ func (o *windowsRecordOps) create(name string, temporary bool) (privateRecordHan
 	}
 	if err != nil {
 		_ = windowsRecordDeleteHandle(h)
-		_ = windows.CloseHandle(h)
+		_ = syscall.CloseHandle(h)
 		return nil, ReasonStateIO
 	}
 	path := filepath.Join(o.dir, name)
 	return &windowsRecordFile{file: os.NewFile(uintptr(h), path), path: path, identity: info.identity, created: true}, nil
 }
-func windowsRecordDeleteHandle(h windows.Handle) error {
+func windowsRecordDeleteHandle(h syscall.Handle) error {
 	remove := byte(1)
-	if windows.SetFileInformationByHandle(h, windows.FileDispositionInfo, &remove, 1) != nil {
+	if windowsRecordSetFileInformation(h, windowsRecordFileDispositionInfo, &remove, 1) != nil {
 		return ReasonStateIO
 	}
 	return nil
@@ -559,7 +580,7 @@ func (*windowsRecordOps) removeOwned(handle privateRecordHandle) error {
 	if !ok || !f.created || f.published {
 		return ReasonStateIO
 	}
-	return windowsRecordDeleteHandle(windows.Handle(f.file.Fd()))
+	return windowsRecordDeleteHandle(syscall.Handle(f.file.Fd()))
 }
 func (*windowsRecordOps) closeBeforePublish() bool { return false }
 func (o *windowsRecordOps) recheck(name string, source privateRecordHandle, prior *privateRecordInfo) error {
@@ -592,7 +613,7 @@ func (o *windowsRecordOps) recheck(name string, source privateRecordHandle, prio
 
 type windowsRecordRenameInfo struct {
 	Flags          uint32
-	RootDirectory  windows.Handle
+	RootDirectory  syscall.Handle
 	FileNameLength uint32
 	FileName       [1]uint16
 }
@@ -607,9 +628,9 @@ func (o *windowsRecordOps) publish(source privateRecordHandle, name string) (boo
 		return false, ReasonStateIO
 	}
 	// Probe DELETE access on an existing target before the atomic replacement.
-	target, err := windowsRecordOpenMetadata(filepath.Join(o.dir, name), windows.DELETE, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE)
+	target, err := windowsRecordOpenMetadata(filepath.Join(o.dir, name), windowsRecordDelete, syscall.FILE_SHARE_READ|syscall.FILE_SHARE_WRITE|syscall.FILE_SHARE_DELETE)
 	if err == nil {
-		defer func() { _ = windows.CloseHandle(target) }()
+		defer func() { _ = syscall.CloseHandle(target) }()
 		observed, err := o.project("target", target, false)
 		if err != nil || f.expectedTarget == nil || observed.identity != f.expectedTarget.identity {
 			return false, ReasonStateIO
@@ -621,7 +642,7 @@ func (o *windowsRecordOps) publish(source privateRecordHandle, name string) (boo
 		return false, ReasonStateIO
 	}
 	path := filepath.Join(o.dir, name)
-	chars, err := windows.UTF16FromString(path)
+	chars, err := syscall.UTF16FromString(path)
 	if err != nil {
 		return false, ReasonStateIO
 	}
@@ -634,7 +655,7 @@ func (o *windowsRecordOps) publish(source privateRecordHandle, name string) (boo
 	for i, c := range chars {
 		binary.LittleEndian.PutUint16(b[offset+i*2:], c)
 	}
-	if windows.SetFileInformationByHandle(windows.Handle(f.file.Fd()), windows.FileRenameInfoEx, &b[0], uint32(len(b))) != nil {
+	if windowsRecordSetFileInformation(syscall.Handle(f.file.Fd()), windowsRecordFileRenameInfoEx, &b[0], uint32(len(b))) != nil {
 		return false, ReasonStateIO
 	}
 	f.published = true
@@ -649,7 +670,7 @@ func (o *windowsRecordOps) complete(source privateRecordHandle, name string) err
 	if !ok || !f.published {
 		return ReasonStateIO
 	}
-	opened, err := o.project("published", windows.Handle(f.file.Fd()), false)
+	opened, err := o.project("published", syscall.Handle(f.file.Fd()), false)
 	if err != nil || opened.identity != f.identity {
 		return ReasonStateIO
 	}
@@ -662,7 +683,7 @@ func (o *windowsRecordOps) complete(source privateRecordHandle, name string) err
 func (o *windowsRecordOps) close() error {
 	var result error
 	for i := len(o.guards) - 1; i >= 0; i-- {
-		if windows.CloseHandle(o.guards[i].handle) != nil {
+		if syscall.CloseHandle(o.guards[i].handle) != nil {
 			result = ReasonStateIO
 		}
 	}

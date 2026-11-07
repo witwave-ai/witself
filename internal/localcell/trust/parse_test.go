@@ -78,27 +78,40 @@ func TestStrictSchemaForwardCompatibilityAndRequiredFields(t *testing.T) {
 }
 
 func TestTrustStandardLibraryDependencyBoundary(t *testing.T) {
-	cmd := exec.Command("go", "list", "-deps", "-json", ".")
-	raw, err := cmd.Output()
-	if err != nil {
-		t.Fatal("dependency listing failed")
-	}
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	count := 0
-	for dec.More() {
-		var dependency struct {
-			ImportPath string
-			Standard   bool
-		}
-		if dec.Decode(&dependency) != nil {
-			t.Fatal("dependency listing invalid")
-		}
-		count++
-		if !dependency.Standard && dependency.ImportPath != "github.com/witwave-ai/witself/internal/localcell/trust" {
-			t.Fatal("nonstandard dependency entered trust package")
-		}
-	}
-	if count == 0 {
-		t.Fatal("empty dependency listing")
+	for _, target := range []string{"linux", "darwin", "windows"} {
+		t.Run(target, func(t *testing.T) {
+			cmd := exec.Command("go", "list", "-deps", "-json", ".")
+			for _, entry := range cmd.Environ() {
+				key, _, _ := strings.Cut(entry, "=")
+				if !strings.EqualFold(key, "GOOS") && !strings.EqualFold(key, "GOARCH") && !strings.EqualFold(key, "CGO_ENABLED") {
+					cmd.Env = append(cmd.Env, entry)
+				}
+			}
+			// Listing target dependencies needs no target compiler. Pin a target
+			// architecture supported by all three operating systems.
+			cmd.Env = append(cmd.Env, "GOOS="+target, "GOARCH=amd64", "CGO_ENABLED=0")
+			raw, err := cmd.Output()
+			if err != nil {
+				t.Fatal("dependency listing failed")
+			}
+			dec := json.NewDecoder(bytes.NewReader(raw))
+			count := 0
+			for dec.More() {
+				var dependency struct {
+					ImportPath string
+					Standard   bool
+				}
+				if dec.Decode(&dependency) != nil {
+					t.Fatal("dependency listing invalid")
+				}
+				count++
+				if !dependency.Standard && dependency.ImportPath != "github.com/witwave-ai/witself/internal/localcell/trust" {
+					t.Fatal("nonstandard dependency entered trust package")
+				}
+			}
+			if count == 0 {
+				t.Fatal("empty dependency listing")
+			}
+		})
 	}
 }

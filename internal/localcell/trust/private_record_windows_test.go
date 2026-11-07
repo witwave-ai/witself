@@ -13,8 +13,10 @@ import (
 	"path/filepath"
 	"reflect"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
@@ -64,13 +66,13 @@ func windowsRecordTestRead(t *testing.T, ops privateRecordOps, name string, expe
 func TestWindowsTrustPrivateRecordCreateAndReopen(t *testing.T) {
 	root := windowsRecordTestHome(t)
 	seen := map[string]int{}
-	hooks := &windowsRecordHooks{observe: func(stage string, handle windows.Handle, policy privateRecordPolicy) error {
+	hooks := &windowsRecordHooks{observe: func(stage string, handle syscall.Handle, policy privateRecordPolicy) error {
 		if checkPrivateRecordPolicy(policy) != nil {
 			t.Error("native intermediate or final privacy policy differs")
 			return ReasonStateIO
 		}
-		var raw windows.ByHandleFileInformation
-		if windows.GetFileInformationByHandle(handle, &raw) != nil || policy.identity != [3]uint64{uint64(raw.VolumeSerialNumber), uint64(raw.FileIndexHigh), uint64(raw.FileIndexLow)} {
+		var raw syscall.ByHandleFileInformation
+		if syscall.GetFileInformationByHandle(handle, &raw) != nil || policy.identity != [3]uint64{uint64(raw.VolumeSerialNumber), uint64(raw.FileIndexHigh), uint64(raw.FileIndexLow)} {
 			t.Error("native observation identity differs from handle")
 			return ReasonStateIO
 		}
@@ -119,7 +121,7 @@ func TestWindowsTrustPrivateRecordCreateAndReopen(t *testing.T) {
 		home := windowsRecordTestHome(t)
 		path := filepath.Join(home, "failed-records")
 		observed := false
-		hooks := &windowsRecordHooks{observe: func(stage string, _ windows.Handle, policy privateRecordPolicy) error {
+		hooks := &windowsRecordHooks{observe: func(stage string, _ syscall.Handle, policy privateRecordPolicy) error {
 			if stage == "directory-created" {
 				observed = true
 				if checkPrivateRecordPolicy(policy) != nil {
@@ -159,6 +161,59 @@ func windowsRecordTestSetDACL(t *testing.T, path string, sddl string, protected 
 	}
 	if windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, security, nil, nil, acl, nil) != nil {
 		t.Fatal("fixture security mutation failed")
+	}
+}
+
+// SetFileSecurityW preserves explicit ACE flags without the auto-inheritance
+// processing performed by SetNamedSecurityInfo. Read the descriptor back before
+// claiming that the inherited-ACE refusal has actually been exercised.
+func windowsRecordTestSetInheritedDACL(t *testing.T, path, sddl string) {
+	t.Helper()
+	descriptor, err := windows.SecurityDescriptorFromString(sddl)
+	if err != nil {
+		t.Fatal("fixture descriptor construction failed")
+	}
+	name, err := syscall.UTF16PtrFromString(path)
+	if err != nil {
+		t.Fatal("fixture security path conversion failed")
+	}
+	setSecurity := syscall.NewLazyDLL("advapi32.dll").NewProc("SetFileSecurityW")
+	if setSecurity.Find() != nil {
+		t.Fatal("raw inherited fixture security entry point unavailable")
+	}
+	const security = windows.DACL_SECURITY_INFORMATION | windows.PROTECTED_DACL_SECURITY_INFORMATION
+	result, _, _ := setSecurity.Call(uintptr(unsafe.Pointer(name)), uintptr(security), uintptr(unsafe.Pointer(descriptor)))
+	if result == 0 {
+		t.Fatal("raw inherited fixture security mutation failed")
+	}
+	handle, err := windowsRecordOpenMetadata(path, 0, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE)
+	if err != nil {
+		t.Fatal("inherited fixture security readback open failed")
+	}
+	raw, readErr := windowsRecordSecurity(handle)
+	closeErr := syscall.CloseHandle(handle)
+	if readErr != nil || closeErr != nil {
+		t.Fatal("inherited fixture security readback failed")
+	}
+	policy, err := windowsRecordPolicyFromSecurity(raw)
+	if err != nil || !policy.protected || !policy.daclPresent {
+		t.Fatal("inherited fixture protected DACL was not persisted")
+	}
+	inherited := false
+	for i := range policy.aces {
+		if policy.aces[i].flags&0x10 != 0 { // INHERITED_ACE
+			inherited = true
+			policy.aces[i].flags &^= 0x10
+		}
+	}
+	if !inherited {
+		t.Skip("NOT RUN — inherited ACE not persistable")
+	}
+	// Only change the in-memory projection: all other privacy checks must
+	// accept it, so an unrelated invalid owner, trustee or right cannot mask
+	// failure to reject INHERITED_ACE on the persisted native object.
+	if checkPrivateRecordPolicy(policy) != nil {
+		t.Fatal("inherited fixture has unrelated privacy violation")
 	}
 }
 
@@ -215,7 +270,10 @@ func (o *windowsRecordObservedOps) assertHandlesClosed(t *testing.T) {
 		t.Fatal("native handle closure observation absent")
 	}
 	for _, f := range append(o.created, o.opened...) {
-		if _, err := f.file.Stat(); !errors.Is(err, os.ErrClosed) {
+		// File.Stat on Windows reports ERROR_INVALID_HANDLE after Close,
+		// rather than os.ErrClosed. Inspect the os.File sentinel itself so a
+		// recycled native handle number cannot make closure appear successful.
+		if f.file.Fd() != uintptr(syscall.InvalidHandle) {
 			t.Fatal("ordinary completion retained an open native record handle")
 		}
 	}
@@ -254,11 +312,16 @@ func TestWindowsTrustPrivateRecordPrivacyRefusals(t *testing.T) {
 			ops := windowsRecordTestOps(t, root, nil)
 			path := filepath.Join(root, "records", "record.json")
 			windowsRecordTestWrite(t, ops, "record.json", []byte("private-fixture"))
-			user, system, err := windowsRecordPrincipals()
+			nativeUser, nativeSystem, err := windowsRecordPrincipals()
+			user := (*windows.SID)(unsafe.Pointer(nativeUser))
+			system := (*windows.SID)(unsafe.Pointer(nativeSystem))
 			if err != nil {
 				t.Fatal("fixture principals unavailable")
 			}
 			base := "D:P(A;;FA;;;" + user.String() + ")(A;;FA;;;SY)"
+			// Restore disposable security for TempDir cleanup, never to allow an
+			// adapter operation to proceed through a failed privacy check.
+			t.Cleanup(func() { windowsRecordTestSetDACL(t, path, base, true) })
 			switch name {
 			case "wrong-owner":
 				if user.Equals(system) {
@@ -277,7 +340,7 @@ func TestWindowsTrustPrivateRecordPrivacyRefusals(t *testing.T) {
 			case "unprotected-dacl":
 				windowsRecordTestSetDACL(t, path, base, false)
 			case "inherited-ace":
-				windowsRecordTestSetDACL(t, path, "D:P(A;ID;FA;;;"+user.String()+")(A;;FA;;;SY)", true)
+				windowsRecordTestSetInheritedDACL(t, path, "D:P(A;ID;FA;;;"+user.String()+")(A;;FA;;;SY)")
 			case "missing-system":
 				if user.Equals(system) {
 					t.Skip("NOT RUN — separate system principal unavailable")
@@ -286,9 +349,6 @@ func TestWindowsTrustPrivateRecordPrivacyRefusals(t *testing.T) {
 			case "invalid-rights":
 				windowsRecordTestSetDACL(t, path, "D:P(A;;FR;;;"+user.String()+")(A;;FA;;;SY)", true)
 			}
-			// Restore disposable security for TempDir cleanup, never to allow an
-			// adapter operation to proceed through a failed privacy check.
-			t.Cleanup(func() { windowsRecordTestSetDACL(t, path, base, true) })
 			observed := &windowsRecordObservedOps{privateRecordOps: ops}
 			if b, err := readPrivateRecord(observed, "record.json"); err != ReasonStateIO || b != nil || observed.reads.Load() != 0 {
 				t.Fatal("unsafe record was not refused before payload read")
@@ -315,7 +375,9 @@ func TestWindowsTrustPrivateRecordPrivacyRefusals(t *testing.T) {
 		root := windowsRecordTestHome(t)
 		ops := windowsRecordTestOps(t, root, nil)
 		windowsRecordTestWrite(t, ops, "record.json", []byte("private-fixture"))
-		user, system, err := windowsRecordPrincipals()
+		nativeUser, nativeSystem, err := windowsRecordPrincipals()
+		user := (*windows.SID)(unsafe.Pointer(nativeUser))
+		system := (*windows.SID)(unsafe.Pointer(nativeSystem))
 		if err != nil {
 			t.Fatal("fixture principals unavailable")
 		}
@@ -352,11 +414,11 @@ func windowsRecordTestJunction(t *testing.T, path, target string) {
 	if err != nil {
 		t.Fatal("junction fixture path conversion failed")
 	}
-	handle, err := windows.CreateFile(pointer, windows.GENERIC_WRITE, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil, windows.OPEN_EXISTING, windows.FILE_FLAG_OPEN_REPARSE_POINT|windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
+	handle, err := syscall.CreateFile(pointer, windows.GENERIC_WRITE, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil, windows.OPEN_EXISTING, windows.FILE_FLAG_OPEN_REPARSE_POINT|windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
 	if err != nil {
 		t.Skip("NOT RUN — native junction handle prerequisite unavailable")
 	}
-	defer func() { _ = windows.CloseHandle(handle) }()
+	defer func() { _ = syscall.CloseHandle(handle) }()
 	substitute, err := windows.UTF16FromString(`\??\` + target)
 	if err != nil {
 		t.Fatal("junction substitute conversion failed")
@@ -376,28 +438,28 @@ func windowsRecordTestJunction(t *testing.T, path, target string) {
 		binary.LittleEndian.PutUint16(buffer[16+2*i:], char)
 	}
 	var returned uint32
-	if windows.DeviceIoControl(handle, windows.FSCTL_SET_REPARSE_POINT, &buffer[0], uint32(len(buffer)), nil, 0, &returned, nil) != nil {
+	if syscall.DeviceIoControl(handle, windows.FSCTL_SET_REPARSE_POINT, &buffer[0], uint32(len(buffer)), nil, 0, &returned, nil) != nil {
 		t.Skip("NOT RUN — native junction creation prerequisite unavailable")
 	}
-	var info windows.ByHandleFileInformation
-	if windows.GetFileInformationByHandle(handle, &info) != nil || info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT == 0 {
+	var info syscall.ByHandleFileInformation
+	if syscall.GetFileInformationByHandle(handle, &info) != nil || info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT == 0 {
 		t.Fatal("junction native reparse observation absent")
 	}
 }
 
-func windowsRecordTestNativeMetadata(t *testing.T, path string) (windows.Handle, windows.ByHandleFileInformation) {
+func windowsRecordTestNativeMetadata(t *testing.T, path string) (syscall.Handle, syscall.ByHandleFileInformation) {
 	t.Helper()
 	pointer, err := windows.UTF16PtrFromString(path)
 	if err != nil {
 		t.Fatal("native metadata path conversion failed")
 	}
-	h, err := windows.CreateFile(pointer, windows.READ_CONTROL|windows.FILE_READ_ATTRIBUTES, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil, windows.OPEN_EXISTING, windows.FILE_FLAG_OPEN_REPARSE_POINT|windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
+	h, err := syscall.CreateFile(pointer, windows.READ_CONTROL|windows.FILE_READ_ATTRIBUTES, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil, windows.OPEN_EXISTING, windows.FILE_FLAG_OPEN_REPARSE_POINT|windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
 	if err != nil {
 		t.Fatal("native metadata open failed")
 	}
-	t.Cleanup(func() { _ = windows.CloseHandle(h) })
-	var raw windows.ByHandleFileInformation
-	if windows.GetFileInformationByHandle(h, &raw) != nil {
+	t.Cleanup(func() { _ = syscall.CloseHandle(h) })
+	var raw syscall.ByHandleFileInformation
+	if syscall.GetFileInformationByHandle(h, &raw) != nil {
 		t.Fatal("native metadata observation failed")
 	}
 	return h, raw
@@ -442,11 +504,25 @@ func TestWindowsTrustPrivateRecordReparseAndReplacement(t *testing.T) {
 		}
 		windowsRecordTestRead(t, ops, "record.json", []byte("original-fixture"))
 	})
-	parentReplacement := func(t *testing.T, holdParent bool) {
+	parentReplacement := func(t *testing.T, injectObservation bool) {
 		root := windowsRecordTestHome(t)
+		created := windowsRecordTestOps(t, root, nil)
+		windowsRecordTestWrite(t, created, "record.json", []byte("original-fixture"))
+		originalPath := filepath.Join(root, "records")
+		retainedPath := filepath.Join(root, "retained-records")
+		// The ordinary reopen path retains a guard without FILE_SHARE_DELETE.
+		// Newly created directory guards permit delete sharing so they can
+		// coexist with the exact rollback handle. Exercise the pinned
+		// reopen path explicitly instead of assuming either sharing schedule.
+		if created.close() != nil {
+			t.Fatal("parent fixture initial adapter close failed")
+		}
 		hooks := &windowsRecordHooks{}
-		ops := windowsRecordTestOps(t, root, hooks)
-		windowsRecordTestWrite(t, ops, "record.json", []byte("original-fixture"))
+		ops, err := newWindowsPrivateRecordOps(originalPath, false, hooks)
+		if err != nil {
+			t.Fatal("pinned parent fixture reopen failed")
+		}
+		defer func() { _ = ops.close() }()
 		replacementPath := filepath.Join(root, "replacement-records")
 		replacement, err := newWindowsPrivateRecordOps(replacementPath, true, nil)
 		if err != nil {
@@ -454,21 +530,9 @@ func TestWindowsTrustPrivateRecordReparseAndReplacement(t *testing.T) {
 		}
 		defer func() { _ = replacement.close() }()
 		windowsRecordTestWrite(t, replacement, "record.json", []byte("outside-fixture"))
-		originalPath := filepath.Join(root, "records")
-		retainedPath := filepath.Join(root, "retained-records")
-		if holdParent {
-			// This exact mutation case proves a native sharing refusal before using
-			// one injected observation. A real replacement has independent later
-			// checks and cannot kill removal of only the prepublication comparison.
-			guard, err := windowsRecordOpenMetadata(originalPath, windows.FILE_TRAVERSE, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE)
-			if err != nil {
-				t.Fatal("native parent retention fixture failed")
-			}
-			defer func() { _ = windows.CloseHandle(guard) }()
-		}
-
-		changed, physical, injected := false, false, false
+		changed, injected, attempted := false, false, false
 		publications := 0
+		var renameErr error
 		hooks.before = func(stage string) error {
 			if stage == "publish" {
 				publications++
@@ -476,79 +540,63 @@ func TestWindowsTrustPrivateRecordReparseAndReplacement(t *testing.T) {
 			if stage != "prepublication" {
 				return nil
 			}
-			before := ops.guards[len(ops.guards)-1].identity
-			if err := os.Rename(originalPath, retainedPath); err != nil {
-				if !errors.Is(err, windows.ERROR_SHARING_VIOLATION) {
-					return ReasonStateIO
-				}
-				// Only a native sharing refusal permits replacing this one observation.
-				injected = true
-				hooks.metadata = func(stage string, info *windows.ByHandleFileInformation) {
-					if stage == "parent-recheck" {
-						prior := windowsRecordIdentity(*info)
-						info.FileIndexLow ^= 1
-						changed = prior != windowsRecordIdentity(*info)
-					}
-				}
-				return nil
-			}
-			if os.Rename(replacementPath, originalPath) != nil {
+			attempted = true
+			renameErr = os.Rename(originalPath, retainedPath)
+			if renameErr == nil {
 				if os.Rename(retainedPath, originalPath) != nil {
 					t.Error("parent fixture rollback failed")
 				}
 				return ReasonStateIO
 			}
-			physical = true
-			handle, err := windowsRecordOpenMetadata(originalPath, 0, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE)
-			if err != nil {
+			if !errors.Is(renameErr, windows.ERROR_SHARING_VIOLATION) || !injectObservation {
 				return ReasonStateIO
 			}
-			var current windows.ByHandleFileInformation
-			readErr := windows.GetFileInformationByHandle(handle, &current)
-			closeErr := windows.CloseHandle(handle)
-			if readErr != nil || closeErr != nil {
-				return ReasonStateIO
+			// Native pinning is established above. This single injected changed
+			// observation isolates the prepublication identity comparison (W7).
+			injected = true
+			hooks.metadata = func(stage string, info *syscall.ByHandleFileInformation) {
+				if stage == "parent-recheck" {
+					prior := windowsRecordIdentity(*info)
+					info.FileIndexLow ^= 1
+					changed = prior != windowsRecordIdentity(*info)
+				}
 			}
-			changed = before != windowsRecordIdentity(current)
 			return nil
 		}
 		err = writePrivateRecord(ops, "record.json", ".record-tmp-", []byte("replacement-fixture"), nil)
-		if !changed || physical == injected || holdParent != injected {
-			t.Fatal("changed-parent observation was not reached")
+		if !attempted {
+			t.Fatal("parent replacement hook was not reached")
 		}
-		if err != ReasonStateIO || publications != 0 {
-			t.Fatal("changed parent must refuse before publication")
+		if renameErr == nil {
+			t.Fatal("pinned parent fixture rename unexpectedly succeeded")
+		}
+		if !errors.Is(renameErr, windows.ERROR_SHARING_VIOLATION) {
+			t.Fatal("parent fixture rename refused without sharing violation")
+		}
+		if injectObservation {
+			if !injected {
+				t.Fatal("changed parent observation hook was not installed")
+			}
+			if !changed {
+				t.Fatal("changed parent observation hook was not reached")
+			}
+			t.Log("injected parent observation after native sharing refusal")
+		} else {
+			if injected || changed {
+				t.Fatal("physical parent refusal unexpectedly used injected observation")
+			}
+			t.Log("physical parent replacement refused by native sharing guard")
+		}
+		if err != ReasonStateIO {
+			t.Fatal("parent replacement did not return fixed refusal")
+		}
+		if publications != 0 {
+			t.Fatal("parent replacement reached publication")
 		}
 		hooks.before, hooks.metadata = nil, nil
-		if injected {
-			t.Log("injected parent observation after native sharing refusal")
-			windowsRecordTestRead(t, ops, "record.json", []byte("original-fixture"))
-			windowsRecordTestRead(t, replacement, "record.json", []byte("outside-fixture"))
-			windowsRecordTestNoArtifacts(t, root, 1)
-			return
-		}
-		t.Log("physical parent replacement exercised")
-		for _, fixture := range []struct {
-			path string
-			data []byte
-		}{
-			{retainedPath, []byte("original-fixture")},
-			{originalPath, []byte("outside-fixture")},
-		} {
-			reopened, err := newWindowsPrivateRecordOps(fixture.path, false, nil)
-			if err != nil {
-				t.Fatal("replaced parent fixture reopen failed")
-			}
-			b, readErr := readPrivateRecord(reopened, "record.json")
-			closeErr := reopened.close()
-			if readErr != nil || closeErr != nil || !bytes.Equal(b, fixture.data) {
-				t.Fatal("parent replacement changed a protected record")
-			}
-			entries, err := os.ReadDir(fixture.path)
-			if err != nil || len(entries) != 1 {
-				t.Fatal("parent replacement cleanup touched substitute or leaked temporary object")
-			}
-		}
+		windowsRecordTestRead(t, ops, "record.json", []byte("original-fixture"))
+		windowsRecordTestRead(t, replacement, "record.json", []byte("outside-fixture"))
+		windowsRecordTestNoArtifacts(t, root, 1)
 	}
 	t.Run("parent-replaced", func(t *testing.T) { parentReplacement(t, true) })
 	t.Run("physical-parent-replaced", func(t *testing.T) { parentReplacement(t, false) })
@@ -620,12 +668,12 @@ func TestWindowsTrustPrivateRecordReparseAndReplacement(t *testing.T) {
 		ops := windowsRecordTestOps(t, root, hooks)
 		windowsRecordTestWrite(t, ops, "record.json", []byte("original-fixture"))
 		seen := false
-		hooks.metadata = func(stage string, info *windows.ByHandleFileInformation) {
+		hooks.metadata = func(stage string, info *syscall.ByHandleFileInformation) {
 			if stage == "projection" {
 				info.FileAttributes |= windows.FILE_ATTRIBUTE_REPARSE_POINT
 			}
 		}
-		hooks.observe = func(_ string, _ windows.Handle, policy privateRecordPolicy) error {
+		hooks.observe = func(_ string, _ syscall.Handle, policy privateRecordPolicy) error {
 			if policy.reparse {
 				seen = true
 			}
@@ -724,7 +772,7 @@ func TestWindowsTrustPrivateRecordFenceAndPublication(t *testing.T) {
 				ops := windowsRecordTestOps(t, root, hooks)
 				windowsRecordTestWrite(t, ops, "record.json", []byte("original-fixture"))
 				seen := false
-				hooks.observe = func(current string, _ windows.Handle, policy privateRecordPolicy) error {
+				hooks.observe = func(current string, _ syscall.Handle, policy privateRecordPolicy) error {
 					if current == stage {
 						seen = true
 						if checkPrivateRecordPolicy(policy) != nil {
@@ -756,9 +804,9 @@ func TestWindowsTrustPrivateRecordFenceAndPublication(t *testing.T) {
 		ops := windowsRecordTestOps(t, root, hooks)
 		windowsRecordTestWrite(t, ops, "record.json", []byte("original-fixture"))
 		changed := false
-		hooks.observe = func(stage string, _ windows.Handle, _ privateRecordPolicy) error {
+		hooks.observe = func(stage string, _ syscall.Handle, _ privateRecordPolicy) error {
 			if stage == "temporary-created" {
-				hooks.metadata = func(stage string, info *windows.ByHandleFileInformation) {
+				hooks.metadata = func(stage string, info *syscall.ByHandleFileInformation) {
 					if stage == "ancestor-recheck" {
 						info.FileIndexLow ^= 1
 						changed = true

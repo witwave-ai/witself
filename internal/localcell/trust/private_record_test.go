@@ -87,6 +87,7 @@ type recordTestOps struct {
 	largeRead                           bool
 	publishThenFail                     bool
 	reads, publishes, removals, handles int
+	opened, created, closed             int
 }
 type recordTestHandle struct {
 	ops      *recordTestOps
@@ -147,6 +148,7 @@ func (o *recordTestOps) open(name string) (privateRecordHandle, error) {
 		obj = &recordTestObject{identity: obj.identity, data: make([]byte, maxStateBytes+1), private: true}
 	}
 	o.handles++
+	o.opened++
 	return &recordTestHandle{ops: o, object: obj, name: name, kind: "read"}, nil
 }
 func (o *recordTestOps) inspectHandle(handle privateRecordHandle) (privateRecordInfo, error) {
@@ -183,6 +185,7 @@ func (o *recordTestOps) create(name string, temporary bool) (privateRecordHandle
 	obj := &recordTestObject{identity: [3]uint64{1, 1, o.store.sequence}, private: true}
 	o.store.objects[name] = obj
 	o.handles++
+	o.created++
 	return &recordTestHandle{ops: o, object: obj, name: name, kind: kind}, nil
 }
 func (o *recordTestOps) removeOwned(handle privateRecordHandle) error {
@@ -288,6 +291,7 @@ func (h *recordTestHandle) Close() error {
 	}
 	h.closed = true
 	o.handles--
+	o.closed++
 	if o.fail == "close" && h.kind == "temp" {
 		return ReasonStateIO
 	}
@@ -343,6 +347,49 @@ func TestTrustPrivateRecordProtocol(t *testing.T) {
 			}
 		})
 	}
+	t.Run("ordinary-retained-writer-handle-count", func(t *testing.T) {
+		ops := newRecordTestOps()
+		ops.closeFirst = false
+		original := append([]byte(nil), ops.store.objects[recordTestName].data...)
+		reader, err := ops.open(recordTestName)
+		if err != nil {
+			t.Fatal("retained reader setup failed")
+		}
+		defer func() {
+			if !reader.(*recordTestHandle).closed {
+				_ = reader.Close()
+			}
+		}()
+		for i := range 8 {
+			next := []byte{byte(i)}
+			err := withPrivateRecordTransaction(ops, recordTestFence, func() error {
+				return writePrivateRecord(ops, recordTestName, recordTestTemp, next, nil)
+			})
+			if err != nil {
+				t.Fatal("ordinary retained-writer transaction failed")
+			}
+			if ops.handles != 1 || ops.created != 2*(i+1) || ops.closed != ops.opened+ops.created-1 {
+				t.Fatal("ordinary publication retained a source or fence handle")
+			}
+			reopened, err := readPrivateRecord(ops, recordTestName)
+			if err != nil || !bytes.Equal(reopened, next) {
+				t.Fatal("ordinary reopen did not return complete next record")
+			}
+			if ops.handles != 1 || ops.opened != i+2 || ops.closed != ops.opened+ops.created-1 {
+				t.Fatal("ordinary read retained an opened record handle")
+			}
+		}
+		retained, err := io.ReadAll(reader)
+		if err != nil || !bytes.Equal(retained, original) {
+			t.Fatal("retained reader lost complete original record")
+		}
+		if reader.Close() != nil {
+			t.Fatal("retained reader close failed")
+		}
+		if ops.handles != 0 || ops.closed != ops.opened+ops.created {
+			t.Fatal("ordinary completion did not close every created and opened handle")
+		}
+	})
 	t.Run("read-replaced", func(t *testing.T) {
 		ops := newRecordTestOps()
 		ops.replaceRead = true
