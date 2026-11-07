@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"errors" // FLAKE-3 fix 5 (W1)
 	"fmt"
 	"net"
@@ -15,6 +16,9 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/witwave-ai/witself/internal/localcell"
+	"github.com/witwave-ai/witself/internal/runtimeconfig"
 )
 
 func main() {
@@ -223,6 +227,22 @@ func servePostgresWithPublication(rename func(string, string) error, transient f
 }
 
 func serveComponent(component string) error {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var shutdownConfig runtimeconfig.LocalShutdown
+	if descriptor := os.Getenv("WITSELF_LOCAL_SHUTDOWN_DESCRIPTOR"); descriptor != "" {
+		shutdownConfig = runtimeconfig.LocalShutdown{Transport: runtimeconfig.LocalShutdownNamedPipe, DescriptorPath: descriptor}
+	}
+	channel, err := localcell.InstallLocalShutdown(ctx, cancel, shutdownConfig, component)
+	if err != nil {
+		return err
+	}
+	if channel != nil {
+		defer func() { _ = channel.Close() }()
+		if err := channel.WaitRelease(ctx); err != nil {
+			return err
+		}
+	}
 	if component == "server" {
 		if _, err := os.Stat("fixture-server-exit"); err == nil {
 			fmt.Fprintln(os.Stderr, "postgres://synthetic-private-value@invalid/fixture")
@@ -264,6 +284,11 @@ func serveComponent(component string) error {
 	stopped := make(chan os.Signal, 1)
 	notifyFixtureStop(stopped)
 	defer signal.Stop(stopped)
+	if channel != nil {
+		if err := channel.RuntimeReady(); err != nil {
+			return err
+		}
+	}
 	if err := record(component + "-start"); err != nil {
 		return err
 	}
@@ -273,6 +298,9 @@ func serveComponent(component string) error {
 		})}
 		go func() { _ = server.Serve(listener) }()
 	}
-	<-stopped
+	select {
+	case <-stopped:
+	case <-ctx.Done():
+	}
 	return record(component + "-stop")
 }

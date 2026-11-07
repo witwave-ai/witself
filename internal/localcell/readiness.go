@@ -55,26 +55,39 @@ func (c *Cell) observeChildExit(component string, pid int, wait func() (*os.Proc
 }
 
 type readinessExitError struct {
-	observation *readinessError
-	component   string
-	exitStatus  string
-	diagnostic  string
+	observation    *readinessError
+	component      string
+	exitStatus     string
+	diagnostic     string
+	waitCompleted  bool
+	recoveredAlive bool
 }
 
 func (e *readinessExitError) Error() string {
-	return fmt.Sprintf("local cell %s exited before readiness (exit status %s): %s", e.component, e.exitStatus, e.diagnostic)
+	return fmt.Sprintf("local cell %s exited before readiness (exit status %s): %s; %s", e.component, e.exitStatus, e.diagnostic, e.observationDiagnostic())
+}
+
+// Only closed vocabulary and booleans leave this observation boundary. A
+// completed Wait with no ProcessState is distinct from a pending Wait whose
+// readiness context ended; neither is inferred from the procfs classification.
+func (e *readinessExitError) observationDiagnostic() string {
+	wait := "context_expired"
+	if e.waitCompleted {
+		wait = "wait_completed"
+	}
+	return fmt.Sprintf("wait_observation=%s recovered_alive=%t", wait, e.recoveredAlive)
 }
 
 // Unwrap preserves PW3's pre-rollback process observation alongside the
 // additional value-free exit detail of a child launched by this handle.
 func (e *readinessExitError) Unwrap() error { return e.observation }
 
-func (c *Cell) childReadinessExit(ctx context.Context, component string, pid int) error {
-	failure := &readinessError{component: component, state: ProcessState{PID: pid}}
+func (c *Cell) childReadinessExit(ctx context.Context, component string, record ProcessRecord) error {
+	failure := &readinessError{component: component, state: ProcessState{PID: record.PID}}
 	exit := &readinessExitError{observation: failure, component: component, exitStatus: "unavailable", diagnostic: "value-free diagnostic unavailable"}
 	c.childrenMu.Lock()
 	observation := c.children[component]
-	if observation != nil && observation.pid != pid {
+	if observation != nil && observation.pid != record.PID {
 		observation = nil
 	}
 	c.childrenMu.Unlock()
@@ -91,15 +104,27 @@ func (c *Cell) childReadinessExit(ctx context.Context, component string, pid int
 	// receiving done also retains the observer goroutine's publication fence.
 	select {
 	case <-observation.done:
+		exit.waitCompleted = true
 		if observation.status != nil {
 			exit.exitStatus = fmt.Sprint(observation.status.ExitCode())
 		}
 	default:
 	}
+	// This is diagnostic only: never retry readiness or signal from a recovered
+	// observation. Compare the exact original fence, not a reread process record.
+	exit.recoveredAlive = c.readinessIdentityRecovered(component, record, processIdentity)
 	if diagnostic := c.lastValueFreeDiagnostic(component, observation.logOffset); diagnostic != "" {
 		exit.diagnostic = diagnostic
 	}
 	return exit
+}
+
+func (c *Cell) readinessIdentityRecovered(component string, record ProcessRecord, observe func(int) (string, bool, error)) bool {
+	if record.PID <= 1 || record.StartTime == "" || record.Root != c.cfg.Root || record.Component != component {
+		return false
+	}
+	identity, alive, err := observe(record.PID)
+	return err == nil && alive && identity == record.StartTime
 }
 
 const maxReadinessDiagnostic = 256

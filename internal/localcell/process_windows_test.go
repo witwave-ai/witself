@@ -172,7 +172,7 @@ func windowsControlFixtureMode(t *testing.T, detached bool, launchMode string) (
 		if err != nil || !alive {
 			t.Fatal("detached fixture identity unavailable")
 		}
-		record := ProcessRecord{PID: cmd.Process.Pid, StartTime: identity, Root: c.cfg.Root, Component: "server"}
+		record := ProcessRecord{PID: cmd.Process.Pid, StartTime: identity, Root: c.cfg.Root, Component: "server", LaunchKind: shutdownLaunchLegacy}
 		if err := writeAtomic(c.path("run", "server.json"), record, nil); err != nil {
 			t.Fatal(err)
 		}
@@ -264,8 +264,8 @@ func TestWindowsStopGracefulAcrossConsoleAndInvocation(t *testing.T) {
 
 func TestWindowsStopRefusesAbsentConsole(t *testing.T) {
 	c, record, handle := windowsControlFixture(t, true)
-	err := c.terminateChild(t.Context(), "server", ProcessState{PID: record.PID, Alive: true, Matches: true})
-	if !errors.Is(err, errWindowsConsoleUnavailable) {
+	outcome := c.stopChildOutcome(t.Context(), "server", ProcessState{PID: record.PID, Alive: true, Matches: true})
+	if outcome.Kind != serviceStopRefused || outcome.Detail != "shutdown:pipe" {
 		t.Fatal("detached component did not produce explicit console refusal")
 	}
 	if result, err := windows.WaitForSingleObject(handle, 0); err != nil || result != uint32(windows.WAIT_TIMEOUT) {

@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"runtime"
 	"strconv"
 	"time"
 )
@@ -56,6 +57,19 @@ func serviceControlBudget(bound time.Duration, shares int) time.Duration {
 	return bound * time.Duration(shares)
 }
 
+// Windows app shutdown and its control command share the whole-tree budget.
+// Other actions and Unix control retain their existing health-derived budgets.
+func serviceControlActionBudget(bound time.Duration, shares int, action string) time.Duration {
+	return serviceControlActionBudgetForPlatform(bound, shares, action, runtime.GOOS)
+}
+
+func serviceControlActionBudgetForPlatform(bound time.Duration, shares int, action, platform string) time.Duration {
+	if platform == "windows" && (action == "stop" || action == "repair") {
+		return ServiceShutdownTimeout
+	}
+	return serviceControlBudget(bound, shares)
+}
+
 func (c *Cell) readServiceControlSecret() (secretBytes []byte, result error) {
 	defer func() { result = serviceFailureAt(result, "control_secret") }()
 	if err := c.validateRoot(false); err != nil {
@@ -71,6 +85,9 @@ func (c *Cell) readServiceControlSecret() (secretBytes []byte, result error) {
 // Control reads the private installation token directly into the request. The
 // token never appears in arguments, responses or diagnostic errors.
 func (c *Cell) Control(ctx context.Context, action string) (ServiceStatus, error) {
+	if action == "exit-host" {
+		return c.controlExitHost(ctx)
+	}
 	if os.Getenv("WITSELF_RUNTIME") != "local" {
 		return ServiceStatus{}, ErrServiceControlRefused
 	}
@@ -95,7 +112,7 @@ func (c *Cell) Control(ctx context.Context, action string) (ServiceStatus, error
 		return conn, nil
 	}}
 	defer transport.CloseIdleConnections()
-	client := &http.Client{Transport: transport, Timeout: serviceControlBudget(c.cfg.Timeout, 4), CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	client := &http.Client{Transport: transport, Timeout: serviceControlActionBudget(c.cfg.Timeout, 4, action), CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://localcell/"+action, nil)
 	if err != nil {
 		return ServiceStatus{}, ErrServiceControlRefused
@@ -183,13 +200,17 @@ func serviceControlTransportTimeout(err error) bool {
 
 func validServiceAction(action string) bool {
 	switch action {
-	case "observe", "status", "health", "start", "stop", "repair":
+	case "observe", "status", "health", "start", "stop", "repair", "exit-host":
 		return true
 	}
 	return false
 }
 
 func (c *Cell) serveServiceControl(commands chan<- serviceCommand) (func(), error) {
+	return c.serveServiceControlForPlatform(commands, runtime.GOOS)
+}
+
+func (c *Cell) serveServiceControlForPlatform(commands chan<- serviceCommand, platform string) (func(), error) {
 	secret, err := c.readServiceControlSecret()
 	if err != nil {
 		return nil, err
@@ -199,6 +220,7 @@ func (c *Cell) serveServiceControl(commands chan<- serviceCommand) (func(), erro
 		return nil, err
 	}
 	closed := make(chan struct{})
+	exitRequests := &serviceHostExitRequests{seen: make(map[string]bool)}
 	server := &http.Server{ReadHeaderTimeout: time.Second, ReadTimeout: 2 * time.Second, WriteTimeout: serviceControlBudget(c.cfg.Timeout, 4), IdleTimeout: time.Second, MaxHeaderBytes: 4096}
 	server.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), append([]byte("Bearer "), secret...)) != 1 {
@@ -210,13 +232,26 @@ func (c *Cell) serveServiceControl(commands chan<- serviceCommand) (func(), erro
 			http.Error(w, "service_control_refused", http.StatusBadRequest)
 			return
 		}
+		if action == "exit-host" {
+			c.serveHostExit(w, r, commands, closed, exitRequests)
+			return
+		}
 		bound := c.cfg.Timeout
 		if callerBound, err := time.ParseDuration(r.Header.Get("X-Localcell-Health-Bound")); err == nil && callerBound > 0 {
 			bound = min(bound, callerBound)
 		}
+		// A Windows drain can outlive the health-derived server write timeout.
+		// Use the same selected whole-tree budget as the command and client.
+		if platform == "windows" && (action == "stop" || action == "repair") {
+			budget := serviceControlActionBudgetForPlatform(bound, 4, action, platform)
+			if http.NewResponseController(w).SetWriteDeadline(time.Now().Add(budget)) != nil {
+				http.Error(w, "service_control_action_failed", http.StatusConflict)
+				return
+			}
+		}
 		// This bounds waiting for a queue/decision, not the host's health
 		// verdict. A tighter caller bound also cancels the accepted command.
-		commandCtx, cancel := context.WithTimeout(r.Context(), serviceControlBudget(bound, 3))
+		commandCtx, cancel := context.WithTimeout(r.Context(), serviceControlActionBudgetForPlatform(bound, 3, action, platform))
 		defer cancel()
 		commandCtx = context.WithValue(commandCtx, serviceControlHealthBoundKey{}, bound)
 		refuse := func(err error) {

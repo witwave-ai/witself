@@ -325,9 +325,13 @@ func runConcurrentStartIndependentRoots(fixture *testing.T, t concurrentStartRep
 // Render only the probe's timing and boolean observations, never status payloads.
 func formatPostStartReadinessDiagnostic(site string, rootIndex int, elapsed time.Duration, status localcell.Status, statusErr error, contextDone bool) string {
 	server, worker := status.Processes["server"], status.Processes["worker"]
-	return fmt.Sprintf("site=%s root_index=%d probe_elapsed=%.6fs status_error=%t manifest_present=%t server_ready=%t worker_ready=%t server_alive=%t server_matches=%t worker_alive=%t worker_matches=%t context_done=%t",
+	line := fmt.Sprintf("site=%s root_index=%d probe_elapsed=%.6fs status_error=%t manifest_present=%t server_ready=%t worker_ready=%t server_alive=%t server_matches=%t worker_alive=%t worker_matches=%t context_done=%t",
 		site, rootIndex, elapsed.Seconds(), statusErr != nil, status.Manifest != nil, status.ServerReady, status.WorkerReady,
 		server.Alive, server.Matches, worker.Alive, worker.Matches, contextDone)
+	if observation := localcell.ReadinessExitDiagnosticForTest(statusErr); observation != "" {
+		line += " " + observation
+	}
+	return line
 }
 
 type concurrentStartFatal struct{}
@@ -468,7 +472,7 @@ func testEarlyExitCause(t *testing.T, binaries localcell.Binaries) {
 		t.Fatal("cannot configure synthetic server exit")
 	}
 	err := cell.Start(t.Context())
-	const cause = "local cell server exited before readiness (exit status 7): witself-server: migration wait exceeded 250ms during advisory lock"
+	const cause = "local cell server exited before readiness (exit status 7): witself-server: migration wait exceeded 250ms during advisory lock; wait_observation=wait_completed recovered_alive=false"
 	if err == nil || !strings.Contains(err.Error(), cause) || strings.Contains(err.Error(), "synthetic-private") {
 		t.Fatalf("early exit omitted its bounded value-free cause: %v", err)
 	}

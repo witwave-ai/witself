@@ -15,11 +15,10 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// Process Creation Flags; GenerateConsoleCtrlEvent function: the explicit host
-// shares the CI console but receives its own CTRL_BREAK process-group target.
-// This is the existing console shutdown contract, not console-free shutdown.
+// The explicit Windows host has no console. Authenticated exit-host drains its
+// children and exits without generating a console control event.
 func nativeServicePrepareForegroundCommand(command *exec.Cmd) {
-	command.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.CREATE_NEW_PROCESS_GROUP}
+	command.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.CREATE_NO_WINDOW | windows.CREATE_NEW_PROCESS_GROUP}
 }
 
 func nativeServiceInterruptForeground(process *os.Process) error {

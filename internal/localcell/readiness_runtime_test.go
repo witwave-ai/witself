@@ -177,7 +177,7 @@ func TestReadinessExitRetainsCompletedStatusAfterCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	for range 100 {
-		err := c.childReadinessExit(ctx, "server", 42)
+		err := c.childReadinessExit(ctx, "server", ProcessRecord{PID: observation.pid})
 		if strings.Contains(err.Error(), "exit status unavailable") {
 			t.Fatal("cancellation discarded an already-published exit status")
 		}

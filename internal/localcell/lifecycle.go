@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"time"
 
@@ -269,7 +270,7 @@ func (c *Cell) stopServiceChildren(ctx context.Context) error {
 }
 
 func (c *Cell) stopWithServiceFence(ctx context.Context, fence bool) error {
-	ctx, cancel := c.deadline(ctx)
+	ctx, cancel := c.serviceShutdownDeadline(ctx)
 	defer cancel()
 	lock, err := c.own(false)
 	if err != nil {
@@ -359,8 +360,11 @@ func (c *Cell) Repair(ctx context.Context) error {
 // Remove stops the cell and removes disposable runtime directories. Only Purge
 // authorizes deletion of PGDATA and the manifest. The stable owner lock remains.
 func (c *Cell) Remove(ctx context.Context, options RemoveOptions) error {
-	ctx, cancel := c.deadline(ctx)
+	ctx, cancel := c.serviceShutdownDeadline(ctx)
 	defer cancel()
+	if err := c.exitServiceHostForRemoval(ctx); err != nil {
+		return err
+	}
 	lock, err := c.ownExisting()
 	if err != nil {
 		return err
@@ -538,21 +542,28 @@ func (c *Cell) Status(ctx context.Context) (Status, error) {
 }
 
 func (c *Cell) processState(component string) (ProcessState, error) {
+	state, _, err := c.processStateWithRecord(component)
+	return state, err
+}
+
+// Return the exact record used by the observation. Readiness retains this
+// fence even if rollback or another actor later changes the durable record.
+func (c *Cell) processStateWithRecord(component string) (ProcessState, ProcessRecord, error) {
 	var record ProcessRecord
 	if err := readJSON(c.path("run", component+".json"), &record); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return ProcessState{}, nil
+			return ProcessState{}, record, nil
 		}
-		return ProcessState{}, err
+		return ProcessState{}, record, err
 	}
 	if record.PID <= 1 || record.StartTime == "" {
-		return ProcessState{}, errors.New("invalid local cell process record")
+		return ProcessState{}, record, errors.New("invalid local cell process record")
 	}
 	identity, alive, err := processIdentity(record.PID)
 	if err != nil {
-		return ProcessState{}, errors.New("cannot verify local cell process identity")
+		return ProcessState{}, record, errors.New("cannot verify local cell process identity")
 	}
-	return ProcessState{PID: record.PID, Alive: alive, Matches: alive && identity == record.StartTime && record.Root == c.cfg.Root && record.Component == component}, nil
+	return ProcessState{PID: record.PID, Alive: alive, Matches: alive && identity == record.StartTime && record.Root == c.cfg.Root && record.Component == component}, record, nil
 }
 
 func (c *Cell) postmaster() (int, error) {
@@ -680,6 +691,37 @@ func postgresRecoveryStartMatches(started time.Time, epoch int64) bool {
 func (c *Cell) stopAll(ctx context.Context) error { return c.stopSelected(ctx, nil) }
 
 func (c *Cell) stopSelected(ctx context.Context, keep map[string]bool) error {
+	if runtime.GOOS != "windows" {
+		return c.stopSelectedLegacy(ctx, keep)
+	}
+	if err := c.verifyAll(); err != nil {
+		return err
+	}
+	return drainServiceTree(ctx, keep, func(ctx context.Context, component string) serviceStopOutcome {
+		state, err := c.processState(component)
+		if err != nil || (state.Alive && !state.Matches) {
+			return serviceStopOutcome{Kind: serviceStopRefused, Component: component, Detail: "shutdown:incarnation"}
+		}
+		if state.PID == 0 {
+			return serviceStopOutcome{Kind: serviceStopAlreadyExited, Component: component}
+		}
+		return c.stopChildOutcome(ctx, component, state)
+	}, func(ctx context.Context) error {
+		if err := c.verifyAll(); err != nil {
+			return err
+		}
+		state, err := c.processState("postgres")
+		if err != nil || !state.Alive {
+			return err
+		}
+		if handled, err := c.terminatePendingPostgres(ctx, state); handled || err != nil {
+			return err
+		}
+		return c.stopPostgres(ctx, state)
+	})
+}
+
+func (c *Cell) stopSelectedLegacy(ctx context.Context, keep map[string]bool) error {
 	if err := c.verifyAll(); err != nil {
 		return err
 	}

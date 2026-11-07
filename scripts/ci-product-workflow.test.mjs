@@ -154,7 +154,7 @@ function assertLocalcellWindowsJob(ci) {
       "$proofJSON = Join-Path $env:RUNNER_TEMP 'lc-pg16\\service-proof.json'",
       "go test -json ./internal/localcell -run '^TestNativeServiceLifecycle$' -count=1 -timeout=15m > $proofJSON 2>&1",
       '$goExit = $LASTEXITCODE',
-      'node scripts/ci-go-test-json-check.mjs --input $proofJSON --diagnose --require TestNativeServiceLifecycle',
+      'node scripts/ci-go-test-json-check.mjs --input $proofJSON --diagnose --require TestNativeServiceLifecycle,service_shutdown_channel',
       '$parserExit = $LASTEXITCODE',
       '# The checker prints successful capability outcomes only. Project the',
       '# fixed boot diagnostic fields so successful native rounds retain them.',
@@ -1215,6 +1215,7 @@ const mutations = [
   ...[
     ["'^TestNativeServiceLifecycle$'", "'TestNativeServiceLifecycle'", 'broadens the run filter'],
     [' --require TestNativeServiceLifecycle', '', 'omits required service outcome'],
+    [',service_shutdown_channel', '', 'omits required shutdown channel outcome'],
     [' --diagnose', '', 'omits diagnostics'],
     [' --input $proofJSON', '', 'does not read captured JSON'],
     [' > $proofJSON 2>&1', '', 'prints raw Go output'],
