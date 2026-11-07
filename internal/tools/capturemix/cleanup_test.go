@@ -96,9 +96,12 @@ func TestCaptureMixFailedWriterCleanupAllowsNextFixture(t *testing.T) {
 	if nextCluster.admin.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_namespace WHERE nspname=$1)`, name).Scan(&exists) != nil || exists {
 		t.Fatal("capturemix failed writer left its fixture schema")
 	}
-	nextFixture, err := nextCluster.fixture(ctx, Options{}, "old", "new")
+	constructionContext, cancelConstruction := newFixtureConstructionContext(t.Deadline)
+	defer cancelConstruction()
+	constructionStarted := time.Now()
+	nextFixture, err := nextCluster.fixture(constructionContext, Options{}, "old", "new")
 	if err != nil {
-		t.Fatal("capturemix next fixture failed after writer failure cleanup")
+		t.Fatalf("capturemix next fixture failed after writer failure cleanup: %s (construction elapsed %s)", fixtureConstructionErrorClass(err), time.Since(constructionStarted))
 	}
 	if err := nextFixture.close(); err != nil {
 		t.Error(err)
