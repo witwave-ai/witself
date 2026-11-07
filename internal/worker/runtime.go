@@ -7,10 +7,13 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/witwave-ai/witself/internal/listenerdiagnostic"
 )
 
 const defaultShutdownTimeout = 10 * time.Second
@@ -98,10 +101,12 @@ func (r *Registry) run(ctx context.Context, cfg Config, timing jobRestartTiming)
 
 	healthListener, err := net.Listen("tcp", cfg.HealthAddr)
 	if err != nil {
+		listenerdiagnostic.Write(os.Stderr, "worker", err)
 		return fmt.Errorf("worker health listener %s: %w", cfg.HealthAddr, err)
 	}
 	metricsListener, err := net.Listen("tcp", cfg.MetricsAddr)
 	if err != nil {
+		listenerdiagnostic.Write(os.Stderr, "worker", err)
 		_ = healthListener.Close()
 		return fmt.Errorf("worker metrics listener %s: %w", cfg.MetricsAddr, err)
 	}

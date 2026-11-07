@@ -88,7 +88,7 @@ func (c *Cell) Install(ctx context.Context, options InstallOptions) error {
 	if err := c.layout(); err != nil {
 		return err
 	}
-	ports, err := c.allocateAvailablePorts()
+	ports, err := c.allocateAvailablePorts(Ports{}, "")
 	if err != nil {
 		return err
 	}
@@ -195,14 +195,49 @@ func (c *Cell) Start(ctx context.Context) error {
 	if err := c.begin("start"); err != nil {
 		return err
 	}
+	launched := make(map[string]bool)
+	prepareChild := func(component string) func() error {
+		return func() error {
+			// A replacement belongs to this Start even if the entry snapshot
+			// contained its now-exited predecessor. Roll back the replacement.
+			before[component] = false
+			if err := c.prepareComponentPorts(m, component, false, false); err != nil {
+				return err
+			}
+			launched[component] = true
+			return nil
+		}
+	}
 	steps := []struct {
 		name string
 		run  func(context.Context) error
 	}{
-		{"ports", func(context.Context) error { return probePorts(m.Ports, before) }},
-		{"postgres", func(ctx context.Context) error { return c.startServicePostgres(ctx, m) }},
-		{"server", func(context.Context) error { return c.startChild(m, "server") }},
-		{"server_ready", func(ctx context.Context) error { return c.waitReady(ctx, "server", m.Ports.ServerHealth) }},
+		{"postgres", func(ctx context.Context) error {
+			if err := c.verifyAll(); err != nil {
+				return err
+			}
+			state, err := c.processState("postgres")
+			if err != nil {
+				return err
+			}
+			if state.Alive {
+				if !state.Matches {
+					return errors.New("local cell process identity mismatch")
+				}
+				return c.bindServiceProcessBoot("postgres")
+			}
+			before["postgres"] = false
+			if err := c.prepareComponentPorts(m, "postgres", false, false); err != nil {
+				return err
+			}
+			return c.startServicePostgres(ctx, m)
+		}},
+		{"server", func(ctx context.Context) error {
+			return c.startChildPrepared(ctx, m, "server", prepareChild("server"))
+		}},
+		{"server_ready", func(ctx context.Context) error {
+			return c.waitReadyWithPortRecovery(ctx, m, "server", launched["server"])
+		}},
 		{"account", func(ctx context.Context) error {
 			account, err := c.psql(ctx, m, "SELECT id FROM accounts WHERE is_default AND status = 'active'")
 			if err != nil || !accountPattern.MatchString(account) || (m.AccountID != "" && account != m.AccountID) {
@@ -219,8 +254,12 @@ func (c *Cell) Start(ctx context.Context) error {
 			m.AccountID, m.LastVerifiedSchemaVersion = account, schema
 			return writeAtomic(c.path("manifest.json"), m, nil)
 		}},
-		{"worker", func(context.Context) error { return c.startChild(m, "worker") }},
-		{"worker_ready", func(ctx context.Context) error { return c.waitReady(ctx, "worker", m.Ports.WorkerHealth) }},
+		{"worker", func(ctx context.Context) error {
+			return c.startChildPrepared(ctx, m, "worker", prepareChild("worker"))
+		}},
+		{"worker_ready", func(ctx context.Context) error {
+			return c.waitReadyWithPortRecovery(ctx, m, "worker", launched["worker"])
+		}},
 	}
 	for _, step := range steps {
 		err := c.step("start", step.name, func() error {

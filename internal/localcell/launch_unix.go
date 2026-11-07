@@ -3,6 +3,7 @@
 package localcell
 
 import (
+	"context"
 	"errors"
 	"io"
 	"os"
@@ -56,7 +57,7 @@ func childCommand(binary, root, component string) (*exec.Cmd, error) {
 	return exec.Command(self, childLaunchArgument, root, component, binary), nil
 }
 
-func (c *Cell) launchChild(binary, component string, environment []string, log *os.File) error {
+func (c *Cell) launchChild(ctx context.Context, binary, component string, environment []string, log *os.File) error {
 	// Deliberately not CommandContext: a successful Start transfers lifetime to
 	// the persisted PID record, independent of the invoking harness's lifetime.
 	cmd, err := childCommand(binary, c.cfg.Root, component)
@@ -82,8 +83,11 @@ func (c *Cell) launchChild(binary, component string, environment []string, log *
 	if err != nil || !alive {
 		return errors.New("cannot identify launched local cell component")
 	}
-	deadline := time.Now().Add(c.cfg.Timeout)
-	for time.Now().Before(deadline) {
+	launchCtx, cancel := context.WithTimeout(ctx, c.cfg.Timeout)
+	defer cancel()
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+	for launchCtx.Err() == nil {
 		state, stateErr := c.processState(component)
 		if stateErr == nil && state.PID == cmd.Process.Pid && state.Alive && state.Matches {
 			if _, err := permit.Write([]byte{1}); err != nil {
@@ -95,7 +99,10 @@ func (c *Cell) launchChild(binary, component string, environment []string, log *
 		if identityErr != nil || !alive || current != identity {
 			return errors.New("local cell launch helper exited before publishing ownership")
 		}
-		time.Sleep(5 * time.Millisecond)
+		select {
+		case <-launchCtx.Done():
+		case <-ticker.C:
+		}
 	}
 	current, alive, identityErr := processIdentity(cmd.Process.Pid)
 	if identityErr == nil && alive && current == identity {

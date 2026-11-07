@@ -117,6 +117,39 @@ func TestReadinessDiagnosticOnlyAcceptsValueFreeLines(t *testing.T) {
 	if valueFreeDiagnostic("worker", worker) != worker {
 		t.Fatal("value-free worker restart diagnostic was lost")
 	}
+	for _, component := range []string{"server", "worker"} {
+		for _, category := range []string{"address in use", "other"} {
+			diagnostic := "witself-" + component + ": listener bind failed: " + category
+			for _, line := range []string{diagnostic, "2026/10/25 12:00:00 " + diagnostic} {
+				if valueFreeDiagnostic(component, line) != diagnostic {
+					t.Fatal("value-free listener bind diagnostic was lost")
+				}
+			}
+			for _, line := range []string{
+				diagnostic + " 127.0.0.1:12345",
+				diagnostic + ": 127.0.0.1:12345",
+				diagnostic + " synthetic-private-value",
+				"prefix " + diagnostic,
+				diagnostic + " ",
+			} {
+				if valueFreeDiagnostic("server", line) != "" || valueFreeDiagnostic("worker", line) != "" {
+					t.Fatal("address-bearing or extended bind diagnostic crossed the allowlist")
+				}
+			}
+			for _, otherComponent := range []string{"postgres", "synthetic-private-value", "server", "worker"} {
+				if otherComponent != component && valueFreeDiagnostic(otherComponent, diagnostic) != "" {
+					t.Fatal("listener bind diagnostic crossed its component boundary")
+				}
+			}
+			c, _ := unitCell(t)
+			if err := writeAtomicBytes(c.path("logs", component+".log"), []byte(diagnostic+"\n"), nil); err != nil {
+				t.Fatal(err)
+			}
+			if c.lastValueFreeDiagnostic(component, 0) != diagnostic {
+				t.Fatal("readiness log lost the exact listener bind diagnostic")
+			}
+		}
+	}
 	c, _ := unitCell(t)
 	log := c.path("logs", "server.log")
 	stale := safe + "\n"

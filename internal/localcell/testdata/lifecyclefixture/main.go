@@ -13,8 +13,11 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/witwave-ai/witself/internal/listenerdiagnostic"
 )
 
 func main() {
@@ -31,7 +34,11 @@ func main() {
 		return
 	}
 	if err := run(name); err != nil { // FLAKE-3 fix 5 (W1)
-		message, code := "synthetic lifecycle fixture failed", 1          // FLAKE-3 fix 5 (W1)
+		message, code := "synthetic lifecycle fixture failed", 1 // FLAKE-3 fix 5 (W1)
+		var bind *fixtureBindError
+		if errors.As(err, &bind) {
+			message = listenerdiagnostic.Diagnostic(bind.component, bind.err)
+		}
 		if name == "pg_ctl" && len(os.Args) > 1 && os.Args[1] == "stop" { // FLAKE-3 fix 5 (W1)
 			message, code = fixtureStopFailure(err) // FLAKE-3 fix 5 (W1)
 		} // FLAKE-3 fix 5 (W1)
@@ -223,6 +230,9 @@ func servePostgresWithPublication(rename func(string, string) error, transient f
 }
 
 func serveComponent(component string) error {
+	if err := fixtureComponentAttempt(component); err != nil {
+		return err
+	}
 	if component == "server" {
 		if _, err := os.Stat("fixture-server-exit"); err == nil {
 			fmt.Fprintln(os.Stderr, "postgres://synthetic-private-value@invalid/fixture")
@@ -257,7 +267,7 @@ func serveComponent(component string) error {
 	for _, address := range addresses {
 		listener, err := net.Listen("tcp4", address)
 		if err != nil {
-			return err
+			return &fixtureBindError{component: component, err: err}
 		}
 		listeners = append(listeners, listener)
 	}
@@ -275,4 +285,74 @@ func serveComponent(component string) error {
 	}
 	<-stopped
 	return record(component + "-stop")
+}
+
+// Only errors from the actual listener setup (or its explicit lost-port
+// failpoint) carry bind diagnostics. Other fixture failures retain their old
+// fixed message and must never authorize a product retry.
+type fixtureBindError struct {
+	component string
+	err       error
+}
+
+func (e *fixtureBindError) Error() string { return "fixture listener bind failed" }
+func (e *fixtureBindError) Unwrap() error { return e.err }
+
+func fixtureComponentAttempt(component string) error {
+	path := filepath.Join("run", "fixture-launches-"+component)
+	attempt := 1
+	if previous, err := os.ReadFile(path); err == nil {
+		count, err := strconv.Atoi(string(previous))
+		if err != nil || count < 1 {
+			return errors.New("fixture launch counter is invalid")
+		}
+		attempt += count
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	if err := fixtureWriteFile(path, []byte(strconv.Itoa(attempt))); err != nil {
+		return err
+	}
+	if _, err := os.Stat("fixture-bind-other-" + component); err == nil {
+		// Exercise the typed non-conflict bind category through Start without
+		// relying on platform-specific ways to make a listener fail.
+		return &fixtureBindError{component: component, err: errors.New("fixture non-conflict bind failure")}
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	mode, err := os.ReadFile("fixture-steal-port-" + component)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if string(mode) != "" && string(mode) != "once" && string(mode) != "always" {
+		return errors.New("fixture lost-port mode is invalid")
+	}
+	if attempt == 1 || string(mode) == "always" {
+		if err := fixtureComponentDelay("fixture-steal-port-delay-" + component); err != nil {
+			return err
+		}
+		// The explicit failpoint binds nothing. It follows the identical typed
+		// diagnostic path as a genuine operating-system listener conflict.
+		return &fixtureBindError{component: component, err: listenerdiagnostic.ErrAddressInUse}
+	}
+	return fixtureComponentDelay("fixture-retry-delay-" + component)
+}
+
+func fixtureComponentDelay(path string) error {
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	delay, err := time.ParseDuration(string(data))
+	if err != nil || delay < 0 {
+		return errors.New("fixture component delay is invalid")
+	}
+	time.Sleep(delay)
+	return nil
 }

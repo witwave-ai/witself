@@ -73,44 +73,40 @@ func occupyLifecyclePort(t *testing.T, port int) net.Listener {
 }
 
 func testSavedPortPreflight(t *testing.T, binaries localcell.Binaries) {
-	cell, root := disposableCell(t, binaries, nil)
-	if err := cell.Install(t.Context(), localcell.InstallOptions{}); err != nil {
-		t.Fatalf("saved port fixture install failed: %v", err)
-	}
-	inspection, err := cell.Inspect(t.Context())
-	if err != nil || inspection.Manifest == nil {
-		t.Fatal("cannot inspect saved port fixture manifest")
-	}
-	ports := inspection.Manifest.Ports
-	if err := lifecycleWriteFile(filepath.Join(root, "fixture-events"), nil); err != nil {
-		t.Fatal("cannot reset saved port fixture events")
-	}
 	for _, tc := range []struct {
-		name string
-		port int
+		name      string
+		component string
+		port      func(localcell.Ports) int
 	}{
-		{"postgres", ports.Postgres}, {"server_api", ports.ServerAPI},
-		{"server_health", ports.ServerHealth}, {"server_metrics", ports.ServerMetrics},
-		{"worker_health", ports.WorkerHealth}, {"worker_metrics", ports.WorkerMetrics},
+		{"postgres", "postgres", func(p localcell.Ports) int { return p.Postgres }},
+		{"server_api", "server", func(p localcell.Ports) int { return p.ServerAPI }},
+		{"server_health", "server", func(p localcell.Ports) int { return p.ServerHealth }},
+		{"server_metrics", "server", func(p localcell.Ports) int { return p.ServerMetrics }},
+		{"worker_health", "worker", func(p localcell.Ports) int { return p.WorkerHealth }},
+		{"worker_metrics", "worker", func(p localcell.Ports) int { return p.WorkerMetrics }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			listener := occupyLifecyclePort(t, tc.port)
-			err := cell.Start(t.Context())
-			assertLifecycleFixedCause(t, root, err, "start", "ports", "saved local cell port is occupied")
-			assertFixtureEvents(t, root, "")
-			assertStopped(t, cell)
-			if err := listener.Close(); err != nil {
-				t.Fatal("cannot release occupied saved port fixture")
+			cell, root := disposableCell(t, binaries, nil)
+			if err := cell.Install(t.Context(), localcell.InstallOptions{}); err != nil {
+				t.Fatalf("saved port fixture install failed: %v", err)
+			}
+			before := lostPortManifest(t, cell).Ports
+			occupyLifecyclePort(t, tc.port(before))
+			if err := cell.Start(t.Context()); err != nil {
+				t.Fatalf("occupied saved port prevented recovered startup: %v", err)
+			}
+			after := assertReady(t, cell).Ports
+			assertOnlyComponentPortsChanged(t, before, after, tc.component)
+			assertPortRecoveryCauses(t, root, tc.component, false)
+			if err := cell.Start(t.Context()); err != nil {
+				t.Fatalf("owned running ports prevented idempotent startup: %v", err)
+			}
+			assertReady(t, cell)
+			if got := lostPortManifest(t, cell).Ports; got != after {
+				t.Fatal("idempotent startup changed already-running component ports")
 			}
 		})
 	}
-	if err := cell.Start(t.Context()); err != nil {
-		t.Fatalf("released saved ports prevented clean startup: %v", err)
-	}
-	if err := cell.Start(t.Context()); err != nil {
-		t.Fatalf("owned running ports prevented idempotent startup: %v", err)
-	}
-	assertReady(t, cell)
 }
 
 func testInstallPortReallocation(t *testing.T, binaries localcell.Binaries) {

@@ -3,6 +3,7 @@
 package localcell
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -30,8 +31,11 @@ func launchCheckpoint(stage string, process windows.ProcessInformation) error {
 	return nil
 }
 
-func (c *Cell) launchChild(binary, component string, environment []string, log *os.File) error {
-	return c.launchWindows(binary, []string{"serve"}, component, environment, log, nil)
+func (c *Cell) launchChild(ctx context.Context, binary, component string, environment []string, log *os.File) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return c.launchWindows(binary, []string{"serve"}, component, environment, log, func(ProcessRecord) error { return ctx.Err() })
 }
 
 // launchWindows creates the actual executable, never a shell or reexec proxy.

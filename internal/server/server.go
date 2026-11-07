@@ -27,6 +27,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/witwave-ai/witself/internal/envconfig"
+	"github.com/witwave-ai/witself/internal/listenerdiagnostic"
 	"github.com/witwave-ai/witself/internal/placement"
 	"github.com/witwave-ai/witself/internal/plans"
 	"github.com/witwave-ai/witself/internal/store"
@@ -2394,6 +2395,7 @@ func Run(ctx context.Context, cfg Config) error {
 	for _, d := range defs {
 		ln, err := net.Listen("tcp", d.addr)
 		if err != nil {
+			listenerdiagnostic.Write(os.Stderr, "server", err)
 			for _, r := range servers {
 				_ = r.ln.Close()
 			}

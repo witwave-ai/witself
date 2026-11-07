@@ -1669,11 +1669,12 @@
         },
         "recovery": {
           "state": "conditional",
-          "summary": "Journal-based repair and failed-start rollback preserve PostgreSQL data; only explicit purge removes it. Restart policy and migration cancellation remain deferred.",
+          "summary": "Journal repair and failed-start rollback preserve PostgreSQL data. Start preflights each component and retries an attributable bind conflict once within the original readiness budget; port allocation is bounded. Only explicit purge removes data.",
           "evidence": [
             "internal/localcell/files_test.go",
             "internal/localcell/lifecycle.go",
-            "internal/localcell/lifecycle_integration_test.go"
+            "internal/localcell/lifecycle_integration_test.go",
+            "internal/localcell/lifecycle_lost_port_test.go"
           ]
         },
         "rollout_canaries": {
