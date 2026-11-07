@@ -34,23 +34,20 @@ func TestWindowsShutdownChildHelper(_ *testing.T) {
 		os.Exit(70)
 	}
 	if args[0] == "probe" {
-		if len(args) != 3 {
+		// The probe is a detached child of the CREATE_NO_WINDOW fixture, so
+		// ATTACH_PARENT_PROCESS always selects that fixture, never the runner.
+		getConsole := windows.NewLazySystemDLL("kernel32.dll").NewProc("GetConsoleWindow")
+		if window, _, _ := getConsole.Call(); window != 0 {
 			os.Exit(71)
 		}
-		pid, err := strconv.Atoi(args[1])
-		if err != nil {
-			os.Exit(72)
-		}
-		result, _, callErr := attachConsoleProc.Call(uintptr(pid))
+		const attachParentProcess = ^uint32(0)
+		result, _, callErr := attachConsoleProc.Call(uintptr(attachParentProcess))
 		if result != 0 {
 			_, _, _ = freeConsoleProc.Call()
 			os.Exit(73)
 		}
 		if !errors.Is(callErr, windows.ERROR_INVALID_HANDLE) {
 			os.Exit(74)
-		}
-		if writeAtomicBytes(args[2], []byte("absent"), nil) != nil {
-			os.Exit(75)
 		}
 		os.Exit(0)
 	}
@@ -123,6 +120,34 @@ func TestWindowsShutdownChildHelper(_ *testing.T) {
 	if writeAtomicBytes(filepath.Join(root, "tmp", "runtime-started"), []byte("started"), nil) != nil {
 		os.Exit(82)
 	}
+	if mode == "normal-probe" {
+		// Run from the real shutdown fixture: its own CREATE_NO_WINDOW launch
+		// is the parent whose console absence the detached probe observes.
+		if len(args) != 2 {
+			os.Exit(83)
+		}
+		probeBudget, err := time.ParseDuration(args[1])
+		if err != nil || probeBudget <= 0 {
+			os.Exit(83)
+		}
+		probeCtx, probeCancel := context.WithTimeout(ctx, probeBudget)
+		probe := exec.CommandContext(probeCtx, os.Args[0], "-test.run=^TestWindowsShutdownChildHelper$", "--", "probe")
+		probe.Dir = root
+		probe.Stdout, probe.Stderr = io.Discard, io.Discard
+		probe.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.DETACHED_PROCESS}
+		code := 0
+		if err := probe.Run(); err != nil {
+			code = 72
+			var exit *exec.ExitError
+			if errors.As(err, &exit) {
+				code = exit.ExitCode()
+			}
+		}
+		probeCancel()
+		if writeAtomicBytes(filepath.Join(root, "tmp", "console-probe-result"), []byte(strconv.Itoa(code)), nil) != nil {
+			os.Exit(75)
+		}
+	}
 	<-ctx.Done()
 	_ = channel.Close()
 	os.Exit(0)
@@ -185,8 +210,12 @@ func launchShutdownFixture(t *testing.T, mode string, barrier bool) windowsShutd
 		return nil
 	}
 	defer func() { windowsLaunchCheckpoint = old }()
+	args := []string{"-test.run=^TestWindowsShutdownChildHelper$", "--", mode}
+	if mode == "normal-probe" {
+		args = append(args, c.cfg.Timeout.String())
+	}
 	started := time.Now()
-	err = c.launchWindows(os.Args[0], []string{"-test.run=^TestWindowsShutdownChildHelper$", "--", mode}, "server", environment, log, nil)
+	err = c.launchWindows(os.Args[0], args, "server", environment, log, nil)
 	if (err != nil) != barrier {
 		t.Fatal("synthetic launch did not reach expected release fence")
 	}
@@ -239,20 +268,29 @@ func TestWindowsNoConsoleShutdown(t *testing.T) {
 		t.Fatal("recorded legacy clean case did not exercise the console entry witness")
 	}
 	legacyAttempts = 0
-	f := launchShutdownFixture(t, "normal", false)
+	f := launchShutdownFixture(t, "normal-probe", false)
 	if _, err := os.Stat(f.cell.path("tmp", "console-absent")); err != nil {
 		t.Fatal("child did not prove absent console window")
 	}
-	probe := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestWindowsShutdownChildHelper$", "--", "probe", strconv.Itoa(f.record.PID), f.cell.path("tmp", "probe-absent"))
-	probe.Env, _ = f.cell.baseEnvironment()
-	probe.Dir = f.cell.cfg.Root
-	probe.Stdout, probe.Stderr = io.Discard, io.Discard
-	probe.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.DETACHED_PROCESS}
-	if probe.Run() != nil {
-		t.Fatal("detached AttachConsole probe did not prove ERROR_INVALID_HANDLE")
+	probeResult := f.cell.path("tmp", "console-probe-result")
+	waitShutdownMarker(t, probeResult, f.cell.cfg.Timeout+10*f.startup)
+	result, err := readPrivateFile(probeResult)
+	if err != nil {
+		t.Fatal("no-console probe result unavailable")
 	}
-	if _, err := os.Stat(f.cell.path("tmp", "probe-absent")); err != nil {
-		t.Fatal("no-console probe witness absent")
+	switch string(result) {
+	case "0":
+		// The probe witnessed the exact ERROR_INVALID_HANDLE from its parent.
+	case "71":
+		t.Fatal("detached probe unexpectedly had a console")
+	case "72":
+		t.Fatal("no-console probe launch failed")
+	case "73":
+		t.Fatal("detached probe unexpectedly attached to parent console")
+	case "74":
+		t.Fatal("detached AttachConsole probe did not prove ERROR_INVALID_HANDLE")
+	default:
+		t.Fatal("no-console probe exited unexpectedly")
 	}
 	bystander := launchShutdownFixture(t, "ignore", false)
 	if outcome := f.stop(t); outcome.Kind != serviceStopGraceful {

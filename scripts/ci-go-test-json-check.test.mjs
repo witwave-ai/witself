@@ -276,6 +276,72 @@ test('why diagnostics from the actual packages recognize production errors and n
     'local cell password file is unavailable or not private', packages[0]));
 });
 
+test('Windows shutdown regression assertions classify every fixed failure without private details', async () => {
+  // Independent of source extraction: losing a direct assertion literal must
+  // fail this fixture instead of silently returning an unclassified CI reason.
+  const cases = [
+    ['service_failure_receipt_test.go', 'TestServiceFailureReceiptOnceActualControlPath', [
+      'cannot create failure receipt fixture',
+      'cannot secure failure receipt fixture',
+      'cannot configure failure receipt fixture',
+      'cannot prepare failure receipt fixture layout',
+      'cannot write failure receipt fixture manifest',
+      'failure receipt fixture executable unavailable',
+      'cannot prepare failure receipt service',
+      'cannot capture receipt',
+      'foreground fixture cleanup did not finish',
+      'foreground host exited before control request',
+      'foreground never became ready',
+      'foreground did not stop',
+      'failure receipt host did not exit cleanly',
+      'failed control stop was not rejected',
+      'failed control stop did not preserve shutdown policy',
+      'cannot read failure receipt service descriptor',
+      'failed control stop did not preserve durable fault and stopped intent',
+      'cannot read receipt',
+      'one failed control operation did not emit exactly one site receipt',
+      'failed control operation lost its inner supervisor_stop site',
+    ]],
+    ['service_native_deadline_test.go', 'TestServiceRunShutdownSharedDeadline', [
+      'shutdown did not create one fresh signal-independent platform budget',
+      'cannot read supervisor shutdown budget source',
+      'supervisor shutdown budget lost platform cap or independent parent',
+      'supervisor shutdown budget mutation did not apply',
+      'supervisor shutdown budget contract accepted a broken policy',
+    ]],
+    ['service_shutdown_windows_test.go', 'TestWindowsNoConsoleShutdown', [
+      'no-console probe result unavailable',
+      'detached probe unexpectedly had a console',
+      'no-console probe launch failed',
+      'detached probe unexpectedly attached to parent console',
+      'detached AttachConsole probe did not prove ERROR_INVALID_HANDLE',
+      'no-console probe exited unexpectedly',
+    ]],
+    ['service_shutdown_console_contract_test.go', 'TestWindowsNoConsoleProbeSourceContract', [
+      'no-console probe source unavailable',
+      'no-console probe lost detached parent or exact error proof',
+      'no-console probe mutation site changed',
+      'no-console probe contract accepted a broken oracle',
+      'no-console probe contract rejected CRLF source',
+    ]],
+  ];
+  for (const [file, testName, messages] of cases) {
+    for (const message of messages) {
+      for (const appended of [false, true]) {
+        const input = stream(packages.flatMap(name => name === packages[0]
+          ? [event('start', name), event('run', name, testName),
+            event('output', name, testName, {Output: `    ${file}:12: ${message}${appended ? ' private-fixture-marker' : ''}\n`}),
+            event('output', name, testName, {Output: '    private details are not diagnostics\n'}),
+            event('fail', name, testName), event('fail', name)] : packageEvents(name)));
+        const result = await checkGoTestJSON([input]);
+        assert.equal(result.reason, failureDiagnostic.trimEnd());
+        assert(result.lines.includes(`why ${packages[0]} ${testName} :: ${appended ? '(unclassified)' : message}`));
+        assert(!result.lines.join('\n').includes('private-fixture-marker'));
+      }
+    }
+  }
+});
+
 test('child control and native proof retain each closed transport cause as why', async () => {
   for (const step of ['dial', 'deadline', 'eof', 'response']) {
     const message = `localcell: service_control_unavailable: transport:${step}`;
