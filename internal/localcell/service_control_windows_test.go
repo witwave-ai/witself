@@ -25,8 +25,9 @@ import (
 )
 
 // The Windows synthetic receipt reserves 22 localcell tests at budget/33 (60s),
-// the child-client matrix at budget/15 (6s), and the harness at 24s.
-// Children share their parent's deadline; the total remains 90s.
+// the child-client matrix at budget/15 (6s) per row for its two rows (12s), and
+// the harness at 24s. Children share their parent's deadline; the aggregate
+// contract caps the total at 96s.
 const windowsSyntheticTestBudget = 90 * time.Second
 
 func windowsSyntheticTestContext(t *testing.T) context.Context {

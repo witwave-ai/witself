@@ -22,8 +22,9 @@ import (
 )
 
 // Keep the same named total as localcell windowsSyntheticTestBudget. Test-only
-// constants are package-local: 22 localcell tests reserve 3s each; this separate
-// harness package reserves the remaining 24s, excluding its bounded compilation.
+// constants are package-local: 22 localcell tests reserve budget/33 each (60s in
+// all) and the child-client matrix reserves 6s per row (12s); this separate
+// harness package reserves 24s, excluding its bounded compilation.
 const windowsSyntheticTestBudget = 90 * time.Second
 
 // Exercise the production main/run dispatch and named-pipe transport in fresh

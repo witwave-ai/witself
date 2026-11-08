@@ -20,7 +20,8 @@ const windowsSyntheticHarnessSource = "../tools/localcellharness/service_subproc
 // Source evidence only: the Windows runtime receipt still runs on Windows.
 // Count enrollment in the selected sources and evaluate both package-local
 // budgets and timeout expressions so increasing either budget or adding an
-// enrolled test in those sources fails closed.
+// enrolled test in those sources fails closed. The child share is counted per
+// matrix row.
 func TestWindowsSyntheticRuntimeBudget(t *testing.T) {
 	sources := windowsSyntheticBudgetSources(t)
 	worst, err := windowsSyntheticBudgetContract(sources)
@@ -31,7 +32,7 @@ func TestWindowsSyntheticRuntimeBudget(t *testing.T) {
 }
 
 func TestWindowsSyntheticRuntimeBudgetMutations(t *testing.T) {
-	for _, name := range []string{"local_budget_doubled", "harness_budget_doubled", "extra_enrolled_test", "child_budget_increased", "child_budget_unbound"} {
+	for _, name := range []string{"local_budget_doubled", "harness_budget_doubled", "extra_enrolled_test", "child_budget_increased", "child_budget_unbound", "child_row_budget_unbound", "child_extra_row", "child_row_context_unbounded"} {
 		t.Run(name, func(t *testing.T) {
 			sources := windowsSyntheticBudgetSources(t)
 			path := "service_control_windows_test.go"
@@ -45,6 +46,22 @@ func TestWindowsSyntheticRuntimeBudgetMutations(t *testing.T) {
 			case "child_budget_unbound":
 				path = windowsSyntheticChildSource
 				sources[path] = []byte(strings.Replace(string(sources[path]), "localcell.NativeServiceChildSyntheticBudget)", "90*time.Second)", 1))
+			case "child_row_budget_unbound", "child_extra_row", "child_row_context_unbounded":
+				path = windowsSyntheticChildSource
+				original := string(sources[path])
+				from := "context.WithTimeout(t.Context(), localcell.NativeServiceChildSyntheticBudget)"
+				to := "context.WithTimeout(t.Context(), 90*time.Second)"
+				switch name {
+				case "child_extra_row":
+					from, to = `{"full", os.Environ},`, "{\"full\", os.Environ},\n\t\t{\"extra\", os.Environ},"
+				case "child_row_context_unbounded":
+					to = "context.WithCancel(t.Context())"
+				}
+				mutated := strings.Replace(original, from, to, 1)
+				if mutated == original {
+					t.Fatal("synthetic budget mutation no longer applies")
+				}
+				sources[path] = []byte(mutated)
 			case "extra_enrolled_test":
 				sources[path] = append(sources[path], []byte("\nfunc TestWindowsExtraBudget(t *testing.T) { _ = windowsSyntheticTestContext(t) }\n")...)
 			default:
@@ -76,7 +93,7 @@ func windowsSyntheticBudgetSources(t *testing.T) map[string][]byte {
 }
 
 func windowsSyntheticBudgetContract(sources map[string][]byte) (time.Duration, error) {
-	invalid := errors.New("Windows synthetic runtime budget is unaccounted or exceeds 90 seconds")
+	invalid := errors.New("Windows synthetic runtime budget is unaccounted or exceeds 96 seconds")
 	files := make(map[string]*ast.File)
 	for path, source := range sources {
 		file, err := parser.ParseFile(token.NewFileSet(), path, source, 0)
@@ -91,44 +108,16 @@ func windowsSyntheticBudgetContract(sources map[string][]byte) (time.Duration, e
 	if localBudget == nil || harnessBudget == nil || childShare == nil {
 		return 0, invalid
 	}
-	childBounded := false
-	for _, declaration := range files[windowsSyntheticChildSource].Decls {
-		function, ok := declaration.(*ast.FuncDecl)
-		if !ok || function.Name.Name != "TestServiceControlChildProcessClient" {
-			continue
-		}
-		for _, statement := range function.Body.List {
-			assignment, ok := statement.(*ast.AssignStmt)
-			if !ok || len(assignment.Rhs) != 1 {
-				continue
-			}
-			call, ok := assignment.Rhs[0].(*ast.CallExpr)
-			if !ok || len(call.Args) != 2 {
-				continue
-			}
-			callee, ok := call.Fun.(*ast.SelectorExpr)
-			if !ok || callee.Sel.Name != "WithTimeout" {
-				continue
-			}
-			limit, ok := call.Args[1].(*ast.SelectorExpr)
-			if !ok || limit.Sel.Name != "NativeServiceChildSyntheticBudget" {
-				return 0, invalid
-			}
-			packageName, ok := limit.X.(*ast.Ident)
-			if !ok || packageName.Name != "localcell" || childBounded {
-				return 0, invalid
-			}
-			childBounded = true
-		}
-	}
-	if !childBounded {
+	rowCount := windowsSyntheticChildBudgetRows(files[windowsSyntheticChildSource])
+	if rowCount < 1 {
 		return 0, invalid
 	}
+	childShare = constant.BinaryOp(childShare, token.MUL, constant.MakeInt64(rowCount))
 	var localShare, harnessShare constant.Value
 	enrolled := int64(0)
 	for path, file := range files {
 		if path == windowsSyntheticChildBridgeSource || path == windowsSyntheticChildSource {
-			continue // The exported child share is counted once for both matrix rows.
+			continue // The child matrix is accounted as rows × the exported share.
 		}
 		for _, declaration := range file.Decls {
 			function, ok := declaration.(*ast.FuncDecl)
@@ -169,10 +158,139 @@ func windowsSyntheticBudgetContract(sources map[string][]byte) (time.Duration, e
 	}
 	worst := constant.BinaryOp(constant.BinaryOp(constant.BinaryOp(localShare, token.MUL, constant.MakeInt64(enrolled)), token.ADD, harnessShare), token.ADD, childShare)
 	nanos, ok := constant.Int64Val(worst)
-	if !ok || nanos <= 0 || nanos > int64(90*time.Second) {
+	if !ok || nanos <= 0 || nanos > int64(96*time.Second) {
 		return 0, invalid
 	}
 	return time.Duration(nanos), nil
+}
+
+func windowsSyntheticChildBudgetRows(file *ast.File) int64 {
+	if file == nil {
+		return 0
+	}
+	var child *ast.FuncDecl
+	for _, declaration := range file.Decls {
+		function, ok := declaration.(*ast.FuncDecl)
+		if ok && function.Name.Name == "TestServiceControlChildProcessClient" {
+			if child != nil || function.Body == nil {
+				return 0
+			}
+			child = function
+		}
+	}
+	if child == nil {
+		return 0
+	}
+	rowCount, bounds := int64(0), 0
+	for _, statement := range child.Body.List {
+		assignment, ok := statement.(*ast.AssignStmt)
+		if !ok || len(assignment.Rhs) != 1 {
+			continue
+		}
+		if len(assignment.Lhs) == 1 {
+			if name, ok := assignment.Lhs[0].(*ast.Ident); ok && name.Name == "rows" {
+				literal, ok := assignment.Rhs[0].(*ast.CompositeLit)
+				if !ok || assignment.Tok != token.DEFINE || rowCount != 0 {
+					return 0
+				}
+				slice, ok := literal.Type.(*ast.ArrayType)
+				if !ok || slice.Len != nil {
+					return 0
+				}
+				if _, ok := slice.Elt.(*ast.StructType); !ok || len(literal.Elts) == 0 {
+					return 0
+				}
+				rowCount = int64(len(literal.Elts))
+			}
+		}
+		call, ok := assignment.Rhs[0].(*ast.CallExpr)
+		if !ok || !windowsSyntheticBudgetSelector(call.Fun, "context", "WithTimeout") {
+			continue
+		}
+		bounds++
+		if len(call.Args) != 2 || !windowsSyntheticBudgetTestContext(call.Args[0]) || !windowsSyntheticChildOuterLimit(call.Args[1]) {
+			return 0
+		}
+	}
+	if bounds != 1 || !windowsSyntheticChildRowBounded(child.Body) {
+		return 0
+	}
+	return rowCount
+}
+
+func windowsSyntheticChildOuterLimit(expression ast.Expr) bool {
+	product, ok := expression.(*ast.BinaryExpr)
+	if !ok || product.Op != token.MUL || !windowsSyntheticBudgetSelector(product.Y, "localcell", "NativeServiceChildSyntheticBudget") {
+		return false
+	}
+	duration, ok := product.X.(*ast.CallExpr)
+	if !ok || !windowsSyntheticBudgetSelector(duration.Fun, "time", "Duration") || len(duration.Args) != 1 {
+		return false
+	}
+	length, ok := duration.Args[0].(*ast.CallExpr)
+	if !ok || len(length.Args) != 1 {
+		return false
+	}
+	callee, ok := length.Fun.(*ast.Ident)
+	if !ok || callee.Name != "len" {
+		return false
+	}
+	rows, ok := length.Args[0].(*ast.Ident)
+	return ok && rows.Name == "rows"
+}
+
+func windowsSyntheticChildRowBounded(body *ast.BlockStmt) bool {
+	runs := 0
+	var row *ast.FuncLit
+	ast.Inspect(body, func(node ast.Node) bool {
+		call, ok := node.(*ast.CallExpr)
+		if ok && windowsSyntheticBudgetSelector(call.Fun, "t", "Run") {
+			runs++
+			if len(call.Args) == 2 {
+				row, _ = call.Args[1].(*ast.FuncLit)
+			}
+		}
+		return true
+	})
+	if runs != 1 || row == nil {
+		return false
+	}
+	bounds := 0
+	for _, statement := range row.Body.List {
+		assignment, ok := statement.(*ast.AssignStmt)
+		if !ok || len(assignment.Rhs) != 1 {
+			continue
+		}
+		call, ok := assignment.Rhs[0].(*ast.CallExpr)
+		if !ok || !windowsSyntheticBudgetSelector(call.Fun, "context", "WithTimeout") {
+			continue
+		}
+		if len(call.Args) != 2 {
+			return false
+		}
+		if _, ok := call.Args[1].(*ast.SelectorExpr); !ok {
+			continue // Readiness and command allowances are row-local identifiers.
+		}
+		bounds++
+		if !windowsSyntheticBudgetTestContext(call.Args[0]) || !windowsSyntheticBudgetSelector(call.Args[1], "localcell", "NativeServiceChildSyntheticBudget") {
+			return false
+		}
+	}
+	return bounds == 1
+}
+
+func windowsSyntheticBudgetSelector(expression ast.Expr, name, member string) bool {
+	selector, ok := expression.(*ast.SelectorExpr)
+	if !ok || selector.Sel.Name != member {
+		return false
+	}
+	identifier, ok := selector.X.(*ast.Ident)
+	return ok && identifier.Name == name
+}
+
+func windowsSyntheticBudgetTestContext(expression ast.Expr) bool {
+	call, ok := expression.(*ast.CallExpr)
+	return ok && len(call.Args) == 0 && windowsSyntheticBudgetSelector(call.Fun, "t", "Context")
 }
 
 func windowsSyntheticBudgetConstant(file *ast.File) constant.Value {

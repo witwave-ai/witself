@@ -24,6 +24,12 @@ type serviceControlChildRequest struct {
 	Deadline     time.Time
 }
 
+func TestServiceControlChildSyntheticBudget(t *testing.T) {
+	if serviceControlChildSyntheticBudgetMirror != localcell.NativeServiceChildSyntheticBudget {
+		t.Fatal("portable child readiness budget mirror differs from the Windows fixture")
+	}
+}
+
 // This is deliberately the native proof's client shape: a fresh test process
 // whose first control operation uses the exact native environment constructor.
 // Each row owns a fresh synthetic host; no PostgreSQL or manager is involved.
@@ -31,11 +37,6 @@ func TestServiceControlChildProcessClient(t *testing.T) {
 	t.Setenv("WITSELF_HOME", t.TempDir())
 	t.Setenv("DSH_HOME", t.TempDir())
 	t.Setenv("WITSELF_RUNTIME", "local")
-	ctx, cancel := context.WithTimeout(t.Context(), localcell.NativeServiceChildSyntheticBudget)
-	defer cancel()
-	deadline, _ := ctx.Deadline()
-	workContext, workCancel := context.WithDeadline(ctx, deadline.Add(-localcell.NativeServiceChildSyntheticBudget/20))
-	defer workCancel()
 	rows := []struct {
 		name        string
 		environment func() []string
@@ -43,11 +44,21 @@ func TestServiceControlChildProcessClient(t *testing.T) {
 		{"minimal", func() []string { return nativeServiceChildEnvironment(os.LookupEnv) }},
 		{"full", os.Environ},
 	}
+	testContext, testCancel := context.WithTimeout(t.Context(), time.Duration(len(rows))*localcell.NativeServiceChildSyntheticBudget)
+	defer testCancel()
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), localcell.NativeServiceChildSyntheticBudget)
+			defer cancel()
+			// The whole-test bound can cancel a row, but never sizes its allowance.
+			stopOuter := context.AfterFunc(testContext, cancel)
+			defer stopOuter()
+			deadline, _ := ctx.Deadline()
+			workContext, workCancel := context.WithDeadline(ctx, deadline.Add(-localcell.NativeServiceChildSyntheticBudget/20))
+			defer workCancel()
 			prepared := time.Now()
 			cell, root, policy := localcell.NativeServiceChildFixture(t)
-			allowance := max(time.Second, 10*time.Since(prepared))
+			allowance := serviceControlChildReadinessAllowance(localcell.NativeServiceChildSyntheticBudget, time.Since(prepared))
 			hostContext, stopHost := context.WithCancel(workContext)
 			stderr, err := os.CreateTemp(t.TempDir(), "host-stderr")
 			if err != nil {
@@ -65,7 +76,8 @@ func TestServiceControlChildProcessClient(t *testing.T) {
 				}
 				serviceControlChildLog(t, data)
 			}
-			t.Cleanup(func() {
+			// Run before t.Context is canceled and before the row deadline is released.
+			defer func() {
 				stopHost()
 				if !finished {
 					select {
@@ -79,22 +91,45 @@ func TestServiceControlChildProcessClient(t *testing.T) {
 				}
 				os.Stderr = originalStderr
 				_ = stderr.Close()
-			})
+			}()
+			readinessStarted := time.Now()
 			go func() { done <- cell.Run(hostContext, policy) }()
 			// Readiness comes from client A, matching the native proof. The child
 			// still makes its first ever connection separately for every action.
 			readyContext, readyCancel := context.WithTimeout(workContext, allowance)
 			defer readyCancel()
+			lastControl := "none"
 			for {
-				if status, controlErr := cell.Control(readyContext, "health"); controlErr == nil && status.Healthy {
-					break
+				status, controlErr := cell.Control(readyContext, "health")
+				if controlErr != nil {
+					switch serviceControlChildDiagnostic(controlErr) {
+					case "localcell: service_control_unavailable: transport:dial":
+						lastControl = "dial"
+					case "localcell: service_control_unavailable: transport:deadline":
+						lastControl = "deadline"
+					case "localcell: service_control_unavailable: transport:eof":
+						lastControl = "eof"
+					case "localcell: service_control_unavailable: transport:response":
+						lastControl = "response"
+					default:
+						lastControl = "unclassified"
+					}
+				} else {
+					lastControl = "none"
+					if status.Healthy {
+						break
+					}
+					lastControl = "unhealthy"
 				}
 				select {
 				case <-readyContext.Done():
-					t.Fatal("synthetic host did not reach authenticated readiness")
+					logHost()
+					workDeadline, _ := workContext.Deadline()
+					t.Fatalf("synthetic host did not reach authenticated readiness: row=%s elapsed_ms=%d allowance_ms=%d work_remaining_ms=%d last_control=%s", row.name, time.Since(readinessStarted).Milliseconds(), allowance.Milliseconds(), max(time.Until(workDeadline).Milliseconds(), 0), lastControl)
 				case <-time.After(time.Millisecond):
 				}
 			}
+			allowance = max(allowance, 10*time.Since(readinessStarted))
 			for _, action := range []string{"health", "status", "observe", "stop"} {
 				started := time.Now()
 				commandAllowance := allowance
