@@ -124,24 +124,33 @@ type Cell struct {
 	recoveryProcessStartedAt func(int) (time.Time, error)
 }
 
+// CanonicalRoot makes two spellings of one directory canonicalize to the same string.
+func CanonicalRoot(root string) (string, error) {
+	if root == "" {
+		return "", errors.New("local cell root is required")
+	}
+	if err := validateRootPath(root); err != nil {
+		return "", err
+	}
+	root, err := filepath.Abs(root)
+	if err != nil || root == filepath.VolumeName(root)+string(os.PathSeparator) {
+		return "", errors.New("invalid local cell root")
+	}
+	root = filepath.Clean(root)
+	parent, err := filepath.EvalSymlinks(filepath.Dir(root))
+	if err != nil {
+		return "", errors.New("local cell parent directory is unavailable")
+	}
+	return filepath.Join(parent, filepath.Base(root)), nil
+}
+
 // New validates configuration without creating anything or starting a process.
 func New(cfg Config) (*Cell, error) {
-	if cfg.Root == "" {
-		return nil, errors.New("local cell root is required")
-	}
-	if err := validateRootPath(cfg.Root); err != nil {
+	root, err := CanonicalRoot(cfg.Root)
+	if err != nil {
 		return nil, err
 	}
-	root, err := filepath.Abs(cfg.Root)
-	if err != nil || root == filepath.VolumeName(root)+string(os.PathSeparator) {
-		return nil, errors.New("invalid local cell root")
-	}
-	cfg.Root = filepath.Clean(root)
-	parent, err := filepath.EvalSymlinks(filepath.Dir(cfg.Root))
-	if err != nil {
-		return nil, errors.New("local cell parent directory is unavailable")
-	}
-	cfg.Root = filepath.Join(parent, filepath.Base(cfg.Root))
+	cfg.Root = root
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = 30 * time.Second
 	}

@@ -70,6 +70,12 @@ func serviceAdapterKind(goos string) (string, error) {
 	}
 }
 
+func sameInstallationRoot(persisted, recorded string) bool {
+	persistedRoot, persistedErr := localcell.CanonicalRoot(persisted)
+	recordedRoot, recordedErr := localcell.CanonicalRoot(recorded)
+	return persistedErr == nil && recordedErr == nil && persistedRoot == recordedRoot
+}
+
 func runServiceCommandForGOOS(ctx context.Context, args []string, out io.Writer, goos string) (result error) {
 	if os.Getenv("WITSELF_RUNTIME") != "local" {
 		return errors.New("localcellharness: service commands require explicit local runtime selection")
@@ -148,7 +154,7 @@ func runServiceCommandForGOOS(ctx context.Context, args []string, out io.Writer,
 		return errors.New("localcellharness: invalid service payload")
 	}
 	persisted, parseErr := parseServiceFlags(descriptor.Payload.Args[1:])
-	if parseErr != nil || persisted.adapter != "" || persisted.root != descriptor.Root {
+	if parseErr != nil || persisted.adapter != "" || !sameInstallationRoot(persisted.root, descriptor.Root) {
 		return errors.New("localcellharness: invalid service payload")
 	}
 	if (values.pgbin != "" && values.pgbin != persisted.pgbin) ||

@@ -75,7 +75,7 @@ func runTaskHostWith(ctx context.Context, args []string,
 		return errors.New("localcellharness: invalid task host payload")
 	}
 	persisted, err := parseServiceFlags(descriptor.Payload.Args[1:])
-	if err != nil || persisted.root != descriptor.Root || persisted.adapter != "" ||
+	if err != nil || !sameInstallationRoot(persisted.root, descriptor.Root) || persisted.adapter != "" ||
 		persisted.pgbin == "" || persisted.server == "" || persisted.worker == "" {
 		return errors.New("localcellharness: invalid task host payload")
 	}
