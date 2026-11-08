@@ -4,19 +4,25 @@ import (
 	"context"
 	"crypto/rand"
 	"errors"
+	"net"
 	"net/url"
 	"os"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 var postgresTransactionGuardsEnabled atomic.Bool
+
+var postgresObserverConnect = pgx.Connect
+var postgresObserverSleep = time.Sleep
 
 var postgresTransactionProcessTag = sync.OnceValue(func() string {
 	return "witself-test-" + strconv.Itoa(os.Getpid()) + "-" + rand.Text()[:12]
@@ -282,6 +288,48 @@ type postgresTransactionGuard struct {
 	baseline map[postgresTransactionIdentity]struct{}
 }
 
+func (guard *postgresTransactionGuard) connectObserver(t testing.TB, dsn string) (context.Context, context.CancelFunc, bool) {
+	t.Helper()
+	for attempt := 1; attempt <= 3; attempt++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		started := time.Now()
+		observer, err := postgresObserverConnect(ctx, dsn)
+		elapsed := time.Since(started)
+		if err == nil {
+			guard.observer = observer
+			return ctx, cancel, true
+		}
+		cancel()
+		kind := postgresObserverConnectKind(err)
+		if kind == "auth" || attempt == 3 {
+			t.Fatalf("postgres transaction guard observer connection failed kind=%s attempts=%d", kind, attempt)
+			return nil, nil, false
+		}
+		postgresObserverSleep(min(max(2*elapsed, 200*time.Millisecond), 2*time.Second))
+	}
+	return nil, nil, false
+}
+
+func postgresObserverConnectKind(err error) string {
+	var timeout net.Error
+	if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &timeout) && timeout.Timeout()) {
+		return "timeout"
+	}
+	var postgres *pgconn.PgError
+	if errors.As(err, &postgres) {
+		if postgres.Code == "53300" || postgres.Code == "53400" {
+			return "limit"
+		}
+		if strings.HasPrefix(postgres.Code, "28") {
+			return "auth"
+		}
+	}
+	if errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE) {
+		return "refused"
+	}
+	return "other"
+}
+
 func registerPostgresTransactionGuard(t testing.TB, dsn string) {
 	t.Helper()
 	postgresTransactionGuards.Lock()
@@ -329,14 +377,12 @@ func registerPostgresTransactionGuard(t testing.TB, dsn string) {
 			t.Errorf("postgres transaction guard test=%s left open transaction state=%s age=%s", t.Name(), activity.state, activity.age)
 		}
 	})
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	observer, err := pgx.Connect(ctx, dsn)
-	if err != nil {
-		t.Fatal("postgres transaction guard observer connection failed")
+	ctx, cancel, ok := guard.connectObserver(t, dsn)
+	if !ok {
 		return
 	}
-	guard.observer = observer
+	defer cancel()
+	observer := guard.observer
 	activities, err := postgresOpenTransactions(ctx, observer)
 	if err != nil {
 		t.Fatal("postgres transaction guard baseline observation failed")
