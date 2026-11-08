@@ -19,6 +19,7 @@ import (
 // an explicitly selected windows-logon-task descriptor and a proven capability.
 func NewServiceAdapter() ServiceAdapter { return NewWindowsLogonTaskAdapter() }
 
+// NewWindowsLogonTaskAdapter returns the current-user Windows logon task adapter.
 func NewWindowsLogonTaskAdapter() ServiceAdapter {
 	uid, _ := serviceOwner()
 	return &windowsLogonTaskAdapter{uid: uid, command: runWindowsTaskCommand, capability: WindowsLogonTaskCapability}

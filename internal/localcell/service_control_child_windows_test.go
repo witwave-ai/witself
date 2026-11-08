@@ -98,9 +98,9 @@ func TestServiceControlChildProcessClient(t *testing.T) {
 			// still makes its first ever connection separately for every action.
 			readyContext, readyCancel := context.WithTimeout(workContext, allowance)
 			defer readyCancel()
-			lastControl := "none"
 			for {
 				status, controlErr := cell.Control(readyContext, "health")
+				var lastControl string
 				if controlErr != nil {
 					switch serviceControlChildDiagnostic(controlErr) {
 					case "localcell: service_control_unavailable: transport:dial":
@@ -115,7 +115,6 @@ func TestServiceControlChildProcessClient(t *testing.T) {
 						lastControl = "unclassified"
 					}
 				} else {
-					lastControl = "none"
 					if status.Healthy {
 						break
 					}

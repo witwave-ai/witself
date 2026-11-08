@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"unicode"
@@ -54,10 +53,6 @@ func sanitizeServiceSystemdDetail(text, root, home string, privatePaths ...strin
 
 func serviceSystemdError(reason error, step, detail string) error {
 	return fmt.Errorf("%w: %s: %s", reason, step, detail)
-}
-
-func (a *systemdUserAdapter) commandError(reason error, step string, err error, root string) error {
-	return serviceSystemdCommandError(reason, step, err, root, a.home, a.runtimeDir, filepath.Dir(filepath.Dir(a.unitDir)))
 }
 
 func serviceSystemdCommandError(reason error, step string, err error, root, home string, privatePaths ...string) error {
