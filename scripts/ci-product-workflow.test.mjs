@@ -184,7 +184,7 @@ function assertLocalcellWindowsJob(ci) {
       "$proofJSON = Join-Path $env:RUNNER_TEMP 'lc-pg16\\service-proof.json'",
       "go test -json ./internal/localcell -run '^TestNativeServiceLifecycle$' -count=1 -timeout=15m > $proofJSON 2>&1",
       '$goExit = $LASTEXITCODE',
-      'node scripts/ci-go-test-json-check.mjs --input $proofJSON --diagnose --require TestNativeServiceLifecycle,service_shutdown_channel',
+      'node scripts/ci-go-test-json-check.mjs --input $proofJSON --diagnose --manager-required --require TestNativeServiceLifecycle,service_shutdown_channel',
       '$parserExit = $LASTEXITCODE',
       '# The checker prints successful capability outcomes only. Project the',
       '# fixed boot diagnostic fields so successful native rounds retain them.',
@@ -211,7 +211,7 @@ function assertLocalcellWindowsJob(ci) {
     TEMP: '${{ runner.temp }}\\lc-pg16\\testtmp',
     TMP: '${{ runner.temp }}\\lc-pg16\\testtmp',
   });
-  assert.deepEqual(serviceProof.env, proof.env, `${label}: both native proofs receive the exact private PostgreSQL environment`);
+  assert.deepEqual(serviceProof.env, {...proof.env, WITSELF_LOCALCELL_SERVICE_ADAPTER: 'windows-logon-task'}, `${label}: Windows service proof explicitly selects the per-user manager`);
   assert.equal(serviceProof.run.trimEnd().split('\n').at(-1),
     'if ($goExit -ne 0 -or $parserExit -ne 0) { exit 1 }',
     `${label}: native and parser exits are evaluated after the diagnostic projection`);
@@ -1385,6 +1385,7 @@ const mutations = [
     ["'^TestNativeServiceLifecycle$'", "'TestNativeServiceLifecycle'", 'broadens the run filter'],
     [' --require TestNativeServiceLifecycle', '', 'omits required service outcome'],
     [',service_shutdown_channel', '', 'omits required shutdown channel outcome'],
+    [' --manager-required', '', 'allows capability or foreground receipts'],
     [' --diagnose', '', 'omits diagnostics'],
     [' --input $proofJSON', '', 'does not read captured JSON'],
     [' > $proofJSON 2>&1', '', 'prints raw Go output'],
@@ -1402,6 +1403,9 @@ const mutations = [
     const step = data['ci.yml'].jobs['localcell-windows'].steps.find(step => step.name === 'Prove native service restart or record adapter capability');
     const exitCheck = 'if ($goExit -ne 0 -or $parserExit -ne 0) { exit 1 }';
     step.run = step.run.replace(exitCheck, '').replace('Get-Content', `${exitCheck}\nGet-Content`);
+  }],
+  ['Windows service proof loses explicit task selection', data => {
+    delete data['ci.yml'].jobs['localcell-windows'].steps.find(step => step.name === 'Prove native service restart or record adapter capability').env.WITSELF_LOCALCELL_SERVICE_ADAPTER;
   }],
   ['Windows service proof loses PostgreSQL environment', data => {
     delete data['ci.yml'].jobs['localcell-windows'].steps.find(step => step.name === 'Prove native service restart or record adapter capability').env.WITSELF_LOCALCELL_PGBIN;

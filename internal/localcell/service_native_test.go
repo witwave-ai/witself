@@ -41,6 +41,10 @@ func TestNativeServiceLifecycle(t *testing.T) {
 	t.Setenv("WITSELF_HOME", t.TempDir())
 	t.Setenv("DSH_HOME", t.TempDir())
 	t.Setenv("WITSELF_RUNTIME", "local")
+	if runtime.GOOS == "windows" && os.Getenv("WITSELF_LOCALCELL_SERVICE_ADAPTER") == "windows-logon-task" {
+		nativeWindowsTaskManagerLifecycle(t, proofStarted, pgbin)
+		return
+	}
 	if runtime.GOOS == "windows" {
 		probeCtx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 		diagnostic, _ := nativeServiceCapabilityDiagnostic(probeCtx, localcell.ServiceDescriptor{})
@@ -519,6 +523,12 @@ func waitServiceReadyAfter(parent context.Context, t *testing.T, cell *localcell
 
 func nativeServiceWriteWitness(parent context.Context, t *testing.T, proof *nativeServiceProofBudget, root string, manifest *localcell.Manifest) func() {
 	t.Helper()
+	read := nativeServiceWriteWitnessWithTest(parent, t, proof, root, manifest)
+	return func() { read(t) }
+}
+
+func nativeServiceWriteWitnessWithTest(parent context.Context, t *testing.T, proof *nativeServiceProofBudget, root string, manifest *localcell.Manifest) func(*testing.T) {
+	t.Helper()
 	phase := func(limit time.Duration) context.Context {
 		ctx, cancel := proof.phase(parent, limit)
 		t.Cleanup(cancel)
@@ -552,14 +562,17 @@ func nativeServiceWriteWitness(parent context.Context, t *testing.T, proof *nati
 	if created.Operator.ID == "" {
 		t.Fatal("native service authenticated write omitted identity")
 	}
-	return func() {
+	return func(t *testing.T) {
+		t.Helper()
+		readCtx, readCancel := proof.phase(parent, 5*time.Second)
+		defer readCancel()
 		var listed struct {
 			Operators []struct {
 				ID   string `json:"id"`
 				Name string `json:"display_name"`
 			} `json:"operators"`
 		}
-		lifecycleJSON(t, manifest, bearer, http.MethodGet, "/v1/operators", nil, &listed, phase(5*time.Second))
+		lifecycleJSON(t, manifest, bearer, http.MethodGet, "/v1/operators", nil, &listed, readCtx)
 		for _, operator := range listed.Operators {
 			if operator.ID == created.Operator.ID && operator.Name == lifecycleUnicodeName {
 				return

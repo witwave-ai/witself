@@ -8,8 +8,6 @@ import (
 	"runtime"
 	"strconv"
 	"time"
-
-	"github.com/witwave-ai/witself/internal/id"
 )
 
 func (c *Cell) own(create bool) (*operationLock, error) {
@@ -93,7 +91,7 @@ func (c *Cell) Install(ctx context.Context, options InstallOptions) error {
 	if err != nil {
 		return err
 	}
-	installationID, err := id.New("lc")
+	installationID, err := newLocalCellInstallationID(runtime.GOOS)
 	if err != nil {
 		return errors.New("cannot allocate local cell identity")
 	}

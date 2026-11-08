@@ -1,7 +1,7 @@
-//go:build !linux && !darwin
+//go:build !linux && !darwin && !windows
 
 package localcell
 
 // NewServiceAdapter reports the platform capability without registering a
-// service. The Windows native adapter belongs to LC-S7C2.
+// service.
 func NewServiceAdapter() ServiceAdapter { return unavailableServiceAdapter{} }

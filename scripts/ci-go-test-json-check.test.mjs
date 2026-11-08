@@ -239,6 +239,219 @@ test('Windows shutdown channel requirement needs its own observed persistence ou
     assert.equal(result.valid, valid);
   }
 });
+// Kept independent of the checker export: deleting a stage from the checker
+// must not silently narrow the acceptance contract.
+const managerStages = [
+  'query_typed', 'registration', 'on_demand', 'readiness_write', 'same_boot_restart',
+  'persisted_read', 'durable_stop', 'unregister', 'resources_closed', 'bystander_retained',
+];
+function managerEvents(stages = managerStages) {
+  const name = serviceTest;
+  return [event('start', packages[0]), event('run', packages[0], name),
+    ...stages.flatMap(stage => [
+      event('run', packages[0], `${name}/manager_${stage}`),
+      event('pass', packages[0], `${name}/manager_${stage}`),
+      event('output', packages[0], name, {Output: `    service_native_windows_task_test.go:10: PASS service_manager_stage=${stage}\n`}),
+    ]),
+    ...['PASS service_manager_available', 'PASS service_manager_persistence', 'PASS service_shutdown_channel']
+      .map(Output => event('output', packages[0], name, {Output: `${Output}\n`})),
+    event('pass', packages[0], name), event('pass', packages[0])];
+}
+const managerOptions = {managerRequired: true};
+const managerRequirements = [serviceTest, 'service_shutdown_channel'];
+const managerArgs = ['--manager-required', '--require', managerRequirements.join(',')];
+
+function missingManagerEvents(outcomes) {
+  return [event('start', packages[0]), event('run', packages[0], serviceTest),
+    ...outcomes.map(Output => event('output', packages[0], serviceTest, {Output: `${Output}\n`})),
+    event('pass', packages[0], serviceTest), event('pass', packages[0])];
+}
+
+for (const reason of ['windows_task_query_result_untyped', 'windows_task_interactive_token_unavailable']) {
+  test(`manager-required projects approved missing receipt as NOT RUN: ${reason}`, async () => {
+    const outcomes = ['NOT_RUN service_manager_receipt_missing', `NOT_RUN ${reason}`];
+    const input = stream(missingManagerEvents(outcomes));
+    const output = [`package ${packages[0]} pass=1 skip=0 fail=0`,
+      ...outcomes.map(outcome => `capability ${packages[0]} ${serviceTest} :: ${outcome}`), ''].join('\n');
+    assertFixture(script, {args: managerArgs, input, status: 0, output});
+    const result = await checkGoTestJSON([input], managerRequirements, managerOptions);
+    assert.equal(result.valid, true);
+    assert.equal(result.lines.some(line => line.startsWith('receipt ') || line.includes('PASS service_manager_')), false);
+    // Ordinary required-service mode still requires its existing proof outcome.
+    assert.equal((await checkGoTestJSON([input], [serviceTest])).valid, false);
+  });
+}
+
+test('manager-required refuses mixed duplicate malformed or attempted missing-receipt evidence', async () => {
+  const missing = ['NOT_RUN service_manager_receipt_missing', 'NOT_RUN windows_task_query_result_untyped'];
+  for (const outcomes of [
+    missing.slice(0, 1), missing.slice(1),
+    [...missing, missing[0]], [...missing, missing[1]],
+    [...missing, 'NOT_RUN windows_task_interactive_token_unavailable'],
+    [...missing, 'NOT_RUN windows_task_manager_unavailable'],
+    ...['PASS service_manager_available', 'PASS service_manager_persistence',
+      'PASS service_foreground_persistence', 'NOT_RUN service_manager_unavailable',
+      'NOT_RUN service_adapter_unsupported', 'NOT_RUN native_postgres_unconfigured',
+      'PASS service_shutdown_channel', 'PASS service_manager_stage=query_typed',
+      'NOT_RUN windows_task_unknown', 'NOT_RUN windows_task_query_result_untyped extra',
+      'NOT_RUN service_manager_receipt_missing extra', 'extra NOT_RUN service_manager_receipt_missing',
+      'PASS service_manager_available extra'].map(extra => [...missing, extra]),
+  ]) {
+    const result = await checkGoTestJSON([stream(missingManagerEvents(outcomes))], managerRequirements, managerOptions);
+    assert.equal(result.valid, false, 'mixed or malformed missing-manager evidence accepted');
+  }
+  for (const action of ['pass', 'fail', 'skip']) {
+    const events = missingManagerEvents(missing);
+    events.splice(events.length - 2, 0, event('run', packages[0], `${serviceTest}/manager_query_typed`),
+      event(action, packages[0], `${serviceTest}/manager_query_typed`));
+    assert.equal((await checkGoTestJSON([stream(events)], managerRequirements, managerOptions)).valid, false,
+      'attempted manager proof accepted as unavailable');
+  }
+  const failed = missingManagerEvents(missing).map(value => value.Action === 'pass' ? {...value, Action: 'fail'} : value);
+  assert.equal((await checkGoTestJSON([stream(failed)], managerRequirements, managerOptions)).valid, false);
+  const mixedSuccess = managerEvents();
+  mixedSuccess.splice(mixedSuccess.length - 2, 0, ...missing.map(Output =>
+    event('output', packages[0], serviceTest, {Output: `${Output}\n`})));
+  const result = spawnSync(process.execPath, [script, ...managerArgs], {input: stream(mixedSuccess), encoding: 'utf8'});
+  assert.equal(result.status, 1, 'missing-manager marker plus manager success was accepted');
+  assert.equal(result.stderr, diagnostic);
+});
+
+test('manager-required rejects misplaced evidence in package sibling and child output', async () => {
+  const missing = ['NOT_RUN service_manager_receipt_missing', 'NOT_RUN windows_task_query_result_untyped'];
+  for (const name of [undefined, 'TestFixture', `${serviceTest}/unrelated`]) {
+    for (const proof of [missingManagerEvents(missing), managerEvents()]) {
+      for (const message of [
+        ...missing, 'NOT_RUN windows_task_interactive_token_unavailable',
+        'PASS service_manager_available', 'PASS service_manager_persistence',
+        'PASS service_manager_stage=query_typed', 'PASS service_foreground_persistence',
+        'PASS service_shutdown_channel', 'NOT_RUN service_manager_unavailable',
+        'NOT_RUN service_adapter_unsupported', 'NOT_RUN native_postgres_unconfigured',
+        'PASS service_manager_available extra', 'NOT_RUN windows_task_unknown',
+      ]) {
+        for (const prefix of ['', '    service_native_windows_task_test.go:10: ']) {
+          const events = [...proof];
+          events.splice(events.length - 2, 0,
+            ...(name === undefined ? [] : [event('run', packages[0], name)]),
+            event('output', packages[0], name, {Output: `${prefix}${message}\n`}),
+            ...(name === undefined ? [] : [event('pass', packages[0], name)]));
+          assert.equal((await checkGoTestJSON([stream(events)], managerRequirements, managerOptions)).valid, false,
+            'misattributed manager evidence accepted');
+        }
+      }
+      // A source filename containing windows_task is not itself evidence.
+      const unrelated = [...proof];
+      unrelated.splice(unrelated.length - 2, 0,
+        ...(name === undefined ? [] : [event('run', packages[0], name)]),
+        event('output', packages[0], name, {Output: '    service_native_windows_task_test.go:10: ordinary fixture output\n'}),
+        ...(name === undefined ? [] : [event('pass', packages[0], name)]));
+      assert.equal((await checkGoTestJSON([stream(unrelated)], managerRequirements, managerOptions)).valid, true);
+    }
+  }
+});
+
+test('manager-required accepts only complete ordered manager stages with passing child assertions', async () => {
+  const result = await checkGoTestJSON([stream(managerEvents())], managerRequirements, managerOptions);
+  assert.equal(result.valid, true);
+  assert.equal(result.lines.filter(line => line.startsWith('receipt ')).length, managerStages.length);
+  for (const stage of managerStages) {
+    for (const action of ['skip', 'fail', undefined]) {
+      const events = managerEvents().flatMap(value => value.Test === `${serviceTest}/manager_${stage}` && value.Action === 'pass'
+        ? action ? [{...value, Action: action}] : [] : [value]);
+      assert.equal((await checkGoTestJSON([stream(events)], managerRequirements, managerOptions)).valid, false, `${stage} ${action}`);
+    }
+    const missing = managerEvents().filter(value => !(value.Output ?? '').includes(`stage=${stage}\n`));
+    assert.equal((await checkGoTestJSON([stream(missing)], managerRequirements, managerOptions)).valid, false, stage);
+  }
+});
+
+test('manager-required rejects duplicate, reordered, unknown and malformed stage evidence', async () => {
+  const fixture = managerEvents();
+  const index = fixture.findIndex(value => (value.Output ?? '').includes('service_manager_stage='));
+  for (const replacement of [
+    [fixture[index], fixture[index]],
+    [{...fixture[index], Output: 'PASS service_manager_stage=query_typed private-fixture-marker\n'}],
+    [{...fixture[index], Output: 'PASS service_manager_stage=unapproved\n'}],
+    [{...fixture[index], Output: 'PASS service_manager_stage=\n'}],
+    [{...fixture[index], Output: 'PASS service_manager_stage query_typed\n'}],
+  ]) {
+    const events = [...fixture.slice(0, index), ...replacement, ...fixture.slice(index + 1)];
+    const result = await checkGoTestJSON([stream(events)], managerRequirements, managerOptions);
+    assert.equal(result.valid, false);
+    assert(!result.lines.join('\n').includes('private-fixture-marker'));
+  }
+  const reversed = managerEvents([...managerStages].reverse());
+  assert.equal((await checkGoTestJSON([stream(reversed)], managerRequirements, managerOptions)).valid, false);
+});
+
+test('manager-required rejects capability-only, foreground, unsupported and a duplicate outcome', async () => {
+  for (const outcomes of [
+    ['PASS service_manager_available'],
+    ['NOT_RUN service_manager_unavailable', 'PASS service_foreground_persistence', 'PASS service_shutdown_channel'],
+    ['NOT_RUN service_adapter_unsupported'],
+    ['NOT_RUN service_manager_receipt_missing', 'NOT_RUN windows_task_manager_unavailable'],
+  ]) {
+    const events = [event('start', packages[0]), event('run', packages[0], serviceTest),
+      ...outcomes.map(Output => event('output', packages[0], serviceTest, {Output: `${Output}\n`})),
+      event('pass', packages[0], serviceTest), event('pass', packages[0])];
+    const result = await checkGoTestJSON([stream(events)], managerRequirements, managerOptions);
+    assert.equal(result.valid, false);
+    for (const missing of outcomes.filter(outcome => outcome.includes('receipt_missing') || outcome.includes('windows_task_'))) {
+      assert(result.lines.some(line => line.endsWith(missing)));
+    }
+  }
+  const events = managerEvents();
+  events.splice(events.length - 2, 0, event('output', packages[0], serviceTest, {Output: 'PASS service_manager_available\n'}));
+  assert.equal((await checkGoTestJSON([stream(events)], managerRequirements, managerOptions)).valid, false);
+});
+
+test('manager-required cannot be enabled for unit mode or another package', async () => {
+  for (const [required, options] of [
+    [[], managerOptions], [[serviceTest], {...managerOptions, packageName: packages[1]}],
+    [[serviceTest], {managerRequired: 'yes'}],
+  ]) assert.equal((await checkGoTestJSON([stream(managerEvents())], required, options)).valid, false);
+  const result = spawnSync(process.execPath, [script, '--manager-required'], {input: '', encoding: 'utf8'});
+  assert.equal(result.status, 1);
+  assert.equal(result.stderr, 'FAIL: invalid Go test checker arguments\n');
+});
+
+for (const mutation of [
+  {name: 'manager child completion ignored',
+    from: "state.tests.get(`${serviceProofTest}/manager_${stage}`) !== 'pass'", to: 'false',
+    events: () => managerEvents().filter(value => value.Test !== `${serviceTest}/manager_registration`)},
+  {name: 'manager receipt order ignored',
+    from: 'stages[index] !== stage ||', to: '',
+    events: () => managerEvents().map(value => value.Output?.includes('stage=query_typed')
+      ? {...value, Output: value.Output.replace('query_typed', 'registration')}
+      : value.Output?.includes('stage=registration') ? {...value, Output: value.Output.replace('registration', 'query_typed')} : value)},
+  {name: 'manager extra receipt accepted',
+    from: 'stages.length !== serviceManagerStages.length ||', to: '',
+    events: () => { const events = managerEvents(); events.splice(events.length - 2, 0,
+      event('output', packages[0], serviceTest, {Output: 'PASS service_manager_stage=query_typed\n'})); return events; }},
+  {name: 'manager malformed extra receipt ignored',
+    from: "else if (message.includes('service_manager_stage')) invalid = true;", to: '',
+    events: () => { const events = managerEvents(); events.splice(events.length - 2, 0,
+      event('output', packages[0], serviceTest, {Output: 'PASS service_manager_stage=query_typed extra\n'})); return events; }},
+  {name: 'manager duplicate outcome accepted',
+    from: 'if (managerRequired && state.serviceOutcomes.has(message)) invalid = true;', to: '',
+    events: () => { const events = managerEvents(); events.splice(events.length - 2, 0,
+      event('output', packages[0], serviceTest, {Output: 'PASS service_manager_available\n'})); return events; }},
+]) {
+  test(`mutation killed: ${mutation.name}`, () => {
+    withDiagnosticSources(target => {
+      const args = ['--manager-required', '--require', managerRequirements.join(',')];
+      const input = stream(mutation.events());
+      const expected = spawnSync(process.execPath, [target, ...args], {input, encoding: 'utf8'});
+      assert.equal(expected.status, 1);
+      const fixture = {args, input, status: expected.status, output: expected.stdout, stderr: expected.stderr};
+      const source = readFileSync(target, 'utf8');
+      assert.equal(source.split(mutation.from).length, 2, 'mutation must target exactly one manager guard');
+      writeFileSync(target, source.replace(mutation.from, mutation.to));
+      assert.throws(() => assertFixture(target, fixture), {code: 'ERR_ASSERTION'});
+    });
+  });
+}
+
 const failures = [
   {name: 'one failing test', input: stream(packages.flatMap((name, index) => packageEvents(name, index === 0 ? 'fail' : 'pass'))),
     output: summary({[packages[0]]: {pass: 0, fail: 1, failedNames: ['TestFixture']}}), stderr: failureDiagnostic},
@@ -945,8 +1158,8 @@ test('diagnose masks credentials before truncating and caps each failed test at 
     `${prefix}private-user:private-secret@127.0.0.1/db\n`,
     `${prefix}postgres://private-user:priv'ate"sec\\ret@127.0.0.1/db\n`,
     `${prefix}private-user:it's-private@127.0.0.1/db\n`,
-    `${prefix}${'x'.repeat(160)}${'b'.repeat(64)}\n`,
-    `${prefix}${'x'.repeat(250)}\n`,
+    `${prefix}${'x '.repeat(80)}${'b'.repeat(64)}\n`,
+    `${prefix}${'x '.repeat(125)}\n`,
     ...Array.from({length: 140}, (_, i) => `${prefix}assertion ${i}\n`),
   ];
   const result = await checkGoTestJSON([stream(diagnosedFailure(outputs))], [requiredTests[0]], {diagnose: true});
@@ -963,16 +1176,16 @@ test('diagnose masks credentials before truncating and caps each failed test at 
   assert.equal(diagnostics[6], `${prefix}[MASKED]@127.0.0.1/db`);
   assert.equal(diagnostics[7], `${prefix}postgres://[MASKED]@127.0.0.1/db`);
   assert.equal(diagnostics[8], `${prefix}[MASKED]@127.0.0.1/db`);
-  assert.equal(diagnostics[9], `${prefix}${'x'.repeat(160)}[MASKED]`);
+  assert.equal(diagnostics[9], `${prefix}${'x '.repeat(80)}[MASKED]`);
   assert(!result.lines.join('\n').includes('private-'));
   assert(!/[a-f0-9]{64}/i.test(result.lines.join('\n')));
 });
 
 test('diagnose reports the first invalid line masked and bounded with the observed record count', async () => {
-  const invalid = `postgres://private-user:private-secret@127.0.0.1 ${'a'.repeat(64)} ${'x'.repeat(200)}`;
+  const invalid = `postgres://private-user:private-secret@127.0.0.1 ${'a'.repeat(64)} ${'x '.repeat(100)}`;
   const result = await checkGoTestJSON([stream(proofEvents) + `${invalid}\nsecond-invalid-line\n`], requiredTests, {diagnose: true});
   const detail = result.lines.find(line => line.startsWith('stream '));
-  assert.equal(detail, `stream records=${proofEvents.length + 2} :: first offending line: ${`postgres://[MASKED]@127.0.0.1 [MASKED] ${'x'.repeat(200)}`.slice(0, 120)}`);
+  assert.equal(detail, `stream records=${proofEvents.length + 2} :: first offending line: ${`postgres://[MASKED]@127.0.0.1 [MASKED] ${'x '.repeat(100)}`.slice(0, 120)}`);
   assert(!detail.includes('private-'));
   assert(!detail.includes('second-invalid-line'));
   for (const fragment of ['password="private password with spaces"', 'PGPASSWORD=private-value', '--pwfile="private path"']) {
@@ -981,6 +1194,73 @@ test('diagnose reports the first invalid line masked and bounded with the observ
     assert(rejected.lines.some(line => line.startsWith(`stream records=${proofEvents.length} :: first offending line: `)));
   }
 });
+
+for (const [kind, canary] of [
+  ['SID', ['S', '1', '5', '21', '7139', '2846', '9025', '1007'].join('-')],
+  ['Windows drive path', String.raw`C:\private fixture\host.exe`],
+  ['Windows UNC path', String.raw`\\fixture-server\private share\host.exe`],
+  ['task namespace', String.raw`\Witself-Cell-privatefixture`],
+  ['named pipe', String.raw`\\.\pipe\private-fixture-control`],
+  ['base64 run', 'cHJpdmF0ZS1maXh0dXJlLW9ubHktY2FuYXJ5'],
+]) {
+  test(`diagnose masks ${kind} before and across both truncation boundaries`, async () => {
+    for (const boundary of [false, true]) {
+      const prefix = '    lifecycle_proof_test.go:42: ';
+      const padding = boundary ? ' '.repeat(196 - prefix.length) : '';
+      const output = `${prefix}${padding}${canary}\n`;
+      const result = await checkGoTestJSON([stream(diagnosedFailure([output]))], [requiredTests[0]], {diagnose: true});
+      const detail = result.lines.find(line => line.startsWith('diagnose '))?.split(' :: ')[1];
+      assert.equal(detail === `${prefix}${padding}[MASKED]`.slice(0, 200), true,
+        'private native diagnostic was not masked before its display boundary');
+
+      const invalidPrefix = 'invalid: ';
+      const invalidPadding = boundary ? ' '.repeat(116 - invalidPrefix.length) : '';
+      const invalidLine = `${invalidPrefix}${invalidPadding}${canary}`;
+      const rejected = await checkGoTestJSON([stream(proofEvents) + `${invalidLine}\n`], requiredTests, {diagnose: true});
+      const streamDetail = rejected.lines.find(line => line.startsWith('stream '));
+      const expected = `stream records=${proofEvents.length + 1} :: first offending line: ${`${invalidPrefix}${invalidPadding}[MASKED]`.slice(0, 120)}`;
+      assert.equal(streamDetail === expected, true,
+        'private invalid-stream diagnostic was not masked before its display boundary');
+    }
+  });
+}
+
+test('diagnose masks exactly thirty-two base64 characters and preserves shorter ordinary text', async () => {
+  const prefix = '    lifecycle_proof_test.go:42: ';
+  for (const length of [31, 32, 33]) {
+    const result = await checkGoTestJSON([stream(diagnosedFailure([`${prefix}${'Q'.repeat(length)}\n`]))],
+      [requiredTests[0]], {diagnose: true});
+    const detail = result.lines.find(line => line.startsWith('diagnose '))?.split(' :: ')[1];
+    assert.equal(detail === `${prefix}${length >= 32 ? '[MASKED]' : 'Q'.repeat(length)}`, true,
+      'base64 diagnostic mask has the wrong minimum length');
+  }
+});
+
+for (const [kind, canary, suffix] of [
+  ['SID', ['S', '1', '5', '21', '7139', '2846', '9025', '1007'].join('-'), 'x'],
+  ['Windows drive path', String.raw`C:\private fixture\host.exe`, ''],
+]) {
+  test(`diagnose masks concatenated ${kind} before and across both truncation boundaries`, async () => {
+    for (const boundary of [false, true]) {
+      const prefix = '    lifecycle_proof_test.go:42: ';
+      const padding = boundary ? ' '.repeat(195 - prefix.length) : '';
+      const output = `${prefix}${padding}x${canary}${suffix}\n`;
+      const result = await checkGoTestJSON([stream(diagnosedFailure([output]))], [requiredTests[0]], {diagnose: true});
+      const detail = result.lines.find(line => line.startsWith('diagnose '))?.split(' :: ')[1];
+      assert.equal(detail === `${prefix}${padding}x[MASKED]${suffix}`.slice(0, 200), true,
+        'concatenated private native diagnostic escaped masking');
+
+      const invalidPrefix = 'invalid: ';
+      const invalidPadding = boundary ? ' '.repeat(115 - invalidPrefix.length) : '';
+      const invalidLine = `${invalidPrefix}${invalidPadding}x${canary}${suffix}`;
+      const rejected = await checkGoTestJSON([stream(proofEvents) + `${invalidLine}\n`], requiredTests, {diagnose: true});
+      const streamDetail = rejected.lines.find(line => line.startsWith('stream '));
+      const expected = `stream records=${proofEvents.length + 1} :: first offending line: ${`${invalidPrefix}${invalidPadding}x[MASKED]${suffix}`.slice(0, 120)}`;
+      assert.equal(streamDetail === expected, true,
+        'concatenated private invalid-stream diagnostic escaped masking');
+    }
+  });
+}
 
 test('diagnose preserves both forty-line readiness log tails after cause and identity details', async () => {
   for (const component of ['server', 'worker']) {
@@ -1045,7 +1325,7 @@ for (const mutation of [
   {name: 'diagnostic limit removed', from: 'if (diagnostics.length === 128) break;', to: '',
     outputs: Array.from({length: 129}, (_, i) => `--- FAIL: TestRealLifecycle (${i}s)\n`)},
   {name: 'diagnostic width limit removed', from: '.slice(0, limit);', to: ';',
-    outputs: [`--- FAIL: TestRealLifecycle ${'x'.repeat(250)}\n`]},
+    outputs: [`--- FAIL: TestRealLifecycle ${'x '.repeat(125)}\n`]},
   {name: 'diagnostic masking removed', from: "return maskedDiagnostic(line.replace(/\\r$/, ''), 200);", to: "return line.replace(/\\r$/, '').slice(0, 200);",
     outputs: [`--- FAIL: TestRealLifecycle ${'a'.repeat(64)}\n`, '--- FAIL: TestRealLifecycle password=private-value\n']},
   {name: 'foreign test assertions accepted', from: 'testFiles.get(packageName)?.has(assertion[1])', to: 'true',

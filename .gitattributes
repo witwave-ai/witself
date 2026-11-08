@@ -7,3 +7,6 @@ internal/localcell/trust/testdata/** -text
 
 # The launchd observed-print capture is compared byte for byte; never convert its line endings.
 internal/localcell/testdata/launchd-print-observed.txt -text
+
+# Byte-exact UTF-16LE task-registration fixture (including BOM).
+internal/localcell/testdata/windows-task.xml -text
