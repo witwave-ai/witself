@@ -527,14 +527,44 @@
       "version": 1,
       "obligation": "H36",
       "capability": "mixed_executable_versions",
+      "evidence_class": "mixed_binaries",
       "adapter": {
-        "package": "",
-        "symbol": ""
+        "package": "store",
+        "symbol": "TestCaptureMixMatrix"
       },
       "scenario": "PreBeginLateFirstWrite",
-      "outcome": "NOT_RUN",
-      "missing_capability": "mixed_executable_versions",
-      "reason": "mixed_binaries_roles_unavailable"
+      "executable": "lc_s6c2b_go_test_v1",
+      "database_class": "disposable_postgresql",
+      "platform_class": "go_test_host",
+      "artifact": "H36_mixed_mixed_executable_versions_v1",
+      "outcome": "PASS",
+      "build_identity": {
+        "predecessor_commit": "2f1c194398c5df943c305b8e11c9ab32db0e7f3e",
+        "current_server": {
+          "digest": "98e4e2937f093113a4b6fcdcc7f58504ab1a5d6c62cb57e9fcbdd840ae8f1805",
+          "go_version": "go1.27.0",
+          "goos": "linux",
+          "goarch": "amd64"
+        },
+        "current_worker": {
+          "digest": "46bee46cc8d510babc120579b594d453ac75bce0ee1c63d25f9769d523a7c9fe",
+          "go_version": "go1.27.0",
+          "goos": "linux",
+          "goarch": "amd64"
+        },
+        "predecessor_server": {
+          "digest": "bbf7a2ee0e5639fb79127d2724748cbb9bd94ad5ea7de95b861f0d2f06c712f3",
+          "go_version": "go1.27.0",
+          "goos": "linux",
+          "goarch": "amd64"
+        },
+        "predecessor_worker": {
+          "digest": "20e98b0fc088e964e400248989337b9bf645e309aa4c5fc2c0d2229b5f706c3e",
+          "go_version": "go1.27.0",
+          "goos": "linux",
+          "goarch": "amd64"
+        }
+      }
     },
     {
       "version": 1,
@@ -1271,53 +1301,173 @@
       "version": 1,
       "obligation": "H36",
       "capability": "production_writer_admission",
+      "evidence_class": "mixed_binaries",
       "adapter": {
-        "package": "",
-        "symbol": ""
+        "package": "store",
+        "symbol": "TestCaptureMixMatrix"
       },
       "scenario": "PreBeginLateFirstWrite",
-      "outcome": "NOT_RUN",
-      "missing_capability": "production_writer_admission",
-      "reason": "mixed_binaries_roles_unavailable"
+      "executable": "lc_s6c2b_go_test_v1",
+      "database_class": "disposable_postgresql",
+      "platform_class": "go_test_host",
+      "artifact": "H36_mixed_production_writer_admission_v1",
+      "outcome": "PASS",
+      "build_identity": {
+        "predecessor_commit": "2f1c194398c5df943c305b8e11c9ab32db0e7f3e",
+        "current_server": {
+          "digest": "98e4e2937f093113a4b6fcdcc7f58504ab1a5d6c62cb57e9fcbdd840ae8f1805",
+          "go_version": "go1.27.0",
+          "goos": "linux",
+          "goarch": "amd64"
+        },
+        "current_worker": {
+          "digest": "46bee46cc8d510babc120579b594d453ac75bce0ee1c63d25f9769d523a7c9fe",
+          "go_version": "go1.27.0",
+          "goos": "linux",
+          "goarch": "amd64"
+        },
+        "predecessor_server": {
+          "digest": "bbf7a2ee0e5639fb79127d2724748cbb9bd94ad5ea7de95b861f0d2f06c712f3",
+          "go_version": "go1.27.0",
+          "goos": "linux",
+          "goarch": "amd64"
+        },
+        "predecessor_worker": {
+          "digest": "20e98b0fc088e964e400248989337b9bf645e309aa4c5fc2c0d2229b5f706c3e",
+          "go_version": "go1.27.0",
+          "goos": "linux",
+          "goarch": "amd64"
+        }
+      }
     },
     {
       "version": 1,
       "obligation": "H36",
       "capability": "legacy_writer_refusal",
+      "evidence_class": "mixed_binaries",
       "adapter": {
-        "package": "",
-        "symbol": ""
+        "package": "store",
+        "symbol": "TestCaptureMixMatrix"
       },
       "scenario": "PreBeginLateFirstWrite",
-      "outcome": "NOT_RUN",
-      "missing_capability": "legacy_writer_refusal",
-      "reason": "mixed_binaries_roles_unavailable"
+      "executable": "lc_s6c2b_go_test_v1",
+      "database_class": "disposable_postgresql",
+      "platform_class": "go_test_host",
+      "artifact": "H36_mixed_legacy_writer_refusal_v1",
+      "outcome": "PASS",
+      "build_identity": {
+        "predecessor_commit": "2f1c194398c5df943c305b8e11c9ab32db0e7f3e",
+        "current_server": {
+          "digest": "98e4e2937f093113a4b6fcdcc7f58504ab1a5d6c62cb57e9fcbdd840ae8f1805",
+          "go_version": "go1.27.0",
+          "goos": "linux",
+          "goarch": "amd64"
+        },
+        "current_worker": {
+          "digest": "46bee46cc8d510babc120579b594d453ac75bce0ee1c63d25f9769d523a7c9fe",
+          "go_version": "go1.27.0",
+          "goos": "linux",
+          "goarch": "amd64"
+        },
+        "predecessor_server": {
+          "digest": "bbf7a2ee0e5639fb79127d2724748cbb9bd94ad5ea7de95b861f0d2f06c712f3",
+          "go_version": "go1.27.0",
+          "goos": "linux",
+          "goarch": "amd64"
+        },
+        "predecessor_worker": {
+          "digest": "20e98b0fc088e964e400248989337b9bf645e309aa4c5fc2c0d2229b5f706c3e",
+          "go_version": "go1.27.0",
+          "goos": "linux",
+          "goarch": "amd64"
+        }
+      }
     },
     {
       "version": 1,
       "obligation": "H34",
       "capability": "proof_profile_registration",
+      "evidence_class": "mixed_binaries",
       "adapter": {
-        "package": "",
-        "symbol": ""
+        "package": "store",
+        "symbol": "TestCaptureMixMatrix"
       },
       "scenario": "CoverageInventoryAndSchedule",
-      "outcome": "NOT_RUN",
-      "missing_capability": "proof_profile_registration",
-      "reason": "proof_profile_database_unavailable"
+      "executable": "lc_s6c2b_go_test_v1",
+      "database_class": "disposable_postgresql",
+      "platform_class": "go_test_host",
+      "artifact": "H34_mixed_proof_profile_registration_v1",
+      "outcome": "PASS",
+      "build_identity": {
+        "predecessor_commit": "2f1c194398c5df943c305b8e11c9ab32db0e7f3e",
+        "current_server": {
+          "digest": "98e4e2937f093113a4b6fcdcc7f58504ab1a5d6c62cb57e9fcbdd840ae8f1805",
+          "go_version": "go1.27.0",
+          "goos": "linux",
+          "goarch": "amd64"
+        },
+        "current_worker": {
+          "digest": "46bee46cc8d510babc120579b594d453ac75bce0ee1c63d25f9769d523a7c9fe",
+          "go_version": "go1.27.0",
+          "goos": "linux",
+          "goarch": "amd64"
+        },
+        "predecessor_server": {
+          "digest": "bbf7a2ee0e5639fb79127d2724748cbb9bd94ad5ea7de95b861f0d2f06c712f3",
+          "go_version": "go1.27.0",
+          "goos": "linux",
+          "goarch": "amd64"
+        },
+        "predecessor_worker": {
+          "digest": "20e98b0fc088e964e400248989337b9bf645e309aa4c5fc2c0d2229b5f706c3e",
+          "go_version": "go1.27.0",
+          "goos": "linux",
+          "goarch": "amd64"
+        }
+      }
     },
     {
       "version": 1,
       "obligation": "H43",
       "capability": "production_downgrade_denial_mixed",
+      "evidence_class": "mixed_binaries",
       "adapter": {
-        "package": "",
-        "symbol": ""
+        "package": "store",
+        "symbol": "TestCaptureMixMatrix"
       },
       "scenario": "WriterGuardBypassAndDowngrade",
-      "outcome": "NOT_RUN",
-      "missing_capability": "production_downgrade_denial_mixed",
-      "reason": "mixed_binaries_roles_unavailable"
+      "executable": "lc_s6c2b_go_test_v1",
+      "database_class": "disposable_postgresql",
+      "platform_class": "go_test_host",
+      "artifact": "H43_mixed_production_downgrade_denial_mixed_v1",
+      "outcome": "PASS",
+      "build_identity": {
+        "predecessor_commit": "2f1c194398c5df943c305b8e11c9ab32db0e7f3e",
+        "current_server": {
+          "digest": "98e4e2937f093113a4b6fcdcc7f58504ab1a5d6c62cb57e9fcbdd840ae8f1805",
+          "go_version": "go1.27.0",
+          "goos": "linux",
+          "goarch": "amd64"
+        },
+        "current_worker": {
+          "digest": "46bee46cc8d510babc120579b594d453ac75bce0ee1c63d25f9769d523a7c9fe",
+          "go_version": "go1.27.0",
+          "goos": "linux",
+          "goarch": "amd64"
+        },
+        "predecessor_server": {
+          "digest": "bbf7a2ee0e5639fb79127d2724748cbb9bd94ad5ea7de95b861f0d2f06c712f3",
+          "go_version": "go1.27.0",
+          "goos": "linux",
+          "goarch": "amd64"
+        },
+        "predecessor_worker": {
+          "digest": "20e98b0fc088e964e400248989337b9bf645e309aa4c5fc2c0d2229b5f706c3e",
+          "go_version": "go1.27.0",
+          "goos": "linux",
+          "goarch": "amd64"
+        }
+      }
     }
   ]
 }

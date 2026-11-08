@@ -8,11 +8,14 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
 	"testing"
 	"testing/fstest"
+
+	"go.yaml.in/yaml/v3"
 )
 
 func mixedIdentityFixture() MixedBuildIdentity {
@@ -267,20 +270,86 @@ func TestMixedRuntimeRehearsalCannotClaimExecution(t *testing.T) {
 			}
 		}
 	}
-	results, err := EmbeddedRuntimeResults()
-	if err != nil {
+	// Read the inventory directly so identity checks remain independent of
+	// retained artifact resolution, which the inventory boundary test covers.
+	data, err := runtimeResultFiles.ReadFile("testdata/runtime_results/results.v1.json")
+	var results RuntimeResults
+	if err != nil || decodeRuntimeJSON(data, &results) != nil {
 		t.Fatal("mixed evidence retained inventory unavailable")
 	}
+	predecessor := mixedRuntimeWorkflowPredecessor(t)
+	var identity *MixedBuildIdentity
 	found := 0
 	for _, record := range results.Records {
-		if record.EvidenceClass == MixedBinariesEvidence {
-			t.Fatal("mixed evidence retained unexecuted CI as pass")
-		}
 		if mixedRuntimeCapability(record.Obligation, record.Capability) && record.Outcome == NotRun {
-			found++
+			t.Fatal("mixed evidence retained pending capability allocation")
+		}
+		if record.EvidenceClass != MixedBinariesEvidence {
+			continue
+		}
+		expected, _, ok := mixedRuntimeRecord(record.Capability)
+		expected.BuildIdentity = record.BuildIdentity
+		if !ok || record != expected || record.Validate(manifests) != nil || record.BuildIdentity == nil || !record.BuildIdentity.valid() {
+			t.Fatal("mixed evidence retained record differs from reviewed constructor")
+		}
+		if record.BuildIdentity.PredecessorCommit != predecessor {
+			t.Fatal("mixed evidence retained predecessor differs from workflow pin")
+		}
+		if identity != nil && *record.BuildIdentity != *identity {
+			t.Fatal("mixed evidence retained build identities differ")
+		}
+		identity = record.BuildIdentity
+		found++
+		t.Run(record.Capability, func(t *testing.T) {
+			withoutIdentity := record
+			withoutIdentity.BuildIdentity = nil
+			if !errors.Is(withoutIdentity.Validate(manifests), ErrRuntimeResult) {
+				t.Fatal("mixed evidence retained record accepted missing identity")
+			}
+			malformedPredecessor := record
+			changedIdentity := *record.BuildIdentity
+			changedIdentity.PredecessorCommit = "unreviewed_predecessor"
+			malformedPredecessor.BuildIdentity = &changedIdentity
+			if !errors.Is(malformedPredecessor.Validate(manifests), ErrRuntimeResult) {
+				t.Fatal("mixed evidence retained record accepted malformed predecessor")
+			}
+		})
+	}
+	if found != 5 {
+		t.Fatal("mixed evidence retained pass allocation count changed")
+	}
+}
+
+func mixedRuntimeWorkflowPredecessor(t *testing.T) string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", "ci.yml"))
+	if err != nil {
+		t.Fatal("mixed evidence workflow unavailable")
+	}
+	var workflow struct {
+		Jobs map[string]struct {
+			Steps []struct {
+				Name string `yaml:"name"`
+				With struct {
+					Ref string `yaml:"ref"`
+				} `yaml:"with"`
+			} `yaml:"steps"`
+		} `yaml:"jobs"`
+	}
+	if yaml.Unmarshal(data, &workflow) != nil {
+		t.Fatal("mixed evidence workflow invalid")
+	}
+	var predecessor string
+	for _, step := range workflow.Jobs["go-capture-mixed"].Steps {
+		if step.Name == "Check out the reviewed immutable predecessor" {
+			if predecessor != "" || !mixedCommit.MatchString(step.With.Ref) {
+				t.Fatal("mixed evidence workflow predecessor pin invalid or duplicated")
+			}
+			predecessor = step.With.Ref
 		}
 	}
-	if found != len(mixedRuntimeAllocations) {
-		t.Fatal("mixed evidence missing pending capability allocation")
+	if predecessor == "" {
+		t.Fatal("mixed evidence workflow predecessor pin missing")
 	}
+	return predecessor
 }

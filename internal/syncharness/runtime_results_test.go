@@ -44,16 +44,19 @@ func writeRuntimeInventory(t *testing.T, files fstest.MapFS, results RuntimeResu
 }
 
 func TestRuntimeResultsInventoryAndBoundaries(t *testing.T) {
-	results, err := EmbeddedRuntimeResults()
-	if err != nil {
-		t.Fatal(err)
+	// Check allocation counts before resolving artifacts so a count regression
+	// has its own diagnostic even when an artifact is missing or invalid.
+	data, err := runtimeResultFiles.ReadFile("testdata/runtime_results/results.v1.json")
+	var results RuntimeResults
+	if err != nil || decodeRuntimeJSON(data, &results) != nil {
+		t.Fatal("runtime evidence inventory unavailable")
 	}
 	manifests, err := EmbeddedObligations()
 	if err != nil {
 		t.Fatal(err)
 	}
 	covered := map[string]bool{}
-	fixturePasses, capturePasses, principalPasses, pending := 0, 0, 0, 0
+	fixturePasses, capturePasses, principalPasses, mixedPasses, pending := 0, 0, 0, 0, 0
 	for _, r := range results.Records {
 		covered[r.Obligation+":"+r.Capability] = true
 		switch r.Outcome {
@@ -75,6 +78,16 @@ func TestRuntimeResultsInventoryAndBoundaries(t *testing.T) {
 					principalPasses++
 				default:
 					t.Fatal("runtime evidence: unregistered production executable")
+				}
+			case MixedBinariesEvidence:
+				if r.Adapter.Package != "store" || r.DatabaseClass != "disposable_postgresql" {
+					t.Fatal("runtime evidence: mixed binary allocation changed")
+				}
+				switch r.Executable {
+				case "lc_s6c2b_go_test_v1":
+					mixedPasses++
+				default:
+					t.Fatal("runtime evidence: unregistered mixed binary executable")
 				}
 			default:
 				t.Fatal("runtime evidence: unexecuted broader evidence class claimed")
@@ -102,8 +115,11 @@ func TestRuntimeResultsInventoryAndBoundaries(t *testing.T) {
 			t.Fatal("completed model capability missing from runtime inventory")
 		}
 	}
-	if fixturePasses != 12 || capturePasses != 7 || principalPasses != 2 || pending != 81 || len(results.Records) != 102 {
+	if fixturePasses != 12 || capturePasses != 7 || principalPasses != 2 || mixedPasses != 5 || pending != 76 || len(results.Records) != 102 {
 		t.Fatal("runtime evidence inventory changed without review")
+	}
+	if _, err := EmbeddedRuntimeResults(); err != nil {
+		t.Fatal(err)
 	}
 }
 
