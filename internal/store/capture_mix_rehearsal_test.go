@@ -96,7 +96,7 @@ func TestCaptureMixMatrix(t *testing.T) {
 		t.Skip("NOT RUN capturemix_target_outside_closed_lanes")
 	}
 	if err != nil {
-		t.Fatal(err.Error())
+		fatalLines(t, err)
 	}
 	if len(result.Rows) != 4 {
 		t.Fatal("capturemix matrix coverage incomplete")
@@ -104,7 +104,7 @@ func TestCaptureMixMatrix(t *testing.T) {
 	t.Log("predecessor build identity recorded")
 	if disposable {
 		if err := result.VerifyMixedExecution(); err != nil {
-			t.Fatal(err.Error())
+			fatalLines(t, err)
 		}
 	}
 }
