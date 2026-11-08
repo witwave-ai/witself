@@ -191,7 +191,7 @@ func TestServiceFailureSiteSourceContract(t *testing.T) {
 		return nil, serviceFailureAt(err, "lease_directory")`,
 			`if err := servicePrivateRecord(c.path(".service-host.lock")); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, serviceFailureAt(err, "lease_record")`,
-			`if err := writeAtomic(c.path("service", "lease.json"), record, nil); err != nil {
+			`if err := c.publishServiceLease(c.path("service", "lease.json"), record); err != nil {
 		_ = lock.Close()
 		return nil, serviceFailureAt(err, "lease_write")`,
 		},
@@ -403,7 +403,7 @@ func TestServiceFailureSiteSourceContract(t *testing.T) {
 // new raw filesystem/lifecycle return cannot pass merely because its function
 // still contains the old reviewed wrapper somewhere else.
 func TestServiceFailureSiteProducerInventory(t *testing.T) {
-	producers := strings.Fields(`privateDir servicePrivateRecord openPrivateFile readPrivateFile readJSON readManifest writeAtomic writeAtomicBytes removePrivateFile validateRoot validatePrivate validatePrivateTree validateRootPath openLockFile serviceControlSecret ServiceDescriptor PrepareService New readServiceControlSecret readServiceControlEndpointRecord readServiceControlEndpointWithBoot readServiceControlEndpoint publishServiceControlEndpoint publishServiceControlEndpointWithBoot removeOwnedServiceControlEndpoint refreshOwnedServiceControlEndpoint removeServiceControlEndpoint listenServiceControl dialServiceControl serveServiceControl serveServiceControlForPlatform Control Run load save tick step call command Repair Stop Start SetServiceDesiredState RepairService setServiceFaulted bindServiceProcessBoot bindServiceProcessBootWithReader reconcileServiceBoot reconcileServiceBootWithReader reconcileOldBoot writeServiceDescriptor own newSupervisor acquireLease acquireServiceLease acquireServiceLeaseWithBoot stopServiceChildren ServiceHealth hook operation retryServiceContention`)
+	producers := strings.Fields(`privateDir servicePrivateRecord openPrivateFile readPrivateFile readJSON readManifest writeAtomic writeAtomicBytes removePrivateFile validateRoot validatePrivate validatePrivateTree validateRootPath openLockFile serviceControlSecret ServiceDescriptor PrepareService New readServiceControlSecret readServiceControlEndpointRecord readServiceControlEndpointWithBoot readServiceControlEndpoint publishServiceControlEndpoint publishServiceControlEndpointWithBoot removeOwnedServiceControlEndpoint refreshOwnedServiceControlEndpoint removeServiceControlEndpoint listenServiceControl dialServiceControl serveServiceControl serveServiceControlForPlatform Control Run load save tick step call command Repair Stop Start SetServiceDesiredState RepairService setServiceFaulted bindServiceProcessBoot bindServiceProcessBootWithReader reconcileServiceBoot reconcileServiceBootWithReader reconcileOldBoot writeServiceDescriptor own newSupervisor acquireLease acquireServiceLease acquireServiceLeaseWithBoot stopServiceChildren ServiceHealth hook operation retryServiceContention publishServiceLease`)
 	selected := make(map[string]bool)
 	for _, producer := range producers {
 		selected[producer] = true
@@ -415,7 +415,7 @@ func TestServiceFailureSiteProducerInventory(t *testing.T) {
 		},
 		"service_foreground.go": {
 			"acquireServiceLease":         "acquireServiceLeaseWithBoot",
-			"acquireServiceLeaseWithBoot": "openLockFile privateDir servicePrivateRecord writeAtomic",
+			"acquireServiceLeaseWithBoot": "openLockFile privateDir publishServiceLease servicePrivateRecord",
 		},
 		"service_supervisor.go": {
 			"Run":                    "ServiceDescriptor acquireLease acquireServiceLeaseWithBoot call call call command load newSupervisor retryServiceContention retryServiceContention retryServiceContention retryServiceContention retryServiceContention serveServiceControl tick tick",

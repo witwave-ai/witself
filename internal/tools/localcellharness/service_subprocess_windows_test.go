@@ -268,6 +268,15 @@ func TestWindowsServiceForegroundSubprocessCommands(t *testing.T) {
 // this closed allowlist against that emitter.
 const windowsForegroundReceiptKeys = "phase|operation|site|journal_pending|journal_read_ok"
 
+const windowsForegroundLeasePublishPattern = `native service host lease_publish class=(sharing_violation|access_denied|validation|other) attempts=[1-9][0-9]* elapsed_ms=[0-9]+`
+
+func TestWindowsForegroundLeasePublishOutput(t *testing.T) {
+	guard := regexp.MustCompile(`^` + windowsForegroundLeasePublishPattern + `$`)
+	if guard.MatchString("native service host lease_publish class=other attempts=1 elapsed_ms=0 cause=private") {
+		t.Fatal("Windows lease publication guard accepted an extra private field")
+	}
+}
+
 // Only call after Wait has joined both output copiers. Each complete or partial
 // line is independently guarded; rejected bytes are never logged or normalized
 // into the vocabulary. Diagnostic visibility does not imply shutdown acceptance.
@@ -276,7 +285,7 @@ func windowsLogForegroundExit(t *testing.T, command *exec.Cmd, captured []byte) 
 	t.Logf("foreground_output_lines=%d", len(foregroundOutputLines(captured)))
 	for _, firstLine := range foregroundOutputLines(captured) {
 		firstLine = strings.TrimSuffix(firstLine, "\r")
-		if len(firstLine) <= 160 && regexp.MustCompile(`^(localcell: [a-z_]{1,48}|service_[a-z_]+( (`+windowsForegroundReceiptKeys+`)=[a-z_0-9]{1,24})*|service_control accept=rejected step=(peer:pid|peer:identity|peer:sid|duplicate|conn)|service_control action=stop response=unflushed|native service host site=(host_config|host_descriptor|host_prepare|host_persisted_config|initial_descriptor|lease_directory|lease_record|lease_write|control_secret|control_transport|control_cancelled|endpoint_descriptor|endpoint_read|endpoint_write|endpoint_lease|endpoint_remove|supervisor_load|supervisor_traversal|supervisor_save|supervisor_start|supervisor_stop|supervisor_repair|supervisor_reconcile|supervisor_health|supervisor_command|health_lock|health_tree|health_database|health_credential|health_probe|health_ready|startup_reconcile|startup_repair|startup_stop|shutdown_repair|shutdown_stop|boot_binding|descriptor_write|unknown))$`).MatchString(firstLine) {
+		if len(firstLine) <= 160 && regexp.MustCompile(`^(localcell: [a-z_]{1,48}|service_[a-z_]+( (`+windowsForegroundReceiptKeys+`)=[a-z_0-9]{1,24})*|service_control accept=rejected step=(peer:pid|peer:identity|peer:sid|duplicate|conn)|service_control action=stop response=unflushed|`+windowsForegroundLeasePublishPattern+`|native service host site=(host_config|host_descriptor|host_prepare|host_persisted_config|initial_descriptor|lease_directory|lease_record|lease_write|control_secret|control_transport|control_cancelled|endpoint_descriptor|endpoint_read|endpoint_write|endpoint_lease|endpoint_remove|supervisor_load|supervisor_traversal|supervisor_save|supervisor_start|supervisor_stop|supervisor_repair|supervisor_reconcile|supervisor_health|supervisor_command|health_lock|health_tree|health_database|health_credential|health_probe|health_ready|startup_reconcile|startup_repair|startup_stop|shutdown_repair|shutdown_stop|boot_binding|descriptor_write|unknown))$`).MatchString(firstLine) {
 			t.Log(firstLine)
 		}
 	}
