@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"time"
 
 	"github.com/witwave-ai/witself/internal/runtimeconfig"
 	"github.com/witwave-ai/witself/internal/store"
@@ -81,17 +82,20 @@ func (c *Cell) ServiceHealth(ctx context.Context) (result error) {
 	if err != nil || m.AccountID == "" {
 		return errServiceHealth
 	}
-	password, err := c.password()
+	role, password, err := c.healthPrincipal(m)
 	if err != nil {
 		return errServiceHealth
 	}
 	site = serviceHealthStep(ctx, "health_database")
-	dsn := url.URL{Scheme: "postgres", Host: addr(m.Ports.Postgres), Path: "/" + m.Database, User: url.UserPassword(m.Role, password), RawQuery: "sslmode=disable"}
+	dsn := url.URL{Scheme: "postgres", Host: addr(m.Ports.Postgres), Path: "/" + m.Database, User: url.UserPassword(role, password), RawQuery: "sslmode=disable"}
 	st, err := store.Open(ctx, dsn.String())
 	if err != nil {
 		return errServiceHealth
 	}
 	defer st.Close()
+	if m.PrincipalLayoutVersion != 0 && st.VerifyManagedRuntimePrincipal(ctx, store.SyncPrincipalMaintenance) != nil {
+		return ErrLocalRuntimeLoginOwnsTables
+	}
 	if err := runtimeconfig.CheckReady(ctx, st, store.SchemaVersion(), m.AccountID); err != nil {
 		return errServiceHealth
 	}
@@ -114,6 +118,44 @@ func (c *Cell) ServiceHealth(ctx context.Context) (result error) {
 	return c.serviceLiveTree()
 }
 
+func (c *Cell) healthDSN(m *Manifest) (string, error) {
+	role, password, err := c.healthPrincipal(m)
+	if err != nil {
+		return "", err
+	}
+	dsn := url.URL{Scheme: "postgres", Host: addr(m.Ports.Postgres), Path: "/" + m.Database, User: url.UserPassword(role, password), RawQuery: "sslmode=disable"}
+	return dsn.String(), nil
+}
+
+func (c *Cell) healthPrincipal(m *Manifest) (string, string, error) {
+	purpose := credentialBootstrap
+	if m.PrincipalLayoutVersion != 0 {
+		purpose = credentialMaintenance
+	}
+	password, err := c.credentialPassword(m, purpose)
+	if err != nil {
+		return "", "", err
+	}
+	role, err := credentialRole(purpose)
+	return role, password, err
+}
+
+func (c *Cell) healthStore(ctx context.Context, m *Manifest) (*store.Store, error) {
+	dsn, err := c.healthDSN(m)
+	if err != nil {
+		return nil, errServiceHealth
+	}
+	st, err := store.Open(ctx, dsn)
+	if err != nil {
+		return nil, errServiceHealth
+	}
+	if m.PrincipalLayoutVersion != 0 && st.VerifyManagedRuntimePrincipal(ctx, store.SyncPrincipalMaintenance) != nil {
+		st.Close()
+		return nil, ErrLocalRuntimeLoginOwnsTables
+	}
+	return st, nil
+}
+
 func (c *Cell) serviceLiveTree() error {
 	if err := c.verifyAll(); err != nil {
 		return errServiceHealth
@@ -130,7 +172,13 @@ func (c *Cell) serviceLiveTree() error {
 // The current API has no health-only token profile. Use the existing operator
 // credential contract, keep the dedicated credential private, and only issue
 // read-only whoami requests. Scope reduction belongs to the future role split.
-func (c *Cell) serviceAPICredential(ctx context.Context, st *store.Store, m *Manifest) (serviceHealthCredential, error) {
+type serviceHealthCredentialStore interface {
+	EnsureRootOperator(context.Context, string) (string, error)
+	CreateOperatorToken(context.Context, string, string, string, *time.Duration) (string, string, *time.Time, error)
+	RevokeToken(context.Context, string, string, string) error
+}
+
+func (c *Cell) serviceAPICredential(ctx context.Context, st serviceHealthCredentialStore, m *Manifest) (serviceHealthCredential, error) {
 	var credential serviceHealthCredential
 	path := c.path("service", "api.secret")
 	err := servicePrivateRecord(path)

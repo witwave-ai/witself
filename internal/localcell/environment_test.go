@@ -15,6 +15,117 @@ import (
 	"time"
 )
 
+const installerArgumentFixtureMarker = "installer-argument-fixture"
+
+// The production launcher re-execs this test binary with ordinary serve
+// arguments. A value-free marker in the private test root selects the fixture,
+// without changing child argv or the production environment allowlist.
+func init() {
+	if len(os.Args) < 2 || os.Args[1] != "serve" || os.Getenv("WITSELF_LOCAL_MANAGED_PRINCIPALS") != "1" {
+		return
+	}
+	root, err := os.Getwd()
+	if err != nil {
+		return
+	}
+	marker := filepath.Join(root, "run", installerArgumentFixtureMarker)
+	if data, readErr := os.ReadFile(marker); readErr != nil || string(data) != "enabled" {
+		return
+	}
+	result := "refused"
+	if installerChildArgumentsPrivate(root) {
+		result = "accepted"
+	}
+	if writeAtomicBytes(marker+".result", []byte(result), nil) != nil {
+		os.Exit(125)
+	}
+	// Keep the incarnation alive for ownership-fenced parent cleanup.
+	time.Sleep(time.Minute)
+	os.Exit(0)
+}
+
+func installerChildArgumentsPrivate(root string) bool {
+	c, err := New(Config{Root: root})
+	if err != nil {
+		return false
+	}
+	m, err := readManifest(root)
+	if err != nil || m.PrincipalLayoutVersion != 1 {
+		return false
+	}
+	seen := make(map[string]bool)
+	for _, purpose := range append([]credentialPurpose{credentialBootstrap}, principalCredentialPurposes[:]...) {
+		secret, secretErr := c.credentialPassword(m, purpose)
+		connection, connectionErr := c.principalDSN(m, purpose)
+		path, pathErr := c.credentialPath(purpose)
+		if secretErr != nil || connectionErr != nil || pathErr != nil || secret == "" || connection == "" || path == "" || seen[secret] {
+			return false
+		}
+		seen[secret] = true
+		for _, argument := range os.Args {
+			if strings.Contains(argument, secret) || strings.Contains(argument, connection) || strings.Contains(argument, path) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func assertInstallerChildArguments(t *testing.T, c *Cell, m *Manifest, component string) {
+	t.Helper()
+	binary, err := os.Executable()
+	if err != nil {
+		t.Fatal("selected argument fixture executable was unavailable")
+	}
+	c.cfg.Binaries.Server, c.cfg.Binaries.Worker = binary, binary
+	marker := c.path("run", installerArgumentFixtureMarker)
+	if err := os.Remove(marker + ".result"); err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("selected argument fixture previous result could not be retired")
+	}
+	// The marker stays in the cell tree for later service preparation, so it
+	// needs the same explicit private owner and ACL as production control files.
+	if testWriteFile(marker, []byte("enabled"), 0o600) != nil {
+		t.Fatal("selected argument fixture marker could not be written")
+	}
+	if err := c.validateRoot(false); err != nil {
+		t.Fatalf("selected argument fixture did not retain a private tree%s", installerPrincipalFailureSuffix(err))
+	}
+	if c.startChild(m, component) != nil {
+		t.Fatal("selected argument fixture child could not start")
+	}
+	var record ProcessRecord
+	if readJSON(c.path("run", component+".json"), &record) != nil {
+		t.Fatal("selected argument fixture did not publish its process fence")
+	}
+	t.Cleanup(func() {
+		if cleanupEnvironmentFixture(record, 5*time.Second, processIdentity, terminateEnvironmentFixture) != nil {
+			t.Error("selected argument fixture child could not be cleaned up")
+		}
+	})
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	for {
+		result, readErr := os.ReadFile(marker + ".result")
+		if readErr == nil {
+			if string(result) != "accepted" {
+				t.Fatal("selected child arguments disclosed principal material")
+			}
+			if os.Remove(marker+".result") != nil {
+				t.Fatal("selected argument fixture result could not be retired")
+			}
+			return
+		}
+		if !errors.Is(readErr, os.ErrNotExist) {
+			t.Fatal("selected argument fixture result was unavailable")
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal("selected argument fixture did not report its private verdict")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
 func buildEnvironmentNamesChild(t *testing.T) string {
 	t.Helper()
 	directory := t.TempDir()
@@ -111,6 +222,52 @@ func TestChildrenReceiveOnlyAllowlistedEnvironmentNames(t *testing.T) {
 						}
 					}
 				})
+			}
+		})
+	}
+}
+
+func TestInstallerPrincipalsChildEnvironmentNames(t *testing.T) {
+	binary := buildEnvironmentNamesChild(t)
+	for _, component := range []string{"server", "worker"} {
+		t.Run(component, func(t *testing.T) {
+			c, m, _ := selectedCredentialFixture(t)
+			c.cfg.Binaries = Binaries{PostgresDir: t.TempDir(), Server: binary, Worker: binary}
+			want := []string{"PATH", "HOME", "TMPDIR", "TEMP", "TMP", "WITSELF_RUNTIME", "WITSELF_DATABASE_URL", "WITSELF_API_ADDR", "WITSELF_HEALTH_ADDR", "WITSELF_METRICS_ADDR", "WITSELF_LOCAL_SPOOL_DIR", "WITSELF_LOCAL_JOBS", "WITSELF_LOCAL_MIGRATION_WAIT", "WITSELF_LOCAL_JOB_RESTART_POLICY", "WITSELF_LOCAL_SYNC_SCHEMA", "WITSELF_LOCAL_MANAGED_PRINCIPALS"}
+			if runtime.GOOS == "windows" {
+				want = append(want, "SystemRoot", "USERPROFILE")
+			}
+			slices.Sort(want)
+			if c.startChild(m, component) != nil {
+				t.Fatal("selected environment child could not start")
+			}
+			var record ProcessRecord
+			if readJSON(c.path("run", component+".json"), &record) != nil {
+				t.Fatal("selected environment child did not publish its process fence")
+			}
+			t.Cleanup(func() {
+				if cleanupEnvironmentFixture(record, 5*time.Second, processIdentity, terminateEnvironmentFixture) != nil {
+					t.Error("selected environment child could not be cleaned up")
+				}
+			})
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+			for {
+				data, err := os.ReadFile(c.path("logs", component+".log"))
+				if err != nil {
+					t.Fatal("selected environment child output was unavailable")
+				}
+				if len(strings.Fields(string(data))) >= len(want) {
+					if !slices.Equal(strings.Fields(string(data)), want) || strings.Contains(string(data), "=") {
+						t.Fatal("selected environment child names differ from the exact allowlist")
+					}
+					break
+				}
+				select {
+				case <-ctx.Done():
+					t.Fatal("selected environment child did not report its variable names")
+				case <-time.After(10 * time.Millisecond):
+				}
 			}
 		})
 	}

@@ -478,8 +478,15 @@ The disposable principal tests are separate from the owner-path regression
 matrix; a one-role installation remains migration-refused at 0003
 (`sync_principals_missing`) and activation-refused
 (`sync_principal_topology_unverified`). Snapshot
-materialization, mixed binaries, installer role conversion and native recovery
-remain separate acceptance work.
+materialization, mixed binaries and native recovery remain separate acceptance
+work. C3's [fresh selected installer](../../../internal/localcell/installer_principals.go)
+and [private credential purposes](../../../internal/localcell/installer_principal_credentials.go)
+provide bounded migration custody and restricted runtime identities selected by
+[typed configuration](../../../internal/runtimeconfig/managed_principals.go).
+Its [native installer capability](../../../internal/syncharness/installer_principal_runtime_results.go)
+binds only `TestRealLifecycle/InstallerPrincipals` and remains committed NOT_RUN
+until executed; capture stays disabled and broader M4 acceptance remains open.
+LC-S6C4 owns conversion and recovery of existing one-role installations.
 
 **CURRENT CODE** — C2b adds the default-off
 [capture-proof runtime selection](../../../internal/runtimeconfig/config.go),

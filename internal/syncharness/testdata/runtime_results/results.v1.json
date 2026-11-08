@@ -1468,6 +1468,19 @@
           "goarch": "amd64"
         }
       }
+    },
+    {
+      "version": 1,
+      "obligation": "H43",
+      "capability": "installer_principal_topology",
+      "adapter": {
+        "package": "",
+        "symbol": ""
+      },
+      "scenario": "WriterGuardBypassAndDowngrade",
+      "outcome": "NOT_RUN",
+      "missing_capability": "installer_principal_topology",
+      "reason": "native_lifecycle_not_executed"
     }
   ]
 }

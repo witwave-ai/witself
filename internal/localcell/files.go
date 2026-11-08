@@ -113,6 +113,9 @@ func readManifest(root string) (*Manifest, error) {
 	if m.LayoutVersion != LayoutVersion {
 		return nil, errors.New("unsupported local cell layout version")
 	}
+	if err := validatePrincipalLayout(&m); err != nil {
+		return nil, err
+	}
 	if m.InstallationID == "" || m.Database != localDatabaseName || m.Role != "localcell" {
 		return nil, errors.New("invalid local cell manifest identity")
 	}
@@ -152,7 +155,7 @@ func writeAtomicBytes(path string, data []byte, beforeRename func() error) error
 		return errors.New("cannot create local cell record")
 	}
 	defer func() { _ = removePrivateFile(f.Name()) }()
-	if filepath.Base(path) == "postgres.password" && beforePasswordWrite != nil {
+	if (filepath.Base(path) == "postgres.password" || filepath.Base(filepath.Dir(path)) == "credentials") && beforePasswordWrite != nil {
 		beforePasswordWrite(f)
 	}
 	if _, err = f.Write(data); err == nil {
@@ -242,9 +245,15 @@ type journalProgress struct {
 	tornTail     bool
 }
 
-func (p journalProgress) installComplete() bool {
-	return p.pending != nil && p.pending.Operation == "install" &&
+func (p journalProgress) installComplete(manifests ...*Manifest) bool {
+	complete := p.pending != nil && p.pending.Operation == "install" &&
 		p.done["initdb"] && p.done["configure"] && p.done["postgres"] && p.done["database"]
+	if len(manifests) != 0 && manifests[0] != nil && manifests[0].PrincipalLayoutVersion != 0 {
+		for _, step := range selectedInstallSteps {
+			complete = complete && p.done[step]
+		}
+	}
+	return complete
 }
 
 // readJournal relies on journal writing each value plus newline in ONE write
@@ -371,8 +380,8 @@ func (c *Cell) cleanupInterruption() (*Interruption, error) {
 
 func validJournalStep(operation, step string) bool {
 	steps := map[string]map[string]bool{
-		"install": {"manifest": true, "password": true, "initdb": true, "configure": true, "postgres": true, "database": true, "stop": true},
-		"start":   {"ports": true, "postgres": true, "server": true, "server_ready": true, "account": true, "worker": true, "worker_ready": true},
+		"install": {"manifest": true, "password": true, "initdb": true, "configure": true, "postgres": true, "database": true, "stop": true, "principal_credentials": true, "principals": true, "principal_migrations": true, "principal_grants": true, "principal_verified": true},
+		"start":   {"ports": true, "postgres": true, "server": true, "server_ready": true, "account": true, "worker": true, "worker_ready": true, "principal_verified": true},
 		"stop":    {"stop": true},
 		"remove":  {"stop": true, "spool": true, "tmp": true, "logs": true, "purge": true, "runtime_cleanup": true},
 	}

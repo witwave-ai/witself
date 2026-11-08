@@ -554,6 +554,18 @@ var concatenated = errors.New("concatenated error" + suffix)
 // errors.New("comment error")
 var quoted = \`errors.New("quoted error")\`
 var formatted = fmt.Errorf("formatted error")
+var wrongFile = fixedCause("fixed cause from wrong file")
+`);
+    writeFileSync(join(directory, 'internal', 'localcell', 'fixed_cause.go'), `package localcell
+var allowed = fixedCause("local_fixture_fixed_cause")
+var concatenated = fixedCause("fixed concatenated cause") + suffix
+var dynamic = fixedCause(value)
+var nested = helper(fixedCause("fixed nested cause"))
+// var comment = fixedCause("fixed comment cause")
+var quoted = \`var quoted = fixedCause("fixed quoted cause")\`
+`);
+    writeFileSync(join(directory, 'internal', 'runtimeconfig', 'fixed_cause.go'), `package runtimeconfig
+var wrongPackage = fixedCause("fixed cause from wrong package")
 `);
     writeFileSync(join(directory, 'internal', 'runtimeconfig', 'policy_test.go'), `package runtimeconfig
 func TestPolicy(t *testing.T) {
@@ -601,7 +613,7 @@ function outputFailure(output, message = '(unclassified)', packageName = package
 
 test('why diagnostics accept only exact fixed errors and package-local literal assertions', () => {
   withDiagnosticSources(target => {
-    for (const message of ['localcell: fixed private error', 'owner-is-admin-group', 'ace-count', 'assertion with 12 safe digits']) {
+    for (const message of ['localcell: fixed private error', 'local_fixture_fixed_cause', 'owner-is-admin-group', 'ace-count', 'assertion with 12 safe digits']) {
       assertFixture(target, outputFailure([`    policy_test.go:123: ${message}\r\n`], message));
     }
     // A fixed helper error may propagate to another package; assertions may not.
@@ -615,6 +627,8 @@ test('why diagnostics suppress unallowlisted, unsafe, interpolated, commented an
     for (const message of ['private-fixture-marker', 'assertion with 123 unsafe digits', 'private/path', 'private\\path',
       'private=marker', 'private: marker', 'private value', 'multiple arguments value', 'concatenated error',
       'comment error', 'quoted error', 'formatted error', 'comment assertion', 'concatenated assertion', 'test-only error',
+      'fixed concatenated cause', 'fixed nested cause', 'fixed comment cause', 'fixed quoted cause',
+      'fixed cause from wrong file', 'fixed cause from wrong package', 'local_fixture_fixed_cause private-fixture-marker',
       'owner-is-admin-group private-fixture-marker', 'private/path_test.go:12: owner-is-admin-group', 'a'.repeat(64)]) {
       assertFixture(target, outputFailure([`    policy_test.go:12: ${message}\n`]));
     }
@@ -632,6 +646,12 @@ test('why diagnostics from the actual packages recognize production errors and n
   assertFixture(script, outputFailure(['    policy_test.go:12: canonical policy was rejected\n'], 'canonical policy was rejected'));
   assertFixture(script, outputFailure(['    fixture_test.go:12: local cell password file is unavailable or not private\n'],
     'local cell password file is unavailable or not private', packages[0]));
+  for (const cause of ['local_migration_phase_required', 'local_runtime_login_owns_tables',
+    'local_principal_layout_invalid', 'local_principal_provision_refused', 'local_privileged_sessions_present',
+    'local_principal_repair_required', 'local_principal_credentials_refused']) {
+    assertFixture(script, outputFailure([`    fixture_test.go:12: ${cause}\n`], cause, packages[0]));
+    assertFixture(script, outputFailure([`    fixture_test.go:12: ${cause} private-fixture-marker\n`], '(unclassified)', packages[0]));
+  }
 });
 
 test('Windows shutdown regression assertions classify every fixed failure without private details', async () => {
@@ -1029,7 +1049,7 @@ test('an input stream error fails closed without reflecting its message', async 
 });
 
 const requiredTests = ['TestRealLifecycle', ...[
-  'InstallStartRestartRemove', 'TwoCellsAreIndependent', 'InterruptedStartRepair', 'WaitsForReadiness',
+  'InstallStartRestartRemove', 'TwoCellsAreIndependent', 'InterruptedStartRepair', 'WaitsForReadiness', 'InstallerPrincipals',
 ].map(name => `TestRealLifecycle/${name}`)];
 const requiredArgs = ['--require', requiredTests.join(',')];
 const proofEvents = [event('start', packages[0]), event('run', packages[0], requiredTests[0]),
@@ -1038,26 +1058,26 @@ const proofEvents = [event('start', packages[0]), event('run', packages[0], requ
 const proofSummary = count => `package ${packages[0]} pass=${count} skip=0 fail=0\n`;
 
 test('required-test mode accepts the complete native proof without requiring unrelated unit packages', () => {
-  assertFixture(script, {args: requiredArgs, input: stream(proofEvents), output: proofSummary(5), status: 0});
+  assertFixture(script, {args: requiredArgs, input: stream(proofEvents), output: proofSummary(requiredTests.length), status: 0});
 });
 
 for (const required of requiredTests) {
   test(`required-test mode rejects missing ${required}`, () => {
     assertFixture(script, {args: requiredArgs,
-      input: stream(proofEvents.filter(value => value.Test !== required)), output: proofSummary(4)});
+      input: stream(proofEvents.filter(value => value.Test !== required)), output: proofSummary(requiredTests.length - 1)});
   });
   test(`required-test mode rejects skipped ${required}`, () => {
     assertFixture(script, {args: requiredArgs,
       input: stream(proofEvents.map(value => value.Test === required && value.Action === 'pass' ? {...value, Action: 'skip'} : value)),
-      output: `package ${packages[0]} pass=4 skip=1 fail=0\nskip ${packages[0]} ${required}\n`});
+      output: `package ${packages[0]} pass=${requiredTests.length - 1} skip=1 fail=0\nskip ${packages[0]} ${required}\n`});
   });
 }
 
 test('required-test mode rejects truncated proof and package skip', () => {
-  assertFixture(script, {args: requiredArgs, input: stream(proofEvents).trimEnd(), output: proofSummary(5)});
+  assertFixture(script, {args: requiredArgs, input: stream(proofEvents).trimEnd(), output: proofSummary(requiredTests.length)});
   for (const Action of ['skip']) {
     assertFixture(script, {args: requiredArgs,
-      input: stream([...proofEvents.slice(0, -1), event(Action, packages[0])]), output: proofSummary(5)});
+      input: stream([...proofEvents.slice(0, -1), event(Action, packages[0])]), output: proofSummary(requiredTests.length)});
   }
 });
 
@@ -1110,7 +1130,7 @@ test('required-test mode rejects an additional skipped child even when every nam
   const extra = 'TestRealLifecycle/AdditionalScenario';
   assertFixture(script, {args: requiredArgs,
     input: stream([...proofEvents.slice(0, -2), event('run', packages[0], extra), event('skip', packages[0], extra), ...proofEvents.slice(-2)]),
-    output: `package ${packages[0]} pass=5 skip=1 fail=0\nskip ${packages[0]} ${extra}\n`});
+    output: `package ${packages[0]} pass=${requiredTests.length} skip=1 fail=0\nskip ${packages[0]} ${extra}\n`});
 });
 
 function diagnosedFailure(outputs, {packageOutput = [], finish = true} = {}) {
@@ -1303,10 +1323,10 @@ test('input mode reads the named UTF-8 proof file instead of stdin and diagnoses
   try {
     const input = join(directory, 'proof.json');
     writeFileSync(input, stream(proofEvents).replaceAll('\n', '\r\n'));
-    assertFixture(script, {args: [...requiredArgs, '--input', input, '--diagnose'], input: 'invalid stdin\n', output: proofSummary(5), status: 0});
+    assertFixture(script, {args: [...requiredArgs, '--input', input, '--diagnose'], input: 'invalid stdin\n', output: proofSummary(requiredTests.length), status: 0});
     writeFileSync(input, stream(proofEvents.slice(0, -1)));
     assertFixture(script, {args: [...requiredArgs, '--input', input, '--diagnose'], input: '',
-      output: `${proofSummary(5)}stream records=${proofEvents.length - 1} :: stream ended before the package summary\n`});
+      output: `${proofSummary(requiredTests.length)}stream records=${proofEvents.length - 1} :: stream ended before the package summary\n`});
     assertFixture(script, {args: [...requiredArgs, '--input', join(directory, 'private-missing-file'), '--diagnose'], input: '',
       output: 'package ' + packages[0] + ' pass=0 skip=0 fail=0\nstream records=0 :: stream ended before the package summary\n'});
   } finally {
@@ -1356,15 +1376,15 @@ test('required-test mode rejects malformed arguments without reflecting their va
     assertFixture(script, {args, input: stream(proofEvents), output: '', stderr: 'FAIL: invalid Go test checker arguments\n'});
   }
   for (const names of [['TestPrivate\nprivate-fixture-marker'], [`Test${'a'.repeat(64)}`], ['TestRealLifecycle', 'TestRealLifecycle']]) {
-    assertFixture(script, {args: ['--require', names.join(',')], input: stream(proofEvents), output: proofSummary(5)});
+    assertFixture(script, {args: ['--require', names.join(',')], input: stream(proofEvents), output: proofSummary(requiredTests.length)});
   }
 });
 
 for (const [name, replacement, events, output] of [
-  ['missing required children accepted', 'false', proofEvents.filter(value => value.Test !== requiredTests[1]), proofSummary(4)],
+  ['missing required children accepted', 'false', proofEvents.filter(value => value.Test !== requiredTests[1]), proofSummary(requiredTests.length - 1)],
   ['skipped required children accepted', "!['pass', 'fail', 'skip'].includes(state.tests.get(testName))",
     proofEvents.map(value => value.Test === requiredTests[1] && value.Action === 'pass' ? {...value, Action: 'skip'} : value),
-    `package ${packages[0]} pass=4 skip=1 fail=0\nskip ${packages[0]} ${requiredTests[1]}\n`],
+    `package ${packages[0]} pass=${requiredTests.length - 1} skip=1 fail=0\nskip ${packages[0]} ${requiredTests[1]}\n`],
 ]) {
   test(`mutation killed: ${name}`, () => {
     const directory = realpathSync(mkdtempSync(join(tmpdir(), 'witself-go-json-required-')));
