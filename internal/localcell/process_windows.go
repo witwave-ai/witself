@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -113,4 +114,49 @@ func privateOwnedDir(path string, info os.FileInfo) bool {
 		return false
 	}
 	return validatePrivate(path, true) == nil
+}
+
+// The queried image and its owner come from the retained process object. File
+// identity is compared through open file handles, never a textual path match or
+// a second PID lookup. The handles deny replacement while being compared.
+func windowsValidateProcessExecutable(handle windows.Handle, expected string) error {
+	if handle == 0 || handle == windows.InvalidHandle || !filepath.IsAbs(expected) {
+		return errors.New("localcell: process executable identity refused")
+	}
+	buffer := make([]uint16, 32768)
+	size := uint32(len(buffer))
+	if windows.QueryFullProcessImageName(handle, 0, &buffer[0], &size) != nil || size == 0 || size >= uint32(len(buffer)) {
+		return errors.New("localcell: process executable identity refused")
+	}
+	actual := windows.UTF16ToString(buffer[:size])
+	identity := func(path string) (windows.Handle, windows.ByHandleFileInformation, error) {
+		var info windows.ByHandleFileInformation
+		name, err := windows.UTF16PtrFromString(path)
+		if err != nil {
+			return 0, info, err
+		}
+		file, err := windows.CreateFile(name, windows.FILE_READ_ATTRIBUTES, windows.FILE_SHARE_READ, nil, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+		if err != nil {
+			return 0, info, err
+		}
+		if err := windows.GetFileInformationByHandle(file, &info); err != nil || info.FileAttributes&(windows.FILE_ATTRIBUTE_REPARSE_POINT|windows.FILE_ATTRIBUTE_DIRECTORY) != 0 {
+			_ = windows.CloseHandle(file)
+			return 0, info, errors.New("localcell: process executable identity refused")
+		}
+		return file, info, nil
+	}
+	want, wantInfo, err := identity(expected)
+	if err != nil {
+		return errors.New("localcell: process executable identity refused")
+	}
+	defer func() { _ = windows.CloseHandle(want) }()
+	got, gotInfo, err := identity(actual)
+	if err != nil {
+		return errors.New("localcell: process executable identity refused")
+	}
+	defer func() { _ = windows.CloseHandle(got) }()
+	if gotInfo.VolumeSerialNumber != wantInfo.VolumeSerialNumber || gotInfo.FileIndexHigh != wantInfo.FileIndexHigh || gotInfo.FileIndexLow != wantInfo.FileIndexLow {
+		return errors.New("localcell: process executable identity refused")
+	}
+	return nil
 }

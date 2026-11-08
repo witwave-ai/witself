@@ -15,6 +15,23 @@ const selectablePackages = Object.freeze([...expectedPackages, storePackage]);
 
 const terminalActions = new Set(['pass', 'skip', 'fail']);
 const serviceProofTest = 'TestNativeServiceLifecycle';
+// Every manager stage has both a passing child assertion and one ordered,
+// value-free receipt. Capability or foreground success cannot satisfy this mode.
+export const serviceManagerStages = Object.freeze([
+  'query_typed', 'registration', 'on_demand', 'readiness_write', 'same_boot_restart',
+  'persisted_read', 'durable_stop', 'unregister', 'resources_closed', 'bystander_retained',
+]);
+const managerReceipt = /^PASS service_manager_stage=([a-z_]+)$/;
+const managerMissing = new Set([
+  'NOT_RUN service_manager_receipt_missing',
+  'NOT_RUN windows_task_query_result_untyped',
+  'NOT_RUN windows_task_interactive_token_unavailable',
+  'NOT_RUN windows_task_manager_unavailable',
+]);
+const managerEvidence = /(?:service_manager_|service_foreground_persistence|service_adapter_unsupported|native_postgres_unconfigured|service_shutdown_channel|windows_task_)/;
+function serviceEvidenceMessage(line) {
+  return line.replace(/^[ \t]*(?:[A-Za-z0-9_.-]+_test\.go:[0-9]+: )?/, '').replace(/\r$/, '');
+}
 const serviceShutdownReceipt = /^service_shutdown phase=(startup|tick|control|idle) operation=(none|reconcile|repair|stop|start|health) journal_pending=(true|false) journal_read_ok=(true|false)$/;
 const serviceOutcomes = new Set([
   'PASS service_manager_available', 'NOT_RUN service_manager_unavailable',
@@ -112,6 +129,13 @@ function maskedDiagnostic(value, limit) {
     // Any user:password@ pair, whatever punctuation the password carries (an
     // apostrophe or quote is a valid URI password character), is masked whole.
     .replace(/[^\s@/]+:[^\s@/]+@/g, '[MASKED]@')
+    .replace(/S-1-(?:\d+-)*\d+/gi, '[MASKED]')
+    .replace(/\\\\\.\\pipe\\[^\r\n]*/gi, '[MASKED]')
+    // Paths can contain spaces: discard the remaining line rather than leave
+    // part of an unquoted path. Include drive-rooted and UNC/device paths.
+    .replace(/(?:[a-z]:(?:\\|\/(?!\/))|\\\\)[^\r\n]*/gi, '[MASKED]')
+    .replace(/\\?Witself-Cell-[a-z0-9_-]+/gi, '[MASKED]')
+    .replace(/[a-z0-9+/]{32,}={0,2}/gi, '[MASKED]')
     .replace(/[\x00-\x1f\x7f]/g, ' ').slice(0, limit);
 }
 
@@ -124,19 +148,21 @@ function proofDiagnostic(line, packageName) {
 // --require defaults to the native localcell proof. An explicit --package
 // selects one reviewed package and requires named tests; default unit coverage
 // and its skip policy remain unchanged.
-export async function checkGoTestJSON(input, requiredTests = [], {diagnose = false, packageName} = {}) {
+export async function checkGoTestJSON(input, requiredTests = [], {diagnose = false, packageName, managerRequired = false} = {}) {
   const channelRequirements = requiredTests.filter(name => name === 'service_shutdown_channel').length;
   const requireShutdownChannel = channelRequirements === 1;
   requiredTests = requiredTests.filter(name => name !== 'service_shutdown_channel');
   const channelValid = channelRequirements <= 1 && (!requireShutdownChannel ||
     (requiredTests.includes(serviceProofTest) && (packageName === undefined || packageName === expectedPackages[0])));
-  const packageValid = channelValid && (packageName === undefined || (selectablePackages.includes(packageName) && requiredTests.length !== 0));
+  const managerValid = typeof managerRequired === 'boolean' && (!managerRequired ||
+    (requiredTests.includes(serviceProofTest) && (packageName === undefined || packageName === expectedPackages[0])));
+  const packageValid = managerValid && channelValid && (packageName === undefined || (selectablePackages.includes(packageName) && requiredTests.length !== 0));
   const packageNames = packageName === undefined
     ? requiredTests.length === 0 ? expectedPackages : expectedPackages.slice(0, 1)
     : packageValid ? [packageName] : [];
   const packages = new Map(packageNames.map(name => [name, {
     started: false, summary: null, summaryLine: null, tests: new Map(), why: new Map(), diagnostics: new Map(),
-    timedOut: new Set(), serviceOutcomes: new Set(), shutdownReceipts: [], pass: 0, skip: 0, fail: 0,
+    timedOut: new Set(), serviceOutcomes: new Set(), managerStages: [], managerMissing: new Set(), shutdownReceipts: [], pass: 0, skip: 0, fail: 0,
   }]));
   let invalid = !packageValid || requiredTests.some(name => typeof name !== 'string' || !testNamePattern.test(name) || /[a-f0-9]{64}/i.test(name)) ||
     new Set(requiredTests).size !== requiredTests.length;
@@ -194,6 +220,11 @@ export async function checkGoTestJSON(input, requiredTests = [], {diagnose = fal
       reject(line);
       return;
     }
+    // Receipt-like output from a package, sibling or child cannot become
+    // unobserved mixed evidence beside an otherwise valid parent result.
+    if (managerRequired && action === 'output' && name !== serviceProofTest &&
+      typeof event.Output === 'string' && event.Output.split('\n').some(outputLine =>
+        managerEvidence.test(serviceEvidenceMessage(outputLine)))) invalid = true;
     if (name === undefined) {
       if (terminalActions.has(action)) {
         state.summary = action;
@@ -211,8 +242,21 @@ export async function checkGoTestJSON(input, requiredTests = [], {diagnose = fal
         classifyTimeout(state, event.Output);
         if (name === serviceProofTest && event.Package === expectedPackages[0]) {
           for (const line of event.Output.split('\n')) {
-            const message = line.replace(/^[ \t]*(?:service_native_test\.go:[0-9]+: )?/, '').replace(/\r$/, '');
-            if (serviceOutcomes.has(message)) state.serviceOutcomes.add(message);
+            const message = serviceEvidenceMessage(line);
+            if (serviceOutcomes.has(message)) {
+              if (managerRequired && state.serviceOutcomes.has(message)) invalid = true;
+              state.serviceOutcomes.add(message);
+            }
+            if (managerRequired) {
+              const match = managerReceipt.exec(message);
+              if (match) state.managerStages.push(match[1]);
+              else if (message.includes('service_manager_stage')) invalid = true;
+              if (managerMissing.has(message)) {
+                if (state.managerMissing.has(message)) invalid = true;
+                state.managerMissing.add(message);
+              } else if (!serviceOutcomes.has(message) && !message.includes('service_manager_stage') &&
+                managerEvidence.test(message)) invalid = true;
+            }
           }
         }
         if (diagnoseProof && required.has(name)) {
@@ -280,20 +324,39 @@ export async function checkGoTestJSON(input, requiredTests = [], {diagnose = fal
     const incompleteProof = requiredTests.length !== 0 && (state.summary === 'skip' || state.skip !== 0 ||
       requiredTests.some(testName => !['pass', 'fail'].includes(state.tests.get(testName))));
     if (incompleteProof) invalid = true;
-    if (required.has(serviceProofTest) && state.tests.get(serviceProofTest) === 'pass') {
+    // An unavailable native premise is a complete, passing test observation,
+    // but never a manager receipt. Permit exactly the marker plus one approved
+    // reason, with no attempted manager child, stage or success outcome.
+    const missingManagerReceipt = managerRequired && state.managerMissing.size === 2 &&
+      state.managerMissing.has('NOT_RUN service_manager_receipt_missing') &&
+      (state.managerMissing.has('NOT_RUN windows_task_query_result_untyped') ||
+        state.managerMissing.has('NOT_RUN windows_task_interactive_token_unavailable')) &&
+      state.serviceOutcomes.size === 0 && state.managerStages.length === 0 &&
+      ![...state.tests.keys()].some(testName => testName.startsWith(`${serviceProofTest}/manager_`));
+    if (required.has(serviceProofTest) && state.tests.get(serviceProofTest) === 'pass' && !missingManagerReceipt) {
       const outcomes = state.serviceOutcomes;
       const supported = outcomes.has('PASS service_manager_available') && outcomes.has('PASS service_manager_persistence');
       const foreground = outcomes.has('NOT_RUN service_manager_unavailable') && outcomes.has('PASS service_foreground_persistence');
       const unsupported = outcomes.has('NOT_RUN service_adapter_unsupported');
       if (outcomes.has('NOT_RUN native_postgres_unconfigured') || Number(supported) + Number(foreground) + Number(unsupported) !== 1 ||
         outcomes.size !== (unsupported ? 1 : 2) + Number(outcomes.has('PASS service_shutdown_channel')) ||
-        (outcomes.has('PASS service_shutdown_channel') && !foreground) ||
-        (requireShutdownChannel && (!foreground || !outcomes.has('PASS service_shutdown_channel')))) invalid = true;
+        (outcomes.has('PASS service_shutdown_channel') && !foreground && !(managerRequired && supported)) ||
+        (requireShutdownChannel && ((!foreground && !(managerRequired && supported)) || !outcomes.has('PASS service_shutdown_channel')))) invalid = true;
+    }
+    if (managerRequired && state.tests.get(serviceProofTest) === 'pass' && !missingManagerReceipt) {
+      const stages = state.managerStages;
+      if (!state.serviceOutcomes.has('PASS service_manager_available') ||
+        !state.serviceOutcomes.has('PASS service_manager_persistence') ||
+        state.managerMissing.size !== 0 || stages.length !== serviceManagerStages.length ||
+        serviceManagerStages.some((stage, index) => stages[index] !== stage ||
+          state.tests.get(`${serviceProofTest}/manager_${stage}`) !== 'pass')) invalid = true;
     }
     if (invalid && firstInvalidLine === null && state.summaryLine !== null &&
       (state.tests.size === 0 || [...state.tests.values()].some(action => !terminalActions.has(action)) ||
         incompleteProof)) firstInvalidLine = maskedDiagnostic(state.summaryLine, 120);
     lines.push(`package ${name} pass=${state.pass} skip=${state.skip} fail=${state.fail}`);
+    for (const missing of [...state.managerMissing].sort()) lines.push(`capability ${name} ${serviceProofTest} :: ${missing}`);
+    for (const stage of state.managerStages) if (serviceManagerStages.includes(stage)) lines.push(`receipt ${name} ${serviceProofTest} :: PASS service_manager_stage=${stage}`);
     for (const outcome of [...state.serviceOutcomes].sort()) lines.push(`capability ${name} ${serviceProofTest} :: ${outcome}`);
     for (const [testName, action] of [...state.tests].sort(([left], [right]) => left.localeCompare(right))) {
       if (action === 'skip') lines.push(`skip ${name} ${testName}`);
@@ -334,21 +397,21 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   let argumentsValid = true;
   for (let index = 0; index < args.length; index++) {
     const key = args[index];
-    if (!['--require', '--input', '--diagnose', '--package'].includes(key) || options[key] !== undefined) {
+    if (!['--require', '--input', '--diagnose', '--package', '--manager-required'].includes(key) || options[key] !== undefined) {
       argumentsValid = false;
       break;
     }
-    options[key] = key === '--diagnose' ? true : args[++index];
+    options[key] = ['--diagnose', '--manager-required'].includes(key) ? true : args[++index];
     if (!options[key] || (typeof options[key] === 'string' && options[key].startsWith('--'))) argumentsValid = false;
   }
-  if ((options['--diagnose'] || options['--package']) && !options['--require']) argumentsValid = false;
+  if ((options['--diagnose'] || options['--package'] || options['--manager-required']) && !options['--require']) argumentsValid = false;
   if (options['--package'] && !selectablePackages.includes(options['--package'])) argumentsValid = false;
   if (!argumentsValid) {
     console.error('FAIL: invalid Go test checker arguments');
     process.exitCode = 1;
   } else {
     const input = options['--input'] ? createReadStream(options['--input'], {encoding: 'utf8'}) : process.stdin.setEncoding('utf8');
-    const result = await checkGoTestJSON(input, options['--require']?.split(',') ?? [], {diagnose: options['--diagnose'], packageName: options['--package']});
+    const result = await checkGoTestJSON(input, options['--require']?.split(',') ?? [], {diagnose: options['--diagnose'], packageName: options['--package'], managerRequired: options['--manager-required'] ?? false});
     console.log(result.lines.join('\n'));
     if (!result.valid) console.error(result.reason);
     process.exitCode = result.valid ? 0 : 1;

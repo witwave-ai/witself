@@ -6,6 +6,14 @@ import "golang.org/x/sys/windows"
 
 type windowsServiceExitHost struct{ handle windows.Handle }
 
+func (o *windowsServiceExitHost) validateHost(d ServiceDescriptor) error {
+	sid, err := windowsProcessTokenUser(o.handle)
+	if err != nil || sid == nil || sid.String() != d.UID || windowsValidateProcessExecutable(o.handle, d.Payload.Host) != nil {
+		return hostExitRefused("envelope")
+	}
+	return nil
+}
+
 func retainServiceExitHost(lease serviceLeaseRecord) (serviceExitHostObserver, error) {
 	handle, alive, err := openVerifiedWindowsProcess(ProcessRecord{PID: lease.PID, StartTime: lease.StartIdentity}, 0)
 	if err != nil || !alive {

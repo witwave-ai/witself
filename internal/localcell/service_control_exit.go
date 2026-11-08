@@ -459,7 +459,7 @@ func (c *Cell) controlExitHost(ctx context.Context) (ServiceStatus, error) {
 	if err != nil {
 		return ServiceStatus{}, err
 	}
-	observer, err := retainServiceExitHost(lease)
+	observer, err := c.retainServiceExitHost(lease)
 	if err != nil {
 		return ServiceStatus{}, err
 	}
@@ -479,7 +479,7 @@ func (c *Cell) ExitServiceHost(ctx context.Context) (ServiceStatus, error) {
 	if err != nil {
 		return ServiceStatus{}, hostExitFailure("identity_tree", false, err)
 	}
-	observer, err := retainServiceExitHost(lease)
+	observer, err := c.retainServiceExitHost(lease)
 	if err != nil {
 		return ServiceStatus{}, hostExitFailure("retain", false, err)
 	}
@@ -534,7 +534,54 @@ func (c *Cell) exitServiceHostForRemoval(ctx context.Context) error {
 		return err
 	}
 	if !held {
-		return c.SetServiceDesiredState(ctx, "stopped")
+		if err := c.SetServiceDesiredState(ctx, "stopped"); err != nil {
+			return err
+		}
+		// A crashed host can release its lease while children survive. Stopped
+		// intent prevents a new launch, but is not an exit receipt. Observe the
+		// recorded tree under the operation lock; never signal an unverified PID
+		// or erase recovery records when liveness is unknown.
+		lock, err := c.own(false)
+		if err != nil {
+			return hostExitRefused("child_tree_unknown")
+		}
+		defer func() { _ = lock.Close() }()
+		if held, err := c.serviceHostLeaseHeld(); err != nil || held {
+			return hostExitRefused("child_tree_unknown")
+		}
+		for _, component := range []string{"worker", "server", "postgres"} {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			var record ProcessRecord
+			if err := readJSON(c.path("run", component+".json"), &record); errors.Is(err, os.ErrNotExist) {
+				continue
+			} else if err != nil {
+				return hostExitRefused("child_tree_unknown")
+			}
+			if record.Root != c.cfg.Root || record.Component != component || record.PID <= 1 || record.StartTime == "" || record.LaunchPending {
+				return hostExitRefused("child_tree_unknown")
+			}
+			if _, alive, err := processIdentity(record.PID); err != nil {
+				return hostExitRefused("child_tree_unknown")
+			} else if alive {
+				return hostExitRefused("child_tree_live")
+			}
+		}
+		// PostgreSQL can publish its pidfile before the host records the
+		// process. Preserve that independent recovery authority as well.
+		pid, err := c.postmaster()
+		if err != nil {
+			return hostExitRefused("child_tree_unknown")
+		}
+		if pid != 0 {
+			if _, alive, err := processIdentity(pid); err != nil {
+				return hostExitRefused("child_tree_unknown")
+			} else if alive {
+				return hostExitRefused("child_tree_live")
+			}
+		}
+		return nil
 	}
 	// The live host owns its endpoint revision. Persist intent through its
 	// authenticated stop command so Windows endpoint discovery remains bound
@@ -546,7 +593,7 @@ func (c *Cell) exitServiceHostForRemoval(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	observer, err := retainServiceExitHost(lease)
+	observer, err := c.retainServiceExitHost(lease)
 	if err != nil {
 		return err
 	}
@@ -568,6 +615,21 @@ func (c *Cell) exitServiceHostForRemoval(ctx context.Context) error {
 type serviceExitHostObserver interface {
 	exited() (bool, error)
 	close()
+}
+
+func (c *Cell) retainServiceExitHost(lease serviceLeaseRecord) (serviceExitHostObserver, error) {
+	observer, err := retainServiceExitHost(lease)
+	if err != nil {
+		return nil, err
+	}
+	if verifier, ok := observer.(interface{ validateHost(ServiceDescriptor) error }); ok {
+		d, err := c.ServiceDescriptor()
+		if err != nil || verifier.validateHost(d) != nil {
+			observer.close()
+			return nil, hostExitRefused("envelope")
+		}
+	}
+	return observer, nil
 }
 
 func (c *Cell) waitServiceHostExit(ctx context.Context, lease serviceLeaseRecord, observer serviceExitHostObserver) error {

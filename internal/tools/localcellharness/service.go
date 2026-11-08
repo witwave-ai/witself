@@ -18,6 +18,7 @@ import (
 
 type serviceFlags struct {
 	root, pgbin, server, worker, jobs string
+	adapter                           string
 	timeout                           time.Duration
 }
 
@@ -30,6 +31,7 @@ func parseServiceFlags(args []string) (serviceFlags, error) {
 	flags.StringVar(&values.server, "server", "", "absolute server executable")
 	flags.StringVar(&values.worker, "worker", "", "absolute worker executable")
 	flags.StringVar(&values.jobs, "jobs", "", "comma-separated local worker jobs")
+	flags.StringVar(&values.adapter, "adapter", "", "explicit native adapter selection")
 	flags.DurationVar(&values.timeout, "timeout", 45*time.Second, "bounded lifecycle operation timeout")
 	if flags.Parse(args) != nil || flags.NArg() != 0 || !filepath.IsAbs(values.root) || values.timeout <= 0 {
 		return values, errors.New("localcellharness: invalid service arguments")
@@ -68,6 +70,12 @@ func serviceAdapterKind(goos string) (string, error) {
 	}
 }
 
+func sameInstallationRoot(persisted, recorded string) bool {
+	persistedRoot, persistedErr := localcell.CanonicalRoot(persisted)
+	recordedRoot, recordedErr := localcell.CanonicalRoot(recorded)
+	return persistedErr == nil && recordedErr == nil && persistedRoot == recordedRoot
+}
+
 func runServiceCommandForGOOS(ctx context.Context, args []string, out io.Writer, goos string) (result error) {
 	if os.Getenv("WITSELF_RUNTIME") != "local" {
 		return errors.New("localcellharness: service commands require explicit local runtime selection")
@@ -86,11 +94,18 @@ func runServiceCommandForGOOS(ctx context.Context, args []string, out io.Writer,
 	if err != nil {
 		return err
 	}
+	if values.adapter != "" && (action != "install" || values.adapter != "windows-logon-task" || goos != "windows") {
+		return errors.New("localcellharness: unsupported explicit service adapter")
+	}
 	selectedAdapter := "foreground"
 	if action == "install" {
-		selectedAdapter, err = serviceAdapterKind(goos)
-		if err != nil {
-			return err
+		if values.adapter != "" {
+			selectedAdapter = values.adapter
+		} else {
+			selectedAdapter, err = serviceAdapterKind(goos)
+			if err != nil {
+				return err
+			}
 		}
 	}
 	site := "host_config"
@@ -130,13 +145,16 @@ func runServiceCommandForGOOS(ctx context.Context, args []string, out io.Writer,
 			return err
 		}
 	}
+	if action == "install" && descriptor.Adapter != selectedAdapter {
+		return localcell.ErrServiceOwnershipConflict
+	}
 	// Every lifecycle operation reopens the installation's immutable payload.
 	// Caller flags cannot silently replace selected components during restart.
 	if len(descriptor.Payload.Args) == 0 || descriptor.Payload.Args[0] != "run" {
 		return errors.New("localcellharness: invalid service payload")
 	}
 	persisted, parseErr := parseServiceFlags(descriptor.Payload.Args[1:])
-	if parseErr != nil {
+	if parseErr != nil || persisted.adapter != "" || !sameInstallationRoot(persisted.root, descriptor.Root) {
 		return errors.New("localcellharness: invalid service payload")
 	}
 	if (values.pgbin != "" && values.pgbin != persisted.pgbin) ||
