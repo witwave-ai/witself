@@ -52,6 +52,19 @@ func TestSyncCaptureFixtureProbeFailure(t *testing.T) {
 					attempts++
 					return nil, ErrSyncWriterNotAdmitted
 				}, func(context.Context) syncCaptureFixtureProbeClass { probes++; return class }, func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }, func(time.Duration, syncCaptureFixtureProbeClass) { retries++ })
+				if class == captureProbeSafe {
+					if attempts != 2 || probes != 2 || retries != 1 {
+						t.Fatal("capture fixture safe probe bracket counts differ")
+					}
+					if a != nil || got != failure {
+						t.Fatal("capture fixture safe probe bracket refusal differs")
+					}
+					if len(logs) != 1 || logs[0] != "capture fixture probe classes begin_failed=0 timeout=0 unhealthy=0 missing_account=0 safe=2 unsafe=0" {
+						t.Fatal("capture fixture safe probe bracket classes line must appear exactly once with exact counts")
+					}
+					t.Log("capture fixture safe probe outcome: bracketed refusal")
+					return
+				}
 				want := failure
 				if class == captureProbeBeginFailed || class == captureProbeTimeout || class == captureProbeUnsafe {
 					want = "capture fixture foreign snapshot horizon persisted"
