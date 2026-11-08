@@ -5,6 +5,7 @@ import (
 	"errors"
 	"reflect"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -145,5 +146,95 @@ func TestServiceStopOutcomeRefusalIdentity(t *testing.T) {
 		if err.Error() != "localcell: service_shutdown_refused: shutdown:ack" {
 			t.Fatal("typed wrapping changed the value-free refusal text")
 		}
+	}
+}
+
+func TestServiceShutdownPolicyLostAckBudget(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		lostBudgetPercent int
+		exitAfter         time.Duration
+		kind              serviceStopKind
+		detail            string
+		requests          int
+		elapsed           time.Duration
+		forced            bool
+	}{
+		{"budget_covers_lost_and_accepted_send", 40, 80 * time.Millisecond, serviceStopGraceful, "", 2, 80 * time.Millisecond, false},
+		{"exit_before_second_send", 40, 50 * time.Millisecond, serviceStopAlreadyExited, "", 1, 50 * time.Millisecond, false},
+		{"lost_send_consumes_budget", 100, 110 * time.Millisecond, serviceStopUnknown, "shutdown:ack", 1, 100 * time.Millisecond, false},
+		{"accepted_send_exit_after_budget", 40, 110 * time.Millisecond, serviceStopForced, "service_shutdown_forced", 2, 100 * time.Millisecond, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				const appBudget = 100 * time.Millisecond
+				const acceptedSendCost = 5 * time.Millisecond
+				lostSendCost := appBudget * time.Duration(tc.lostBudgetPercent) / 100
+				started := time.Now()
+				ctx, cancel := context.WithTimeout(t.Context(), 2*appBudget)
+				defer cancel()
+				record := ProcessRecord{Component: "server", PID: 42, StartTime: "fixture-incarnation"}
+				request := serviceShutdownRequest{Action: "cancel", Component: record.Component, PID: record.PID, StartIdentity: record.StartTime}
+				requests, forced := 0, false
+				exited := func() bool { return forced || time.Since(started) >= tc.exitAfter }
+				process := serviceShutdownProcess{
+					verify: func(candidate ProcessRecord) (bool, error) {
+						if candidate != record {
+							t.Fatal("lost-ACK budget proof changed the retained incarnation")
+						}
+						return !exited(), nil
+					},
+					send: func(_ context.Context, got serviceShutdownRequest) (serviceShutdownResponse, error) {
+						if got != request {
+							t.Fatal("lost-ACK budget proof changed the retained request")
+						}
+						requests++
+						if requests == 1 {
+							// synctest advances fake time, including the real policy's
+							// context timer, without spending this interval on the host.
+							time.Sleep(lostSendCost)
+							synctest.Wait()
+							return serviceShutdownResponse{}, errShutdownAckLost
+						}
+						time.Sleep(acceptedSendCost)
+						synctest.Wait()
+						return serviceShutdownResponse{Accepted: true, Phase: shutdownPhaseReady}, nil
+					},
+					wait: func(waitCtx context.Context, interval time.Duration) bool {
+						if exited() {
+							return true
+						}
+						if waitCtx.Err() != nil {
+							return false
+						}
+						until := time.Now().Add(interval)
+						if exitAt := started.Add(tc.exitAfter); exitAt.Before(until) {
+							until = exitAt
+						}
+						if deadline, ok := waitCtx.Deadline(); ok && deadline.Before(until) {
+							until = deadline
+						}
+						time.Sleep(time.Until(until))
+						synctest.Wait()
+						return exited()
+					},
+					force: func() error {
+						forced = true
+						return nil
+					},
+				}
+				outcome := runServiceShutdownPolicy(ctx, record, request, true, appBudget, process)
+				want := serviceStopOutcome{Kind: tc.kind, Component: record.Component, Detail: tc.detail}
+				if outcome != want {
+					t.Fatalf("lost-ACK budget outcome kind=%s detail=%s; want kind=%s detail=%s", outcome.Kind, outcome.Detail, tc.kind, tc.detail)
+				}
+				if requests != tc.requests || forced != tc.forced {
+					t.Fatal("lost-ACK budget proof took the wrong resend or force path")
+				}
+				if time.Since(started) != tc.elapsed || ctx.Err() != nil {
+					t.Fatal("lost-ACK budget proof used the wrong elapsed time or outer deadline")
+				}
+			})
+		})
 	}
 }
