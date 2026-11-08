@@ -211,6 +211,15 @@ func TestInstallerPrincipalsCatalog(t *testing.T) {
 	}
 }
 
+// Local-cell causes use fixed vocabulary. Keep diagnostics useful without
+// admitting a path, connection string, or a wrapped error into failure output.
+func installerPrincipalFailureSuffix(err error) string {
+	if err != nil && !strings.ContainsAny(err.Error(), `/\:`) {
+		return ": " + err.Error()
+	}
+	return ""
+}
+
 func selectedJournalFixture(t *testing.T) (*Cell, *Manifest) {
 	t.Helper()
 	c, m := unitCell(t)
@@ -332,8 +341,13 @@ func TestInstallerPrincipalsRepairFence(t *testing.T) {
 			t.Fatal("repair retained database fixture failed")
 		}
 		foreign := c.path("pg", "foreign-record")
-		if os.WriteFile(foreign, []byte("retained"), 0o600) != nil {
+		// Match production private-file ownership instead of the process token's
+		// default owner, which can be Administrators on elevated Windows runners.
+		if testWriteFile(foreign, []byte("retained"), 0o600) != nil {
 			t.Fatal("repair preservation fixture failed")
+		}
+		if err := c.validateRoot(false); err != nil {
+			t.Fatalf("repair fixture did not retain a private tree%s", installerPrincipalFailureSuffix(err))
 		}
 		if c.Start(t.Context()) == nil {
 			t.Fatal("pending selected phases allowed start")
@@ -347,8 +361,8 @@ func TestInstallerPrincipalsRepairFence(t *testing.T) {
 			t.Fatal("old journal phases incorrectly completed selected install")
 		}
 		c.installerPrincipals.verify = func(context.Context, *Manifest) error { calls++; return nil }
-		if c.Repair(t.Context()) != nil {
-			t.Fatal("unambiguous selected repair failed")
+		if err := c.Repair(t.Context()); err != nil {
+			t.Fatalf("unambiguous selected repair failed%s", installerPrincipalFailureSuffix(err))
 		}
 		read, _ = readManifest(c.cfg.Root)
 		if read == nil || !read.Installed || read.InstallationID != m.InstallationID {

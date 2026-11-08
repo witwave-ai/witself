@@ -224,7 +224,10 @@ func (c *Cell) principalDSN(m *Manifest, purpose credentialPurpose) (string, err
 		// applies owner custody to every connection, not just the initial pool.
 		query := dsn.Query()
 		query.Set("options", "-c role="+string(store.SyncPrincipalOwner))
-		dsn.RawQuery = query.Encode()
+		// PostgreSQL URI parameters use percent escapes; pgx/libpq preserve a
+		// literal plus rather than decoding form-encoded spaces. A plus here
+		// would make PostgreSQL interpret the startup parameter as "+role".
+		dsn.RawQuery = strings.ReplaceAll(query.Encode(), "+", "%20")
 	}
 	return dsn.String(), nil
 }

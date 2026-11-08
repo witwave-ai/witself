@@ -219,6 +219,13 @@ func (c *Cell) configurePostgres(m *Manifest) error {
 		return "'" + strings.ReplaceAll(strings.ReplaceAll(value, "\\", "\\\\"), "'", "''") + "'"
 	}
 	config := fmt.Sprintf("listen_addresses = '127.0.0.1'\nport = %d\nunix_socket_directories = %s\npassword_encryption = 'scram-sha-256'\nlogging_collector = off\nlog_destination = 'stderr'\n", m.Ports.Postgres, quote(socketDir))
+	if m.PrincipalLayoutVersion != 0 {
+		// The logical replication launcher retains initdb's bootstrap identity
+		// even with no subscriptions. Selected cells use application-level sync,
+		// so disable this unused privileged worker and keep the session fence
+		// strict for every bootstrap and migrator backend.
+		config += "max_logical_replication_workers = 0\n"
+	}
 	return c.writePostgresConfig([]byte(config))
 }
 

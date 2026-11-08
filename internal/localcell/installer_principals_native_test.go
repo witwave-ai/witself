@@ -46,7 +46,7 @@ func nativePrincipalDSN(t *testing.T, root string, m localcell.Manifest, role st
 	if role == string(store.SyncPrincipalMigrator) {
 		q := u.Query()
 		q.Set("options", "-c role="+string(store.SyncPrincipalOwner))
-		u.RawQuery = q.Encode()
+		u.RawQuery = strings.ReplaceAll(q.Encode(), "+", "%20")
 	}
 	return u.String()
 }
@@ -137,8 +137,18 @@ func testInstallerPrincipalsNative(t *testing.T, binaries localcell.Binaries) {
 		return nil
 	})
 	root = created
-	if cell.Install(t.Context(), localcell.InstallOptions{ManagedPrincipals: true, LeaveRunning: true}) == nil || held == nil {
+	installErr := cell.Install(t.Context(), localcell.InstallOptions{ManagedPrincipals: true, LeaveRunning: true})
+	if held == nil {
+		if installErr != nil && !strings.ContainsAny(installErr.Error(), `/\:`) {
+			t.Fatalf("native install failed before the held-migrator fence: %s", installErr)
+		}
+		t.Fatal("native install failed before the held-migrator fence")
+	}
+	if installErr == nil {
 		t.Fatal("native held migrator did not fence installation")
+	}
+	if !strings.HasSuffix(installErr.Error(), ": local_privileged_sessions_present") {
+		t.Fatal("native held migrator failed before session observation")
 	}
 	m := nativePrincipalManifest(t, root)
 	if m.Installed {

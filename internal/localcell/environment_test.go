@@ -82,8 +82,13 @@ func assertInstallerChildArguments(t *testing.T, c *Cell, m *Manifest, component
 	if err := os.Remove(marker + ".result"); err != nil && !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("selected argument fixture previous result could not be retired")
 	}
-	if os.WriteFile(marker, []byte("enabled"), 0o600) != nil {
+	// The marker stays in the cell tree for later service preparation, so it
+	// needs the same explicit private owner and ACL as production control files.
+	if testWriteFile(marker, []byte("enabled"), 0o600) != nil {
 		t.Fatal("selected argument fixture marker could not be written")
+	}
+	if err := c.validateRoot(false); err != nil {
+		t.Fatalf("selected argument fixture did not retain a private tree%s", installerPrincipalFailureSuffix(err))
 	}
 	if c.startChild(m, component) != nil {
 		t.Fatal("selected argument fixture child could not start")

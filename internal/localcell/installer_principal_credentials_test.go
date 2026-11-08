@@ -121,8 +121,8 @@ func installerCredentialDescriptors(t *testing.T, c *Cell, m *Manifest) [][]byte
 		t.Fatal("credential descriptor fixture could not resolve test executable")
 	}
 	t.Setenv("WITSELF_RUNTIME", "local")
-	if c.PrepareService(t.Context(), ServiceDescriptor{Adapter: "foreground", Payload: ServicePayload{Host: host, Args: []string{"run", "--root", c.cfg.Root}}}) != nil {
-		t.Fatal("credential descriptor fixture could not prepare selected service intent")
+	if err := c.PrepareService(t.Context(), ServiceDescriptor{Adapter: "foreground", Payload: ServicePayload{Host: host, Args: []string{"run", "--root", c.cfg.Root}}}); err != nil {
+		t.Fatalf("credential descriptor fixture could not prepare selected service intent%s", installerPrincipalFailureSuffix(err))
 	}
 	d, err := c.ServiceDescriptor()
 	if err != nil || d.InstallationID != m.InstallationID {
