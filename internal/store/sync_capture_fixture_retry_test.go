@@ -71,6 +71,8 @@ func retrySyncCaptureFixtureAdmission(ctx context.Context, st *Store, account st
 // Explicit callbacks exercise admission, probe deadlines and diagnostics without
 // database-wide horizon assumptions or mutable package globals. Real fixtures use
 // the adapter above. The named result funnels every failure through one log site.
+// A safe probe retries unless the immediately preceding probe was also safe:
+// only two safe observations bracketing a refused admission rule out a cleared horizon.
 func retrySyncCaptureFixtureAttempts(ctx context.Context, seedWork time.Duration, failure string, attempt func(context.Context) (*SyncCaptureActivation, error), probe func(context.Context) syncCaptureFixtureProbeClass, logf func(string, ...any), onRetry ...func(time.Duration, syncCaptureFixtureProbeClass)) (activation *SyncCaptureActivation, resultFailure string) {
 	started := time.Now()
 	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
@@ -108,6 +110,7 @@ func retrySyncCaptureFixtureAttempts(ctx context.Context, seedWork time.Duration
 		}
 		deadline, _ := ctx.Deadline()
 		probeCtx, probeCancel := context.WithTimeout(ctx, min(probeBudget, time.Until(deadline)))
+		previous := last
 		last = probe(probeCtx)
 		if probeCtx.Err() == context.DeadlineExceeded {
 			last = captureProbeTimeout
@@ -120,7 +123,11 @@ func retrySyncCaptureFixtureAttempts(ctx context.Context, seedWork time.Duration
 		switch last {
 		case captureProbeBeginFailed, captureProbeTimeout, captureProbeUnsafe:
 			// Inconclusive observations retain the calibrated retry allowance.
-		case captureProbeUnhealthy, captureProbeMissingAccount, captureProbeSafe:
+		case captureProbeSafe:
+			if previous == captureProbeSafe {
+				return nil, failure
+			}
+		case captureProbeUnhealthy, captureProbeMissingAccount:
 			return nil, failure
 		default:
 			panic("capture fixture unknown probe class")
@@ -208,6 +215,85 @@ func TestSyncCaptureFixtureRetryLogging(t *testing.T) {
 			}
 			requireSyncCaptureFixtureSuccessLog(t, logs, retries)
 		})
+	}
+}
+
+func TestSyncCaptureFixtureRetrySafeBracket(t *testing.T) {
+	for _, failure := range []string{"capture fixture capability failed", "capture fixture activation failed"} {
+		for _, tc := range []struct {
+			name    string
+			classes []syncCaptureFixtureProbeClass
+			refuse  bool
+		}{
+			{name: "unsafe-safe-admitted", classes: []syncCaptureFixtureProbeClass{captureProbeUnsafe, captureProbeSafe}},
+			{name: "safe-safe-refused", classes: []syncCaptureFixtureProbeClass{captureProbeSafe, captureProbeSafe}, refuse: true},
+			{name: "safe-admitted", classes: []syncCaptureFixtureProbeClass{captureProbeSafe}},
+			{name: "safe-unsafe-safe-admitted", classes: []syncCaptureFixtureProbeClass{captureProbeSafe, captureProbeUnsafe, captureProbeSafe}},
+			{name: "safe-timeout-safe-admitted", classes: []syncCaptureFixtureProbeClass{captureProbeSafe, captureProbeTimeout, captureProbeSafe}},
+			{name: "safe-begin-failed-safe-admitted", classes: []syncCaptureFixtureProbeClass{captureProbeSafe, captureProbeBeginFailed, captureProbeSafe}},
+		} {
+			t.Run(failure+"/"+tc.name, func(t *testing.T) {
+				attempts, probes, retries := 0, 0, 0
+				var logs []string
+				want := &SyncCaptureActivation{}
+				a, got := retrySyncCaptureFixtureAttempts(context.Background(), 0, failure, func(context.Context) (*SyncCaptureActivation, error) {
+					attempts++
+					if tc.refuse || attempts <= len(tc.classes) {
+						return nil, ErrSyncWriterNotAdmitted
+					}
+					return want, nil
+				}, func(context.Context) syncCaptureFixtureProbeClass {
+					class := tc.classes[min(probes, len(tc.classes)-1)]
+					probes++
+					return class
+				}, func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }, func(_ time.Duration, class syncCaptureFixtureProbeClass) {
+					if retries >= len(tc.classes) || class != tc.classes[retries] {
+						t.Error("capture fixture safe bracket retry observation differs")
+					}
+					retries++
+				})
+				if tc.refuse {
+					if a != nil || got != failure {
+						t.Fatal("capture fixture safe bracket must return generic refusal")
+					}
+					if attempts != 2 || probes != 2 || retries != 1 {
+						t.Fatal("capture fixture safe bracket must refuse after exactly two attempts")
+					}
+					if len(logs) != 1 || logs[0] != "capture fixture probe classes begin_failed=0 timeout=0 unhealthy=0 missing_account=0 safe=2 unsafe=0" {
+						t.Fatal("capture fixture safe bracket failure summary differs")
+					}
+					return
+				}
+				if got != "" || a != want {
+					t.Fatal("capture fixture safe probe must reattempt admission")
+				}
+				if attempts != len(tc.classes)+1 || probes != len(tc.classes) || retries != len(tc.classes) {
+					t.Fatal("capture fixture safe bracket admission counts differ")
+				}
+				requireSyncCaptureFixtureSuccessLog(t, logs, retries)
+			})
+		}
+	}
+}
+
+func TestSyncCaptureFixtureRetryUnsafeExhaustion(t *testing.T) {
+	attempts, probes, retries := 0, 0, 0
+	var logs []string
+	a, failure := retrySyncCaptureFixtureAttempts(context.Background(), 0, "capture fixture capability failed", func(context.Context) (*SyncCaptureActivation, error) {
+		attempts++
+		return nil, ErrSyncWriterNotAdmitted
+	}, func(context.Context) syncCaptureFixtureProbeClass {
+		probes++
+		return captureProbeUnsafe
+	}, func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }, func(time.Duration, syncCaptureFixtureProbeClass) { retries++ })
+	if a != nil || failure != "capture fixture foreign snapshot horizon persisted" {
+		t.Fatal("capture fixture unsafe exhaustion literal differs")
+	}
+	if attempts < 2 || probes < 2 || retries < 2 {
+		t.Fatal("capture fixture unsafe exhaustion must retry within budget")
+	}
+	if len(logs) != 1 || !strings.HasPrefix(logs[0], "capture fixture probe classes ") {
+		t.Fatal("capture fixture unsafe exhaustion summary differs")
 	}
 }
 
@@ -321,8 +407,8 @@ func TestSyncCaptureFixtureRetryPostgres(t *testing.T) {
 				}
 				if release {
 					// Release between the completed unsafe probe and the next
-					// attempt. Releasing between a refusal and its probe would
-					// correctly take the generic (now-safe) failure branch.
+					// attempt. A safe probe after a refusal also permits another
+					// admission unless the preceding probe was already safe.
 					close(releaseRequested)
 					select {
 					case <-paused:
@@ -428,34 +514,76 @@ func TestSyncCaptureFixtureRetryOverlapPostgres(t *testing.T) {
 					t.Fatal("capture retry activation capability seed failed")
 				}
 			}
-			var logs []string
+			pollCtx, pollCancel := context.WithTimeout(ctx, max(time.Second, 5*work))
+			defer pollCancel()
+			pid := old.Conn().PgConn().PID()
+			captureObserve(pollCtx, t, capturePoolQuery(st, `SELECT EXISTS(SELECT 1 FROM pg_stat_activity activity JOIN accounts account ON account.id=$1 WHERE activity.pid=$2 AND activity.backend_xmin IS NOT NULL AND age(activity.backend_xmin)>=age(account.xmin))`, p.AccountID, pid))
+			var logs []string // Read after joining the admission goroutine.
 			retries := 0
-			var expected time.Duration
+			type retryObservation struct{ budget, observed time.Duration }
+			unsafe := make(chan retryObservation, 1)
+			resume := make(chan struct{})
+			result := make(chan string, 1)
 			started := time.Now()
-			a, failure := retrySyncCaptureFixtureAdmission(ctx, st, p.AccountID, activate, work, func(format string, args ...any) {
-				logs = append(logs, fmt.Sprintf(format, args...))
-				t.Logf(format, args...)
-			}, func(budget time.Duration, class syncCaptureFixtureProbeClass) {
-				retries++
-				if class != captureProbeUnsafe {
-					return
-				}
-				if expected == 0 {
-					observed := time.Since(started)
-					expected = syncCaptureFixtureRetryBudget(work + observed)
-					t.Logf("capture fixture overlap calibration work=%s observed=%s expected=%s", work, observed, expected)
-					if budget > expected {
-						t.Fatal("capture fixture retry budget exceeds the proportional bound")
+			go func() {
+				observedUnsafe := false
+				a, failure := retrySyncCaptureFixtureAdmission(ctx, st, p.AccountID, activate, work, func(format string, args ...any) {
+					logs = append(logs, fmt.Sprintf(format, args...))
+					t.Logf(format, args...)
+				}, func(budget time.Duration, class syncCaptureFixtureProbeClass) {
+					retries++
+					if class != captureProbeUnsafe || observedUnsafe {
+						return
 					}
-					// The real probe has completed before this callback. Release
-					// now so the next admission observes the cleared horizon.
-					if old.Rollback(ctx) != nil {
-						t.Fatal("capture retry overlap pin release failed")
+					observedUnsafe = true
+					unsafe <- retryObservation{budget: budget, observed: time.Since(started)}
+					select {
+					case <-resume:
+					case <-ctx.Done():
 					}
+				})
+				if a != nil {
+					a.Close()
 				}
-			})
-			if a != nil {
-				a.Close()
+				result <- failure
+			}()
+			joined := false
+			defer func() {
+				cancel()
+				if !joined {
+					<-result
+				}
+			}()
+			var observation retryObservation
+			select {
+			case observation = <-unsafe:
+			case failure := <-result:
+				joined = true
+				t.Fatalf("capture retry overlap ended before foreign horizon observation: %s", failure)
+			case <-ctx.Done():
+				t.Fatal("capture retry overlap did not observe foreign horizon")
+			}
+			expected := syncCaptureFixtureRetryBudget(work + observation.observed)
+			t.Logf("capture fixture overlap calibration work=%s observed=%s expected=%s", work, observation.observed, expected)
+			if observation.budget > expected {
+				t.Fatal("capture fixture retry budget exceeds the proportional bound")
+			}
+			// The observer pauses at the first unsafe probe until the pinned
+			// connection is released; the next tick can then retry admission.
+			if old.Rollback(ctx) != nil {
+				t.Fatal("capture retry overlap pin release failed")
+			}
+			wait, waitCancel := context.WithDeadline(ctx, started.Add(expected+max(time.Second, 5*work)))
+			defer waitCancel()
+			// The pool may reuse the released connection for this observation.
+			captureObserve(wait, t, capturePoolQuery(st, `SELECT NOT EXISTS(SELECT 1 FROM pg_stat_activity WHERE pid=$1 AND pid<>pg_backend_pid() AND backend_xmin IS NOT NULL)`, pid))
+			close(resume)
+			var failure string
+			select {
+			case failure = <-result:
+				joined = true
+			case <-wait.Done():
+				t.Fatal("capture retry exceeded proportional completion bound")
 			}
 			if failure != "" {
 				t.Fatalf("capture retry overlap did not admit after horizon release: %s", failure)
@@ -487,13 +615,15 @@ func TestSyncCaptureFixtureRetryOtherCausePostgres(t *testing.T) {
 				// its predicate is safe but the admission must still fail.
 				ctx := context.Background()
 				var logs []string
-				invalidRetries, horizonRetries := 0, 0
+				invalidRetries, horizonRetries, safeRetries := 0, 0, 0
 				started := time.Now()
 				a, failure := retrySyncCaptureFixtureAdmission(ctx, st, account, activate, work, func(format string, args ...any) {
 					logs = append(logs, fmt.Sprintf(format, args...))
 					t.Logf(format, args...)
 				}, func(_ time.Duration, class syncCaptureFixtureProbeClass) {
-					if class != captureProbeUnsafe && class != captureProbeTimeout && class != captureProbeBeginFailed {
+					if class == captureProbeSafe {
+						safeRetries++
+					} else if class != captureProbeUnsafe && class != captureProbeTimeout && class != captureProbeBeginFailed {
 						invalidRetries++
 					} else {
 						horizonRetries++
@@ -515,6 +645,9 @@ func TestSyncCaptureFixtureRetryOtherCausePostgres(t *testing.T) {
 				}
 				if failure != want {
 					t.Fatalf("capture retry other cause literal differs: %q", failure)
+				}
+				if (missing && safeRetries != 0) || (!missing && safeRetries == 0) {
+					t.Fatal("capture retry other cause safe bracket differs")
 				}
 				// An unsafe horizon or inconclusive probe can overlap an unrelated
 				// refusal. Immediate timing applies only when neither was retried.
