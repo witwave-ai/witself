@@ -344,11 +344,14 @@ func TestServiceControlCallerBoundYieldsActualHost(t *testing.T) {
 			name = "caller_bound_yields"
 		}
 		t.Run(name, func(t *testing.T) {
-			floor := 100 * time.Millisecond
+			floor := serviceHealthVerdictFloor
 			if tighter {
 				floor = 2 * time.Second
 			}
 			hostBound := serviceHealthMeasuredBound(t, floor)
+			if hostBound < serviceHealthVerdictFloor {
+				t.Fatalf("host bound below floor host_bound_ms=%d floor_ms=%d", hostBound.Milliseconds(), serviceHealthVerdictFloor.Milliseconds())
+			}
 			callerBound := 10 * hostBound
 			if tighter {
 				callerBound = hostBound / 10
@@ -432,8 +435,23 @@ func TestServiceControlCallerBoundYieldsActualHost(t *testing.T) {
 				if elapsed <= callerBound || elapsed >= hostBound {
 					t.Error("healthy hook did not complete between caller and host bounds")
 				}
-			} else if !errors.Is(verdict, errServiceUnhealthy) || *stops != 1 || s.running || len(s.record.Failures) != 1 || s.record.NextStart.IsZero() || s.status.State != "backoff" || elapsed < hostBound {
-				t.Error("host bound expiry lost unhealthy verdict, stop, or backoff")
+			} else {
+				observed := serviceHealthVerdictObservation{
+					verdict: verdict, stops: *stops, running: s.running,
+					failures: len(s.record.Failures), nextStartZero: s.record.NextStart.IsZero(),
+					state: s.status.State, elapsed: elapsed, hostBound: hostBound,
+				}
+				fields := serviceHealthVerdictFields(observed)
+				if len(fields) > 0 {
+					t.Error(serviceHealthVerdictReport(fields, observed))
+				} else {
+					// A wrong-state copy must exercise the same collector and report.
+					// The valid host result alone cannot detect a missing state check.
+					observed.state = ""
+					if fields := serviceHealthVerdictFields(observed); !reflect.DeepEqual(fields, []string{"state"}) || !strings.HasPrefix(serviceHealthVerdictReport(fields, observed), "host bound expiry failed fields=state ") {
+						t.Error("host bound diagnostic lost state check")
+					}
+				}
 			}
 		})
 	}
