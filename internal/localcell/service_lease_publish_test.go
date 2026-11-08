@@ -48,7 +48,9 @@ func TestPublishErrorKeepsTextAndCause(t *testing.T) {
 	}
 	// Every remaining string literal in writeAtomicBytes is unchanged. Only
 	// the final publication error now carries the underlying platform cause.
-	want := []string{"local cell record must be a regular file", "cannot create local cell record", "postgres.password", "cannot persist local cell record"}
+	// "credentials" is the per-role credential directory whose files share the
+	// password file's pre-write hook (selected Local Cell principals).
+	want := []string{"local cell record must be a regular file", "cannot create local cell record", "postgres.password", "credentials", "cannot persist local cell record"}
 	if !slices.Equal(literals, want) {
 		t.Fatal("writeAtomicBytes changed an unrelated literal")
 	}
