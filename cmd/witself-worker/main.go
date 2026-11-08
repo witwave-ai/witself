@@ -113,7 +113,19 @@ func main() {
 }
 
 func run(args []string) int {
-	return runWith(args, os.LookupEnv, os.Stdout, os.Stderr, serve, runAgentEmailReceiptReplay)
+	return runWith(args, os.LookupEnv, os.Stdout, os.Stderr, serve, func(args []string) int {
+		return managedWorkerReceiptReplay(args, os.LookupEnv, os.Stderr, runAgentEmailReceiptReplay)
+	})
+}
+
+func managedWorkerReceiptReplay(args []string, lookup func(string) (string, bool), stderr io.Writer, replay func([]string) int) int {
+	_, managed := lookup("WITSELF_LOCAL_MANAGED_PRINCIPALS")
+	_, migration := lookup("WITSELF_LOCAL_MIGRATION_PHASE")
+	if managed || migration {
+		_, _ = fmt.Fprintln(stderr, "local managed principal command is invalid")
+		return 1
+	}
+	return replay(args)
 }
 
 func runWith(args []string, lookup func(string) (string, bool), stdout, stderr io.Writer, serveCommand func() int, receiptReplayCommand func([]string) int) int {
@@ -226,6 +238,10 @@ func serve() int {
 
 	st, err := store.Open(ctx, dsn)
 	if err != nil {
+		if runtime.ManagedPrincipals {
+			fmt.Fprintf(os.Stderr, "witself-worker: %v\n", localcell.ErrLocalRuntimeLoginOwnsTables)
+			return 1
+		}
 		if runtime.CaptureProof {
 			fmt.Fprintln(os.Stderr, "witself-worker: capture_proof_database_unidentified")
 			return 1
@@ -234,11 +250,15 @@ func serve() int {
 		return 1
 	}
 	defer st.Close()
-	if err := migrateWorkerStore(ctx, st, runtime); err != nil {
+	if err := workerMigrationStartup(ctx, st, runtime); err != nil {
 		fmt.Fprintf(os.Stderr, "witself-worker: migrate: %v\n", err)
 		return 1
 	}
 	if err := st.Ping(ctx); err != nil {
+		if runtime.ManagedPrincipals {
+			fmt.Fprintf(os.Stderr, "witself-worker: %v\n", localcell.ErrLocalRuntimeLoginOwnsTables)
+			return 1
+		}
 		if runtime.CaptureProof {
 			fmt.Fprintln(os.Stderr, "witself-worker: capture_proof_database_unidentified")
 			return 1
@@ -254,6 +274,20 @@ func serve() int {
 // serveWorker keeps the account check and the selected readiness callback in
 // the production path while allowing tests to observe the registry boundary.
 func serveWorker(ctx context.Context, jobStore *store.Store, st runtimeconfig.BootstrapStore, runtime runtimeconfig.Config, jobs jobConfig, lookup func(string) (string, bool), runRegistry func(*worker.Registry, context.Context, worker.Config) error) int {
+	if runtime.ManagedPrincipals {
+		managed, ok := st.(managedWorkerStore)
+		if !ok {
+			fmt.Fprintf(os.Stderr, "witself-worker: %v\n", localcell.ErrLocalRuntimeLoginOwnsTables)
+			return 1
+		}
+		checkCtx, cancel := context.WithTimeout(ctx, runtime.MigrationWait)
+		err := verifyManagedWorkerStartup(checkCtx, managed)
+		cancel()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "witself-worker: %v\n", err)
+			return 1
+		}
+	}
 	if runtime.CaptureProof {
 		proof, ok := st.(runtimeconfig.CaptureProofStore)
 		if !ok || runtimeconfig.CheckCaptureProofReady(ctx, proof, runtime, store.SchemaVersion(), store.SyncSchemaVersion()) != nil {
@@ -315,6 +349,59 @@ func serveWorker(ctx context.Context, jobStore *store.Store, st runtimeconfig.Bo
 	}
 	fmt.Fprintln(os.Stderr, "witself-worker: shut down cleanly")
 	return 0
+}
+
+type managedWorkerStore interface {
+	AppliedSchemaVersion(context.Context) (int, error)
+	AppliedSyncSchemaVersion(context.Context) (int, error)
+	VerifyManagedRuntimeIdentity(context.Context, store.SyncPrincipalRole) error
+	VerifyManagedRuntimePrincipal(context.Context, store.SyncPrincipalRole) error
+}
+
+func verifyManagedWorkerStartup(ctx context.Context, st managedWorkerStore) error {
+	if st.VerifyManagedRuntimeIdentity(ctx, store.SyncPrincipalWorker) != nil {
+		return localcell.ErrLocalRuntimeLoginOwnsTables
+	}
+	core, err := st.AppliedSchemaVersion(ctx)
+	if err != nil || core != store.SchemaVersion() {
+		return localcell.ErrLocalMigrationPhaseRequired
+	}
+	sync, err := st.AppliedSyncSchemaVersion(ctx)
+	if err != nil || sync != store.SyncSchemaVersion() {
+		return localcell.ErrLocalMigrationPhaseRequired
+	}
+	if st.VerifyManagedRuntimePrincipal(ctx, store.SyncPrincipalWorker) != nil {
+		return localcell.ErrLocalRuntimeLoginOwnsTables
+	}
+	return nil
+}
+
+func workerMigrationStartup(ctx context.Context, st workerStartupMigrator, runtime runtimeconfig.Config) error {
+	if !runtime.ManagedPrincipals {
+		return migrateWorkerStore(ctx, st, runtime)
+	}
+	if !runtime.Local || !runtime.SyncSchema || runtime.MigrationPhase {
+		return localcell.ErrLocalMigrationPhaseRequired
+	}
+	managed, ok := st.(managedWorkerStore)
+	if !ok {
+		return localcell.ErrLocalRuntimeLoginOwnsTables
+	}
+	ctx, cancel := context.WithTimeout(ctx, runtime.MigrationWait)
+	defer cancel()
+	for {
+		err := verifyManagedWorkerStartup(ctx, managed)
+		if err != localcell.ErrLocalMigrationPhaseRequired {
+			return err
+		}
+		timer := time.NewTimer(25 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return localcell.ErrLocalMigrationPhaseRequired
+		case <-timer.C:
+		}
+	}
 }
 
 // registerJobs preserves the hosted registration order and log messages.

@@ -65,6 +65,10 @@ func runWithRuntime(args []string, lookup func(string) (string, bool), dispatch 
 }
 
 func dispatchServerCommand(args []string) int {
+	if !managedServerCommandAllowed(args, os.LookupEnv) {
+		fmt.Fprintln(os.Stderr, "local managed principal command is invalid")
+		return 1
+	}
 	if len(args) == 0 {
 		usage(os.Stdout)
 		return 0
@@ -109,6 +113,12 @@ func dispatchServerCommand(args []string) int {
 	}
 }
 
+func managedServerCommandAllowed(args []string, lookup func(string) (string, bool)) bool {
+	_, managed := lookup("WITSELF_LOCAL_MANAGED_PRINCIPALS")
+	_, migration := lookup("WITSELF_LOCAL_MIGRATION_PHASE")
+	return (!managed && !migration) || (len(args) == 1 && args[0] == "serve")
+}
+
 func parseAgentEmailBackfillCommandArgs(args []string) (string, string, bool) {
 	if len(args) != 2 && len(args) != 4 {
 		return "", "", false
@@ -143,9 +153,99 @@ type startupMigrator interface {
 // These boundaries keep migration selection and its ordering before listener
 // startup testable without applying migrations or opening server listeners.
 type serverStartup struct {
-	migrator      func(*store.Store) startupMigrator
-	notifyContext func(context.Context, ...os.Signal) (context.Context, context.CancelFunc)
-	run           func(context.Context, server.Config) error
+	migrator       func(*store.Store) startupMigrator
+	notifyContext  func(context.Context, ...os.Signal) (context.Context, context.CancelFunc)
+	run            func(context.Context, server.Config) error
+	migrationStore func(context.Context, string) (managedMigrationStore, error)
+	runtimeSetup   func()
+	beforeShutdown func()
+	bootstrapToken func() (string, error)
+}
+
+type managedRuntimeStore interface {
+	AppliedSchemaVersion(context.Context) (int, error)
+	AppliedSyncSchemaVersion(context.Context) (int, error)
+	VerifyManagedRuntimeIdentity(context.Context, store.SyncPrincipalRole) error
+	VerifyManagedRuntimePrincipal(context.Context, store.SyncPrincipalRole) error
+}
+
+type managedMigrationStore interface {
+	startupMigrator
+	AppliedSchemaVersion(context.Context) (int, error)
+	AppliedSyncSchemaVersion(context.Context) (int, error)
+	VerifyManagedMigrationPrincipal(context.Context) error
+	Close()
+}
+
+func verifyManagedServerStartup(ctx context.Context, st managedRuntimeStore) error {
+	if st.VerifyManagedRuntimeIdentity(ctx, store.SyncPrincipalServer) != nil {
+		return localcell.ErrLocalRuntimeLoginOwnsTables
+	}
+	core, err := st.AppliedSchemaVersion(ctx)
+	if err != nil || core != store.SchemaVersion() {
+		return localcell.ErrLocalMigrationPhaseRequired
+	}
+	sync, err := st.AppliedSyncSchemaVersion(ctx)
+	if err != nil || sync != store.SyncSchemaVersion() {
+		return localcell.ErrLocalMigrationPhaseRequired
+	}
+	if st.VerifyManagedRuntimePrincipal(ctx, store.SyncPrincipalServer) != nil {
+		return localcell.ErrLocalRuntimeLoginOwnsTables
+	}
+	return nil
+}
+
+func runManagedMigrationPhase(ctx context.Context, runtime runtimeconfig.Config, open func(context.Context, string) (managedMigrationStore, error)) error {
+	if !runtime.Local || !runtime.SyncSchema || !runtime.ManagedPrincipals || !runtime.MigrationPhase ||
+		runtime.CaptureProof || runtime.LocalShutdown != (runtimeconfig.LocalShutdown{}) || !runtimeconfig.ManagedMigrationDSN(runtime.DatabaseURL) {
+		return localcell.ErrLocalMigrationPhaseRequired
+	}
+	ctx, cancel := context.WithTimeout(ctx, runtime.MigrationWait)
+	defer cancel()
+	st, err := open(ctx, runtime.DatabaseURL)
+	if err != nil {
+		return localcell.ErrLocalMigrationPhaseRequired
+	}
+	defer st.Close()
+	if st.VerifyManagedMigrationPrincipal(ctx) != nil {
+		return localcell.ErrLocalRuntimeLoginOwnsTables
+	}
+	if ctx.Err() != nil || st.MigrateContext(ctx) != nil || ctx.Err() != nil || st.MigrateSync(ctx) != nil || ctx.Err() != nil {
+		return localcell.ErrLocalMigrationPhaseRequired
+	}
+	core, err := st.AppliedSchemaVersion(ctx)
+	if err != nil || core != store.SchemaVersion() {
+		return localcell.ErrLocalMigrationPhaseRequired
+	}
+	sync, err := st.AppliedSyncSchemaVersion(ctx)
+	if err != nil || sync != store.SyncSchemaVersion() {
+		return localcell.ErrLocalMigrationPhaseRequired
+	}
+	if st.VerifyManagedMigrationPrincipal(ctx) != nil {
+		return localcell.ErrLocalRuntimeLoginOwnsTables
+	}
+	return nil
+}
+
+func serverMigrationStartup(ctx context.Context, runtime runtimeconfig.Config, managed managedRuntimeStore, migrate func() startupMigrator) error {
+	if runtime.ManagedPrincipals {
+		ctx, cancel := context.WithTimeout(ctx, runtime.MigrationWait)
+		defer cancel()
+		return verifyManagedServerStartup(ctx, managed)
+	}
+	migrator := migrate()
+	if !runtime.Local {
+		return migrator.Migrate()
+	}
+	ctx, cancel := context.WithTimeout(ctx, runtime.MigrationWait)
+	defer cancel()
+	if err := migrator.MigrateContext(ctx); err != nil {
+		return err
+	}
+	if runtime.SyncSchema {
+		return migrator.MigrateSync(ctx)
+	}
+	return nil
 }
 
 // The nil seam uses the production channel only for an explicit local opt-in.
@@ -212,6 +312,25 @@ func serveWithStartup(startup serverStartup) int {
 		fmt.Fprintf(os.Stderr, "witself-server: %v\n", err)
 		return 1
 	}
+	if runtime.MigrationPhase {
+		if cfg.SpoolRoot != nil {
+			defer func() { _ = cfg.SpoolRoot.Close() }()
+		}
+		ctx, stop := startup.notifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		defer stop()
+		open := startup.migrationStore
+		if open == nil {
+			open = openManagedMigrationStore
+		}
+		if err := runManagedMigrationPhase(ctx, runtime, open); err != nil {
+			fmt.Fprintf(os.Stderr, "witself-server: %v\n", err)
+			return 1
+		}
+		return 0
+	}
+	if startup.runtimeSetup != nil {
+		startup.runtimeSetup()
+	}
 	memlimit.Configure(os.Stderr, "witself-server")
 	if runtime.Local {
 		defer func() { _ = cfg.SpoolRoot.Close() }()
@@ -257,6 +376,9 @@ func serveWithStartup(startup serverStartup) int {
 	}
 	ctx, stop := startup.notifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	if startup.beforeShutdown != nil {
+		startup.beforeShutdown()
+	}
 	ctx, shutdownChannel, closeShutdown, err := installCommandShutdown(ctx, runtime)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "witself-server: %v\n", err)
@@ -300,6 +422,10 @@ func serveWithStartup(startup serverStartup) int {
 		st, err := store.Open(ctx, dsn,
 			serverStoreOptions(avatarPayloadCompactionEnabled, supportTicketRateLimit, os.Stderr)...)
 		if err != nil {
+			if runtime.ManagedPrincipals {
+				fmt.Fprintf(os.Stderr, "witself-server: %v\n", localcell.ErrLocalRuntimeLoginOwnsTables)
+				return 1
+			}
 			if runtime.CaptureProof {
 				fmt.Fprintln(os.Stderr, "witself-server: capture_proof_database_unidentified")
 				return 1
@@ -308,23 +434,22 @@ func serveWithStartup(startup serverStartup) int {
 			return 1
 		}
 		defer st.Close()
-		migrator := startup.migrator(st)
 		var migrationErr error
-		if runtime.CaptureProof {
+		if runtime.ManagedPrincipals {
+			migrationErr = serverMigrationStartup(ctx, runtime, st, func() startupMigrator { return startup.migrator(st) })
+			if migrationErr == nil && runtime.CaptureProof {
+				migrationCtx, cancel := context.WithTimeout(ctx, runtime.MigrationWait)
+				migrationErr = configureCaptureProofStore(migrationCtx, &cfg, st, runtime)
+				cancel()
+			}
+		} else if runtime.CaptureProof {
 			// The disposable owner installs guards after both versions are ready.
 			// Runtime principals only verify the explicit profile marker and schema.
 			migrationCtx, cancel := context.WithTimeout(ctx, runtime.MigrationWait)
 			migrationErr = configureCaptureProofStore(migrationCtx, &cfg, st, runtime)
 			cancel()
-		} else if runtime.Local {
-			migrationCtx, cancel := context.WithTimeout(ctx, runtime.MigrationWait)
-			migrationErr = migrator.MigrateContext(migrationCtx)
-			if migrationErr == nil && runtime.SyncSchema {
-				migrationErr = migrator.MigrateSync(migrationCtx)
-			}
-			cancel()
 		} else {
-			migrationErr = migrator.Migrate()
+			migrationErr = serverMigrationStartup(ctx, runtime, st, func() startupMigrator { return startup.migrator(st) })
 		}
 		if err := migrationErr; err != nil {
 			if runtime.Local && errors.Is(err, store.ErrMigrationWaitCanceled) {
@@ -424,7 +549,11 @@ func serveWithStartup(startup serverStartup) int {
 			fmt.Fprintf(os.Stderr, "witself-server: %v\n", err)
 			return 1
 		}
-		bt, err := bootstrapToken()
+		readBootstrap := startup.bootstrapToken
+		if readBootstrap == nil {
+			readBootstrap = bootstrapToken
+		}
+		bt, err := readBootstrap()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "witself-server: %v\n", err)
 			return 1
@@ -2201,6 +2330,10 @@ func serveWithStartup(startup serverStartup) int {
 	}
 	fmt.Fprintln(os.Stderr, "witself-server: shut down cleanly")
 	return 0
+}
+
+func openManagedMigrationStore(ctx context.Context, dsn string) (managedMigrationStore, error) {
+	return store.Open(ctx, dsn)
 }
 
 func managedRealmEmailRoutesConfigured(provisionToken, backendKind string) bool {

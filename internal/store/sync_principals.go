@@ -25,6 +25,8 @@ const (
 	SyncPrincipalSnapshot SyncPrincipalRole = "witself_sync_snapshot"
 	// SyncPrincipalLegacy has domain DML but no protected function access.
 	SyncPrincipalLegacy SyncPrincipalRole = "witself_sync_legacy"
+	// SyncPrincipalMigrator is the bounded fresh-install login, never a runtime.
+	SyncPrincipalMigrator SyncPrincipalRole = "witself_sync_migrator"
 )
 
 var (
@@ -151,7 +153,10 @@ func (s *Store) verifySyncPrincipalTopology(ctx context.Context, q syncVersionRe
 // Individual predicates remain callable from package tests so an unrelated
 // role failure cannot mask ownership, ACL, or owner-drain regression coverage.
 func (s *Store) verifySyncPrincipalTopologyPredicate(ctx context.Context, q syncVersionReader, predicate syncPrincipalTopologyPredicate) error {
-	roles := s.syncPrincipalNames()
+	return verifySyncPrincipalTopologyPredicate(ctx, q, predicate, s.syncPrincipalNames())
+}
+
+func verifySyncPrincipalTopologyPredicate(ctx context.Context, q syncVersionReader, predicate syncPrincipalTopologyPredicate, roles []string) error {
 	if predicate == syncPrincipalTopologyRoles {
 		if verifySyncPrincipals(ctx, q, roles) != nil {
 			return ErrSyncPrincipalTopologyUnverified
@@ -227,6 +232,105 @@ const syncPrincipalOwnerDrainSQL = `SELECT NOT EXISTS(SELECT 1 FROM pg_locks l J
 
 // Kept as the reviewed complete topology text for the independent SQL contract.
 const syncPrincipalTopologySQL = syncPrincipalOwnerIdentitySQL + syncPrincipalFunctionACLSQL + syncPrincipalOwnerDrainSQL
+
+const managedPrincipalIdentitySQL = `SELECT current_user,session_user`
+const managedPrincipalOwnerLoginSQL = `SELECT rolcanlogin FROM pg_roles WHERE rolname=$1`
+const managedPrincipalMigratorMembershipSQL = `SELECT count(*)=1 AND bool_and(parent.rolname=$2 AND NOT m.admin_option)
+ FROM pg_auth_members m JOIN pg_roles parent ON parent.oid=m.roleid
+ WHERE m.member=(SELECT oid FROM pg_roles WHERE rolname=$1)`
+
+// VerifyManagedRuntimePrincipal checks the actual login and C2a's catalog,
+// covered ownership and ACL predicates on one physical connection. It neither
+// migrates nor enables capture, and exposes no activation-verifier bypass.
+func (s *Store) VerifyManagedRuntimePrincipal(ctx context.Context, expected SyncPrincipalRole) error {
+	conn, err := s.pool.Acquire(ctx)
+	if err != nil {
+		return ErrSyncPrincipalTopologyUnverified
+	}
+	defer conn.Release()
+	return verifyManagedRuntimePrincipal(ctx, conn, expected)
+}
+
+// VerifyManagedRuntimeIdentity rejects unsafe logins before schema reads can
+// obscure an identity refusal with an unrelated missing-table or ACL error.
+func (s *Store) VerifyManagedRuntimeIdentity(ctx context.Context, expected SyncPrincipalRole) error {
+	conn, err := s.pool.Acquire(ctx)
+	if err != nil {
+		return ErrSyncPrincipalTopologyUnverified
+	}
+	defer conn.Release()
+	return verifyManagedRuntimeIdentity(ctx, conn, expected)
+}
+
+func verifyManagedRuntimeIdentity(ctx context.Context, q syncVersionReader, expected SyncPrincipalRole) error {
+	if expected != SyncPrincipalServer && expected != SyncPrincipalWorker && expected != SyncPrincipalMaintenance {
+		return ErrSyncPrincipalTopologyUnverified
+	}
+	var current, session string
+	if q.QueryRow(ctx, managedPrincipalIdentitySQL).Scan(&current, &session) != nil || current != string(expected) || session != string(expected) {
+		return ErrSyncPrincipalTopologyUnverified
+	}
+	roles := syncPrincipalRoleNames()
+	if verifySyncPrincipals(ctx, q, roles) != nil || verifyManagedOwnerNoLogin(ctx, q) != nil {
+		return ErrSyncPrincipalTopologyUnverified
+	}
+	return nil
+}
+
+func verifyManagedRuntimePrincipal(ctx context.Context, q syncVersionReader, expected SyncPrincipalRole) error {
+	if verifyManagedRuntimeIdentity(ctx, q, expected) != nil {
+		return ErrSyncPrincipalTopologyUnverified
+	}
+	roles := syncPrincipalRoleNames()
+	for _, predicate := range []syncPrincipalTopologyPredicate{syncPrincipalTopologyOwnerIdentity, syncPrincipalTopologyFunctionACL} {
+		if verifySyncPrincipalTopologyPredicate(ctx, q, predicate, roles) != nil {
+			return ErrSyncPrincipalTopologyUnverified
+		}
+	}
+	return nil
+}
+
+func verifyManagedOwnerNoLogin(ctx context.Context, q syncVersionReader) error {
+	var login bool
+	if q.QueryRow(ctx, managedPrincipalOwnerLoginSQL, string(SyncPrincipalOwner)).Scan(&login) != nil || login {
+		return ErrSyncPrincipalTopologyUnverified
+	}
+	return nil
+}
+
+// VerifyManagedMigrationPrincipal verifies migration custody without requiring
+// a schema that has not yet been installed. The DSN independently pins SET ROLE
+// for the SQL migration pools reopened by MigrateContext and MigrateSync.
+func (s *Store) VerifyManagedMigrationPrincipal(ctx context.Context) error {
+	conn, err := s.pool.Acquire(ctx)
+	if err != nil {
+		return ErrSyncPrincipalTopologyUnverified
+	}
+	defer conn.Release()
+	return verifyManagedMigrationPrincipal(ctx, conn)
+}
+
+func verifyManagedMigrationPrincipal(ctx context.Context, q syncVersionReader) error {
+	var current, session string
+	if q.QueryRow(ctx, managedPrincipalIdentitySQL).Scan(&current, &session) != nil ||
+		current != string(SyncPrincipalOwner) || session != string(SyncPrincipalMigrator) ||
+		verifySyncPrincipals(ctx, q, syncPrincipalRoleNames()) != nil || verifyManagedOwnerNoLogin(ctx, q) != nil {
+		return ErrSyncPrincipalTopologyUnverified
+	}
+	var role syncPrincipalRoleCatalog
+	err := q.QueryRow(ctx, syncPrincipalRoleCatalogSQL, string(SyncPrincipalMigrator)).Scan(&role.name,
+		&role.superuser, &role.createRole, &role.createDB, &role.bypassRLS,
+		&role.inherit, &role.replication, &role.canLogin, &role.membership, &role.replicationParameter)
+	if err != nil || role.name != string(SyncPrincipalMigrator) || role.superuser || role.createRole || role.createDB ||
+		role.bypassRLS || role.inherit || role.replication || !role.canLogin || !role.membership || role.replicationParameter {
+		return ErrSyncPrincipalTopologyUnverified
+	}
+	var membership bool
+	if q.QueryRow(ctx, managedPrincipalMigratorMembershipSQL, string(SyncPrincipalMigrator), string(SyncPrincipalOwner)).Scan(&membership) != nil || !membership {
+		return ErrSyncPrincipalTopologyUnverified
+	}
+	return nil
+}
 
 // syncFunctionAdmission selects the protected path for every nonowner. An
 // absent function is never permission to fall back to direct control-table DML.

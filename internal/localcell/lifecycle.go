@@ -66,8 +66,22 @@ func (c *Cell) finish(m *Manifest, operation string) error {
 // Install creates a new disposable cluster. Existing data is never adopted or
 // overwritten. A failed or interrupted installation is retained for Repair.
 func (c *Cell) Install(ctx context.Context, options InstallOptions) error {
-	ctx, cancel := c.deadline(ctx)
+	timeout := c.cfg.Timeout
+	if options.ManagedPrincipals {
+		timeout = c.readinessTimeout("server", &Manifest{})
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	// Selection never adopts a manifest or old PGDATA, even before lock/layout
+	// creation. Repeating the check under the lock closes concurrent adoption.
+	if options.ManagedPrincipals {
+		if _, err := os.Lstat(c.path("manifest.json")); !errors.Is(err, os.ErrNotExist) {
+			return errPrincipalLayout
+		}
+		if entries, err := os.ReadDir(c.path("pg")); (err == nil && len(entries) != 0) || (err != nil && !errors.Is(err, os.ErrNotExist)) {
+			return errPrincipalLayout
+		}
+	}
 	lock, err := c.own(true)
 	if err != nil {
 		return err
@@ -111,6 +125,10 @@ func (c *Cell) Install(ctx context.Context, options InstallOptions) error {
 		PostgreSQLVersion: pgVersion, ServerVersion: serverVersion, WorkerVersion: workerVersion,
 		Ports: ports, Database: localDatabaseName, Role: "localcell", LastOperation: "install"}
 	m.MigrationWait, m.JobRestartPolicy = c.runtimeSettings(m)
+	if options.ManagedPrincipals {
+		m.PrincipalLayoutVersion = PrincipalLayoutVersion
+		m.PrincipalRoles = installerRoleNames()
+	}
 	if err := c.begin("install"); err != nil {
 		return err
 	}
@@ -135,6 +153,19 @@ func (c *Cell) Install(ctx context.Context, options InstallOptions) error {
 			return err
 		}},
 	}
+	if options.ManagedPrincipals {
+		steps = append(steps, struct {
+			name string
+			run  func() error
+		}{"principal_credentials", func() error { return c.principalOperations().credentials(ctx, m) }})
+		ops := c.principalOperations()
+		for i, fn := range []func(context.Context, *Manifest) error{ops.provision, ops.migrate, ops.grants, ops.verify} {
+			steps = append(steps, struct {
+				name string
+				run  func() error
+			}{selectedInstallSteps[i+1], func() error { return fn(ctx, m) }})
+		}
+	}
 	if !options.LeaveRunning {
 		steps = append(steps, struct {
 			name string
@@ -153,6 +184,49 @@ func (c *Cell) Install(ctx context.Context, options InstallOptions) error {
 	}
 	m.Installed = true
 	return c.finish(m, "install")
+}
+
+// installerStartOperations replaces only external startup boundaries in package
+// tests. Nil per-Cell state uses the same production operations for every phase.
+type installerStartOperations struct {
+	postgres func(context.Context, *Manifest) error
+	verify   func(context.Context, *Manifest) error
+	launch   func(context.Context, *Manifest, string, func() error) error
+	ready    func(context.Context, *Manifest, string, bool) error
+	account  func(context.Context, *Manifest) error
+}
+
+func (c *Cell) principalStartOperations() installerStartOperations {
+	if c.installerStart != nil {
+		return *c.installerStart
+	}
+	return installerStartOperations{
+		postgres: c.startServicePostgres, verify: c.verifyRuntimePrincipalStart,
+		launch: c.startChildPrepared, ready: c.waitReadyWithPortRecovery,
+		account: c.verifyStartAccount,
+	}
+}
+
+func (c *Cell) verifyStartAccount(ctx context.Context, m *Manifest) error {
+	account, err := c.psql(ctx, m, "SELECT id FROM accounts WHERE is_default AND status = 'active'")
+	if err != nil || !accountPattern.MatchString(account) || (m.AccountID != "" && account != m.AccountID) {
+		return errors.New("local cell bootstrap account mismatch")
+	}
+	version, err := c.psql(ctx, m, "SELECT version_id FROM goose_db_version WHERE is_applied ORDER BY id DESC LIMIT 1")
+	if err != nil {
+		return err
+	}
+	schema, err := strconv.Atoi(version)
+	if err != nil || schema < 1 {
+		return errors.New("local cell schema verification failed")
+	}
+	m.AccountID, m.LastVerifiedSchemaVersion = account, schema
+	if m.PrincipalLayoutVersion != 0 {
+		if err := c.prepareSelectedHealthCredential(ctx, m); err != nil {
+			return err
+		}
+	}
+	return writeAtomic(c.path("manifest.json"), m, nil)
 }
 
 // Start orders PostgreSQL, server readiness, then worker readiness. It never
@@ -177,7 +251,11 @@ func (c *Cell) Start(ctx context.Context) error {
 	if err := c.layout(); err != nil {
 		return err
 	}
-	if _, err := c.password(); err != nil {
+	if m.PrincipalLayoutVersion == 0 {
+		if _, err := c.password(); err != nil {
+			return err
+		}
+	} else if err := c.validatePrincipalPasswords(m); err != nil {
 		return err
 	}
 	if err := c.verifyAll(); err != nil {
@@ -195,6 +273,7 @@ func (c *Cell) Start(ctx context.Context) error {
 		return err
 	}
 	launched := make(map[string]bool)
+	ops := c.principalStartOperations()
 	prepareChild := func(component string) func() error {
 		return func() error {
 			// A replacement belongs to this Start even if the entry snapshot
@@ -229,35 +308,24 @@ func (c *Cell) Start(ctx context.Context) error {
 			if err := c.prepareComponentPorts(m, "postgres", false, false); err != nil {
 				return err
 			}
-			return c.startServicePostgres(ctx, m)
+			return ops.postgres(ctx, m)
 		}},
 		{"server", func(ctx context.Context) error {
-			return c.startChildPrepared(ctx, m, "server", prepareChild("server"))
+			if m.PrincipalLayoutVersion != 0 {
+				return runPrincipalStartup(func() error { return ops.verify(ctx, m) },
+					func() error { return ops.launch(ctx, m, "server", prepareChild("server")) })
+			}
+			return ops.launch(ctx, m, "server", prepareChild("server"))
 		}},
 		{"server_ready", func(ctx context.Context) error {
-			return c.waitReadyWithPortRecovery(ctx, m, "server", launched["server"])
+			return ops.ready(ctx, m, "server", launched["server"])
 		}},
-		{"account", func(ctx context.Context) error {
-			account, err := c.psql(ctx, m, "SELECT id FROM accounts WHERE is_default AND status = 'active'")
-			if err != nil || !accountPattern.MatchString(account) || (m.AccountID != "" && account != m.AccountID) {
-				return errors.New("local cell bootstrap account mismatch")
-			}
-			version, err := c.psql(ctx, m, "SELECT version_id FROM goose_db_version WHERE is_applied ORDER BY id DESC LIMIT 1")
-			if err != nil {
-				return err
-			}
-			schema, err := strconv.Atoi(version)
-			if err != nil || schema < 1 {
-				return errors.New("local cell schema verification failed")
-			}
-			m.AccountID, m.LastVerifiedSchemaVersion = account, schema
-			return writeAtomic(c.path("manifest.json"), m, nil)
-		}},
+		{"account", func(ctx context.Context) error { return ops.account(ctx, m) }},
 		{"worker", func(ctx context.Context) error {
-			return c.startChildPrepared(ctx, m, "worker", prepareChild("worker"))
+			return ops.launch(ctx, m, "worker", prepareChild("worker"))
 		}},
 		{"worker_ready", func(ctx context.Context) error {
-			return c.waitReadyWithPortRecovery(ctx, m, "worker", launched["worker"])
+			return ops.ready(ctx, m, "worker", launched["worker"])
 		}},
 	}
 	for _, step := range steps {
@@ -343,6 +411,7 @@ func (c *Cell) stopWithServiceFence(ctx context.Context, fence bool) error {
 // An install is completed only when all required steps are durably done. Other
 // incomplete installations stay uninstalled; they are never guessed/adopted.
 func (c *Cell) Repair(ctx context.Context) error {
+	parent := ctx
 	ctx, cancel := c.deadline(ctx)
 	defer cancel()
 	lock, err := c.ownExisting()
@@ -353,6 +422,11 @@ func (c *Cell) Repair(ctx context.Context) error {
 	m, manifestErr := readManifest(c.cfg.Root)
 	if manifestErr != nil && !errors.Is(manifestErr, os.ErrNotExist) {
 		return manifestErr
+	}
+	if m != nil && m.PrincipalLayoutVersion != 0 {
+		selected, selectedCancel := context.WithTimeout(parent, c.readinessTimeout("server", m))
+		defer selectedCancel()
+		ctx = selected
 	}
 	progress, err := c.readJournal()
 	if err != nil {
@@ -379,11 +453,46 @@ func (c *Cell) Repair(ctx context.Context) error {
 		}
 		return c.finishRemoval(m, false)
 	}
+	if m != nil && m.PrincipalLayoutVersion != 0 && pending.Operation == "install" {
+		// Only this fresh installation's durable database phase authorizes
+		// resumption. A partial initdb or partial credential publication stays
+		// visible and non-startable, never converted or guessed.
+		if !progress.done["database"] {
+			_ = c.stopAll(ctx)
+			return errPrincipalRepair
+		}
+		if err := c.principalOperations().resumePostgres(ctx, m); err != nil {
+			return err
+		}
+		if m.Installed && !progress.installComplete(m) {
+			_ = c.stopAll(ctx)
+			return errPrincipalRepair
+		}
+		if progress.done["principals"] && !m.Installed {
+			if err := c.principalOperations().provision(ctx, m); err != nil {
+				_ = c.stopAll(ctx)
+				return err
+			}
+		}
+		if err := c.installPrincipals(ctx, m, progress); err != nil {
+			_ = c.stopAll(ctx)
+			return err
+		}
+		// A persisted verification record alone cannot bless changed custody.
+		if err := c.principalOperations().verify(ctx, m); err != nil {
+			_ = c.stopAll(ctx)
+			return err
+		}
+		progress, err = c.readJournal()
+		if err != nil {
+			return err
+		}
+	}
 	if err := c.step(pending.Operation, "revert_stop", func() error { return c.stopAll(ctx) }); err != nil {
 		return err
 	}
 	if m != nil {
-		if progress.installComplete() {
+		if progress.installComplete(m) {
 			m.Installed = true
 		}
 		m.LastOperation = "repair"
@@ -516,8 +625,14 @@ func (c *Cell) Inspect(_ context.Context) (Inspection, error) {
 	result.JournalTailIncomplete = progress.tornTail
 	if result.Manifest != nil && !result.Manifest.Installed {
 		result.InstallState = "install incomplete; purge to start over"
-		if progress.installComplete() {
+		if progress.installComplete(result.Manifest) {
 			result.InstallState = "install completion pending; run repair"
+		}
+	}
+	if result.Manifest != nil && result.Manifest.PrincipalLayoutVersion != 0 {
+		result.PrincipalTopology = "unverified"
+		if result.Interrupted != nil && !result.Manifest.Installed {
+			result.InstallState = "selected install incomplete; run repair"
 		}
 	}
 	for _, component := range []string{"postgres", "server", "worker"} {
@@ -558,6 +673,11 @@ func (c *Cell) Status(ctx context.Context) (Status, error) {
 	client := localHTTPClient()
 	defer client.CloseIdleConnections()
 	m := inspection.Manifest
+	if m.PrincipalLayoutVersion != 0 && !inspection.Locked && inspection.Interrupted == nil {
+		if err := c.verifyMaintenanceTopology(ctx, m); err == nil {
+			result.PrincipalTopology = "verified"
+		}
+	}
 	server, worker := inspection.Processes["server"], inspection.Processes["worker"]
 	result.ServerReady = server.Alive && server.Matches && ready(ctx, client, m.Ports.ServerHealth)
 	result.WorkerReady = worker.Alive && worker.Matches && ready(ctx, client, m.Ports.WorkerHealth)

@@ -62,6 +62,8 @@ type Manifest struct {
 	Ports                     Ports         `json:"ports"`
 	Database                  string        `json:"database"`
 	Role                      string        `json:"role"`
+	PrincipalLayoutVersion    int           `json:"principal_layout_version,omitempty"`
+	PrincipalRoles            []string      `json:"principal_roles,omitempty"`
 	AccountID                 string        `json:"account_id,omitempty"`
 	LastVerifiedSchemaVersion int           `json:"last_verified_schema_version"`
 	LastOperation             string        `json:"last_operation"`
@@ -72,7 +74,10 @@ type Manifest struct {
 }
 
 // InstallOptions controls whether PostgreSQL stays running after installation.
-type InstallOptions struct{ LeaveRunning bool }
+type InstallOptions struct {
+	LeaveRunning      bool
+	ManagedPrincipals bool
+}
 
 // RemoveOptions requires explicit consent before deleting retained database data.
 type RemoveOptions struct{ Purge bool }
@@ -99,6 +104,7 @@ type Inspection struct {
 	Interrupted           *Interruption           `json:"interrupted,omitempty"`
 	JournalTailIncomplete bool                    `json:"journal_tail_incomplete,omitempty"`
 	InstallState          string                  `json:"install_state,omitempty"`
+	PrincipalTopology     string                  `json:"principal_topology,omitempty"`
 }
 
 // Status adds bounded, live readiness observations to Inspection.
@@ -122,6 +128,9 @@ type Cell struct {
 	// Test observers scoped to interrupted PostgreSQL recovery. Nil in production.
 	recoveryProcessIdentity  func(int) (string, bool, error)
 	recoveryProcessStartedAt func(int) (time.Time, error)
+	installerPrincipals      *installerPrincipalOperations
+	installerStart           *installerStartOperations
+	maintenanceTest          *installerMaintenanceOperations
 }
 
 // CanonicalRoot makes two spellings of one directory canonicalize to the same string.

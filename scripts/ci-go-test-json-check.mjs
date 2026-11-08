@@ -42,7 +42,7 @@ const serviceOutcomes = new Set([
 // used by these suites, including empty subtest segments, addresses, and #NN.
 const testNamePattern = /^(?:Test|Example|Fuzz)[A-Za-z0-9_]*(?:\/[A-Za-z0-9_.,:=+\-[\]#]*)*$/;
 
-function sourceLiterals(source, assertions) {
+function sourceLiterals(source, assertions, fixedCauses = false) {
   // Tokenize comments and strings as whole units, so examples inside comments,
   // string contents, and concatenated expressions cannot enroll themselves as
   // diagnostics. Unsupported Go string escapes fail closed. Formatted assertions
@@ -51,6 +51,20 @@ function sourceLiterals(source, assertions) {
     .filter(token => !token.startsWith('//') && !token.startsWith('/*'));
   const literals = [];
   const prefixes = [];
+  if (fixedCauses) {
+    // Enroll only complete direct var initializers in fixed_cause.go. Token
+    // boundaries exclude comments, quoted examples, calls and expressions.
+    // A declaration/semicolon/end boundary after the call excludes suffixes.
+    for (let index = 0; index + 6 < tokens.length; index++) {
+      const [declaration, name, assign, conversion, open, literal, close, next] = tokens.slice(index, index + 8);
+      if (declaration !== 'var' || !/^[A-Za-z_]\w*$/.test(name) || assign !== '=' || conversion !== 'fixedCause' ||
+        open !== '(' || close !== ')' || !literal.startsWith('"') ||
+        (next !== undefined && !['var', 'const', 'func', 'type', ';'].includes(next))) continue;
+      let value;
+      try { value = JSON.parse(literal); } catch { continue; }
+      if (/^[A-Za-z][A-Za-z0-9 _.,;:!?()'"-]*$/.test(value) && !/\d{3}|[a-f0-9]{64}/i.test(value)) literals.push(value);
+    }
+  }
   for (let index = 0; index + 5 < tokens.length; index++) {
     const [receiver, dot, method, open, literal, close] = tokens.slice(index, index + 6);
     if (dot !== '.' || open !== '(' || !literal.startsWith('"')) continue;
@@ -95,7 +109,8 @@ function diagnosticAllowlist() {
       const isTest = file.endsWith('_test.go');
       if (isTest) testFiles.get(name).add(file);
       if (!isTest && name === expectedPackages[2]) continue;
-      const sourceDiagnostics = sourceLiterals(source, isTest);
+      const sourceDiagnostics = sourceLiterals(source, isTest,
+        !isTest && name === expectedPackages[0] && file === 'fixed_cause.go');
       for (const literal of sourceDiagnostics.literals) {
         (isTest ? assertions.get(name) : name === storePackage ? storeErrors : errors).add(literal);
       }

@@ -155,7 +155,7 @@ func (r RuntimeResultRecord) Validate(manifests []ObligationManifest) error {
 			known = slices.Contains(m.MissingCapabilities, r.Capability) || slices.ContainsFunc(completedModelCapabilities[:], func(pair runtimeCapabilityPair) bool {
 				return pair.Obligation == m.ID && pair.Capability == r.Capability
 			})
-			known = known || principalRuntimeCapability(m.ID, r.Capability) || mixedRuntimeCapability(m.ID, r.Capability)
+			known = known || principalRuntimeCapability(m.ID, r.Capability) || mixedRuntimeCapability(m.ID, r.Capability) || installerPrincipalRuntimeCapability(m.ID, r.Capability)
 			if r.Capability == "runtime_schedule_adapter" {
 				known = slices.ContainsFunc(CoverageSchedules(), func(s CoverageSchedule) bool { return s.ID == m.ID })
 			}
@@ -165,6 +165,9 @@ func (r RuntimeResultRecord) Validate(manifests []ObligationManifest) error {
 		return ErrRuntimeResult
 	}
 	if r.Outcome == NotRun || r.Outcome == UnsupportedScope {
+		if installerPrincipalRuntimeCapability(r.Obligation, r.Capability) && r.Reason != "native_lifecycle_not_executed" {
+			return ErrRuntimeResult
+		}
 		if mixedRuntimeCapability(r.Obligation, r.Capability) && !validMixedPendingReason(r.Reason) {
 			return ErrRuntimeResult
 		}

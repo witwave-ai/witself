@@ -5,3 +5,17 @@ package localcell
 type fixedCause string
 
 func (e fixedCause) Error() string { return string(e) }
+
+// ErrLocalMigrationPhaseRequired refuses runtime migration authority.
+var ErrLocalMigrationPhaseRequired = fixedCause("local_migration_phase_required")
+
+// ErrLocalRuntimeLoginOwnsTables refuses unsafe runtime custody or identity.
+var ErrLocalRuntimeLoginOwnsTables = fixedCause("local_runtime_login_owns_tables")
+
+var errPrincipalLayout = fixedCause("local_principal_layout_invalid")
+var errPrincipalProvision = fixedCause("local_principal_provision_refused")
+var errPrincipalSessions = fixedCause("local_privileged_sessions_present")
+var errPrincipalRepair = fixedCause("local_principal_repair_required")
+
+// ErrLocalPrincipalCredentialsRefused refuses incomplete or unsafe private credentials.
+var ErrLocalPrincipalCredentialsRefused = fixedCause("local_principal_credentials_refused")

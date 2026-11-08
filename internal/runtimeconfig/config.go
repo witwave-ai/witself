@@ -24,6 +24,8 @@ type Config struct {
 	Local                            bool
 	LocalShutdown                    LocalShutdown
 	SyncSchema                       bool
+	ManagedPrincipals                bool
+	MigrationPhase                   bool
 	CaptureProof                     bool
 	CaptureProofToken                string
 	CaptureProofStubEmail            string
@@ -65,6 +67,10 @@ var localJobEligibility = map[string]bool{
 // wildcard refusals; its values never appear in diagnostics.
 func FromEnv(role string, lookup func(string) (string, bool), environ []string) (Config, error) {
 	runtime, _ := lookup("WITSELF_RUNTIME")
+	managed, err := managedPrincipalsFromEnv(role, runtime, lookup, environ)
+	if err != nil {
+		return Config{}, err
+	}
 	shutdown, err := localShutdownFromEnv(role, runtime, lookup, environ)
 	if err != nil {
 		return Config{}, err
@@ -114,7 +120,8 @@ func FromEnv(role string, lookup func(string) (string, bool), environ []string) 
 		}
 	}
 	cfg := Config{Local: true, LocalShutdown: shutdown, MigrationWait: DefaultMigrationWait, JobRestartPolicy: JobRestartNever,
-		CaptureProof: proof.CaptureProof, CaptureProofToken: proof.CaptureProofToken, CaptureProofStubEmail: proof.CaptureProofStubEmail}
+		CaptureProof: proof.CaptureProof, CaptureProofToken: proof.CaptureProofToken, CaptureProofStubEmail: proof.CaptureProofStubEmail,
+		ManagedPrincipals: managed.ManagedPrincipals, MigrationPhase: managed.MigrationPhase}
 	if syncPresent {
 		if syncValue != "1" {
 			return Config{}, fmt.Errorf("%s must be 1 when explicitly selected", syncVariable)

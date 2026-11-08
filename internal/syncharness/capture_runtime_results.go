@@ -36,6 +36,9 @@ func captureRuntimeRecord(testName string) (RuntimeResultRecord, int, bool) {
 }
 
 func expectedRuntimeRecord(r RuntimeResultRecord) (RuntimeResultRecord, int, bool) {
+	if r.Adapter.Package == "localcell" {
+		return installerPrincipalRuntimeRecord(r.Adapter.Symbol)
+	}
 	if r.Adapter.Package == "store" {
 		if r.Adapter.Symbol == "TestCaptureMixMatrix" {
 			return mixedRuntimeRecord(r.Capability)

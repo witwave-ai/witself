@@ -115,7 +115,7 @@ func TestRuntimeResultsInventoryAndBoundaries(t *testing.T) {
 			t.Fatal("completed model capability missing from runtime inventory")
 		}
 	}
-	if fixturePasses != 12 || capturePasses != 7 || principalPasses != 2 || mixedPasses != 5 || pending != 76 || len(results.Records) != 102 {
+	if fixturePasses != 12 || capturePasses != 7 || principalPasses != 2 || mixedPasses != 5 || pending != 77 || len(results.Records) != 103 {
 		t.Fatal("runtime evidence inventory changed without review")
 	}
 	if _, err := EmbeddedRuntimeResults(); err != nil {

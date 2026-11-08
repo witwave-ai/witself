@@ -49,11 +49,38 @@ func (c *Cell) makePassword() error {
 }
 
 func (c *Cell) childEnvironment(m *Manifest, component string) ([]string, error) {
-	password, err := c.password()
-	if err != nil {
+	if err := validatePrincipalLayout(m); err != nil {
 		return nil, err
 	}
-	dsn := url.URL{Scheme: "postgres", Host: addr(m.Ports.Postgres), Path: "/" + localDatabaseName, User: url.UserPassword(m.Role, password), RawQuery: "sslmode=disable"}
+	var databaseURL string
+	if m.PrincipalLayoutVersion != 0 {
+		if err := c.validatePrincipalPasswords(m); err != nil {
+			return nil, err
+		}
+		var purpose credentialPurpose
+		switch component {
+		case "server":
+			purpose = credentialServer
+		case "worker":
+			purpose = credentialWorker
+		case "migration":
+			purpose = credentialMigrator
+		default:
+			return nil, ErrLocalPrincipalCredentialsRefused
+		}
+		var err error
+		databaseURL, err = c.principalDSN(m, purpose)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		password, err := c.password()
+		if err != nil {
+			return nil, err
+		}
+		dsn := url.URL{Scheme: "postgres", Host: addr(m.Ports.Postgres), Path: "/" + localDatabaseName, User: url.UserPassword(m.Role, password), RawQuery: "sslmode=disable"}
+		databaseURL = dsn.String()
+	}
 	health, metrics := m.Ports.ServerHealth, m.Ports.ServerMetrics
 	if component == "worker" {
 		health, metrics = m.Ports.WorkerHealth, m.Ports.WorkerMetrics
@@ -65,7 +92,7 @@ func (c *Cell) childEnvironment(m *Manifest, component string) ([]string, error)
 	wait, policy := c.runtimeSettings(m)
 	environment = appendEnvironment(environment,
 		"WITSELF_RUNTIME=local",
-		"WITSELF_DATABASE_URL="+dsn.String(),
+		"WITSELF_DATABASE_URL="+databaseURL,
 		"WITSELF_API_ADDR="+addr(m.Ports.ServerAPI),
 		"WITSELF_HEALTH_ADDR="+addr(health),
 		"WITSELF_METRICS_ADDR="+addr(metrics),
@@ -76,6 +103,12 @@ func (c *Cell) childEnvironment(m *Manifest, component string) ([]string, error)
 	)
 	if m.AccountID != "" {
 		environment = appendEnvironment(environment, "WITSELF_LOCAL_ACCOUNT_ID="+m.AccountID)
+	}
+	if m.PrincipalLayoutVersion != 0 {
+		environment = appendEnvironment(environment, "WITSELF_LOCAL_SYNC_SCHEMA=1", "WITSELF_LOCAL_MANAGED_PRINCIPALS=1")
+		if component == "migration" {
+			environment = appendEnvironment(environment, "WITSELF_LOCAL_MIGRATION_PHASE=1")
+		}
 	}
 	return environment, nil
 }
@@ -189,11 +222,22 @@ func (c *Cell) configurePostgres(m *Manifest) error {
 	return c.writePostgresConfig([]byte(config))
 }
 
-func (c *Cell) databaseCommand(ctx context.Context, _ *Manifest, tool string, args ...string) (string, error) {
+func (c *Cell) databaseCommand(ctx context.Context, m *Manifest, tool string, args ...string) (string, error) {
+	purpose := credentialBootstrap
+	if m.PrincipalLayoutVersion != 0 {
+		switch tool {
+		case "createdb":
+			// Bootstrap is confined to creation of this fresh owned database.
+		case "psql":
+			purpose = credentialMaintenance
+		default:
+			return "", ErrLocalPrincipalCredentialsRefused
+		}
+	}
 	if !filepath.IsAbs(c.cfg.Binaries.PostgresDir) {
 		return "", errors.New("explicit PostgreSQL binary directory is required")
 	}
-	password, err := c.password()
+	password, err := c.credentialPassword(m, purpose)
 	if err != nil {
 		return "", err
 	}
@@ -221,7 +265,11 @@ func (c *Cell) databaseCommand(ctx context.Context, _ *Manifest, tool string, ar
 }
 
 func (c *Cell) psql(ctx context.Context, m *Manifest, query string) (string, error) {
-	return c.databaseCommand(ctx, m, "psql", "--no-psqlrc", "--no-password", "-h", "127.0.0.1", "-p", strconv.Itoa(m.Ports.Postgres), "-U", m.Role, "-d", localDatabaseName, "-At", "-v", "ON_ERROR_STOP=1", "-c", query)
+	role := m.Role
+	if m.PrincipalLayoutVersion != 0 {
+		role, _ = credentialRole(credentialMaintenance)
+	}
+	return c.databaseCommand(ctx, m, "psql", "--no-psqlrc", "--no-password", "-h", "127.0.0.1", "-p", strconv.Itoa(m.Ports.Postgres), "-U", role, "-d", localDatabaseName, "-At", "-v", "ON_ERROR_STOP=1", "-c", query)
 }
 
 func (c *Cell) startChild(m *Manifest, component string) error {
@@ -233,6 +281,9 @@ func (c *Cell) startChildContext(ctx context.Context, m *Manifest, component str
 }
 
 func (c *Cell) startChildPrepared(ctx context.Context, m *Manifest, component string, prepare func() error) error {
+	if m.PrincipalLayoutVersion != 0 && component != "server" && component != "worker" {
+		return ErrLocalPrincipalCredentialsRefused
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
