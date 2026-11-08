@@ -177,7 +177,7 @@ func writeAtomicBytes(path string, data []byte, beforeRename func() error) error
 		return err
 	}
 	if err := publishPrivateFile(f.Name(), path); err != nil {
-		return errors.New("cannot publish local cell record")
+		return &publishError{cause: err}
 	}
 	return syncDirectory(filepath.Dir(path))
 }

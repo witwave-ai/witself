@@ -19,8 +19,9 @@ func foregroundOutputLines(captured []byte) []string {
 }
 
 // An abandoned readiness probe can disconnect between named-pipe connection
-// and the Windows peer check. Accept only that existing diagnostic family;
-// resource/connection setup failures and host failures still fail this test.
+// and the Windows peer check. Accept that diagnostic family and at most one
+// closed lease-publication diagnostic; resource/connection setup failures and
+// host failure receipts still fail this test.
 // The receipt itself remains unique, last, newline-terminated, and byte-exact.
 func foregroundShutdownFailure(captured []byte) string {
 	if len(captured) == 0 {
@@ -30,7 +31,15 @@ func foregroundShutdownFailure(captured []byte) string {
 		return "foreground shutdown receipt lacks final newline or has trailing bytes"
 	}
 	lines := foregroundOutputLines(captured)
+	leasePublishSeen := false
 	for _, line := range lines[:len(lines)-1] {
+		if regexp.MustCompile(`^native service host lease_publish class=(sharing_violation|access_denied|validation|other) attempts=[1-9][0-9]* elapsed_ms=[0-9]+$`).MatchString(line) {
+			if leasePublishSeen {
+				return "foreground shutdown emitted duplicate lease publication diagnostics"
+			}
+			leasePublishSeen = true
+			continue
+		}
 		if !regexp.MustCompile(`^service_control accept=rejected step=(peer:pid|peer:identity|peer:sid)$`).MatchString(line) {
 			return "foreground shutdown emitted unexpected output before receipt"
 		}
@@ -72,6 +81,12 @@ func TestForegroundShutdownOutput(t *testing.T) {
 		accepted     bool
 	}{
 		{"receipt_only", receipt, true},
+		{"lease_publish_sharing", "native service host lease_publish class=sharing_violation attempts=12 elapsed_ms=2175\n" + receipt, true},
+		{"lease_publish_access", "native service host lease_publish class=access_denied attempts=2 elapsed_ms=25\n" + receipt, true},
+		{"lease_publish_validation", "native service host lease_publish class=validation attempts=1 elapsed_ms=0\n" + receipt, true},
+		{"lease_publish_other", "native service host lease_publish class=other attempts=1 elapsed_ms=0\n" + receipt, true},
+		{"lease_publish_unknown_class", "native service host lease_publish class=none attempts=1 elapsed_ms=0\n" + receipt, false},
+		{"lease_publish_duplicate", strings.Repeat("native service host lease_publish class=other attempts=1 elapsed_ms=0\n", 2) + receipt, false},
 		{"abandoned_peer_pid", "service_control accept=rejected step=peer:pid\n" + receipt, true},
 		{"abandoned_peer_identity", "service_control accept=rejected step=peer:identity\n" + receipt, true},
 		{"abandoned_peer_sid", "service_control accept=rejected step=peer:sid\n" + receipt, true},
@@ -99,7 +114,7 @@ func TestForegroundShutdownOutput(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if (foregroundShutdownFailure([]byte(test.output)) == "") != test.accepted {
-				t.Fatal("foreground shutdown output violated peer-only prefixes and one exact final receipt")
+				t.Fatal("foreground shutdown output violated closed diagnostic prefixes and one exact final receipt")
 			}
 		})
 	}

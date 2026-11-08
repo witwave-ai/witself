@@ -50,7 +50,7 @@ func (c *Cell) acquireServiceLeaseWithBoot(d ServiceDescriptor, readBoot func() 
 		return nil, err
 	}
 	record := serviceLeaseRecord{Version: 1, BootID: boot, StartIdentity: start, PID: os.Getpid(), Owner: d.UID, InstallationID: d.InstallationID}
-	if err := writeAtomic(c.path("service", "lease.json"), record, nil); err != nil {
+	if err := c.publishServiceLease(c.path("service", "lease.json"), record); err != nil {
 		_ = lock.Close()
 		return nil, serviceFailureAt(err, "lease_write")
 	}
