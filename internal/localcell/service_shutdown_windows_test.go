@@ -493,6 +493,7 @@ func TestWindowsShutdownEscalation(t *testing.T) {
 				assertWindowsProcessExited(t, f.handle)
 			case "lost":
 				if !outcome.permitsDrain() || outcome.Kind == serviceStopForced {
+					reportLostACKOutcome(t, outcome)
 					t.Logf("shutdown kind=%s detail=%s budget=%s startup=%s", outcome.Kind, outcome.Detail, shutdownFixtureBudget(f.startup), f.startup)
 					t.Fatal("lost ACK with observed exit did not complete safely")
 				}
