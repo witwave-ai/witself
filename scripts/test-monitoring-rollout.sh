@@ -13,34 +13,12 @@ probe_rules="$platform_chart/files/uptime-probes.rules.yaml"
 probe_rule_tests="$platform_chart/testdata/uptime-probes.rules.test.yaml"
 delivery_rules="$platform_chart/files/entitlement-delivery.rules.yaml"
 delivery_rule_tests="$platform_chart/testdata/entitlement-delivery.rules.test.yaml"
-chart_version="87.6.0"
-chart_sha256="e8bad88c0ad0231b34314c643730ca5641f84db65d937e99a7df98133cbd9cc5"
-chart_repo="https://prometheus-community.github.io/helm-charts"
-chart_name="kube-prometheus-stack"
-prometheus_version="3.13.2"
-alertmanager_version="0.33.0"
-
-case "$(uname -s)-$(uname -m)" in
-  Linux-x86_64)
-    tool_platform="linux-amd64"
-    prometheus_tool_sha256="0e8c4d46101bd025ea8265e377d2caabc57f488fc1be1c367f37db69ea41be6f"
-    alertmanager_tool_sha256="8ce11c42e8a6dfbbf93a59c0b193cb1329210b36d0c7ef3df7b745608675a1d1"
-    ;;
-  Darwin-x86_64)
-    tool_platform="darwin-amd64"
-    prometheus_tool_sha256="e57095aed0b69e10edaee28b92718d4a65f46d466bf93aeda54075e901d15c2a"
-    alertmanager_tool_sha256="eedaa57a6c9f8a67b5bdbc5658c060247685a72364625c8c85e12a7a76845d92"
-    ;;
-  Darwin-arm64)
-    tool_platform="darwin-arm64"
-    prometheus_tool_sha256="f68ca4f1dbedd6366bbfdd8ac5d2c0b7ba1f273474acc8d38eb33202fbeec7a4"
-    alertmanager_tool_sha256="597fbbb6c22d75755560377381326b52f9aad1f1a1dce746daccf357f502cda5"
-    ;;
-  *)
-    echo "unsupported monitoring-test host: $(uname -s)-$(uname -m)" >&2
-    exit 1
-    ;;
-esac
+read -r chart_version chart_sha256 chart_url < <(
+  awk '$1 == "chart" && $2 == "all" { print $3, $4, $5; exit }' "$repo_root/scripts/testdata/monitoring-test-assets.pins"
+)
+chart_repo="${chart_url#helm://}"
+chart_name="${chart_repo##*/}"
+chart_repo="${chart_repo%/*}"
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
@@ -58,33 +36,9 @@ sha256_file() {
   fi
 }
 
-promtool_bin="$(command -v promtool || true)"
-if [[ -z "$promtool_bin" ]]; then
-  archive="prometheus-${prometheus_version}.${tool_platform}.tar.gz"
-  curl -fsSL \
-    "https://github.com/prometheus/prometheus/releases/download/v${prometheus_version}/${archive}" \
-    -o "$tmp/$archive"
-  [[ "$(sha256_file "$tmp/$archive")" == "$prometheus_tool_sha256" ]] || {
-    echo "promtool archive checksum mismatch" >&2
-    exit 1
-  }
-  tar -xzf "$tmp/$archive" -C "$tmp"
-  promtool_bin="$tmp/prometheus-${prometheus_version}.${tool_platform}/promtool"
-fi
-
-amtool_bin="$(command -v amtool || true)"
-if [[ -z "$amtool_bin" ]]; then
-  archive="alertmanager-${alertmanager_version}.${tool_platform}.tar.gz"
-  curl -fsSL \
-    "https://github.com/prometheus/alertmanager/releases/download/v${alertmanager_version}/${archive}" \
-    -o "$tmp/$archive"
-  [[ "$(sha256_file "$tmp/$archive")" == "$alertmanager_tool_sha256" ]] || {
-    echo "amtool archive checksum mismatch" >&2
-    exit 1
-  }
-  tar -xzf "$tmp/$archive" -C "$tmp"
-  amtool_bin="$tmp/alertmanager-${alertmanager_version}.${tool_platform}/amtool"
-fi
+assets="${WITSELF_MONITORING_TEST_ASSETS:-$(bash "$repo_root/scripts/fetch-monitoring-test-assets.sh")}"
+promtool_bin="$(command -v promtool || printf '%s/promtool' "$assets")"
+amtool_bin="$(command -v amtool || printf '%s/amtool' "$assets")"
 
 helm lint "$platform_chart" --values "$monitoring_values" >/dev/null
 helm lint "$apps_chart" >/dev/null
@@ -143,9 +97,7 @@ ruby -ryaml -e '
   print app.dig("spec", "source", "helm", "values")
 ' "$chart_repo" "$chart_name" "$chart_version" "$chart_sha256" <"$enabled_render" >"$child_values"
 
-helm pull --repo "$chart_repo" "$chart_name" \
-  --version "$chart_version" --destination "$tmp"
-chart_archive="$tmp/${chart_name}-${chart_version}.tgz"
+chart_archive="$assets/kube-prometheus-stack-87.6.0.tgz"
 [[ "$(sha256_file "$chart_archive")" == "$chart_sha256" ]] || {
   echo "kube-prometheus-stack package checksum mismatch" >&2
   exit 1

@@ -1,0 +1,8 @@
+# name platform version sha256 url
+chart all 87.6.0 e8bad88c0ad0231b34314c643730ca5641f84db65d937e99a7df98133cbd9cc5 helm://https://prometheus-community.github.io/helm-charts/kube-prometheus-stack
+promtool linux-amd64 3.13.2 0e8c4d46101bd025ea8265e377d2caabc57f488fc1be1c367f37db69ea41be6f https://github.com/prometheus/prometheus/releases/download/v3.13.2/prometheus-3.13.2.linux-amd64.tar.gz
+promtool darwin-amd64 3.13.2 e57095aed0b69e10edaee28b92718d4a65f46d466bf93aeda54075e901d15c2a https://github.com/prometheus/prometheus/releases/download/v3.13.2/prometheus-3.13.2.darwin-amd64.tar.gz
+promtool darwin-arm64 3.13.2 f68ca4f1dbedd6366bbfdd8ac5d2c0b7ba1f273474acc8d38eb33202fbeec7a4 https://github.com/prometheus/prometheus/releases/download/v3.13.2/prometheus-3.13.2.darwin-arm64.tar.gz
+amtool linux-amd64 0.33.0 8ce11c42e8a6dfbbf93a59c0b193cb1329210b36d0c7ef3df7b745608675a1d1 https://github.com/prometheus/alertmanager/releases/download/v0.33.0/alertmanager-0.33.0.linux-amd64.tar.gz
+amtool darwin-amd64 0.33.0 eedaa57a6c9f8a67b5bdbc5658c060247685a72364625c8c85e12a7a76845d92 https://github.com/prometheus/alertmanager/releases/download/v0.33.0/alertmanager-0.33.0.darwin-amd64.tar.gz
+amtool darwin-arm64 0.33.0 597fbbb6c22d75755560377381326b52f9aad1f1a1dce746daccf357f502cda5 https://github.com/prometheus/alertmanager/releases/download/v0.33.0/alertmanager-0.33.0.darwin-arm64.tar.gz
