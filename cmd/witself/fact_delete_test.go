@@ -138,7 +138,7 @@ func TestFactDeleteAddressFailurePrintsValueFreeExactReplayCommand(t *testing.T)
 				http.NotFound(w, r)
 			}))
 			defer srv.Close()
-			tokenFile := factDeleteTokenFile(t)
+			tokenFile := factDeleteReplayTokenFile(t)
 
 			stdout, stderr, code := captureFactDeleteCLI(t, func() int {
 				return run([]string{
@@ -164,7 +164,7 @@ func TestFactDeleteAddressFailurePrintsValueFreeExactReplayCommand(t *testing.T)
 					t.Errorf("replay output omitted %q: %q", want, stderr)
 				}
 			}
-			assertValueFreeFactDeletionOutput(t, stderr, secret, "person_spouse", "identity/name")
+			assertValueFreeFactDeletionReplayOutput(t, stderr, exactCommand, quoteFactDeletionReplayArg(tokenFile), secret, "person_spouse", "identity/name")
 		})
 	}
 }
@@ -425,16 +425,260 @@ func captureFactDeleteCLI(t *testing.T, fn func() int) (stdout, stderr string, c
 	return string(outBytes), string(errBytes), code
 }
 
-func assertValueFreeFactDeletionOutput(t *testing.T, output string, forbidden ...string) {
-	t.Helper()
+// factDeletionOutputIssue returns only fixed categories, never captured output.
+// Values are checked on the original bytes before any field-scan exception.
+func factDeletionOutputIssue(output, expectedCommand, expectedTokenArgument string, forbidden ...string) string {
 	for _, value := range forbidden {
 		if strings.Contains(output, value) {
-			t.Errorf("deletion output leaked %q: %q", value, output)
+			return "forbidden_value"
 		}
+	}
+	fieldOutput := output
+	if expectedCommand != "" || expectedTokenArgument != "" {
+		const header = "witself: exact value-free replay command:"
+		const option = " --token-file "
+		// Token-file is the last optional connection argument, immediately before
+		// --yes. Match the independently supplied command, not a parsed output path.
+		slot := option + expectedTokenArgument + " --yes "
+		if expectedCommand == "" || len(expectedTokenArgument) < 2 ||
+			!strings.HasPrefix(expectedTokenArgument, "'") || !strings.HasSuffix(expectedTokenArgument, "'") ||
+			strings.ContainsAny(expectedCommand, "\r\n") ||
+			!strings.HasPrefix(expectedCommand, "witself fact delete ") ||
+			strings.Count(expectedCommand, option) != 1 ||
+			strings.Count(expectedCommand, expectedTokenArgument) != 1 ||
+			strings.Count(expectedCommand, slot) != 1 ||
+			strings.Count(output, expectedCommand) != 1 || strings.Count(output, header) != 1 {
+			return "replay_structure"
+		}
+		argumentStart := -1
+		// Accept the two explicit emission framings without normalizing other bytes.
+		for _, newline := range []string{"\n", "\r\n"} {
+			prefix := header + newline + "  "
+			frame := prefix + expectedCommand + newline
+			at := strings.Index(output, frame)
+			if at >= 0 && (at == 0 || output[at-1] == '\n') {
+				if argumentStart != -1 {
+					return "replay_structure"
+				}
+				argumentStart = at + len(prefix) + strings.Index(expectedCommand, slot) + len(option)
+			}
+		}
+		if argumentStart == -1 {
+			return "replay_structure"
+		}
+		// Remove only this argument span. Identical bytes elsewhere stay in scope.
+		fieldOutput = output[:argumentStart] + output[argumentStart+len(expectedTokenArgument):]
 	}
 	for _, field := range []string{"source_ref", "evidence", "value="} {
-		if strings.Contains(strings.ToLower(output), field) {
-			t.Errorf("deletion output contains forbidden content field %q: %q", field, output)
+		if strings.Contains(strings.ToLower(fieldOutput), field) {
+			return "content_field"
 		}
 	}
+	return ""
+}
+
+type factDeletionOutputReporter interface {
+	Helper()
+	Errorf(string, ...any)
+}
+
+func assertValueFreeFactDeletionOutput(t factDeletionOutputReporter, output string, forbidden ...string) {
+	t.Helper()
+	if issue := factDeletionOutputIssue(output, "", "", forbidden...); issue != "" {
+		t.Errorf("fact deletion privacy issue: %s", issue)
+	}
+}
+
+func assertValueFreeFactDeletionReplayOutput(t *testing.T, output, expectedCommand, expectedTokenArgument string, forbidden ...string) {
+	t.Helper()
+	if issue := factDeletionOutputIssue(output, expectedCommand, expectedTokenArgument, forbidden...); issue != "" {
+		t.Errorf("fact deletion privacy issue: %s", issue)
+	}
+}
+
+func factDeleteReplayTokenFile(t *testing.T) string {
+	t.Helper()
+	path := factDeleteTokenFile(t)
+	// Make the historical field-word collision deterministic on every host.
+	replayPath := filepath.Join(filepath.Dir(path), "EvIdEnCe-"+filepath.Base(path))
+	if err := os.Rename(path, replayPath); err != nil {
+		t.Fatal("replay token fixture relocation failed")
+	}
+	return replayPath
+}
+
+type factDeletionReplayOracleFixture struct {
+	command, argument, output string
+	forbidden                 []string
+}
+
+func newFactDeletionReplayOracleFixture(t *testing.T, argument, newline string) factDeletionReplayOracleFixture {
+	t.Helper()
+	// Use existing deletion fixtures; the quoted argument is supplied independently.
+	f := factDeletionReplayOracleFixture{
+		argument:  argument,
+		forbidden: []string{"DELETE_ME_SECRET_VALUE", "person_spouse", "identity/name"},
+	}
+	f.command = "witself fact delete --token-file " + argument +
+		" --yes --fact-id " + quoteFactDeletionReplayArg("fact_spouse") +
+		" --expected-assertion-id " + quoteFactDeletionReplayArg("fas_current") +
+		" --expected-candidate-revision " + quoteFactDeletionReplayArg(testFactCandidateRevision) +
+		" --idempotency-key " + quoteFactDeletionReplayArg("delete-stable-1")
+	f.output = "witself: exact value-free replay command:" + newline + "  " + f.command + newline
+	// This precondition does not use the oracle: field-word permission must never
+	// accidentally make a positive fixture a forbidden-value fixture.
+	for _, value := range f.forbidden {
+		if strings.Contains(f.output, value) {
+			t.Fatal("positive fixture contains forbidden value")
+		}
+	}
+	return f
+}
+
+func TestFactDeletionReplayPathOracleAcceptsExpectedArgument(t *testing.T) {
+	for _, tc := range []struct {
+		name, argument, newline, want string
+	}{
+		{name: "canonical_lf", argument: "'EvIdEnCe'", newline: "\n", want: ""},
+		{name: "canonical_crlf", argument: "'EvIdEnCe'", newline: "\r\n", want: ""},
+		{name: "lowercase", argument: "'evidence'", newline: "\n", want: ""},
+		{name: "uppercase", argument: "'EVIDENCE'", newline: "\n", want: ""},
+		{name: "quoted_space_lf", argument: "'EvIdEnCe space'", newline: "\n", want: ""},
+		{name: "quoted_space_crlf", argument: "'EvIdEnCe space'", newline: "\r\n", want: ""},
+		{name: "quoted_apostrophe_lf", argument: "'EvIdEnCe'\"'\"' space'", newline: "\n", want: ""},
+		{name: "quoted_apostrophe_crlf", argument: "'EvIdEnCe'\"'\"' space'", newline: "\r\n", want: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFactDeletionReplayOracleFixture(t, tc.argument, tc.newline)
+			if got := factDeletionOutputIssue("error: retry required"+tc.newline+f.output+"retry pending"+tc.newline, f.command, f.argument, f.forbidden...); got != tc.want {
+				t.Fatalf("oracle issue = %q, want %q", got, tc.want)
+			}
+		})
+	}
+	for _, tc := range []struct{ name, output, want string }{
+		{name: "ordinary_empty", output: "", want: ""},
+		{name: "ordinary_safe", output: "error: retry required\n", want: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := factDeletionOutputIssue(tc.output, "", ""); got != tc.want {
+				t.Fatalf("oracle issue = %q, want %q", got, tc.want)
+			}
+			assertValueFreeFactDeletionOutput(t, tc.output)
+		})
+	}
+}
+
+func TestFactDeletionReplayPathOracleRejectsUnexpectedContent(t *testing.T) {
+	f := newFactDeletionReplayOracleFixture(t, "'EvIdEnCe'", "\n")
+	for _, field := range []struct{ name, text string }{
+		{name: "source_reference", text: "source_ref"},
+		{name: "evidence_field", text: "evidence"},
+		{name: "value_assignment", text: "value="},
+	} {
+		for _, casing := range []struct{ name, text string }{
+			{name: "lower", text: strings.ToLower(field.text)},
+			{name: "upper", text: strings.ToUpper(field.text)},
+		} {
+			for _, tc := range []struct{ name, output, command, argument, want string }{
+				{name: "ordinary_error", output: "error: " + casing.text, want: "content_field"},
+				{name: "outside_frame", output: "error: " + casing.text + "\n" + f.output, command: f.command, argument: f.argument, want: "content_field"},
+				{name: "elsewhere_on_replay_line", output: strings.Replace(f.output, " --yes ", " --yes "+casing.text+" ", 1), command: strings.Replace(f.command, " --yes ", " --yes "+casing.text+" ", 1), argument: f.argument, want: "content_field"},
+			} {
+				t.Run(field.name+"/"+casing.name+"/"+tc.name, func(t *testing.T) {
+					if got := factDeletionOutputIssue(tc.output, tc.command, tc.argument, f.forbidden...); got != tc.want {
+						t.Fatalf("oracle issue = %q, want %q", got, tc.want)
+					}
+				})
+			}
+		}
+	}
+	for _, tc := range []struct{ name, output, command, argument, want string }{
+		{name: "identical_path_outside_command", output: f.output + f.argument + "\n", command: f.command, argument: f.argument, want: "content_field"},
+		{name: "unexpected_path", output: strings.Replace(f.output, f.argument, "'other'", 1), command: f.command, argument: f.argument, want: "replay_structure"},
+		{name: "second_token_option", output: strings.Replace(f.output, " --yes ", " --token-file 'other' --yes ", 1), command: f.command, argument: f.argument, want: "replay_structure"},
+		{name: "ambiguous_expected_option", output: strings.Replace(f.output, " --yes ", " --token-file 'other' --yes ", 1), command: strings.Replace(f.command, " --yes ", " --token-file 'other' --yes ", 1), argument: f.argument, want: "replay_structure"},
+		{name: "repeated_expected_argument", output: strings.Replace(f.output, " --yes ", " --yes "+f.argument+" ", 1), command: strings.Replace(f.command, " --yes ", " --yes "+f.argument+" ", 1), argument: f.argument, want: "replay_structure"},
+		{name: "wrong_expected_argument", output: f.output, command: f.command, argument: "'other'", want: "replay_structure"},
+		{name: "unquoted_expected_argument", output: f.output, command: f.command, argument: "EvIdEnCe", want: "replay_structure"},
+		{name: "missing_expected_argument", output: f.output, command: f.command, want: "replay_structure"},
+		{name: "missing_expected_command", output: f.output, argument: f.argument, want: "replay_structure"},
+		{name: "absent_command", output: "error: retry required\n", command: f.command, argument: f.argument, want: "replay_structure"},
+		{name: "corrupted_command", output: strings.Replace(f.output, " --yes ", " --no ", 1), command: f.command, argument: f.argument, want: "replay_structure"},
+		{name: "duplicate_frame", output: f.output + f.output, command: f.command, argument: f.argument, want: "replay_structure"},
+		{name: "repeated_command_outside_frame", output: f.output + f.command, command: f.command, argument: f.argument, want: "replay_structure"},
+		{name: "unframed_command", output: f.command, command: f.command, argument: f.argument, want: "replay_structure"},
+		{name: "corrupted_header", output: strings.Replace(f.output, "replay command:", "replay:", 1), command: f.command, argument: f.argument, want: "replay_structure"},
+		{name: "header_not_at_line_start", output: "prefix " + f.output, command: f.command, argument: f.argument, want: "replay_structure"},
+		{name: "missing_trailing_newline", output: strings.TrimSuffix(f.output, "\n"), command: f.command, argument: f.argument, want: "replay_structure"},
+		{name: "wrong_indentation", output: strings.Replace(f.output, "\n  ", "\n ", 1), command: f.command, argument: f.argument, want: "replay_structure"},
+		{name: "mixed_frame_newlines", output: strings.Replace(f.output, "\n", "\r\n", 1), command: f.command, argument: f.argument, want: "replay_structure"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := factDeletionOutputIssue(tc.output, tc.command, tc.argument, f.forbidden...); got != tc.want {
+				t.Fatalf("oracle issue = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+type factDeletionOutputProbe struct{ issues []string }
+
+func (*factDeletionOutputProbe) Helper() {}
+
+func (p *factDeletionOutputProbe) Errorf(_ string, args ...any) {
+	issue, ok := args[0].(string)
+	if !ok {
+		issue = "invalid_diagnostic"
+	}
+	p.issues = append(p.issues, issue)
+}
+
+func TestFactDeletionReplayPathOraclePreservesForbiddenValues(t *testing.T) {
+	f := newFactDeletionReplayOracleFixture(t, "'EvIdEnCe'", "\n")
+	for _, value := range []struct{ name, text string }{
+		{name: "original_value", text: "DELETE_ME_SECRET_VALUE"},
+		{name: "original_subject", text: "person_spouse"},
+		{name: "original_predicate", text: "identity/name"},
+	} {
+		argument := "'EvIdEnCe/" + value.text + "'"
+		for _, tc := range []struct{ name, output, command, argument, want string }{
+			{name: "inside_expected_argument", output: strings.Replace(f.output, f.argument, argument, 1), command: strings.Replace(f.command, f.argument, argument, 1), argument: argument, want: "forbidden_value"},
+			{name: "outside_expected_argument", output: f.output + value.text, command: f.command, argument: f.argument, want: "forbidden_value"},
+			{name: "ordinary_output", output: value.text, want: "forbidden_value"},
+		} {
+			t.Run(value.name+"/"+tc.name, func(t *testing.T) {
+				if got := factDeletionOutputIssue(tc.output, tc.command, tc.argument, f.forbidden...); got != tc.want {
+					t.Fatalf("oracle issue = %q, want %q", got, tc.want)
+				}
+			})
+		}
+		t.Run(value.name+"/ordinary_helper", func(t *testing.T) {
+			var probe factDeletionOutputProbe
+			assertValueFreeFactDeletionOutput(&probe, value.text, f.forbidden...)
+			if len(probe.issues) != 1 || probe.issues[0] != "forbidden_value" {
+				t.Fatal("ordinary helper missed forbidden_value")
+			}
+		})
+	}
+	for _, field := range []struct{ name, text string }{
+		{name: "source_reference", text: "source_ref"},
+		{name: "evidence_field", text: "evidence"},
+		{name: "value_assignment", text: "value="},
+	} {
+		t.Run("ordinary_helper/"+field.name, func(t *testing.T) {
+			var probe factDeletionOutputProbe
+			assertValueFreeFactDeletionOutput(&probe, "error: "+strings.ToUpper(field.text), f.forbidden...)
+			if len(probe.issues) != 1 || probe.issues[0] != "content_field" {
+				t.Fatal("ordinary helper missed content_field")
+			}
+		})
+	}
+	t.Run("ordinary_helper/replay_remains_strict", func(t *testing.T) {
+		var probe factDeletionOutputProbe
+		assertValueFreeFactDeletionOutput(&probe, f.output, f.forbidden...)
+		if len(probe.issues) != 1 || probe.issues[0] != "content_field" {
+			t.Fatal("ordinary helper exempted replay argument")
+		}
+	})
+
 }
