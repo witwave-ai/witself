@@ -853,6 +853,10 @@ set -euo pipefail
 printf 'roll-cell' >>"$TEST_LOG"
 printf ' <%s>' "$@" >>"$TEST_LOG"
 printf '\n' >>"$TEST_LOG"
+if [ "$SCENARIO" = evidence_ages_out ] && [ "$1" = civo-sandbox-use1-serving ]; then
+  printf 'roll-cell: backup evidence exceeds max age at wave 2\n' >&2
+  exit 1
+fi
 printf '%s\n' "$1" >"$STATE_DIR/cell"
 if [[ "$SCENARIO" = digest_* ]]; then
   pin=$BACKUP_DIGEST
@@ -1172,6 +1176,41 @@ for args in '' 'v1.2.3' '1.2' '1.2.3 --unknown' '1.2.3 --cells' '1.2.3 --cells o
   assert_no_wave
 done
 printf 'roll train test: usage refusals passed\n'
+
+# Age validation must finish before any operational command or desired-state
+# edit, even when valid evidence paths have already been supplied.
+mkdir -p "$TEST_ROOT/evidence backup" "$TEST_ROOT/evidence serving" "$TEST_ROOT/validation-values"
+for cell in "$BACKUP" "$SERVING" "$PRODUCTION"; do
+  cp "$FIXTURE_ROOT/.gitops/cells/$cell/values.yaml" "$TEST_ROOT/validation-values/$cell.yaml"
+done
+assert_age_usage_refusal() {
+  local status=0 cell
+  bash "$TRAIN" "$VERSION" --workdir "$TEST_ROOT/work" "$@" >"$TEST_ROOT/output" 2>&1 || status=$?
+  [ "$status" -eq 2 ] || fail 'evidence age validation did not return usage exit 2'
+  [ ! -s "$TEST_LOG" ] || fail 'evidence age validation reached an operational command'
+  [ ! -e "$TEST_ROOT/work" ] || fail 'evidence age validation created a workdir'
+  for cell in "$BACKUP" "$SERVING" "$PRODUCTION"; do
+    cmp -s "$FIXTURE_ROOT/.gitops/cells/$cell/values.yaml" "$TEST_ROOT/validation-values/$cell.yaml" \
+      || fail 'evidence age validation changed values'
+  done
+}
+for invalid in 0 0h 0m 73h 4321m 1.5h -1h 24 1d 24H '' --dry-run \
+  00h 024h 0001m 999999999999999999999999999999h; do
+  reset_case
+  assert_age_usage_refusal --backup-evidence "$TEST_ROOT/evidence backup" \
+    --backup-evidence "$TEST_ROOT/evidence serving" --evidence-max-age "$invalid"
+done
+reset_case
+assert_age_usage_refusal --backup-evidence "$TEST_ROOT/evidence backup" --evidence-max-age
+reset_case
+assert_age_usage_refusal --no-schema-change --evidence-max-age 24h
+reset_case
+assert_age_usage_refusal --first-sync --evidence-max-age 24h
+reset_case
+assert_age_usage_refusal --evidence-max-age 24h --dry-run
+reset_case
+assert_age_usage_refusal --backup-evidence "$TEST_ROOT/evidence backup" --evidence-max-age 1h --evidence-max-age 24h
+printf 'roll train test: evidence age invalid spellings and incompatible routes refuse before operations or edits\n'
 
 reset_case
 bash "$TRAIN" "$VERSION" --no-schema-change --dry-run --workdir "$TEST_ROOT/work" >"$TEST_ROOT/output" 2>&1 \
@@ -1926,6 +1965,36 @@ assert_roll_cell_calls 'backup evidence gate arguments were not forwarded exactl
 [ -d "$TEST_ROOT/relative-work" ] || fail 'relative --workdir was not resolved from invocation directory'
 if grep -Fq '<--no-schema-change>' "$TEST_LOG"; then fail 'evidence path introduced a schema attestation'; fi
 printf 'roll train test: evidence pair and paths with spaces reach both gates exactly; relative workdir preserved\n'
+
+# The default call above deliberately contains no age override. Explicit bounds
+# retain their spelling, including minute units, in both separate wave calls.
+for age in 1m 1h 1439m 72h 4320m; do
+  reset_case
+  bash "$TRAIN" "$VERSION" --backup-evidence "$TEST_ROOT/evidence backup" \
+    --backup-evidence "$TEST_ROOT/evidence serving" --evidence-max-age "$age" \
+    --workdir "$TEST_ROOT/work" --poll-interval 1 >"$TEST_ROOT/output" 2>&1 \
+    || fail 'valid evidence age override was rejected'
+  age_gate="<--evidence-cells> <$BACKUP,$SERVING> <--evidence-max-age> <$age> <--backup-evidence> <$TEST_ROOT/evidence backup> <--backup-evidence> <$TEST_ROOT/evidence serving>"
+  assert_roll_cell_calls 'evidence age override was not forwarded byte-for-byte once per wave' \
+    "roll-cell <$BACKUP> <$VERSION> $age_gate" \
+    "roll-cell <$SERVING> <$VERSION> $age_gate"
+done
+printf 'roll train test: evidence age boundaries and minute override reach both waves unchanged\n'
+
+reset_case
+SCENARIO=evidence_ages_out
+expect_failure "$VERSION" --backup-evidence "$TEST_ROOT/evidence backup" \
+  --backup-evidence "$TEST_ROOT/evidence serving" --evidence-max-age 1439m \
+  --workdir "$TEST_ROOT/work" --poll-interval 1
+age_gate="<--evidence-cells> <$BACKUP,$SERVING> <--evidence-max-age> <1439m> <--backup-evidence> <$TEST_ROOT/evidence backup> <--backup-evidence> <$TEST_ROOT/evidence serving>"
+assert_roll_cell_calls 'wave 2 did not independently check its evidence age gate' \
+  "roll-cell <$BACKUP> <$VERSION> $age_gate" \
+  "roll-cell <$SERVING> <$VERSION> $age_gate"
+grep -Fq 'backup evidence exceeds max age at wave 2' "$TEST_ROOT/output" \
+  || fail 'wave 2 evidence age failure was not propagated'
+[ "$(grep -Fc 'gh <pr> <merge>' "$TEST_LOG")" -eq 1 ] || fail 'stale wave 2 evidence was merged'
+[ "$(grep -Fc 'gh <pr> <create>' "$TEST_LOG")" -eq 1 ] || fail 'stale wave 2 evidence reached PR creation'
+printf 'roll train test: evidence aging out at the second wave stops before its PR\n'
 
 for scenario in delayed_checks delayed_required; do
   reset_case

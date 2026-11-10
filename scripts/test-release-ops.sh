@@ -1254,9 +1254,50 @@ for gate in --backup-evidence --no-schema-change; do
   run "$CHAIN" "${chain_args[@]}" --order cp-first --backup-evidence "$TEST_ROOT/evidence-backup" --backup-evidence "$TEST_ROOT/evidence-serving" --execute
   expect_rc 0
   line=$(grep '^child-train ' "$OUT/calls")
-  [[ "$line" == *"<--backup-evidence> <$TEST_ROOT/evidence-backup>"* && "$line" == *"<--backup-evidence> <$TEST_ROOT/evidence-serving>"* && "$line" != *'<--no-schema-change>'* ]] || fail 'T14 train evidence argv'
+  [[ "$line" == *"<--backup-evidence> <$TEST_ROOT/evidence-backup>"* && "$line" == *"<--backup-evidence> <$TEST_ROOT/evidence-serving>"* && "$line" != *'<--no-schema-change>'* && "$line" != *'<--evidence-max-age>'* ]] || fail 'T14 train evidence argv (default age must stay at roll-cell)'
 done
 pass 'T14 chain'
+
+for age in 1m 1h 1439m 72h 4320m; do
+  CASE="T22 chain evidence age $age"
+  chain_reset
+  RO_TEST_GATE=--backup-evidence
+  run "$CHAIN" "${chain_args[@]}" --order cp-first --backup-evidence "$TEST_ROOT/evidence-backup" \
+    --backup-evidence "$TEST_ROOT/evidence-serving" --evidence-max-age "$age" --execute
+  expect_rc 0
+  [ "$(grep -c '^child-train ' "$OUT/calls")" -eq 1 ] || fail 'T22 duplicate train call'
+  line=$(grep '^child-train ' "$OUT/calls")
+  [[ "$line" == *"<--backup-evidence> <$TEST_ROOT/evidence-backup> <--backup-evidence> <$TEST_ROOT/evidence-serving> <--evidence-max-age> <$age>"* ]] \
+    || fail 'T22 chain did not forward the evidence age spelling unchanged'
+  if grep '^child-' "$OUT/calls" | grep -v '^child-train ' | grep -Fq -- '<--evidence-max-age>'; then
+    fail 'T22 chain forwarded age outside the evidence train route'
+  fi
+done
+for invalid in 0 0h 0m 73h 4321m 1.5h -1h 24 1d 24H '' --execute \
+  00h 024h 0001m 999999999999999999999999999999h; do
+  CASE='T22 chain invalid evidence age'
+  chain_reset
+  run "$CHAIN" "${chain_args[@]}" --order cp-first --backup-evidence "$TEST_ROOT/evidence-backup" \
+    --backup-evidence "$TEST_ROOT/evidence-serving" --evidence-max-age "$invalid" --execute
+  expect_rc 2; no_action; absent "$OUT/calls" 'child-'
+  [ ! -e "$OUT/order" ] || fail 'T22 invalid age started a release stage'
+done
+for route in missing-value no-evidence no-schema-change first-sync duplicate; do
+  CASE="T22 chain age $route"
+  chain_reset
+  args=("${chain_args[@]}" --order cp-first --execute)
+  case "$route" in
+    missing-value) args+=(--backup-evidence "$TEST_ROOT/evidence-backup" --backup-evidence "$TEST_ROOT/evidence-serving" --evidence-max-age) ;;
+    no-evidence) args+=(--evidence-max-age 24h) ;;
+    no-schema-change) args+=(--no-schema-change --evidence-max-age 24h) ;;
+    first-sync) args+=(--first-sync --evidence-max-age 24h) ;;
+    duplicate) args+=(--backup-evidence "$TEST_ROOT/evidence-backup" --backup-evidence "$TEST_ROOT/evidence-serving" --evidence-max-age 1h --evidence-max-age 24h) ;;
+  esac
+  run "$CHAIN" "${args[@]}"
+  expect_rc 2; no_action; absent "$OUT/calls" 'child-'
+  [ ! -e "$OUT/order" ] || fail 'T22 invalid evidence route started a release stage'
+done
+pass 'T22 evidence age spelling, boundaries, forwarding and validation before release stages'
 
 for order in cp-first cells-first; do
   CASE="T13 $order"

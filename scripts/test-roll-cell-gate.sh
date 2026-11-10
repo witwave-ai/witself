@@ -557,15 +557,58 @@ $VERSION
 civo-sandbox-use1-backup
 --cell
 civo-sandbox-use1-serving
+--max-age
+24h
 --
 $EVIDENCE_A
 $EVIDENCE_B
 EOF_EXPECTED_ADMIN
 cmp -s "$TEST_ROOT/admin.expected" "$ADMIN_LOG" ||
-  fail "verifier argv or invocation count was incorrect"
-expect_output "backup evidence verified for release $VERSION" "verified backup evidence"
+  fail "evidence-age-default: verifier argv must contain exactly --max-age 24h before --"
+expect_output "backup evidence verified for release $VERSION (2 artifact directories; max age 24h)" "evidence-age-default"
 assert_values "$ROLLED" "verified backup evidence"
 [ ! -e "$KUBECTL_LOG" ] && [ ! -e "$PROBE_LOG" ] || fail 'an ordinary roll ran a first-sync check'
+
+# Whole-hour/minute boundary values reach the verifier unchanged, including a
+# non-hour minute value; the success output records the actual applied bound.
+for max_age in 1m 1h 1439m 72h 4320m; do
+  reset_case
+  run_roll "$CELL" "$VERSION" --backup-evidence "$EVIDENCE_A" \
+    --backup-evidence "$EVIDENCE_B" --evidence-max-age "$max_age" >"$CASE_OUTPUT" 2>&1 ||
+    fail "evidence-age-override: $max_age did not proceed"
+  sed "s/^24h$/$max_age/" "$TEST_ROOT/admin.expected" >"$TEST_ROOT/admin-age.expected"
+  cmp -s "$TEST_ROOT/admin-age.expected" "$ADMIN_LOG" ||
+    fail "evidence-age-override: $max_age changed verifier arguments"
+  expect_output "max age $max_age)" "evidence-age-override"
+  assert_values "$ROLLED" "evidence-age-override $max_age"
+done
+
+assert_age_usage_error() {
+  local label=$1 status=0
+  shift
+  reset_case
+  run_roll "$CELL" "$VERSION" "$@" >"$CASE_OUTPUT" 2>&1 || status=$?
+  [ "$status" -eq 2 ] || fail "$label: expected usage exit 2, got $status"
+  expect_output 'usage:' "$label"
+  [ ! -e "$ADMIN_LOG" ] || fail "$label: invoked verifier"
+  [ ! -e "$REGISTRY_LOG" ] || fail "$label: contacted registry"
+  [ ! -e "$KUBECTL_LOG" ] && [ ! -e "$PROBE_LOG" ] || fail "$label: ran first-sync checks"
+  assert_values "$BASELINE" "$label"
+}
+# Reject malformed, zero, excessive, leading-zero and overflowing inputs at
+# parsing, before the verifier, registry, first-sync checks, or values writes.
+for max_age in 0 0h 73h 4321m 1.5h -1h 24 1d 24H '' --no-schema-change \
+  0m 01h 024h 0001m +1h ' 1h' '1h ' 1h0m 999999999999999999999999h; do
+  assert_age_usage_error "evidence-age-invalid[$max_age]" \
+    --backup-evidence "$EVIDENCE_A" --evidence-max-age "$max_age"
+done
+assert_age_usage_error 'evidence-age-missing' --backup-evidence "$EVIDENCE_A" --evidence-max-age
+assert_age_usage_error 'evidence-age-duplicate' --backup-evidence "$EVIDENCE_A" \
+  --evidence-max-age 24h --evidence-max-age 24h
+for gate in --no-schema-change --first-sync; do
+  assert_age_usage_error "evidence-age-forbidden[$gate]" "$gate" --evidence-max-age 24h
+  assert_age_usage_error "evidence-age-forbidden-order[$gate]" --evidence-max-age 24h "$gate"
+done
 
 # A train always forwards its selected pair. The explicit default pair must
 # reach the verifier exactly as the standalone default does.
@@ -663,6 +706,8 @@ $VERSION
 civo-sandbox-use1-backup
 --cell
 civo-sandbox-use1-serving
+--max-age
+24h
 --
 $EVIDENCE_A
 $EVIDENCE_B
