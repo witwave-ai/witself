@@ -431,7 +431,7 @@ Rules for the push:
 
 1. T1 adds up to about 300 accounts **[PROPOSED]** to a directory that already holds the sandbox serving cell's accounts. Read the pass length from the total directory count, not from production's count.
 2. **[FOUNDER CHECKPOINT]** Before the directory passes about 800 entries **[PROPOSED]**, across all cells, the founder raises the page size to 20 (approved; 8.1). At about 800 entries the default pass dispatches until about 16:40Z, into wave hours.
-3. The pg_dump CronJob runs at 03:00 UTC with a one-hour deadline ([Scheduled PostgreSQL backups](backup-and-recovery.md#scheduled-postgresql-backups)), inside the account-export dispatch window. The load test must cover that overlap.
+3. The pg_dump CronJob runs at 03:00, 09:00, 15:00, and 21:00 UTC, each with a one-hour deadline ([Scheduled PostgreSQL backups](backup-and-recovery.md#scheduled-postgresql-backups)). The 03:00 run is inside the account-export dispatch window, and a pass long enough to reach wave hours also overlaps the 09:00 and 15:00 runs. The load test must cover that overlap.
 4. A stalled maintenance cron costs one page per missed tick (5.3).
 
 ### 8.1 Set the backup page size **[GAP] G6** **[FOUNDER CHECKPOINT]**

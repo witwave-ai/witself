@@ -39,7 +39,7 @@ apps:
       # Catalog postgres_backup enables the job and exporter query. Paging
       # also requires an independently enabled platform monitoring stack.
       enabled: false
-      schedule: "0 3 * * *"
+      schedule: "0 3,9,15,21 * * *"
       activeDeadlineSeconds: 3600
       # PostgreSQL 18 client plus Alpine's signed age/aws-cli packages at startup.
       legacyImage: postgres:18-alpine3.23

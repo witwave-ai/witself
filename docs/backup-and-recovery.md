@@ -1356,19 +1356,21 @@ intermediate values change.
 
 ### Scheduled PostgreSQL backups
 
-The cell apps chart includes a **default-off** daily logical dump to Cloudflare
-R2, outside the Kubernetes provider. The checked-in `.gitops/cells/catalog.yaml`
-sets `switches.postgres_backup: true` for `civo-sandbox-use1-serving` and keeps
+The cell apps chart includes a **default-off** logical dump every six hours to
+Cloudflare R2, outside the Kubernetes provider. The checked-in
+`.gitops/cells/catalog.yaml` sets `switches.postgres_backup: true` for
+`civo-sandbox-use1-serving` and keeps
 it `false` for `civo-sandbox-use1-backup`. These desired-state switches do not
 prove live backup acceptance. Publishing the purpose-built image changes
 neither switch and provisions no credentials or bucket policy.
 This is **not PITR**: there is no WAL archive or recovery between dumps, and a
-successful daily schedule can still lose nearly 24 hours of writes. It does not
-replace the separate pre-migration backup and restore-validation gate below.
+healthy schedule has a recovery point of about 6 hours plus dump time. It does
+not replace the separate pre-migration backup and restore-validation gate below.
 
-`witself-postgresql-backup` runs at 03:00 UTC with `concurrencyPolicy: Forbid`,
-no automatic retry, a one-hour deadline, and one successful/three failed Job
-records retained. It streams `pg_dump --no-owner --no-privileges | gzip | age -r`
+`witself-postgresql-backup` runs at 03:00, 09:00, 15:00, and 21:00 UTC with
+`concurrencyPolicy: Forbid`, no automatic retry, a one-hour deadline, and one
+successful/three failed Job records retained. It streams
+`pg_dump --no-owner --no-privileges | gzip | age -r`
 to the S3 API. Plaintext dump files are never written. Each object is first
 uploaded with an `.incomplete` suffix and promoted within the same bucket/prefix
 only after every pipeline stage succeeds and R2 reports a nonzero encrypted
@@ -1575,8 +1577,9 @@ For operator activation on a provisioned cell:
    row, and a disposable restore before recording backup acceptance. On a
    monitored cell, also verify the exported metrics and alert-rule loading;
    record paging acceptance only after receiver delivery is separately proven.
-   Do not run manual Jobs concurrently with the scheduled Job;
-   Kubernetes' `Forbid` applies only to Jobs created by the CronJob controller.
+   Do not run manual Jobs concurrently with scheduled Jobs in the 03:00, 09:00,
+   15:00, or 21:00 UTC windows; Kubernetes' `Forbid` applies only to Jobs created
+   by the CronJob controller.
 
 The chart's existing Bitnami `postgres_exporter` supports custom SQL queries;
 it has no textfile collector or Pushgateway. The Job inserts one row per attempt
@@ -1601,7 +1604,7 @@ a replacement cluster after provisioning.
 
 When the rules render, `WitselfPostgresBackupStale` fires after five minutes
 without a successful-backup series, with a zero last-success timestamp, or with
-a success older than 26 hours. A never-successful backup therefore alerts after
+a success older than 8 hours. A never-successful backup therefore alerts after
 activation. `WitselfPostgresBackupFailed` fires immediately for a completed
 failed latest attempt, or when an unfinished attempt exceeds 7,200 seconds (the
 chart's maximum configurable deadline). It remains firing until a later attempt

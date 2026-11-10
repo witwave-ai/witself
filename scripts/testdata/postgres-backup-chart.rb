@@ -64,7 +64,24 @@ end
 docs = documents(chart, cell, *enabled)
 job = named(docs, 'CronJob', 'witself-postgresql-backup')
 check('enabled backup must render exactly one CronJob', job && docs.count { |doc| doc['kind'] == 'CronJob' } == 1)
-check('daily backup schedule must use UTC', job.dig('spec', 'schedule') == '0 3 * * *' && job.dig('spec', 'timeZone') == 'Etc/UTC')
+# Couple the chart defaults to the actual rendered alert, including the gap
+# across midnight. An average interval would miss an uneven cron hour list.
+schedule = defaults.dig('apps', 'civoPostgres', 'backup', 'schedule').match(/\A0 ([0-9]+(?:,[0-9]+)*) \* \* \*\z/)
+check('backup drift guard requires a daily cron hour list', schedule)
+hours = schedule[1].split(',').map { |hour| Integer(hour, 10) }.sort
+check('backup cron hours must be unique and within a day', hours.uniq == hours && hours.all? { |hour| (0..23).cover?(hour) })
+gap = (hours + [hours.first + 24]).each_cons(2).map { |first, last| (last - first) * 3600 }.max
+platform = File.join(root, '.gitops/charts/platform')
+monitoring = named(documents(platform, cell, *enabled,
+  'platform.monitoring.enabled=true', 'platform.monitoring.postgresBackupAlerts.enabled=true'), 'Application', 'witself-monitoring')
+monitoring_values = YAML.safe_load(monitoring.dig('spec', 'source', 'helm', 'values'), aliases: false)
+rules = monitoring_values.fetch('additionalPrometheusRulesMap').fetch('postgres-backup').fetch('groups').flat_map { |group| group.fetch('rules') }
+stale = rules.find { |rule| rule['alert'] == 'WitselfPostgresBackupStale' }
+threshold = stale.fetch('expr').match(/\Atime\(\) - max by \(namespace\) \(.*?\)\s*>\s*([0-9]+)\s+or\b/m)
+check('backup stale rule must expose its age threshold', threshold)
+check('backup stale threshold must equal largest scheduled gap plus scheduler and job deadlines',
+  Integer(threshold[1], 10) == gap + job.dig('spec', 'startingDeadlineSeconds') + job.dig('spec', 'jobTemplate', 'spec', 'activeDeadlineSeconds'))
+check('six-hour backup schedule must use UTC', job.dig('spec', 'schedule') == '0 3,9,15,21 * * *' && job.dig('spec', 'timeZone') == 'Etc/UTC')
 check('backup must forbid concurrent jobs and bound history', job.dig('spec', 'concurrencyPolicy') == 'Forbid' && job.dig('spec', 'successfulJobsHistoryLimit') == 1 && job.dig('spec', 'failedJobsHistoryLimit') == 3)
 check('backup must bound job and scheduler deadlines without retries', job.dig('spec', 'startingDeadlineSeconds') == 3600 && job.dig('spec', 'jobTemplate', 'spec', 'activeDeadlineSeconds') == 3600 && job.dig('spec', 'jobTemplate', 'spec', 'backoffLimit') == 0)
 pod = job.dig('spec', 'jobTemplate', 'spec', 'template')
