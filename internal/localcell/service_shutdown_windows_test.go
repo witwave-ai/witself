@@ -179,6 +179,52 @@ func (f windowsShutdownFixture) completionClass() string {
 	return shutdownFixtureCompletionClass(handled, err, code, exitErr)
 }
 
+// Replay the descriptor reader's checks separately so its fixed refusal does
+// not hide which observation currently fails. This is a later snapshot, not a
+// record of the original failure; a transient conflict may already be gone.
+func shutdownFixtureReadDescriptor(root, path string) (serviceShutdownDescriptor, string, error) {
+	if !shutdownDescriptorPath(root, path) {
+		return serviceShutdownDescriptor{}, "path", shutdownRefused("shutdown:descriptor")
+	}
+	for _, check := range []struct {
+		step string
+		read func() error
+	}{
+		{"tree", func() error { return validatePrivateTree(root) }},
+		{"root", func() error { return privateDir(root, false) }},
+		{"service_dir", func() error { return privateDir(filepath.Join(root, "service"), false) }},
+		{"children", func() error { return privateDir(filepath.Join(root, "service", "children"), false) }},
+		{"record", func() error { return servicePrivateRecord(path) }},
+	} {
+		if err := check.read(); err != nil {
+			return serviceShutdownDescriptor{}, check.step, err
+		}
+	}
+	file, err := openPrivateFile(path, os.O_RDONLY, 0)
+	if err != nil {
+		return serviceShutdownDescriptor{}, "open", err
+	}
+	defer func() { _ = file.Close() }()
+	d, err := decodeShutdownDescriptor(file)
+	if err != nil {
+		return d, "decode", err
+	}
+	return d, "none", nil
+}
+
+func (f windowsShutdownFixture) descriptorClass() string {
+	d, step, readErr := shutdownFixtureReadDescriptor(f.cell.cfg.Root, f.record.ShutdownDescriptor)
+	rootErr := f.cell.validateRoot(false)
+	service, serviceErr := f.cell.ServiceDescriptor()
+	boot, bootErr := serviceBootID()
+	match := shutdownFixtureDescriptorMatchClass(d, f.record, service, boot, readErr, serviceErr, bootErr)
+	pending, scanErr := shutdownFixturePendingCount(f.cell.cfg.Root)
+	return "descriptor=" + step + " error=" + shutdownFixtureObservationClass(readErr) +
+		" root=" + shutdownFixtureObservationClass(rootErr) + " service=" + shutdownFixtureObservationClass(serviceErr) +
+		" boot=" + shutdownFixtureObservationClass(bootErr) + " match=" + match +
+		" pending=" + shutdownFixtureCountClass(pending) + " scan=" + shutdownFixtureObservationClass(scanErr)
+}
+
 // Measure this test binary's process startup before selecting behavioural waits.
 func shutdownFixtureStartup(t *testing.T, c *Cell) time.Duration {
 	t.Helper()
@@ -263,7 +309,9 @@ func waitShutdownMarker(t *testing.T, path string, budget time.Duration) {
 	ctx, cancel := context.WithTimeout(t.Context(), budget)
 	defer cancel()
 	for {
-		if _, err := os.Stat(path); err == nil {
+		// Final-name visibility alone can precede the publisher's DELETE-handle
+		// close. A successful private read also fences that rename handle.
+		if _, err := readPrivateFile(path); err == nil {
 			return
 		}
 		select {
@@ -702,6 +750,9 @@ func TestWindowsShutdownParentDeadline(t *testing.T) {
 	if err != nil || !ack.Accepted || ack.Phase != shutdownPhaseReady {
 		t.Fatal("deadline fixture never accepted runtime-ready cancellation")
 	}
+	// The ACK precedes both fixture-only marker publications. The completion
+	// marker follows the callback; fence both before starting the measured stop.
+	waitShutdownMarker(t, f.cell.path("tmp", "cancel-handled"), shutdownFixtureLivenessBudget(f.startup))
 	parentBudget := shutdownFixtureBudget(f.startup)
 	ctx, cancel := context.WithTimeout(t.Context(), parentBudget)
 	defer cancel()
@@ -709,6 +760,7 @@ func TestWindowsShutdownParentDeadline(t *testing.T) {
 	outcome := f.cell.stopChildOutcomeWithBudget(ctx, "server", ProcessState{PID: f.record.PID, Alive: true, Matches: true}, 8*parentBudget)
 	if outcome.Kind != serviceStopUnknown || outcome.Detail != "shutdown:deadline" || ctx.Err() != context.DeadlineExceeded {
 		t.Logf("shutdown parent deadline class: %s", shutdownFixtureDeadlineClass(outcome, ctx.Err()))
+		t.Logf("shutdown descriptor replay class: %s", f.descriptorClass())
 		t.Fatal("parent exhaustion did not raise at the actual shutdown deadline")
 	}
 	// The allowance scales with this fixture's floored shutdown budget. A

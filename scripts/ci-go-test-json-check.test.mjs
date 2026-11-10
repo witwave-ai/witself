@@ -855,6 +855,26 @@ const shutdownClassDiagnostics = [
       'kind=fail detail=fail context=fail outcome=other',
     ],
   },
+  {
+    name: 'TestWindowsShutdownParentDeadline',
+    prefix: 'shutdown descriptor replay class: ',
+    fatal: 'parent exhaustion did not raise at the actual shutdown deadline',
+    values: [
+      ...['none', 'path', 'tree', 'root', 'service_dir', 'children', 'record', 'open', 'decode']
+        .map(descriptor => `descriptor=${descriptor} error=none root=none service=none boot=none match=pass pending=zero scan=none`),
+      ...['error', 'root', 'service', 'boot', 'scan'].flatMap(field =>
+        ['sharing', 'access', 'missing', 'other'].map(value =>
+          'descriptor=none error=none root=none service=none boot=none match=pass pending=zero scan=none'
+            .replace(`${field}=none`, `${field}=${value}`))),
+      ...['unreadable', 'record', 'boot', 'installation', 'generation']
+        .map(match => `descriptor=none error=none root=none service=none boot=none match=${match} pending=zero scan=none`),
+      // Decimal digits are spelled separately so the exact count stays within
+      // the existing word-only class vocabulary (one,two means twelve).
+      ...['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'one,two']
+        .map(pending => `descriptor=none error=none root=none service=none boot=none match=pass pending=${pending} scan=none`),
+      'descriptor=service_dir error=sharing root=sharing service=sharing boot=sharing match=installation pending=one,two scan=sharing',
+    ],
+  },
 ];
 
 function shutdownClassEvents(row, value, action = 'fail') {
@@ -895,6 +915,18 @@ test('Windows shutdown class diagnostics reject private values and stay failed-o
       const counts = action === 'skip' ? {[packages[0]]: {pass: 0, skip: 1, names: [row.name]}} : {};
       assert.equal(`${result.lines.join('\n')}\n`, summary(counts));
     }
+  }
+});
+
+test('Windows shutdown descriptor replay count preserves the word-only privacy boundary', async () => {
+  const row = shutdownClassDiagnostics.find(entry => entry.prefix === 'shutdown descriptor replay class: ');
+  for (const pending of ['12', 'one,untrustedprivatevalue', 'C:\\private', 'one,two private-value: details']) {
+    const value = `descriptor=none error=none root=none service=none boot=none match=pass pending=${pending} scan=none`;
+    const result = await checkGoTestJSON([stream(shutdownClassEvents(row, value))]);
+    assert.equal(result.valid, false);
+    assert.deepEqual(result.lines.filter(line => line.startsWith('class ')),
+      [`class ${packages[0]} ${row.name} :: ${row.prefix}(rejected)`]);
+    assert(!result.lines.join('\n').includes(pending));
   }
 });
 
