@@ -238,3 +238,153 @@ func TestServiceShutdownPolicyLostAckBudget(t *testing.T) {
 		})
 	}
 }
+
+func TestServiceShutdownPolicyLostAckPipeRefusal(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		lostACKs         int
+		finalError       error
+		exitAfter        time.Duration
+		exitViaVerify    bool
+		outerAfter       time.Duration
+		cancelOuter      bool
+		verifyErrorAfter time.Duration
+		kind             serviceStopKind
+		detail           string
+		requests         int
+		elapsed          time.Duration
+	}{
+		{
+			name: "pipe_refusal_then_wait_observes_exit", lostACKs: 1, finalError: shutdownRefused("shutdown:pipe"),
+			exitAfter: 60 * time.Millisecond, kind: serviceStopAlreadyExited, requests: 2, elapsed: 60 * time.Millisecond,
+		},
+		{
+			name: "pipe_refusal_then_verify_observes_exit", lostACKs: 1, finalError: shutdownRefused("shutdown:pipe"),
+			exitAfter: 60 * time.Millisecond, exitViaVerify: true, kind: serviceStopAlreadyExited, requests: 2, elapsed: 60 * time.Millisecond,
+		},
+		{
+			name: "pipe_refusal_until_app_budget", lostACKs: 1, finalError: shutdownRefused("shutdown:pipe"),
+			kind: serviceStopRefused, detail: "shutdown:pipe", requests: 2, elapsed: 100 * time.Millisecond,
+		},
+		{
+			name: "outer_deadline_while_deferred", lostACKs: 1, finalError: shutdownRefused("shutdown:pipe"),
+			exitAfter: 60 * time.Millisecond, outerAfter: 40 * time.Millisecond,
+			kind: serviceStopUnknown, detail: "shutdown:deadline", requests: 2, elapsed: 40 * time.Millisecond,
+		},
+		{
+			name: "outer_cancellation_while_deferred", lostACKs: 1, finalError: shutdownRefused("shutdown:pipe"),
+			exitAfter: 60 * time.Millisecond, outerAfter: 40 * time.Millisecond, cancelOuter: true,
+			kind: serviceStopUnknown, detail: "shutdown:deadline", requests: 2, elapsed: 40 * time.Millisecond,
+		},
+		{
+			name: "first_pipe_refusal_is_immediate", finalError: shutdownRefused("shutdown:pipe"),
+			kind: serviceStopRefused, detail: "shutdown:pipe", requests: 1,
+		},
+		{
+			name: "ack_refusal_after_loss_is_immediate", lostACKs: 1, finalError: shutdownRefused("shutdown:ack"),
+			kind: serviceStopRefused, detail: "shutdown:ack", requests: 2, elapsed: 25 * time.Millisecond,
+		},
+		{
+			name: "other_refusal_after_loss_is_immediate", lostACKs: 1, finalError: shutdownRefused("shutdown:descriptor"),
+			kind: serviceStopRefused, detail: "shutdown:descriptor", requests: 2, elapsed: 25 * time.Millisecond,
+		},
+		{
+			name: "non_refusal_error_then_exit", lostACKs: 1, finalError: errors.New("fixture transport error"),
+			exitAfter: 60 * time.Millisecond, kind: serviceStopAlreadyExited, requests: 2, elapsed: 60 * time.Millisecond,
+		},
+		{
+			name: "non_refusal_error_until_app_budget", lostACKs: 1, finalError: errors.New("fixture transport error"),
+			kind: serviceStopRefused, detail: "shutdown:pipe", requests: 2, elapsed: 100 * time.Millisecond,
+		},
+		{
+			name: "wrapped_pipe_refusal_then_exit", lostACKs: 1, finalError: errors.Join(shutdownRefused("shutdown:pipe")),
+			exitAfter: 60 * time.Millisecond, kind: serviceStopAlreadyExited, requests: 2, elapsed: 60 * time.Millisecond,
+		},
+		{
+			name: "two_lost_acks_then_pipe_refusal_and_exit", lostACKs: 2, finalError: shutdownRefused("shutdown:pipe"),
+			exitAfter: 80 * time.Millisecond, kind: serviceStopAlreadyExited, requests: 3, elapsed: 80 * time.Millisecond,
+		},
+		{
+			name: "verify_error_while_deferred", lostACKs: 1, finalError: shutdownRefused("shutdown:pipe"),
+			verifyErrorAfter: 50 * time.Millisecond, kind: serviceStopUnknown, detail: "shutdown:incarnation", requests: 2, elapsed: 50 * time.Millisecond,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				const appBudget = 100 * time.Millisecond
+				started := time.Now()
+				outerBudget := 2 * appBudget
+				if tc.outerAfter != 0 && !tc.cancelOuter {
+					outerBudget = tc.outerAfter
+				}
+				ctx, cancel := context.WithTimeout(t.Context(), outerBudget)
+				defer cancel()
+				if tc.cancelOuter {
+					timer := time.AfterFunc(tc.outerAfter, cancel)
+					defer timer.Stop()
+				}
+				record := ProcessRecord{Component: "server", PID: 42, StartTime: "fixture-incarnation"}
+				request := serviceShutdownRequest{Action: "cancel", Component: record.Component, PID: record.PID, StartIdentity: record.StartTime}
+				requests, forceCalls := 0, 0
+				exited := func() bool {
+					return forceCalls != 0 || (tc.exitAfter != 0 && time.Since(started) >= tc.exitAfter)
+				}
+				process := serviceShutdownProcess{
+					verify: func(candidate ProcessRecord) (bool, error) {
+						if candidate != record {
+							t.Fatal("pipe-refusal proof changed the retained incarnation")
+						}
+						if tc.verifyErrorAfter != 0 && time.Since(started) >= tc.verifyErrorAfter {
+							return false, errors.New("fixture verification error")
+						}
+						return !exited(), nil
+					},
+					send: func(_ context.Context, got serviceShutdownRequest) (serviceShutdownResponse, error) {
+						if got != request {
+							t.Fatal("pipe-refusal proof changed the retained request")
+						}
+						requests++
+						if requests <= tc.lostACKs {
+							return serviceShutdownResponse{}, errShutdownAckLost
+						}
+						return serviceShutdownResponse{}, tc.finalError
+					},
+					wait: func(waitCtx context.Context, interval time.Duration) bool {
+						if interval != 25*time.Millisecond {
+							t.Fatal("pipe-refusal proof changed the polling interval")
+						}
+						if tc.exitAfter != 0 {
+							interval = min(interval, time.Until(started.Add(tc.exitAfter)))
+						}
+						timer := time.NewTimer(interval)
+						defer timer.Stop()
+						select {
+						case <-waitCtx.Done():
+						case <-timer.C:
+						}
+						synctest.Wait()
+						return exited() && !tc.exitViaVerify
+					},
+					force: func() error {
+						forceCalls++
+						return nil
+					},
+				}
+				outcome := runServiceShutdownPolicy(ctx, record, request, true, appBudget, process)
+				want := serviceStopOutcome{Kind: tc.kind, Component: record.Component, Detail: tc.detail}
+				if outcome != want {
+					t.Errorf("outcome kind=%s detail=%s; want kind=%s detail=%s", outcome.Kind, outcome.Detail, tc.kind, tc.detail)
+				}
+				if requests != tc.requests {
+					t.Errorf("sends=%d; want %d", requests, tc.requests)
+				}
+				if forceCalls != 0 {
+					t.Errorf("force called %d times without acceptance", forceCalls)
+				}
+				if elapsed := time.Since(started); elapsed != tc.elapsed {
+					t.Errorf("fake elapsed=%s; want %s", elapsed, tc.elapsed)
+				}
+			})
+		})
+	}
+}
