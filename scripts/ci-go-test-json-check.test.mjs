@@ -830,6 +830,74 @@ test('class diagnostics enroll the real journal repair format and reject an unkn
   }
 });
 
+const shutdownClassDiagnostics = [
+  {
+    name: 'TestWindowsShutdownEscalation/idempotent-ack',
+    prefix: 'shutdown handler completion class: ',
+    fatal: 'second cancel handler did not complete',
+    values: [
+      ...['absent', 'one', 'two', 'other', 'unreadable'].map(marker => `marker=${marker} read=none stage=none publish=none`),
+      ...['sharing_violation', 'access_denied', 'not_exist', 'other'].map(read => `marker=unreadable read=${read} stage=none publish=none`),
+      ...['sharing_violation', 'access_denied', 'not_exist', 'other'].map(publish => `marker=one read=none stage=handler publish=${publish}`),
+      'marker=one read=none stage=callback publish=other',
+      'marker=one read=none stage=other publish=other',
+    ],
+  },
+  {
+    name: 'TestWindowsShutdownParentDeadline',
+    prefix: 'shutdown parent deadline class: ',
+    fatal: 'parent exhaustion did not raise at the actual shutdown deadline',
+    values: [
+      ...['deadline', 'ack', 'pipe', 'descriptor', 'incarnation', 'migration', 'force_rights', 'force', 'forced', 'none', 'other']
+        .map(outcome => `kind=pass detail=fail context=pass outcome=${outcome}`),
+      'kind=fail detail=pass context=pass outcome=deadline',
+      'kind=pass detail=pass context=fail outcome=deadline',
+      'kind=fail detail=fail context=fail outcome=other',
+    ],
+  },
+];
+
+function shutdownClassEvents(row, value, action = 'fail') {
+  return packages.flatMap(packageName => packageName === packages[0]
+    ? [event('start', packageName), event('run', packageName, row.name),
+      event('output', packageName, row.name,
+        {Output: `    service_shutdown_windows_test.go:12: ${row.prefix}${value}\r\n`}),
+      ...(action === 'fail' ? [event('output', packageName, row.name,
+        {Output: `    service_shutdown_windows_test.go:13: ${row.fatal}\r\n`})] : []),
+      event(action, packageName, row.name), event(action === 'fail' ? 'fail' : 'pass', packageName)]
+    : packageEvents(packageName));
+}
+
+test('Windows shutdown class diagnostics enroll the real fixture prefixes and preserve fixed failures', async () => {
+  for (const row of shutdownClassDiagnostics) {
+    for (const value of row.values) {
+      const result = await checkGoTestJSON([stream(shutdownClassEvents(row, value))]);
+      assert.equal(result.valid, false);
+      assert(result.lines.includes(`why ${packages[0]} ${row.name} :: ${row.fatal}`));
+      assert.deepEqual(result.lines.filter(line => line.startsWith('class ')),
+        [`class ${packages[0]} ${row.name} :: ${row.prefix}${value}`]);
+    }
+  }
+});
+
+test('Windows shutdown class diagnostics reject private values and stay failed-only', async () => {
+  for (const row of shutdownClassDiagnostics) {
+    for (const value of ['untrustedprivatevalue', 'path=C:\\private', 'error=private-value: details']) {
+      const result = await checkGoTestJSON([stream(shutdownClassEvents(row, value))]);
+      assert.equal(result.valid, false);
+      assert.deepEqual(result.lines.filter(line => line.startsWith('class ')),
+        [`class ${packages[0]} ${row.name} :: ${row.prefix}(rejected)`]);
+      assert(!result.lines.join('\n').includes(value));
+    }
+    for (const action of ['pass', 'skip']) {
+      const result = await checkGoTestJSON([stream(shutdownClassEvents(row, row.values[0], action))]);
+      assert.equal(result.valid, true);
+      const counts = action === 'skip' ? {[packages[0]]: {pass: 0, skip: 1, names: [row.name]}} : {};
+      assert.equal(`${result.lines.join('\n')}\n`, summary(counts));
+    }
+  }
+});
+
 test('why diagnostics accept only exact fixed errors and package-local literal assertions', () => {
   withDiagnosticSources(target => {
     for (const message of ['localcell: fixed private error', 'local_fixture_fixed_cause', 'owner-is-admin-group', 'ace-count', 'assertion with 12 safe digits']) {

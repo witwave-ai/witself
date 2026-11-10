@@ -124,3 +124,101 @@ func TestWindowsShutdownLivenessWaitSourceContract(t *testing.T) {
 		}
 	}
 }
+
+func shutdownFixtureSourceFunction(t *testing.T, path, name string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal("shutdown fixture source unavailable")
+	}
+	// Source contracts must also work in the Windows CRLF checkout.
+	source := strings.ReplaceAll(string(data), "\r\n", "\n")
+	positions := token.NewFileSet()
+	file, err := parser.ParseFile(positions, path, source, 0)
+	if err != nil {
+		t.Fatal("shutdown fixture source cannot be parsed")
+	}
+	for _, declaration := range file.Decls {
+		if function, ok := declaration.(*ast.FuncDecl); ok && function.Name.Name == name && function.Body != nil {
+			return source[positions.Position(function.Body.Pos()).Offset:positions.Position(function.Body.End()).Offset]
+		}
+	}
+	t.Fatal("shutdown fixture function unavailable")
+	return ""
+}
+
+func TestWindowsShutdownFixturePublicationSourceContract(t *testing.T) {
+	source := shutdownFixtureSourceFunction(t, "service_shutdown_windows_test.go", "TestWindowsShutdownChildHelper")
+	for _, required := range []string{
+		`if err := writeAtomicBytes(filepath.Join(root, "tmp", "cancel-handled"), []byte(strconv.Itoa(completed)), nil); err != nil {
+			os.Exit(shutdownFixturePublishExitCode(err, false))
+		}`,
+		`if err := writeAtomicBytes(filepath.Join(root, "tmp", "cancel-requested"), []byte(strconv.FormatUint(uint64(cancelCalls.Add(1)), 10)), nil); err != nil {
+			os.Exit(shutdownFixturePublishExitCode(err, true))
+		}`,
+	} {
+		if !strings.Contains(source, required) {
+			t.Fatal("shutdown fixture publication lost its checked error and process exit class")
+		}
+	}
+}
+
+func TestWindowsShutdownFixtureDiagnosticsSourceContract(t *testing.T) {
+	escalation := shutdownFixtureSourceFunction(t, "service_shutdown_windows_test.go", "TestWindowsShutdownEscalation")
+	_, idempotent, found := strings.Cut(escalation, `t.Run("idempotent-ack"`)
+	idempotent, _, bounded := strings.Cut(idempotent, "t.Run(")
+	if !found || !bounded {
+		t.Fatal("shutdown fixture idempotent ACK source unavailable")
+	}
+	for _, required := range []string{
+		`handled, err := readPrivateFile(f.cell.path("tmp", "cancel-handled"))`,
+		`if err == nil && string(handled) == "2" {`,
+		`exitErr := windows.GetExitCodeProcess(f.handle, &code)
+				t.Logf("shutdown handler completion class: %s", shutdownFixtureCompletionClass(handled, err, code, exitErr))
+				t.Fatal("second cancel handler did not complete")`,
+		`data, err := readPrivateFile(f.cell.path("tmp", "cancel-requested"))
+		if err != nil || string(data) != "1" {
+			t.Logf("shutdown handler completion class: %s", f.completionClass())
+			t.Fatal("retry invoked cancellation more than once")
+		}`,
+	} {
+		if !strings.Contains(idempotent, required) {
+			t.Fatal("shutdown fixture lost its completion witness, exit diagnostic or once assertion")
+		}
+	}
+	for _, failure := range []string{"clean cancel request refused", "retried cancel did not return identical ACK"} {
+		if !strings.Contains(idempotent, "t.Logf(\"shutdown handler completion class: %s\", f.completionClass())\n\t\t\tt.Fatal(\""+failure+"\")") {
+			t.Fatal("shutdown fixture early request failure lost its publish diagnostic")
+		}
+	}
+	launch := shutdownFixtureSourceFunction(t, "service_shutdown_windows_test.go", "launchShutdownFixture")
+	if !strings.Contains(launch, `if t.Failed() && windows.GetExitCodeProcess(f.handle, &code) == nil && code >= 90 && code <= 97 {
+			t.Logf("shutdown handler completion class: %s", f.completionClass())
+		}`) {
+		t.Fatal("shutdown fixture lost its publish diagnostic for subtests that do not read the marker")
+	}
+	deadline := shutdownFixtureSourceFunction(t, "service_shutdown_windows_test.go", "TestWindowsShutdownParentDeadline")
+	if !strings.Contains(deadline, `if outcome.Kind != serviceStopUnknown || outcome.Detail != "shutdown:deadline" || ctx.Err() != context.DeadlineExceeded {
+		t.Logf("shutdown parent deadline class: %s", shutdownFixtureDeadlineClass(outcome, ctx.Err()))
+		t.Fatal("parent exhaustion did not raise at the actual shutdown deadline")
+	}`) {
+		t.Fatal("shutdown fixture parent deadline assertion or diagnostic changed")
+	}
+}
+
+func TestWindowsShutdownHandlerCompletionSourceContract(t *testing.T) {
+	source := shutdownFixtureSourceFunction(t, "service_shutdown_windows.go", "serve")
+	// The count is a callback-completion fence only while the hook follows the
+	// handler call, whose deferred once guard has already finished on return.
+	if !strings.Contains(source, `_ = c.handle(request, func(response serviceShutdownResponse) error {
+				if !windowsShutdownReply(request, response) {
+					return nil
+				}
+				return json.NewEncoder(conn).Encode(response)
+			})
+			if windowsShutdownHandlerCompleted != nil {
+				windowsShutdownHandlerCompleted(request)
+			}`) {
+		t.Fatal("shutdown fixture completion hook no longer fences the handler callback")
+	}
+}
