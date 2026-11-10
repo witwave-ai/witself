@@ -19,6 +19,53 @@ import (
 	"time"
 )
 
+func TestOutsideCheckout(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "checkout")
+	tests := []struct {
+		name    string
+		root    string
+		scratch string
+		windows bool
+		want    bool
+	}{
+		{"hosted-windows", `D:/a/witself/witself`, `C:\Users\runneradmin\AppData\Local\Temp`, true, true},
+		{"hosted-non-windows", `D:/a/witself/witself`, `C:\Users\runneradmin\AppData\Local\Temp`, false, false},
+		{"backslash-checkout", `D:\a\witself\witself`, `C:\Users\runneradmin\AppData\Local\Temp`, true, true},
+		{"forward-slash-scratch", `D:\a\witself\witself`, `c:/Users/runneradmin/AppData/Local/Temp`, true, true},
+		{"same-drive-case", `D:/a/witself/witself`, `d:\a\witself\witself\scratch`, true, false},
+		{"same-drive-sibling", `D:/a/witself/witself`, `d:\a\_temp`, true, runtime.GOOS == "windows"},
+		{"sibling", root, filepath.Join(base, "scratch"), false, true},
+		{"parent", root, base, false, true},
+		{"equal", root, root, false, false},
+		{"descendant", root, filepath.Join(root, "scratch"), false, false},
+		{"sibling-windows-rules", root, filepath.Join(base, "scratch"), true, true},
+		{"parent-windows-rules", root, base, true, true},
+		{"equal-windows-rules", root, root, true, false},
+		{"descendant-windows-rules", root, filepath.Join(root, "scratch"), true, false},
+		{"relative-scratch", root, "../scratch", true, false},
+		{"relative-root", "checkout", filepath.Join(base, "scratch"), true, false},
+		{"relative-scratch-and-root", "checkout", "../scratch", true, false},
+		{"drive-relative-scratch", `D:\checkout`, `C:scratch`, true, false},
+		{"drive-relative-root", `D:checkout`, `C:\scratch`, true, false},
+		{"non-letter-drive", `1:\checkout`, `C:\scratch`, true, false},
+		{"unc-scratch", `D:\checkout`, `\\server\share\scratch`, true, false},
+		{"unc-root", `\\server\share\checkout`, `C:\scratch`, true, false},
+		{"unc-different-shares", `\\server\first\checkout`, `\\server\second\scratch`, true, false},
+		{"extended-scratch", `D:\checkout`, `\\?\C:\scratch`, true, false},
+		{"extended-root", `\\?\D:\checkout`, `C:\scratch`, true, false},
+		{"device-scratch", `D:\checkout`, `\\.\C:\scratch`, true, false},
+		{"device-root", `\\.\D:\checkout`, `C:\scratch`, true, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := outsideCheckout(tc.root, tc.scratch, tc.windows); got != tc.want {
+				t.Fatalf("outsideCheckout = %t, want %t", got, tc.want)
+			}
+		})
+	}
+}
+
 func writeTestFile(t *testing.T, path string, data []byte) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {

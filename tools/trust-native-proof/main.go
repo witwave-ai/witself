@@ -299,6 +299,23 @@ func gitRead(run commandRunner, environ []string, cwd, scratch string, args ...s
 
 var gitIdentity = regexp.MustCompile(`^[a-f0-9]{40}(?:[a-f0-9]{24})?$`)
 
+// outsideCheckout only accepts paths that can be proven lexically outside root.
+// The Windows drive check is explicit so it can also be tested on other hosts.
+func outsideCheckout(root, scratch string, windows bool) bool {
+	plainDriveAbsolute := func(path string) bool {
+		return len(path) >= 3 && ((path[0] >= 'A' && path[0] <= 'Z') || (path[0] >= 'a' && path[0] <= 'z')) &&
+			path[1] == ':' && (path[2] == '\\' || path[2] == '/')
+	}
+	if windows && plainDriveAbsolute(root) && plainDriveAbsolute(scratch) && !strings.EqualFold(root[:1], scratch[:1]) {
+		return true
+	}
+	if !filepath.IsAbs(root) || !filepath.IsAbs(scratch) {
+		return false
+	}
+	relative, err := filepath.Rel(root, scratch)
+	return err == nil && (relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)))
+}
+
 func takeSnapshot(run commandRunner, environ []string, scratch string) (snapshot, string) {
 	s := snapshot{raw: map[string][]byte{}}
 	root, ok := gitRead(run, environ, "", scratch, "rev-parse", "--show-toplevel")
@@ -306,7 +323,7 @@ func takeSnapshot(run commandRunner, environ []string, scratch string) (snapshot
 		return s, "checkout_unavailable"
 	}
 	s.root = strings.TrimSpace(string(root))
-	if relative, err := filepath.Rel(s.root, scratch); err != nil || (relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))) {
+	if !outsideCheckout(s.root, scratch, runtime.GOOS == "windows") {
 		return s, "scratch_inside_checkout"
 	}
 	for _, item := range []struct {
