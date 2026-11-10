@@ -529,9 +529,11 @@ update for database/secret stores.
 
 For Civo, the cluster and workload namespace registrations do not set Pulumi
 `Protect`: recording `deletion_protection: false` permits replacement on the
-next `up`, without a separate unprotection interlock. Only `destroy` checks
-the persisted stack protection output and requires an applied unprotection
-`up`. Keep protection enabled throughout a node-count change.
+next `up`, without a separate unprotection interlock. Only `destroy` inspects
+the persisted stack state and refuses while it still records protection, so a
+cell whose state carries the protection fields needs an applied unprotection
+`up` first. Legacy state that predates those fields records no protection and
+passes that check. Keep protection enabled throughout a node-count change.
 
 If a provider proposes replacement to enable protection, do not apply it.
 Use a provider-supported in-place protection operation, then
@@ -554,8 +556,10 @@ tests cover that refusal because resource mocks do not execute provider diffs.
 
 For Civo replacement, this sequence is an operator procedure, not an enforced
 two-step interlock: recording false already permits replacement on the next
-`up`. The separate applied update remains enforced before `destroy` through
-the persisted stack protection output.
+`up`. Before `destroy`, the tool refuses while the persisted stack state still
+records protection, which enforces the separate applied update for every cell
+whose state carries the protection fields. Legacy state that predates those
+fields records no protection and passes that check.
 
 1. Record the break-glass decision in the operator's inventory
    (`~/.witself/infra.yaml`, or the same `-config` path used to provision the

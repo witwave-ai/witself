@@ -610,9 +610,11 @@ volumes. Protection defaults to enabled when neither the cell nor inventory
 defaults records `deletion_protection`. Recording `deletion_protection: false`
 on a Civo cell permits replacement on the next `up`: the cluster and workload
 namespace registrations do not set Pulumi `Protect`, so there is no separate
-unprotection interlock for replacement. Only `destroy` checks the persisted
-stack protection output and requires an applied unprotection `up`. Keep
-protection enabled for a node-count change. Before first use, a read-only
+unprotection interlock for replacement. Only `destroy` inspects the persisted
+stack state and refuses while it still records protection, so a cell whose
+state carries the protection fields needs an applied unprotection `up` first;
+legacy state that predates those fields records none and passes that check.
+Keep protection enabled for a node-count change. Before first use, a read-only
 preview must still confirm that changing `pools.nodeCount` is an in-place
 update in the pinned provider.
 Mocks cannot establish that safety; follow the runbook and stop on any

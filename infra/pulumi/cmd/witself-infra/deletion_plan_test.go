@@ -625,6 +625,20 @@ func TestCivoProtectionSavedPlanGoalIdentity(t *testing.T) {
 	}
 }
 
+func TestCivoProtectionSavedPlanGoalNameOnlyConflict(t *testing.T) {
+	enabled := civoPlanProtection(t, "")
+	for _, command := range []string{"preview", "up"} {
+		t.Run(command, func(t *testing.T) {
+			// Type, URN and operation are all acceptable; only the goal name disagrees with its URN.
+			goal := &apitype.GoalV1{Type: tokens.Type(civoNamespaceTestType), Name: "other-namespace"}
+			s := &protectionPlanStack{t: t, plan: singleResourceTestPlan(civoNamespaceTestURN, goal, apitype.OpSame)}
+			if err := reviewCivoPlan(t, s, command, enabled); err == nil || s.upCalls != 0 {
+				t.Fatalf("goal name conflicting with its URN escaped review: calls=%d, err=%v", s.upCalls, err)
+			}
+		})
+	}
+}
+
 func TestCivoProtectionPlanAndStreamRefusalsAreJoined(t *testing.T) {
 	enabled := civoPlanProtection(t, "")
 	for _, command := range []string{"preview", "up"} {
