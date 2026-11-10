@@ -199,10 +199,22 @@ func windowsForegroundDiagnosticGuard(source []byte) (string, int, bool) {
 		// Pin the whole-output range and numeric count before inspecting the
 		// per-line guard. Unknown lines must not stop later safe diagnostics.
 		statements := function.Body.List
-		if len(statements) != 4 {
+		if len(statements) != 5 {
 			return "", 0, false
 		}
-		count, ok := statements[1].(*ast.ExprStmt)
+		classification, ok := statements[1].(*ast.ExprStmt)
+		if !ok {
+			return "", 0, false
+		}
+		classLog, ok := classification.X.(*ast.CallExpr)
+		if !ok || !foregroundDiagnosticSelector(classLog.Fun, "t", "Logf") || len(classLog.Args) != 2 || !foregroundDiagnosticString(classLog.Args[0], "foreground_exit class=%s") {
+			return "", 0, false
+		}
+		classCall, ok := classLog.Args[1].(*ast.CallExpr)
+		if !ok || !foregroundDiagnosticIdent(classCall.Fun, "foregroundFailureClass") || len(classCall.Args) != 1 || !foregroundDiagnosticIdent(classCall.Args[0], "captured") {
+			return "", 0, false
+		}
+		count, ok := statements[2].(*ast.ExprStmt)
 		if !ok {
 			return "", 0, false
 		}
@@ -214,7 +226,7 @@ func windowsForegroundDiagnosticGuard(source []byte) (string, int, bool) {
 		if !ok || !foregroundDiagnosticIdent(countLength.Fun, "len") || len(countLength.Args) != 1 || !foregroundDiagnosticLines(countLength.Args[0]) {
 			return "", 0, false
 		}
-		loop, ok := statements[2].(*ast.RangeStmt)
+		loop, ok := statements[3].(*ast.RangeStmt)
 		if !ok || !foregroundDiagnosticIdent(loop.Key, "_") || !foregroundDiagnosticIdent(loop.Value, "firstLine") || !foregroundDiagnosticLines(loop.X) || len(loop.Body.List) != 2 {
 			return "", 0, false
 		}
@@ -362,6 +374,36 @@ func TestWindowsForegroundCapturedOutputContract(t *testing.T) {
 	if !fixedMessages {
 		t.Fatal("foreground shutdown validator no longer returns only fixed messages")
 	}
+	classifier, err := parser.ParseFile(token.NewFileSet(), "../tools/localcellharness/service_foreground_classify_test.go", nil, 0)
+	if err != nil {
+		t.Fatal("cannot parse foreground failure classifier")
+	}
+	fixedClasses := false
+	for _, declaration := range classifier.Decls {
+		function, ok := declaration.(*ast.FuncDecl)
+		if !ok || function.Name.Name != "foregroundFailureClass" {
+			continue
+		}
+		fixedClasses = true
+		returns := 0
+		ast.Inspect(function.Body, func(node ast.Node) bool {
+			if statement, ok := node.(*ast.ReturnStmt); ok {
+				returns++
+				if len(statement.Results) != 1 {
+					fixedClasses = false
+				} else if literal, ok := statement.Results[0].(*ast.BasicLit); !ok || literal.Kind != token.STRING {
+					fixedClasses = false
+				} else if value, err := strconv.Unquote(literal.Value); err != nil || !regexp.MustCompile(`^[a-z_]{1,48}$`).MatchString(value) {
+					fixedClasses = false
+				}
+			}
+			return true
+		})
+		fixedClasses = fixedClasses && returns > 0
+	}
+	if !fixedClasses {
+		t.Fatal("foreground failure classifier no longer returns only fixed value-free classes")
+	}
 	for _, violation := range windowsForegroundCapturedOutputViolations(file, guarded) {
 		t.Error(violation)
 	}
@@ -484,7 +526,7 @@ func foregroundCapturedExpression(expression ast.Expr, tainted map[string]bool) 
 	found := false
 	ast.Inspect(expression, func(node ast.Node) bool {
 		if call, ok := node.(*ast.CallExpr); ok {
-			if identifier, ok := call.Fun.(*ast.Ident); ok && identifier.Obj == nil && slices.Contains([]string{"len", "cap", "foregroundShutdownFailure"}, identifier.Name) {
+			if identifier, ok := call.Fun.(*ast.Ident); ok && identifier.Obj == nil && slices.Contains([]string{"len", "cap", "foregroundShutdownFailure", "foregroundFailureClass"}, identifier.Name) {
 				return false // Numeric counts or independently pinned fixed messages.
 			}
 			if selector, ok := call.Fun.(*ast.SelectorExpr); ok && (selector.Sel.Name == "CombinedOutput" || selector.Sel.Name == "Output") {
@@ -516,10 +558,12 @@ func TestWindowsForegroundCapturedOutputFlow(t *testing.T) {
 		{"fmt_sprintf", `message := fmt.Sprintf("%s", captured)`, true},
 		{"shadowed_count", `len := func(raw []byte) []byte { return raw }; t.Log(len(captured))`, true},
 		{"shadowed_validator", `foregroundShutdownFailure := func(raw []byte) string { return string(raw) }; t.Log(foregroundShutdownFailure(captured))`, true},
+		{"shadowed_classifier", `foregroundFailureClass := func(raw []byte) string { return string(raw) }; t.Log(foregroundFailureClass(captured))`, true},
 		{"count", `t.Logf("%d", len(captured))`, false},
 		{"count_alias", `count := len(strings.Split(string(captured), "\n")); t.Log(count)`, false},
 		{"range_index", `for index, line := range foregroundOutputLines(captured) { t.Log(index) }`, false},
 		{"fixed_failure", `failure := foregroundShutdownFailure(captured); t.Fatal(failure)`, false},
+		{"fixed_class", `t.Logf("foreground_exit class=%s", foregroundFailureClass(captured))`, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			file, err := parser.ParseFile(token.NewFileSet(), "flow", "package main; func capture(captured []byte) {"+test.body+"}", 0)

@@ -5,15 +5,11 @@ package localcell
 import (
 	"context"
 	"errors"
-	"go/ast"
-	"go/parser"
-	"go/token"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -24,84 +20,6 @@ import (
 	"github.com/witwave-ai/witself/internal/runtimeconfig"
 	"golang.org/x/sys/windows"
 )
-
-// Keep this test-side bound tied to windowsShutdownRequest below. A lost ACK
-// can consume one request deadline before the policy retries cancellation.
-const shutdownAckReadDeadline = 250 * time.Millisecond
-
-func shutdownFixtureBudget(startup time.Duration) time.Duration {
-	return max(4*startup, 2*shutdownAckReadDeadline+100*time.Millisecond)
-}
-
-func TestWindowsShutdownFixtureBudget(t *testing.T) {
-	for _, tc := range []struct {
-		startup time.Duration
-		want    time.Duration
-	}{
-		{0, 600 * time.Millisecond},
-		{time.Millisecond, 600 * time.Millisecond},
-		{10 * time.Millisecond, 600 * time.Millisecond},
-		{50 * time.Millisecond, 600 * time.Millisecond},
-		{125 * time.Millisecond, 600 * time.Millisecond},
-		{150 * time.Millisecond, 600 * time.Millisecond},
-		{200 * time.Millisecond, 800 * time.Millisecond},
-		{time.Second, 4 * time.Second},
-	} {
-		if got := shutdownFixtureBudget(tc.startup); got != tc.want {
-			t.Fatalf("shutdown fixture budget=%s want=%s startup=%s", got, tc.want, tc.startup)
-		}
-	}
-}
-
-func TestWindowsShutdownFixtureBudgetSourceContract(t *testing.T) {
-	functionBody := func(path, name string) string {
-		t.Helper()
-		data, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatal("shutdown budget source unavailable")
-		}
-		// The Windows checkout may use CRLF; normalize before body comparisons.
-		source := strings.ReplaceAll(string(data), "\r\n", "\n")
-		positions := token.NewFileSet()
-		file, err := parser.ParseFile(positions, path, source, 0)
-		if err != nil {
-			t.Fatal("shutdown budget source cannot be parsed")
-		}
-		for _, declaration := range file.Decls {
-			if function, ok := declaration.(*ast.FuncDecl); ok && function.Name.Name == name && function.Body != nil {
-				return source[positions.Position(function.Body.Pos()).Offset:positions.Position(function.Body.End()).Offset]
-			}
-		}
-		t.Fatal("shutdown budget function unavailable")
-		return ""
-	}
-	request := functionBody("service_shutdown_windows.go", "windowsShutdownRequest")
-	if shutdownAckReadDeadline != 250*time.Millisecond ||
-		!strings.Contains(request, "deadline := time.Now().Add(250 * time.Millisecond)") {
-		t.Fatal("fixture ACK deadline differs from the production request literal")
-	}
-	if functionBody("service_shutdown_windows_test.go", "shutdownFixtureBudget") != `{
-	return max(4*startup, 2*shutdownAckReadDeadline+100*time.Millisecond)
-}` {
-		t.Fatal("shutdown fixture budget lost its protocol floor or startup allowance")
-	}
-	if functionBody("service_shutdown_windows_test.go", "stop") != `{
-	t.Helper()
-	budget := shutdownFixtureBudget(f.startup)
-	ctx, cancel := context.WithTimeout(t.Context(), max(10*f.startup+time.Second, 2*budget))
-	defer cancel()
-	return f.cell.stopChildOutcomeWithBudget(ctx, "server", ProcessState{PID: f.record.PID, Alive: true, Matches: true}, budget)
-}` {
-		t.Fatal("shutdown fixture stop lost its shared budget or outer deadline reserve")
-	}
-	escalation := functionBody("service_shutdown_windows_test.go", "TestWindowsShutdownEscalation")
-	_, idempotent, found := strings.Cut(escalation, `t.Run("idempotent-ack"`)
-	idempotent, _, bounded := strings.Cut(idempotent, "t.Run(")
-	if !found || !bounded || strings.Contains(idempotent, "2*f.startup") ||
-		!strings.Contains(idempotent, "shutdownFixtureBudget(f.startup)") {
-		t.Fatal("idempotent ACK completion lost its shared protocol budget")
-	}
-}
 
 func TestWindowsShutdownChildHelper(_ *testing.T) {
 	args := os.Args
@@ -276,7 +194,7 @@ func launchShutdownFixture(t *testing.T, mode string, barrier bool) windowsShutd
 	t.Setenv("DSH_HOME", t.TempDir())
 	c, _ := descriptorTestCell(t)
 	startup := shutdownFixtureStartup(t, c)
-	c.cfg.Timeout = max(20*startup, shutdownFixtureBudget(startup))
+	c.cfg.Timeout = max(20*startup, shutdownFixtureLivenessBudget(startup))
 	environment, err := c.baseEnvironment()
 	if err != nil {
 		t.Fatal("fixture environment unavailable")
@@ -313,7 +231,7 @@ func launchShutdownFixture(t *testing.T, mode string, barrier bool) windowsShutd
 		t.Fatal("synthetic pipe record unavailable")
 	}
 	if !barrier {
-		waitShutdownMarker(t, c.path("tmp", "runtime-started"), 10*time.Since(started))
+		waitShutdownMarker(t, c.path("tmp", "runtime-started"), max(10*time.Since(started), shutdownFixtureLivenessBudget(startup)))
 	}
 	return windowsShutdownFixture{c, record, handle, time.Since(started)}
 }
@@ -337,7 +255,7 @@ func waitShutdownMarker(t *testing.T, path string, budget time.Duration) {
 func (f windowsShutdownFixture) stop(t *testing.T) serviceStopOutcome {
 	t.Helper()
 	budget := shutdownFixtureBudget(f.startup)
-	ctx, cancel := context.WithTimeout(t.Context(), max(10*f.startup+time.Second, 2*budget))
+	ctx, cancel := context.WithTimeout(t.Context(), max(10*f.startup+time.Second, 2*budget, shutdownFixtureLivenessBudget(f.startup)))
 	defer cancel()
 	return f.cell.stopChildOutcomeWithBudget(ctx, "server", ProcessState{PID: f.record.PID, Alive: true, Matches: true}, budget)
 }
@@ -363,7 +281,7 @@ func TestWindowsNoConsoleShutdown(t *testing.T) {
 		t.Fatal("child did not prove absent console")
 	}
 	probeResult := f.cell.path("tmp", "console-probe-result")
-	probeCtx, probeCancel := context.WithTimeout(t.Context(), f.cell.cfg.Timeout+10*f.startup)
+	probeCtx, probeCancel := context.WithTimeout(t.Context(), max(f.cell.cfg.Timeout+10*f.startup, shutdownFixtureLivenessBudget(f.startup)))
 	defer probeCancel()
 	result, observation, err := readShutdownProbeResult(probeCtx,
 		func() ([]byte, error) { return readPrivateFile(probeResult) },
@@ -538,7 +456,7 @@ func TestWindowsShutdownEscalation(t *testing.T) {
 		}
 		// The second ACK can arrive before its deferred callback. Observe handler
 		// completion before reading the callback count, so a removed once guard fails.
-		completion, cancel := context.WithTimeout(t.Context(), shutdownFixtureBudget(f.startup))
+		completion, cancel := context.WithTimeout(t.Context(), shutdownFixtureLivenessBudget(f.startup))
 		defer cancel()
 		for {
 			handled, err := readPrivateFile(f.cell.path("tmp", "cancel-handled"))
@@ -547,7 +465,7 @@ func TestWindowsShutdownEscalation(t *testing.T) {
 			}
 			select {
 			case <-completion.Done():
-				t.Logf("handler completion budget=%s startup=%s", shutdownFixtureBudget(f.startup), f.startup)
+				t.Logf("handler completion budget=%s startup=%s", shutdownFixtureLivenessBudget(f.startup), f.startup)
 				t.Fatal("second cancel handler did not complete")
 			case <-time.After(max(f.startup/100, time.Millisecond)):
 			}

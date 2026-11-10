@@ -282,6 +282,7 @@ func TestWindowsForegroundLeasePublishOutput(t *testing.T) {
 // into the vocabulary. Diagnostic visibility does not imply shutdown acceptance.
 func windowsLogForegroundExit(t *testing.T, command *exec.Cmd, captured []byte) {
 	t.Helper()
+	t.Logf("foreground_exit class=%s", foregroundFailureClass(captured))
 	t.Logf("foreground_output_lines=%d", len(foregroundOutputLines(captured)))
 	for _, firstLine := range foregroundOutputLines(captured) {
 		firstLine = strings.TrimSuffix(firstLine, "\r")
