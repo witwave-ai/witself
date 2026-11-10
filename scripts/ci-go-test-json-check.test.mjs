@@ -611,6 +611,225 @@ function outputFailure(output, message = '(unclassified)', packageName = package
   stderr: failureDiagnostic};
 }
 
+function withClassSources(callback, {testSource = '', productionSource = '', otherSource = ''} = {}) {
+  const directory = realpathSync(mkdtempSync(join(tmpdir(), 'witself-go-json-classes-')));
+  try {
+    mkdirSync(join(directory, 'scripts'));
+    const target = join(directory, 'scripts', 'ci-go-test-json-check.mjs');
+    writeFileSync(target, readFileSync(script, 'utf8'));
+    for (const name of ['localcell', 'runtimeconfig', 'tools/localcellharness']) {
+      mkdirSync(join(directory, 'internal', name), {recursive: true});
+    }
+    // Exercise Windows source newlines as well as CRLF output events.
+    writeFileSync(join(directory, 'internal', 'runtimeconfig', 'class_test.go'), `package runtimeconfig
+func TestClass(t *testing.T) {
+  t.Logf("fixture error class: %s", value)
+  t.Logf("fixture other class=%s", value)
+  t.Fatal("class fixture assertion failed")
+  _ = "ok next final fourth sentinel=deadline_exceeded windows_errno=other path=journal"
+  ${testSource}
+}
+`.replace(/\r?\n/g, '\r\n'));
+    writeFileSync(join(directory, 'internal', 'runtimeconfig', 'class.go'), `package runtimeconfig\n${productionSource}\n`.replace(/\r?\n/g, '\r\n'));
+    writeFileSync(join(directory, 'internal', 'localcell', 'class_test.go'), `package localcell\n${otherSource}\n`.replace(/\r?\n/g, '\r\n'));
+    callback(target);
+  } finally {
+    rmSync(directory, {recursive: true, force: true});
+  }
+}
+
+function classFailure(outputs, classes, reason = '(unclassified)', packageName = packages[1]) {
+  const fixture = outputFailure(outputs, reason, packageName);
+  const why = `why ${packageName} TestFixture :: ${reason}\n`;
+  return {...fixture, output: fixture.output.replace(why,
+    why + classes.map(message => `class ${packageName} TestFixture :: ${message}\n`).join(''))};
+}
+
+test('class diagnostics enroll colon and equals suffixes with safe fixed prefixes', () => {
+  const prefixes = ['fixture error class: ', 'fixture other class=', 'abcde class=',
+    'Class (safe), said "yes"; item_2!? class='];
+  const testSource = prefixes.slice(2).map(prefix => `logger.Logf(${JSON.stringify(`${prefix}%s`)}, value)`).join('\n');
+  withClassSources(target => {
+    for (const prefix of prefixes) {
+      assertFixture(target, classFailure([`    class_test.go:12: ${prefix}ok\r\n`], [`${prefix}ok`]));
+    }
+  }, {testSource});
+});
+
+test('class diagnostics reject unenrolled formats and preserve existing why classification', () => {
+  const cases = [
+    ['two directives class: %s%s', 'two directives class: ', 't.Logf'],
+    ['integer format class: %d', 'integer format class: ', 't.Logf'],
+    ['generic format class: %v', 'generic format class: ', 't.Logf'],
+    ['width format class: %12s', 'width format class: ', 't.Logf'],
+    ['escaped percent class: %%s', 'escaped percent class: ', 't.Logf'],
+    ['abcd class=%s', 'abcd class=', 't.Logf'],
+    ['unsafe/path class: %s', 'unsafe/path class: ', 't.Logf'],
+    ['unsafe 123 class: %s', 'unsafe 123 class: ', 't.Logf'],
+    [`unsafe ${'a'.repeat(64)} class: %s`, `unsafe ${'a'.repeat(64)} class: `, 't.Logf'],
+    ['wrong suffix category: %s', 'wrong suffix category: ', 't.Logf'],
+    ['trailing format class: %s tail', 'trailing format class: ', 't.Logf'],
+    ['ordinary log class: %s', 'ordinary log class: ', 't.Log'],
+    ['error method class: %s', 'error method class: ', 't.Errorf', 'error method class'],
+  ];
+  const extra = [
+    ['concatenated format class: ', 't.Logf("concatenated format class: %s" + suffix, value)'],
+    ['dynamic format class: ', 't.Logf(dynamicFormat, value)'],
+    ['raw format class: ', 't.Logf(`raw format class: %s`, value)'],
+    ['comment format class: ', '// t.Logf("comment format class: %s", value)'],
+    ['block comment class: ', '/* t.Logf("block comment class: %s", value) */'],
+    ['quoted format class: ', '_ = "t.Logf(\\"quoted format class: %s\\", value)"'],
+    ['raw quoted class: ', '_ = `t.Logf("raw quoted class: %s", value)`'],
+    ['missing comma class: ', 't.Logf("missing comma class: %s")'],
+    ['nonidentifier receiver class: ', 'logger().Logf("nonidentifier receiver class: %s", value)'],
+  ];
+  const testSource = [...cases.map(([format, , method]) => `${method}(${JSON.stringify(format)}, value)`),
+    ...extra.map(([, source]) => source)].join('\n');
+  withClassSources(target => {
+    for (const [, prefix, , why = '(unclassified)'] of cases) {
+      assertFixture(target, outputFailure([`${prefix}ok\n`], why));
+    }
+    for (const [prefix] of extra) assertFixture(target, outputFailure([`${prefix}ok\n`]));
+    assertFixture(target, outputFailure(['another package class: ok\n']));
+    assertFixture(target, outputFailure(['production format class: ok\n']));
+    assertFixture(target, outputFailure(['fixture error class: ok\n'], '(unclassified)', packages[0]));
+  }, {testSource, otherSource: 'func other(t *testing.T) { t.Logf("another package class: %s", value); _ = "ok" }',
+    productionSource: 'func other(t *testing.T) { t.Logf("production format class: %s", value) }'});
+});
+
+test('class diagnostics vocabulary uses only eligible package test literals and whole words', () => {
+  const tooLongWord = 'q'.repeat(41);
+  const tooLongLiteral = `longliteralprivate ${'x'.repeat(64)}`;
+  const testSource = String.raw`
+  _ = "joined-left split_word,equals=pair"
+  _ = "concatword" + "concatsecond"
+  // _ = "commentprivate"
+  /* _ = "blockprivate" */
+  _ = ` + '`rawprivate`' + String.raw`
+  _ = "quoted \"insideprivate\""
+  _ = "uppercaseprivate UPPER"
+  _ = "digitprivate 7"
+  _ = "slashprivate/path"
+  _ = "colonprivate:path"
+  _ = "newlineprivate\n"
+  _ = "tabprivate\t"
+  _ = "_invalidfirst"
+  ` + `_ = ${JSON.stringify(tooLongWord)}\n_ = ${JSON.stringify(tooLongLiteral)}`;
+  withClassSources(target => {
+    for (const value of ['joined-left split_word,equals=pair', 'concatword concatsecond']) {
+      assertFixture(target, classFailure([`fixture error class: ${value}\n`], [`fixture error class: ${value}`]));
+    }
+    for (const value of ['commentprivate', 'blockprivate', 'rawprivate', 'insideprivate', 'uppercaseprivate',
+      'digitprivate', 'slashprivate', 'colonprivate', 'newlineprivate', 'tabprivate', 'invalidfirst', tooLongWord,
+      'longliteralprivate', 'productionprivate', 'otherpackageprivate']) {
+      assertFixture(target, classFailure([`fixture error class: ${value}\n`], ['fixture error class: (rejected)']));
+    }
+  }, {testSource, productionSource: 'var value = "productionprivate"', otherSource: 'var value = "otherpackageprivate"'});
+});
+
+test('class diagnostics print valid values verbatim and reject private values without fragments', () => {
+  const value = 'sentinel=deadline_exceeded windows_errno=other path=journal';
+  withClassSources(target => {
+    assertFixture(target, classFailure([`fixture error class: ${value}\n`], [`fixture error class: ${value}`]));
+    for (const rejected of ['outofvocabularyprivate', 'digitprivate7', 'Uppercaseprivate', 'slashprivate/pathprivate',
+      'backslashprivate\\pathprivate', 'colonprivate:pathprivate', '', 'lengthprivate'.repeat(14), 'a'.repeat(64),
+      'ok  next', 'ok, next', 'ok=', 'ok ', 'ok\tprivate', 'ok\rprivate', 'ok\u0000private']) {
+      assertFixture(target, classFailure([`fixture error class: ${rejected}\n`], ['fixture error class: (rejected)']));
+    }
+  });
+});
+
+test('class diagnostics enforce the value length boundary even for enrolled words', () => {
+  const forty = 'p'.repeat(40);
+  const thirtySeven = 'q'.repeat(37);
+  const value = [forty, forty, forty, thirtySeven].join(' ');
+  assert.equal(value.length, 160);
+  withClassSources(target => {
+    assertFixture(target, classFailure([`fixture error class: ${value}\n`], [`fixture error class: ${value}`]));
+    assertFixture(target, classFailure([`fixture error class: ${value} ok\n`], ['fixture error class: (rejected)']));
+  }, {testSource: `_ = ${JSON.stringify(forty)}\n_ = ${JSON.stringify(thirtySeven)}`});
+});
+
+test('class diagnostics are failed-only and leave passing and skipped streams byte-identical', () => {
+  withClassSources(target => {
+    for (const action of ['pass', 'skip']) {
+      const events = packages.flatMap(name => name === packages[1]
+        ? [event('start', name), event('run', name, 'TestFixture'),
+          event('output', name, 'TestFixture', {Output: 'fixture error class: ok\nfixture other class=outofvocabularyprivate\n'}),
+          event(action, name, 'TestFixture'), event('pass', name)] : packageEvents(name));
+      assertFixture(target, {input: stream(events), status: 0,
+        output: action === 'pass' ? summary() : summary({[packages[1]]: {pass: 0, skip: 1, names: ['TestFixture']}})});
+    }
+  });
+});
+
+test('class diagnostics keep the first three distinct displayed lines across events and CRLF', () => {
+  withClassSources(target => {
+    assertFixture(target, classFailure([
+      '    class_test.go:12: fixture error class: ok\r\nfixture error class: ok\r\n',
+      'fixture other class=next\r\nfixture error class: ok\r\n',
+      'fixture error class: final\r\nfixture error class: fourth\r\n',
+    ], ['fixture error class: ok', 'fixture other class=next', 'fixture error class: final']));
+    assertFixture(target, classFailure([
+      'fixture error class: outofvocabularyprivate\r\nfixture error class: differentprivate\r\n',
+      'fixture other class=next\r\nfixture error class: ok\r\nfixture error class: fourth\r\n',
+    ], ['fixture error class: (rejected)', 'fixture other class=next', 'fixture error class: ok']));
+  });
+});
+
+test('class diagnostics prefer the longest enrolled prefix when formats overlap', () => {
+  withClassSources(target => {
+    assertFixture(target, classFailure(['fixture error class: extra class: ok\n'],
+      ['fixture error class: extra class: ok']));
+  }, {testSource: 't.Logf("fixture error class: extra class: %s", value)'});
+});
+
+test('class diagnostics stay local to each failed test including nested failures', () => {
+  withClassSources(target => {
+    const packageName = packages[1];
+    const names = ['TestParent', 'TestParent/child'];
+    const events = packages.flatMap(name => name === packageName
+      ? [event('start', name), event('run', name, names[0]), event('run', name, names[1]),
+        event('output', name, names[0], {Output: 'fixture error class: ok\n'}),
+        event('output', name, names[1], {Output: 'fixture error class: next\n'}),
+        event('fail', name, names[1]), event('fail', name, names[0]), event('fail', name)] : packageEvents(name));
+    let output = summary({[packageName]: {pass: 0, fail: 2, failedNames: names}});
+    for (const [index, testName] of names.entries()) {
+      const why = `why ${packageName} ${testName} :: (unclassified)\n`;
+      output = output.replace(why, `${why}class ${packageName} ${testName} :: fixture error class: ${index === 0 ? 'ok' : 'next'}\n`);
+    }
+    assertFixture(target, {input: stream(events), output, stderr: failureDiagnostic});
+  });
+});
+
+test('class diagnostics never replace why even when a formatted assertion shares the prefix', () => {
+  withClassSources(target => {
+    assertFixture(target, classFailure(['fixture error class: ok\n', 'class fixture assertion failed\n'],
+      ['fixture error class: ok'], 'class fixture assertion failed'));
+    assertFixture(target, classFailure(['fixture error class: ok\n'], ['fixture error class: ok']));
+    assertFixture(target, classFailure(['class fixture assertion failed\n', 'fixture error class: ok\n'],
+      ['fixture error class: ok'], 'class fixture assertion failed'));
+  }, {testSource: 't.Errorf("fixture error class: %s", value)'});
+});
+
+test('class diagnostics enroll the real journal repair format and reject an unknown path word', () => {
+  const name = 'TestJournalTornTailRepair/operation_done/partial';
+  const prefix = 'journal repair error class: ';
+  for (const [value, expected] of [
+    ['sentinel=deadline_exceeded windows_errno=other path=journal', 'sentinel=deadline_exceeded windows_errno=other path=journal'],
+    ['sentinel=deadline_exceeded windows_errno=other path=notasourcewordprivate', '(rejected)'],
+  ]) {
+    const events = packages.flatMap(packageName => packageName === packages[0]
+      ? [event('start', packageName), event('run', packageName, name),
+        event('output', packageName, name, {Output: `    journal_recovery_test.go:12: ${prefix}${value}\r\n`}),
+        event('fail', packageName, name), event('fail', packageName)] : packageEvents(packageName));
+    const output = summary({[packages[0]]: {pass: 0, fail: 1, failedNames: [name]}});
+    const why = `why ${packages[0]} ${name} :: (unclassified)\n`;
+    assertFixture(script, {input: stream(events),
+      output: output.replace(why, `${why}class ${packages[0]} ${name} :: ${prefix}${expected}\n`), stderr: failureDiagnostic});
+  }
+});
+
 test('why diagnostics accept only exact fixed errors and package-local literal assertions', () => {
   withDiagnosticSources(target => {
     for (const message of ['localcell: fixed private error', 'local_fixture_fixed_cause', 'owner-is-admin-group', 'ace-count', 'assertion with 12 safe digits']) {
