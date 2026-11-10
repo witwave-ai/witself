@@ -36,8 +36,6 @@ func TestNarrativeMemoryRelevancePostgres(t *testing.T) {
 		t.Fatal(err)
 	}
 	started := time.Now().UTC()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
 	// The redacting migration reporter intentionally exposes no testing.TB;
 	// register before wrapping so this opt-in database fixture is guarded too.
 	dsn = testenv.GuardPostgresTransactions(t, dsn)
@@ -45,6 +43,8 @@ func TestNarrativeMemoryRelevancePostgres(t *testing.T) {
 	if err := st.Migrate(); err != nil {
 		t.Fatal("migrate isolated relevance fixture")
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
 	var version int
 	if err := st.pool.QueryRow(ctx, `SELECT current_setting('server_version_num')::integer`).Scan(&version); err != nil || version < 100000 {
 		t.Fatal("read supported PostgreSQL software version")

@@ -48,7 +48,7 @@ func newSyncHarnessTopology(t *testing.T) *syncHarnessTopology {
 		t.Fatal("read harness-only schema failed")
 	}
 	top := &syncHarnessTopology{transport: syncharness.NewTransport(syncharness.L1, syncharness.L2, syncharness.R, syncharness.D, syncharness.W, syncharness.C)}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute+testenv.MigrationBudget(0))
 	defer cancel()
 	for _, id := range syncHarnessNodeIDs {
 		fixture := testenv.NewPostgresSchema(t, dsn)

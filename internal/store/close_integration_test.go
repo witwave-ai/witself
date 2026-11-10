@@ -12,12 +12,12 @@ import (
 
 func TestCheckAccountCloseAndFinalRecheckPostgres(t *testing.T) {
 	dsn := testenv.RequirePostgres(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
 	st, _ := newMigrationTestStore(t, dsn)
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
 	a, err := st.ProvisionAccount(ctx, "close-preflight@example.test", "close preflight", time.Hour)
 	if err != nil {
 		t.Fatal(err)

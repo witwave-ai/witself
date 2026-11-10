@@ -77,9 +77,7 @@ func waitForDatabaseDeadline(
 func newMessageRequestHardeningFixture(t *testing.T, names ...string) *messageRequestHardeningFixture {
 	t.Helper()
 	dsn := testenv.RequirePostgres(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-	t.Cleanup(cancel)
-	st, err := Open(ctx, dsn)
+	st, err := Open(context.Background(), dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,6 +85,8 @@ func newMessageRequestHardeningFixture(t *testing.T, names ...string) *messageRe
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	t.Cleanup(cancel)
 	provisioned, err := st.ProvisionAccount(ctx,
 		fmt.Sprintf("message-request-hardening-%d@witwave.ai", time.Now().UnixNano()),
 		"message request hardening", time.Hour)

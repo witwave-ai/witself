@@ -15,12 +15,12 @@ import (
 
 func TestImportAccountAuditCrossCheckPostgres(t *testing.T) {
 	dsn := testenv.RequirePostgres(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	t.Cleanup(cancel)
 	st, _ := newMigrationTestStore(t, dsn)
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	t.Cleanup(cancel)
 
 	t.Run("consent event contradicts null account state", func(t *testing.T) {
 		accountID, manifest, rows := buildImportAuditArchive(
@@ -282,12 +282,12 @@ func assertImportedAuditAccountState(
 // dropping the Tx re-check would leave the suite green.
 func TestValidateImportedAccountAuditConsistencyTxPostgres(t *testing.T) {
 	dsn := testenv.RequirePostgres(t)
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	t.Cleanup(cancel)
 	st, _ := newMigrationTestStore(t, dsn)
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	t.Cleanup(cancel)
 	provisioned, err := st.ProvisionAccount(
 		ctx,
 		fmt.Sprintf("import-audit-txcheck-%d@witwave.ai", time.Now().UnixNano()),

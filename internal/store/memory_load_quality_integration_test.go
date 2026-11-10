@@ -46,12 +46,12 @@ func TestNarrativeMemoryLoadQualityPostgres(t *testing.T) {
 	}
 
 	startedAt := time.Now().UTC()
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
-	defer cancel()
 	st, _ := newMigrationTestStore(t, dsn)
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer cancel()
 	var postgresVersion string
 	if err := st.pool.QueryRow(ctx, `SHOW server_version`).Scan(&postgresVersion); err != nil {
 		t.Fatal("read PostgreSQL version")

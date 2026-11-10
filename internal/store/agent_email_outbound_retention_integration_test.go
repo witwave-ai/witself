@@ -30,12 +30,12 @@ func TestAgentEmailSuppressionRetentionDaysIsBounded(t *testing.T) {
 
 func TestAgentEmailOutboundRetentionLifecyclePostgres(t *testing.T) {
 	baseDSN := testenv.RequirePostgres(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-	defer cancel()
 	st, _ := newMigrationTestStore(t, baseDSN)
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
 	fixture := newAgentEmailRetentionAccountFixture(ctx, t, st, "outbound")
 	localPart, _, ok := strings.Cut(fixture.address.Address, "@")
 	if !ok {
@@ -257,12 +257,12 @@ func TestAgentEmailOutboundRetentionLifecyclePostgres(t *testing.T) {
 
 func TestAgentEmailRetentionRotatesKindsUnderSustainedInboundBacklogPostgres(t *testing.T) {
 	baseDSN := testenv.RequirePostgres(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
 	st, _ := newMigrationTestStore(t, baseDSN)
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
 	fixture := newAgentEmailRetentionAccountFixture(ctx, t, st, "kind-fairness")
 	if _, err := st.SetAccountPlan(
 		ctx, fixture.accountID, 0, "", "test", map[string]int64{},
@@ -407,8 +407,6 @@ func TestAgentEmailRetentionRotatesKindsUnderSustainedInboundBacklogPostgres(t *
 
 func TestAgentEmailOutboundRetainedReplyAndClaimArchiveRoundTripPostgres(t *testing.T) {
 	baseDSN := testenv.RequirePostgres(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-	defer cancel()
 	source, _ := newMigrationTestStore(t, baseDSN)
 	destination, _ := newMigrationTestStore(t, baseDSN)
 	if err := source.Migrate(); err != nil {
@@ -417,6 +415,8 @@ func TestAgentEmailOutboundRetainedReplyAndClaimArchiveRoundTripPostgres(t *test
 	if err := destination.Migrate(); err != nil {
 		t.Fatal(err)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
 
 	fixture := newAgentEmailRetentionAccountFixture(ctx, t, source, "reply-archive")
 	if _, err := source.SetAccountPlan(

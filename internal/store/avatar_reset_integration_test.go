@@ -15,9 +15,7 @@ import (
 
 func TestAvatarResetLineageLifecycleAndGuardsPostgres(t *testing.T) {
 	dsn := testenv.RequirePostgres(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	st, err := Open(ctx, dsn)
+	st, err := Open(context.Background(), dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -25,6 +23,8 @@ func TestAvatarResetLineageLifecycleAndGuardsPostgres(t *testing.T) {
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
 
 	provisioned, err := st.ProvisionAccount(ctx,
 		fmt.Sprintf("avatar-reset-%d@witwave.ai", time.Now().UnixNano()),

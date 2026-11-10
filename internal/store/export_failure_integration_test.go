@@ -212,12 +212,12 @@ func TestExportAccountWriterFailureRollsBackReconciliationPostgres(t *testing.T)
 
 func newExportFailureFixture(t *testing.T) *messageRequestHardeningFixture {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	t.Cleanup(cancel)
 	st, _ := newMigrationTestStore(t, testenv.RequirePostgres(t))
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	t.Cleanup(cancel)
 	provisioned, err := st.ProvisionAccount(ctx, "archive-writer-failure@example.test", "archive writer failure", time.Hour)
 	if err != nil {
 		t.Fatal(err)

@@ -17,12 +17,12 @@ import (
 
 func TestAgentEmailRetentionLifecyclePostgres(t *testing.T) {
 	baseDSN := testenv.RequirePostgres(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-	defer cancel()
 	st, _ := newMigrationTestStore(t, baseDSN)
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
 
 	provisioned, err := st.ProvisionAccount(
 		ctx,
@@ -386,12 +386,12 @@ func TestMigration69AgentEmailRetentionPostgres(t *testing.T) {
 
 func TestAgentEmailRetentionReplicasUseDifferentLanesPostgres(t *testing.T) {
 	baseDSN := testenv.RequirePostgres(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-	defer cancel()
 	st, _ := newMigrationTestStore(t, baseDSN)
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
 
 	first := newAgentEmailRetentionAccountFixture(ctx, t, st, "replica-a")
 	fixtures := []agentEmailRetentionAccountFixture{first}
@@ -521,12 +521,12 @@ func TestAgentEmailRetentionReplicasUseDifferentLanesPostgres(t *testing.T) {
 
 func TestAgentEmailRetentionIndefinitePolicyWinsRacePostgres(t *testing.T) {
 	baseDSN := testenv.RequirePostgres(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-	defer cancel()
 	st, _ := newMigrationTestStore(t, baseDSN)
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
 	fixture := newAgentEmailRetentionAccountFixture(ctx, t, st, "policy-race")
 	message := ingestAgentEmailRetentionFixture(
 		ctx, t, st, fixture, "policy race",
@@ -618,12 +618,12 @@ func TestAgentEmailRetentionIndefinitePolicyWinsRacePostgres(t *testing.T) {
 
 func TestAgentEmailRetentionWorkerPreservesLockOnlyLaneMetricsPostgres(t *testing.T) {
 	baseDSN := testenv.RequirePostgres(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-	defer cancel()
 	st, _ := newMigrationTestStore(t, baseDSN)
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
 	fixture := newAgentEmailRetentionAccountFixture(
 		ctx, t, st, "worker-lock-metrics",
 	)
@@ -664,12 +664,12 @@ func TestAgentEmailRetentionWorkerPreservesLockOnlyLaneMetricsPostgres(t *testin
 
 func TestAgentEmailRetentionWorkerDrainsConsecutiveCappedBatchesPostgres(t *testing.T) {
 	baseDSN := testenv.RequirePostgres(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-	defer cancel()
 	st, _ := newMigrationTestStore(t, baseDSN)
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
 	fixture := newAgentEmailRetentionAccountFixture(
 		ctx, t, st, "worker-consecutive-drain",
 	)
@@ -722,12 +722,12 @@ func TestAgentEmailRetentionWorkerDrainsConsecutiveCappedBatchesPostgres(t *test
 
 func TestAgentEmailRetentionStaleLaneGenerationCannotDeletePostgres(t *testing.T) {
 	baseDSN := testenv.RequirePostgres(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-	defer cancel()
 	st, _ := newMigrationTestStore(t, baseDSN)
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
 	fixture := newAgentEmailRetentionAccountFixture(ctx, t, st, "stale-lane")
 	message := ingestAgentEmailRetentionFixture(
 		ctx, t, st, fixture, "stale generation",

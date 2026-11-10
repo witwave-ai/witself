@@ -13,7 +13,7 @@ import (
 
 func TestReadSealedPlanePostureMetricsPostgres(t *testing.T) {
 	dsn := testenv.RequirePostgres(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second+testenv.MigrationBudget(0))
 	defer cancel()
 	st, p, current := newVaultLifecycleTestAgent(ctx, t, dsn, "sealed-posture@witwave.ai")
 

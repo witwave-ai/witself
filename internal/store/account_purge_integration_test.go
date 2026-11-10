@@ -32,12 +32,12 @@ func TestAccountPurgeErasesClosedPastGraceAndPreservesExcludedAccountsPostgres(
 	t *testing.T,
 ) {
 	dsn := testenv.RequirePostgres(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	t.Cleanup(cancel)
 	st, _ := newMigrationTestStore(t, dsn)
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	t.Cleanup(cancel)
 
 	suffix := fmt.Sprint(time.Now().UnixNano())
 	target := seedAccountPurgeIntegrationContent(ctx, t, st, "target", suffix)
@@ -287,12 +287,12 @@ func TestAccountPurgeErasesClosedPastGraceAndPreservesExcludedAccountsPostgres(
 
 func TestAccountPurgeDefersActiveVaultLifecyclePostgres(t *testing.T) {
 	dsn := testenv.RequirePostgres(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	t.Cleanup(cancel)
 	st, _ := newMigrationTestStore(t, dsn)
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	t.Cleanup(cancel)
 
 	suffix := fmt.Sprint(time.Now().UnixNano())
 	account := provisionActiveAccountPurgeIntegrationAccount(
@@ -375,12 +375,12 @@ func TestAccountPurgeSkipsAttachmentInvariantFailureAndContinuesPostgres(
 	t *testing.T,
 ) {
 	dsn := testenv.RequirePostgres(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	t.Cleanup(cancel)
 	st, _ := newMigrationTestStore(t, dsn)
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	t.Cleanup(cancel)
 
 	suffix := fmt.Sprint(time.Now().UnixNano())
 	broken := provisionActiveAccountPurgeIntegrationAccount(

@@ -1660,9 +1660,7 @@ func TestAccountEvacuationMigrationDowngradePostgres(t *testing.T) {
 func openAccountEvacuationTestStore(t *testing.T) (context.Context, *Store) {
 	t.Helper()
 	dsn := testenv.RequirePostgres(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	t.Cleanup(cancel)
-	st, err := Open(ctx, dsn)
+	st, err := Open(context.Background(), dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1670,6 +1668,8 @@ func openAccountEvacuationTestStore(t *testing.T) (context.Context, *Store) {
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	t.Cleanup(cancel)
 	return ctx, st
 }
 

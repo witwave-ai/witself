@@ -11,9 +11,7 @@ import (
 )
 
 func TestMessagePeekObservationalPostgres(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-	st, actors, msg := newMessagePeekFixture(ctx, t)
+	ctx, st, actors, msg := newMessagePeekFixture(t)
 	recipient := actors["recipient"]
 	check := func(p Principal, id, readState, processing string, generation int64) {
 		t.Helper()
@@ -85,9 +83,7 @@ func TestMessagePeekObservationalPostgres(t *testing.T) {
 }
 
 func TestMessagePeekAuthorizationPostgres(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-	st, actors, msg := newMessagePeekFixture(ctx, t)
+	ctx, st, actors, msg := newMessagePeekFixture(t)
 	refused := func(t *testing.T, p Principal, id string, want error) {
 		t.Helper()
 		before := messagePeekSnapshot(ctx, t, st)
@@ -132,12 +128,14 @@ func TestMessagePeekAuthorizationPostgres(t *testing.T) {
 	refused(t, actors["bystander"], stillLive.ID, ErrAccountNotActive)
 }
 
-func newMessagePeekFixture(ctx context.Context, t *testing.T) (*Store, map[string]Principal, Message) {
+func newMessagePeekFixture(t *testing.T) (context.Context, *Store, map[string]Principal, Message) {
 	t.Helper()
 	st, _ := newMigrationTestStore(t, testenv.RequirePostgres(t))
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	t.Cleanup(cancel)
 	account := func(name string) string {
 		t.Helper()
 		created, err := st.ProvisionAccount(ctx, name+"@witwave.ai", name, time.Hour)
@@ -193,7 +191,7 @@ func newMessagePeekFixture(ctx context.Context, t *testing.T) (*Store, map[strin
 	if events == 0 || usage == 0 {
 		t.Fatal("fixture must contain durable audit and usage rows")
 	}
-	return st, actors, msg
+	return ctx, st, actors, msg
 }
 
 // Every fixture has its own schema, so comparing all rows also catches writes

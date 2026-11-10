@@ -188,9 +188,7 @@ func TestAccountBackupValidationRollsBackPostgres(t *testing.T) {
 
 func TestAccountBackupValidationCarriesCompactedAvatarLineagePostgres(t *testing.T) {
 	dsn := testenv.RequirePostgres(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-	st, err := Open(ctx, dsn, WithAvatarPayloadCompactionEnabled(true))
+	st, err := Open(context.Background(), dsn, WithAvatarPayloadCompactionEnabled(true))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -198,6 +196,8 @@ func TestAccountBackupValidationCarriesCompactedAvatarLineagePostgres(t *testing
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
 	provisioned, err := st.ProvisionAccount(ctx,
 		fmt.Sprintf("avatar-backup-%d@witwave.ai", time.Now().UnixNano()),
 		"avatar backup validation", time.Hour)

@@ -224,10 +224,8 @@ func (r *importTelemetryReadGate) Read(p []byte) (int, error) {
 func openImportTelemetryTestStore(t *testing.T, logs io.Writer) (context.Context, *Store) {
 	t.Helper()
 	dsn := testenv.RequirePostgres(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	t.Cleanup(cancel)
 	logger := newImportTelemetryLogger(logs, "witself-server", memlimit.Sample, 1024, 1024)
-	st, err := Open(ctx, dsn, WithImportObserver(logger))
+	st, err := Open(context.Background(), dsn, WithImportObserver(logger))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -235,6 +233,8 @@ func openImportTelemetryTestStore(t *testing.T, logs io.Writer) (context.Context
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	t.Cleanup(cancel)
 	return ctx, st
 }
 

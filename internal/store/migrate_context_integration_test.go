@@ -398,16 +398,36 @@ func awaitMigrationResult(t *testing.T, result <-chan error, wait time.Duration)
 
 func assertMigrationLockAvailable(t *testing.T, conn *sql.Conn) {
 	t.Helper()
-	var acquired bool
-	if err := conn.QueryRowContext(context.Background(), migrationAdvisoryTryLockSQL).Scan(&acquired); err != nil {
-		t.Fatal(err)
+	// A failed cleanup query discards the migrator's session. PostgreSQL may
+	// finish that backend's exit after the client has returned, so availability
+	// is a liveness condition, not an instantaneous post-return assertion.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	attempts := 0
+	for ctx.Err() == nil {
+		attempts++
+		var acquired bool
+		if err := conn.QueryRowContext(ctx, migrationAdvisoryTryLockSQL).Scan(&acquired); err != nil {
+			if ctx.Err() != nil {
+				break
+			}
+			t.Fatal(err)
+		}
+		if acquired {
+			if err := releaseMigrationAdvisoryLock(ctx, conn); err != nil {
+				t.Fatal(err)
+			}
+			return
+		}
+		select {
+		case <-ctx.Done():
+		case <-ticker.C:
+		}
 	}
-	if !acquired {
-		t.Fatal("canceled migration retained the advisory lock")
-	}
-	if err := releaseMigrationAdvisoryLock(context.Background(), conn); err != nil {
-		t.Fatal(err)
-	}
+	t.Logf("migration lock availability attempts=%d", attempts)
+	t.Fatal("canceled migration retained the advisory lock")
 }
 
 // recordingCancellationReporter records Fatalf calls instead of stopping the

@@ -13,9 +13,7 @@ import (
 
 func TestDashboardPreferencesRoundTripIsolationAndArchivePostgres(t *testing.T) {
 	dsn := testenv.RequirePostgres(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-	defer cancel()
-	st, err := Open(ctx, dsn)
+	st, err := Open(context.Background(), dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -23,6 +21,8 @@ func TestDashboardPreferencesRoundTripIsolationAndArchivePostgres(t *testing.T) 
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
 
 	provisioned, err := st.ProvisionAccount(ctx, "dashboard-prefs@witwave.ai", "dashboard prefs", time.Hour)
 	if err != nil {

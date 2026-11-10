@@ -19,7 +19,7 @@ func TestMemoryCurationSuccessorRollbackPostgres(t *testing.T) {
 			name = "exact_rollback_replay_with_active_successor"
 		}
 		t.Run(name, func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute+testenv.MigrationBudget(0))
 			defer cancel()
 			st, p, source, started, planned, createdID := prepareMemoryCurationConflictPlan(ctx, t, dsn, true)
 			applied, err := st.ApplyCuration(ctx, p, started.Run.ID, ApplyMemoryCurationInput{

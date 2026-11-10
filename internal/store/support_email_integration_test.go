@@ -15,9 +15,7 @@ import (
 
 func TestSupportEmailIntakePostgres(t *testing.T) {
 	dsn := testenv.RequirePostgres(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-	defer cancel()
-	st, err := Open(ctx, dsn)
+	st, err := Open(context.Background(), dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -27,6 +25,8 @@ func TestSupportEmailIntakePostgres(t *testing.T) {
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
 
 	suffix := time.Now().UnixNano()
 	email := fmt.Sprintf("support-email-%d@witwave.ai", suffix)
