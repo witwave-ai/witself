@@ -872,6 +872,23 @@ jobs:
           WITSELF_TEST_REQUIRE_BOOTSTRAP_PARITY: "1"
         run: go test ./internal/localcell/trust/... -count=1
 
+      - name: Native private generation owner proof
+        id: trust_native_proof
+        if: runner.os == 'Windows'
+        shell: pwsh
+        timeout-minutes: 40
+        run: |
+          go run ./tools/trust-native-proof --output (Join-Path $env:RUNNER_TEMP "trust-native-proof-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT.json")
+          exit $LASTEXITCODE
+
+      - name: Upload native private generation proof receipt
+        if: ${{ always() && runner.os == 'Windows' && steps.trust_native_proof.outcome != 'skipped' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: trust-native-proof-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/trust-native-proof-${{ github.run_id }}-${{ github.run_attempt }}.json
+          if-no-files-found: error
+
       - name: Build native Witself client
         shell: bash
         run: |

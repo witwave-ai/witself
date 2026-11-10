@@ -27,7 +27,84 @@ def step(text, name):
     return match[1]
 
 
+def check_native_proof(text):
+    native = job(text, "provider-integration-contract")
+    normal_name = "Component-set bootstrap parity and remote-only archive boundary"
+    proof_name = "Native private generation owner proof"
+    upload_name = "Upload native private generation proof receipt"
+    normal = step(native, normal_name)
+    proof = step(native, proof_name)
+    upload = step(native, upload_name)
+    names = re.findall(r"^      - name: (.+)$", native, re.M)
+    require(names.count(proof_name) == 1 and names.count(upload_name) == 1,
+            "one native proof and receipt upload")
+    require(names.index(proof_name) == names.index(normal_name) + 1 and
+            names.index(upload_name) == names.index(proof_name) + 1,
+            "proof immediately follows whole trust and retains receipt")
+    require("run: go test ./internal/localcell/trust/... -count=1" in normal,
+            "whole trust remains unfiltered")
+    require(re.findall(r"^        if: (.+)$", proof, re.M) == ["runner.os == 'Windows'"],
+            "native proof Windows only and enabled")
+    require("id: trust_native_proof" in proof and "shell: pwsh" in proof and
+            "timeout-minutes: 40" in proof,
+            "native proof identity shell and bound")
+    command = ('go run ./tools/trust-native-proof --output (Join-Path $env:RUNNER_TEMP '
+               '"trust-native-proof-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT.json")')
+    require(command in proof and "exit $LASTEXITCODE" in proof,
+            "native proof command and failure propagation")
+    require(not re.search(r"^\s+continue-on-error:", proof + upload, re.M),
+            "native proof and receipt cannot ignore failures")
+    require(re.findall(r"^        if: (.+)$", upload, re.M) ==
+            ["${{ always() && runner.os == 'Windows' && steps.trust_native_proof.outcome != 'skipped' }}"],
+            "retain receipt after attempted Windows proof including failure")
+    pinned = re.findall(r"uses: (actions/upload-artifact@[^\s]+)",
+                        step(native, "Upload sanitized provider cell"))
+    require(re.findall(r"uses: (actions/upload-artifact@[^\s]+)", upload) == pinned and len(pinned) == 1,
+            "native receipt uses existing upload pin")
+    require(re.findall(r"^\s+name: (.+)$", upload, re.M) ==
+            ["trust-native-proof-${{ github.run_id }}-${{ github.run_attempt }}"],
+            "native receipt separate from cell aggregation")
+    require(re.findall(r"^\s+path: (.+)$", upload, re.M) ==
+            ["${{ runner.temp }}/trust-native-proof-${{ github.run_id }}-${{ github.run_attempt }}.json"],
+            "upload only sanitized receipt")
+    require("if-no-files-found: error" in upload, "absent attempted receipt fails")
+
+
+def native_proof_fixtures(source):
+    native = job(source, "provider-integration-contract")
+    proof = step(native, "Native private generation owner proof")
+    upload = step(native, "Upload native private generation proof receipt")
+    fixtures = [
+        (proof, ""),
+        (proof, proof.replace("runner.os == 'Windows'", "runner.os == 'Linux'")),
+        (proof, proof.replace("runner.os == 'Windows'", "false")),
+        (proof, proof.replace("shell: pwsh", "continue-on-error: true\n        shell: pwsh")),
+        (proof, proof.replace("exit $LASTEXITCODE", "exit 0")),
+        (upload, ""),
+        (upload, upload.replace("always() &&", "success() &&")),
+        (upload, upload.replace("outcome != 'skipped'", "outcome == 'success'")),
+        (upload, upload.replace("trust-native-proof-${{ github.run_id }}", "provider-contract-cell-${{ github.run_id }}")),
+        (upload, upload.replace(".json", "*")),
+        (upload, upload.replace("if-no-files-found: error", "if-no-files-found: ignore")),
+        (upload, upload.replace("uses: actions/upload-artifact@", "uses: actions/download-artifact@")),
+        (upload, upload.replace("with:", "continue-on-error: true\n        with:")),
+    ]
+    for old, replacement in fixtures:
+        require(source.count(old) == 1, "unique native proof fixture anchor")
+        mutated = source.replace(old, replacement, 1)
+        for variant in (mutated, mutated.replace("\n", "\r\n")):
+            try:
+                check(variant, "ci")
+            except AssertionError:
+                continue
+            raise AssertionError("native proof negative fixture survived")
+    return len(fixtures) * 2
+
+
 def check(text, workflow):
+    text = text.replace("\r\n", "\n")
+    if workflow == "ci":
+        check_native_proof(text)
     native_id = "provider-integration-contract" if workflow == "ci" else "provider-integration-verify"
     native = job(text, native_id)
     aggregate = job(text, "provider-contract-evidence")
@@ -200,6 +277,9 @@ try:
     for workflow in ("ci", "release"):
         source = (root / ".github/workflows" / (workflow + ".yml")).read_text()
         check(source, workflow)
+        check(source.replace("\n", "\r\n"), workflow)
+        if workflow == "ci":
+            count += native_proof_fixtures(source)
         for name, before, after in canaries:
             # Target the native/evidence jobs so older unrelated steps cannot
             # satisfy the fixture mutation accidentally.
