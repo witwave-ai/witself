@@ -523,8 +523,15 @@ CLI `preview` and the preview performed by `up` refuse database/store deletion
 or replacement while the effective field is true, including legacy resources
 whose old state has `protect=false`. The error lists the affected resource
 URNs. `up` applies the exact reviewed saved plan; its private temporary plan
-is removed afterward. With the field false, previous applied protection still
-blocks combining unprotection and replacement in one update.
+is removed afterward. With the field false, previously applied Pulumi or
+native protection still blocks combining unprotection and replacement in one
+update for database/secret stores.
+
+For Civo, the cluster and workload namespace registrations do not set Pulumi
+`Protect`: recording `deletion_protection: false` permits replacement on the
+next `up`, without a separate unprotection interlock. Only `destroy` checks
+the persisted stack protection output and requires an applied unprotection
+`up`. Keep protection enabled throughout a node-count change.
 
 If a provider proposes replacement to enable protection, do not apply it.
 Use a provider-supported in-place protection operation, then
@@ -544,6 +551,11 @@ explains why protection adoption also needs plan review. Synthetic engine-event
 tests cover that refusal because resource mocks do not execute provider diffs.
 
 ### Two-step unprotect, then destroy or replace
+
+For Civo replacement, this sequence is an operator procedure, not an enforced
+two-step interlock: recording false already permits replacement on the next
+`up`. The separate applied update remains enforced before `destroy` through
+the persisted stack protection output.
 
 1. Record the break-glass decision in the operator's inventory
    (`~/.witself/infra.yaml`, or the same `-config` path used to provision the

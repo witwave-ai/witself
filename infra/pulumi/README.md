@@ -608,12 +608,19 @@ The deletion-protection plan review used by both `preview` and `up` refuses
 `witself-namespace`. Replacing either would delete the in-cluster PostgreSQL
 volumes. Protection defaults to enabled when neither the cell nor inventory
 defaults records `deletion_protection`. Recording `deletion_protection: false`
-on the cell allows the documented intentional replacement or destroy path
-after a separate unprotection `up`. Keep it enabled for a
-node-count change. Before first use, a read-only preview must still confirm
-that changing `pools.nodeCount` is an in-place update in the pinned provider.
+on a Civo cell permits replacement on the next `up`: the cluster and workload
+namespace registrations do not set Pulumi `Protect`, so there is no separate
+unprotection interlock for replacement. Only `destroy` checks the persisted
+stack protection output and requires an applied unprotection `up`. Keep
+protection enabled for a node-count change. Before first use, a read-only
+preview must still confirm that changing `pools.nodeCount` is an in-place
+update in the pinned provider.
 Mocks cannot establish that safety; follow the runbook and stop on any
 replacement or unrelated change.
+
+The review covers resources in the Pulumi plan; it does not cover deletions
+cascaded inside the cluster by Argo CD Application finalizers, so the volume
+reclaim policy is a separate control.
 
 A decrease is enforced only by review, not by code: every machine that may
 run `up -cell` for a scaled cell must carry the same recorded count, or an
