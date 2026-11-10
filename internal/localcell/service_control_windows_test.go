@@ -48,7 +48,7 @@ func windowsPipeTestDeadline(ctx context.Context) time.Time {
 }
 
 // Never let a failed cancellation mutant strand test cleanup in Close's Wait.
-func windowsPipeTestClose(t *testing.T, ctx context.Context, listener *windowsPipeListener) {
+func windowsPipeTestClose(ctx context.Context, t *testing.T, listener *windowsPipeListener) {
 	t.Helper()
 	done := make(chan struct{})
 	go func() { _ = listener.Close(); close(done) }()
@@ -64,7 +64,7 @@ func windowsPipeTestClose(t *testing.T, ctx context.Context, listener *windowsPi
 	}
 }
 
-func windowsPipeTestControlStop(t *testing.T, ctx context.Context, c *Cell, stop func()) {
+func windowsPipeTestControlStop(ctx context.Context, t *testing.T, c *Cell, stop func()) {
 	t.Helper()
 	c.serviceControlMu.Lock()
 	listener, _ := c.serviceControlListener.(*windowsPipeListener)
@@ -75,7 +75,7 @@ func windowsPipeTestControlStop(t *testing.T, ctx context.Context, c *Cell, stop
 	case <-done:
 	case <-ctx.Done():
 		if listener != nil {
-			windowsPipeTestClose(t, ctx, listener)
+			windowsPipeTestClose(ctx, t, listener)
 		}
 		t.Error("service control shutdown exceeded synthetic budget")
 	}
@@ -94,18 +94,18 @@ func windowsPipeTestRecord(t *testing.T) serviceControlEndpointRecord {
 	return serviceControlEndpointRecord{PipeName: name, HostPID: os.Getpid(), HostStartIdentity: start}
 }
 
-func windowsPipeTestListener(t *testing.T, ctx context.Context) (*windowsPipeListener, serviceControlEndpointRecord) {
+func windowsPipeTestListener(ctx context.Context, t *testing.T) (*windowsPipeListener, serviceControlEndpointRecord) {
 	t.Helper()
 	record := windowsPipeTestRecord(t)
 	listener, err := windowsListenPipe(record.PipeName)
 	if err != nil {
 		t.Fatal("cannot bind pipe fixture")
 	}
-	t.Cleanup(func() { windowsPipeTestClose(t, ctx, listener) })
+	t.Cleanup(func() { windowsPipeTestClose(ctx, t, listener) })
 	return listener, record
 }
 
-func windowsPipeTestPair(t *testing.T, ctx context.Context, listener *windowsPipeListener, record serviceControlEndpointRecord) (net.Conn, net.Conn) {
+func windowsPipeTestPair(ctx context.Context, t *testing.T, listener *windowsPipeListener, record serviceControlEndpointRecord) (net.Conn, net.Conn) {
 	t.Helper()
 	conn, err := windowsDialPipe(ctx, record)
 	if err != nil {
@@ -175,7 +175,7 @@ func TestWindowsPrivatePipePolicy(t *testing.T) {
 			}
 		})
 	}
-	listener, _ := windowsPipeTestListener(t, ctx)
+	listener, _ := windowsPipeTestListener(ctx, t)
 	if len(listener.handles) != 4 {
 		t.Fatal("pipe instance count changed")
 	}
@@ -206,7 +206,7 @@ func TestWindowsPrivatePipeCreationAndSquatter(t *testing.T) {
 		return original(name, flags, mode, maxInstances, outSize, inSize, timeout, attributes)
 	}
 	t.Cleanup(func() { windowsCreateNamedPipe = original })
-	listener, record := windowsPipeTestListener(t, ctx)
+	listener, record := windowsPipeTestListener(ctx, t)
 	windowsCreateNamedPipe = original
 	if calls != 4 {
 		t.Fatal("bounded instance pool not created")
@@ -218,13 +218,13 @@ func TestWindowsPrivatePipeCreationAndSquatter(t *testing.T) {
 	// The child owns one of four allowed instances; a second raw instance
 	// proves spare capacity before the first-instance reservation is attempted.
 	squatter := windowsPipeTestRecord(t)
-	command, input, output := windowsPipeFixtureCommand(t, ctx, "pipe-squatter", squatter.PipeName)
-	windowsPipeFixtureReady(t, ctx, output)
+	command, input, output := windowsPipeFixtureCommand(ctx, t, "pipe-squatter", squatter.PipeName)
+	windowsPipeFixtureReady(ctx, t, output)
 	spare := windowsPipeRawHandle(t, squatter.PipeName, false)
 	_ = windows.CloseHandle(spare)
 	joined, joinErr := windowsListenPipe(squatter.PipeName)
 	if joined != nil {
-		windowsPipeTestClose(t, ctx, joined)
+		windowsPipeTestClose(ctx, t, joined)
 	}
 	if joined != nil || joinErr == nil || joinErr.Error() != "localcell: service_control_unavailable: pipe:first_instance" {
 		t.Fatal("separate-process one-instance squatter was joined or served")
@@ -233,7 +233,7 @@ func TestWindowsPrivatePipeCreationAndSquatter(t *testing.T) {
 	if command.Wait() != nil {
 		t.Fatal("squatter cleanup failed")
 	}
-	client, server := windowsPipeTestPair(t, ctx, listener, record)
+	client, server := windowsPipeTestPair(ctx, t, listener, record)
 	if client.LocalAddr().String() != "pipe" || server.RemoteAddr().String() != "pipe" || listener.Addr().Network() != "pipe" {
 		t.Fatal("address disclosed random endpoint")
 	}
@@ -305,7 +305,7 @@ func TestWindowsPrivatePipeServerRefusesBeforeHTTP(t *testing.T) {
 			if err != nil {
 				t.Fatal("cannot listen")
 			}
-			defer func() { windowsPipeTestClose(t, ctx, listener) }()
+			defer func() { windowsPipeTestClose(ctx, t, listener) }()
 			pointer, _ := windows.UTF16PtrFromString(name)
 			handle, err := windows.CreateFile(pointer, windows.GENERIC_READ|windows.GENERIC_WRITE, 0, nil, windows.OPEN_EXISTING, windows.FILE_FLAG_OVERLAPPED|windows.SECURITY_SQOS_PRESENT|windows.SECURITY_IDENTIFICATION, 0)
 			if err != nil {
@@ -343,15 +343,15 @@ func windowsPipeHandleCount(t *testing.T) uint32 {
 func TestWindowsPrivatePipeDeadlinesAndHandles(t *testing.T) {
 	ctx := windowsSyntheticTestContext(t)
 	// Warm runtime and listener event allocation before measuring steady-state.
-	listener, record := windowsPipeTestListener(t, ctx)
-	client, server := windowsPipeTestPair(t, ctx, listener, record)
+	listener, record := windowsPipeTestListener(ctx, t)
+	client, server := windowsPipeTestPair(ctx, t, listener, record)
 	_ = client.Close()
 	_ = server.Close()
-	windowsPipeTestClose(t, ctx, listener)
+	windowsPipeTestClose(ctx, t, listener)
 	before := windowsPipeHandleCount(t)
-	listener, record = windowsPipeTestListener(t, ctx)
+	listener, record = windowsPipeTestListener(ctx, t)
 	for iteration := 0; iteration < 20; iteration++ {
-		client, server := windowsPipeTestPair(t, ctx, listener, record)
+		client, server := windowsPipeTestPair(ctx, t, listener, record)
 		started := time.Now()
 		deadline := 40 * time.Millisecond
 		_ = client.SetReadDeadline(started.Add(deadline))
@@ -392,7 +392,7 @@ func TestWindowsPrivatePipeDeadlinesAndHandles(t *testing.T) {
 		_ = server.Close()
 	}
 	// Closing the listener also retires every persistent reservation/pool event.
-	windowsPipeTestClose(t, ctx, listener)
+	windowsPipeTestClose(ctx, t, listener)
 	if after := windowsPipeHandleCount(t); after > before {
 		t.Fatal("pipe deadline loop leaked handles")
 	}
@@ -400,8 +400,8 @@ func TestWindowsPrivatePipeDeadlinesAndHandles(t *testing.T) {
 
 func TestWindowsPrivatePipeDeadlineUpdateAndClose(t *testing.T) {
 	ctx := windowsSyntheticTestContext(t)
-	listener, record := windowsPipeTestListener(t, ctx)
-	client, server := windowsPipeTestPair(t, ctx, listener, record)
+	listener, record := windowsPipeTestListener(ctx, t)
+	client, server := windowsPipeTestPair(ctx, t, listener, record)
 	finished := make(chan error, 1)
 	go func() { _, err := client.Read(make([]byte, 1)); finished <- err }()
 	_ = client.SetReadDeadline(time.Now().Add(30 * time.Millisecond))
@@ -432,7 +432,7 @@ func TestWindowsPrivatePipeDeadlineUpdateAndClose(t *testing.T) {
 	// Establish ERROR_IO_PENDING before invoking Close, without scheduler sleeps.
 	// Calibrate on this exact ConnectNamedPipe/GetOverlappedResult cancellation seam.
 	calibration, _, calibrationDone := windowsPipePendingConnect(t)
-	t.Cleanup(func() { windowsPipeTestClose(t, ctx, calibration) })
+	t.Cleanup(func() { windowsPipeTestClose(ctx, t, calibration) })
 	began := time.Now()
 	for _, handle := range calibration.handles {
 		_ = windows.CancelIoEx(handle, nil)
@@ -443,9 +443,9 @@ func TestWindowsPrivatePipeDeadlineUpdateAndClose(t *testing.T) {
 		t.Fatal("pending-connect calibration stalled")
 	}
 	bound := max(100*time.Millisecond, 10*time.Since(began))
-	windowsPipeTestClose(t, ctx, calibration)
+	windowsPipeTestClose(ctx, t, calibration)
 	pending, _, _ := windowsPipePendingConnect(t)
-	t.Cleanup(func() { windowsPipeTestClose(t, ctx, pending) })
+	t.Cleanup(func() { windowsPipeTestClose(ctx, t, pending) })
 	accepting := make(chan error, 1)
 	go func() { _, err := pending.Accept(); accepting <- err }()
 	closed := make(chan error, 1)
@@ -492,7 +492,7 @@ func TestWindowsPrivatePipeDeadlineUpdateAndClose(t *testing.T) {
 
 func TestWindowsPrivatePipeConcurrentClients(t *testing.T) {
 	ctx := windowsSyntheticTestContext(t)
-	listener, record := windowsPipeTestListener(t, ctx)
+	listener, record := windowsPipeTestListener(ctx, t)
 	results := make(chan error, 8)
 	var servers sync.WaitGroup
 	go func() {
@@ -569,7 +569,7 @@ func TestWindowsServiceControlAuthentication(t *testing.T) {
 	if err != nil {
 		t.Fatal("cannot serve control fixture")
 	}
-	defer windowsPipeTestControlStop(t, ctx, c, closeControl)
+	defer windowsPipeTestControlStop(ctx, t, c, closeControl)
 	transport := &http.Transport{DisableKeepAlives: true, DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) { return c.dialServiceControl(ctx) }}
 	defer transport.CloseIdleConnections()
 	client := &http.Client{Transport: transport, Timeout: 2 * time.Second}
@@ -698,7 +698,7 @@ func TestWindowsPipeProcessFixture(t *testing.T) {
 	}
 }
 
-func windowsPipeFixtureCommand(t *testing.T, ctx context.Context, args ...string) (*exec.Cmd, io.WriteCloser, *bufio.Reader) {
+func windowsPipeFixtureCommand(ctx context.Context, t *testing.T, args ...string) (*exec.Cmd, io.WriteCloser, *bufio.Reader) {
 	t.Helper()
 	c, _ := unitCell(t)
 	childDeadline := windowsPipeTestDeadline(ctx).Add(-windowsSyntheticTestBudget / 300)
@@ -726,8 +726,8 @@ func windowsPipeFixtureCommand(t *testing.T, ctx context.Context, args ...string
 
 func TestWindowsPrivatePipeAcrossProcesses(t *testing.T) {
 	ctx := windowsSyntheticTestContext(t)
-	listener, record := windowsPipeTestListener(t, ctx)
-	command, _, _ := windowsPipeFixtureCommand(t, ctx, "pipe-client", record.PipeName, strconv.Itoa(record.HostPID), record.HostStartIdentity)
+	listener, record := windowsPipeTestListener(ctx, t)
+	command, _, _ := windowsPipeFixtureCommand(ctx, t, "pipe-client", record.PipeName, strconv.Itoa(record.HostPID), record.HostStartIdentity)
 	accepted := make(chan net.Conn, 1)
 	go func() {
 		conn, err := listener.Accept()
@@ -778,8 +778,8 @@ func TestWindowsPrivatePipeDecoyServer(t *testing.T) {
 			if err != nil {
 				t.Fatal("cannot publish decoy fixture")
 			}
-			command, _, output := windowsPipeFixtureCommand(t, ctx, "pipe-decoy", name)
-			windowsPipeFixtureReady(t, ctx, output)
+			command, _, output := windowsPipeFixtureCommand(ctx, t, "pipe-decoy", name)
+			windowsPipeFixtureReady(ctx, t, output)
 			staleLease := originalLease
 			if mismatch == "start" {
 				record.HostPID, staleLease.PID = command.Process.Pid, command.Process.Pid
@@ -820,7 +820,7 @@ func TestWindowsPrivatePipeDecoyServer(t *testing.T) {
 	if err != nil {
 		t.Fatal("cannot serve valid control exchange")
 	}
-	defer windowsPipeTestControlStop(t, ctx, c, stop)
+	defer windowsPipeTestControlStop(ctx, t, c, stop)
 	go func() {
 		select {
 		case command := <-commands:
@@ -834,7 +834,7 @@ func TestWindowsPrivatePipeDecoyServer(t *testing.T) {
 	}
 }
 
-func windowsPipeFixtureReady(t *testing.T, ctx context.Context, output *bufio.Reader) {
+func windowsPipeFixtureReady(ctx context.Context, t *testing.T, output *bufio.Reader) {
 	t.Helper()
 	ready := make(chan bool, 1)
 	go func() { line, err := output.ReadString('\n'); ready <- err == nil && line == "ready\n" }()
@@ -937,8 +937,8 @@ func windowsPipeTestHandleInformation(handle windows.Handle, flags *uint32) erro
 
 func TestWindowsPrivatePipeWriteDeadline(t *testing.T) {
 	ctx := windowsSyntheticTestContext(t)
-	listener, record := windowsPipeTestListener(t, ctx)
-	client, server := windowsPipeTestPair(t, ctx, listener, record)
+	listener, record := windowsPipeTestListener(ctx, t)
+	client, server := windowsPipeTestPair(ctx, t, listener, record)
 	defer func() { _ = client.Close(); _ = server.Close() }()
 	deadline := 40 * time.Millisecond
 	started := time.Now()
@@ -990,7 +990,7 @@ func TestWindowsServiceControlEndpointCleanup(t *testing.T) {
 			if err != nil {
 				t.Fatal("cannot create cleanup fixture listener")
 			}
-			defer func() { windowsPipeTestClose(t, ctx, listener.(*windowsPipeListener)) }()
+			defer func() { windowsPipeTestClose(ctx, t, listener.(*windowsPipeListener)) }()
 			owned, err := c.readServiceControlEndpoint()
 			if err != nil {
 				t.Fatal("cannot read owned endpoint fixture")
@@ -1142,7 +1142,7 @@ func TestWindowsServiceControlPublicationAfterFirstInstance(t *testing.T) {
 	if err != nil {
 		t.Fatal("valid first-create did not publish")
 	}
-	t.Cleanup(func() { windowsPipeTestClose(t, ctx, listener.(*windowsPipeListener)) })
+	t.Cleanup(func() { windowsPipeTestClose(ctx, t, listener.(*windowsPipeListener)) })
 	record, err := c.readServiceControlEndpoint()
 	if err != nil || record.HostPID != os.Getpid() || record.Generation != descriptor.Payload.Generation || !validServiceControlPipeName(record.PipeName, descriptor.InstallationID) {
 		t.Fatal("successful first-create publication was not valid")
@@ -1160,8 +1160,8 @@ func TestWindowsPrivatePipeDisconnectedPeerEOF(t *testing.T) {
 		t.Fatal("closing pipe must retain fixed non-EOF refusal")
 	}
 	t.Run("read_no_data_refused", func(t *testing.T) {
-		listener, record := windowsPipeTestListener(t, ctx)
-		client, _ := windowsPipeTestPair(t, ctx, listener, record)
+		listener, record := windowsPipeTestListener(ctx, t)
+		client, _ := windowsPipeTestPair(ctx, t, listener, record)
 		original := windowsPipeReadFile
 		t.Cleanup(func() { windowsPipeReadFile = original })
 		calls := 0

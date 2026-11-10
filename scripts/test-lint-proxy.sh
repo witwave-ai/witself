@@ -52,30 +52,43 @@ PATH="$work_dir/bin" MAKEFLAGS='' MFLAGS='' MAKEFILES='' MAKELEVEL=0 \
   "$make_bin" -n --no-print-directory MAKE=: check check-infra >"$work_dir/dry-run" \
   || fail 'make dry-run failed'
 
-lint_command='go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@'
-lint_count=$(grep -Fc "$lint_command" "$work_dir/dry-run" || true)
-[[ "$lint_count" == 2 ]] || fail 'expected exactly two golangci-lint go run lines'
-
+lint_module='github.com/golangci/golangci-lint/v2/cmd/golangci-lint'
+lint_command="go run $lint_module@$version run ./..."
+# make expands $$ to $; keep the wrapper's remaining shell escapes literal.
+read -r windows_exec <<'SH'
+go run -exec "sh -c 'GOOS=windows GOARCH=amd64 exec \"\$@\"' sh"
+SH
+windows_packages='./internal/localcell/... ./internal/dashboard/... ./internal/listenerdiagnostic/... ./internal/memorycurator/... ./internal/memoryhydration/... ./internal/runtimeconfig/... ./internal/tools/capturemix/... ./internal/tools/localcellharness/...'
+windows_command="$windows_exec $lint_module@$version run $windows_packages"
 proxy_prefix="GOPROXY=\"file://$scratch_cache/cache/download,$scratch_proxy\" "
 root_count=0
+windows_count=0
 infra_count=0
 while IFS= read -r line; do
-  if [[ "$line" == *"$lint_command"* ]]; then
+  # Discover malformed and extra lint commands too, but ignore recipe comments.
+  if [[ "$line" == *golangci-lint* && ! "$line" =~ ^[[:space:]]*# ]]; then
     command_line=${line#'cd infra/pulumi && '}
     [[ "$command_line" == "$proxy_prefix"* ]] \
       || fail 'lint recipe lost its cache-first GOPROXY prefix'
-    [[ "$command_line" == "$proxy_prefix$lint_command$version run ./..." ]] \
-      || fail 'lint version or arguments differ from the Makefile pin'
-    if [[ "$line" == "$command_line" ]]; then
-      root_count=$((root_count + 1))
-    else
+    if [[ "$line" != "$command_line" ]]; then
+      [[ "$command_line" == "$proxy_prefix$lint_command" ]] \
+        || fail 'infra lint version or arguments differ from the Makefile pin'
       infra_count=$((infra_count + 1))
+    elif [[ "$command_line" == "$proxy_prefix"'go run -exec '* ]]; then
+      [[ "$command_line" == "$proxy_prefix$windows_command" ]] \
+        || fail 'Windows lint version, wrapper, or package scope differs from the expected recipe'
+      windows_count=$((windows_count + 1))
+    else
+      [[ "$command_line" == "$proxy_prefix$lint_command" ]] \
+        || fail 'root lint version or arguments differ from the Makefile pin'
+      root_count=$((root_count + 1))
     fi
   elif [[ "$line" == *GOPROXY=* ]]; then
     fail 'a non-lint recipe gained GOPROXY='
   fi
 done <"$work_dir/dry-run"
-[[ "$root_count" == 1 && "$infra_count" == 1 ]] \
-  || fail 'expected one root and one cd infra/pulumi lint recipe'
+[[ "$root_count" == 1 ]] || fail 'expected exactly one root Linux lint recipe'
+[[ "$windows_count" == 1 ]] || fail 'expected exactly one root Windows lint recipe'
+[[ "$infra_count" == 1 ]] || fail 'expected exactly one cd infra/pulumi lint recipe'
 
-printf 'lint-proxy regression: four assertions passed (two lint recipes)\n'
+printf 'lint-proxy regression: three lint recipes validated (root Linux, root Windows, infra/pulumi)\n'

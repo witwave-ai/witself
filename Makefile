@@ -424,6 +424,8 @@ check: ## Run the full application gate set (see CLAUDE.md for brochure-only sco
 	WITSELF_TEST_REQUIRE_PEAK_MEMORY=1 go test ./internal/export -run '^TestReadPeakMemory$$' -count=1 -v -timeout=15m
 	WITSELF_TEST_REQUIRE_PEAK_MEMORY=1 go test ./internal/store -run '^(TestImportEntryIndexBytes|TestImportStateMemoryPostgres)$$' -count=1 -v -timeout=40m
 	GOPROXY="file://$(shell go env GOMODCACHE)/cache/download,$(shell go env GOPROXY)" go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) run ./...
+	# Keep Windows scope aligned with the golangci-lint step in .github/workflows/ci.yml.
+	GOPROXY="file://$(shell go env GOMODCACHE)/cache/download,$(shell go env GOPROXY)" go run -exec "sh -c 'GOOS=windows GOARCH=amd64 exec \"\$$@\"' sh" github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) run ./internal/localcell/... ./internal/dashboard/... ./internal/listenerdiagnostic/... ./internal/memorycurator/... ./internal/memoryhydration/... ./internal/runtimeconfig/... ./internal/tools/capturemix/... ./internal/tools/localcellharness/...
 	$(MAKE) govulncheck
 	$(MAKE) check-infra
 	@echo "check: all gates green"

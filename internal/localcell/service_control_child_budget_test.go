@@ -171,7 +171,7 @@ case <-ctx.Done():`, "host cleanup must wait within the live row context before 
 		{"case <-ctx.Done():\nt.Fatal(\"synthetic foreground host shutdown exceeded shared budget\")", "shutdown must use the row context"},
 		{"allowance := serviceControlChildReadinessAllowance(localcell.NativeServiceChildSyntheticBudget, time.Since(prepared))", "readiness must use the portable row-budget allowance"},
 		{"readinessStarted := time.Now()\ngo func() { done <- cell.Run(hostContext, policy) }()\nreadyContext, readyCancel := context.WithTimeout(workContext, allowance)", "readiness timing must start before the host and bound its control context"},
-		{"lastControl := \"none\"\nfor {\nstatus, controlErr := cell.Control(readyContext, \"health\")\nif controlErr != nil {\nswitch serviceControlChildDiagnostic(controlErr) {", "readiness must classify the last control result"},
+		{"for {\nstatus, controlErr := cell.Control(readyContext, \"health\")\nvar lastControl string\nif controlErr != nil {\nswitch serviceControlChildDiagnostic(controlErr) {", "readiness must classify the last control result"},
 		{`case "localcell: service_control_unavailable: transport:dial":
 lastControl = "dial"
 case "localcell: service_control_unavailable: transport:deadline":
@@ -184,7 +184,6 @@ default:
 lastControl = "unclassified"
 }
 } else {
-lastControl = "none"
 if status.Healthy {
 break
 }
