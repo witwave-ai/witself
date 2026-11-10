@@ -1204,10 +1204,11 @@ is never a safe recovery procedure. D1B owns enforcement with legacy-path parity
 proofs; executable update is a later unit. The intent-creation helper is withheld
 because legacy manifests cannot authenticate component-set identity. Retained
 record helpers require pre-existing private intent and matching immutable
-metadata; they do not provide executable recovery. The optional wire fields are
-omitted from legacy records. The predecessor rejects manifests carrying the new
-generation fields and journals carrying `update_id` or an update operation; a
-downgrade does not resume an update.
+metadata; they do not provide executable recovery. Manifest generation fields
+are deferred to the enforcement unit; both the shipped reader and the predecessor
+reject manifests carrying `active_generation` or `maintenance_generation`.
+The shipped reader and predecessor also reject journals carrying `update_id` or
+an update operation; a downgrade does not resume an update.
 
 The hosted dependency boundary forbids a localcell trust import. Authenticated
 installation/channel identity, a safe complete-stage discard API and migration

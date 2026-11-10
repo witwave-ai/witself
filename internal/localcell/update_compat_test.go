@@ -3,8 +3,11 @@ package localcell
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -351,18 +354,212 @@ func TestUpdateHEADJournalLineShapes(t *testing.T) {
 	}
 }
 
-func TestUpdateHEADOptionalFieldsDowngrade(t *testing.T) {
-	t.Run("manifest", func(t *testing.T) {
-		for _, field := range []string{"active_generation", "maintenance_generation"} {
-			t.Run(field, func(t *testing.T) {
-				c, m := unitCell(t)
-				if field == "active_generation" {
-					m.ActiveGeneration = "generation-test"
-				} else {
-					m.MaintenanceGeneration = 1
+func TestUpdateLegacyJournalReaderParity(t *testing.T) {
+	type fixture struct {
+		name, data string
+		absent     bool
+		directory  bool
+		cleanup    bool
+	}
+	cases := []fixture{
+		{name: "absent", absent: true},
+		{name: "empty"},
+		{name: "absent_with_cleanup", absent: true, cleanup: true},
+		{name: "empty_with_cleanup", cleanup: true},
+	}
+	type corpusEntry struct {
+		journalEntry
+		line string
+	}
+	var corpus []corpusEntry
+	for _, line := range strings.Split(strings.TrimSuffix(updateHEADJournalFixture, "\n"), "\n") {
+		var entry journalEntry
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			t.Fatal(err)
+		}
+		corpus = append(corpus, corpusEntry{entry, line + "\n"})
+	}
+	// Each cause variant forms a complete operation. Place operation/done last
+	// so all other corpus records (including failed states) are fenced. Together
+	// these eight sequences exercise every one of the 210 captured lines.
+	used := 0
+	for _, operation := range []string{"install", "start", "stop", "remove"} {
+		for _, withCause := range []bool{false, true} {
+			var start, body, end string
+			for _, entry := range corpus {
+				if entry.Operation != operation || (entry.Cause != "") != withCause {
+					continue
 				}
+				used++
+				switch {
+				case entry.Step == "operation" && entry.State == "started":
+					start = entry.line
+				case entry.Step == "operation" && entry.State == "done":
+					end = entry.line
+				default:
+					body += entry.line
+				}
+			}
+			if start == "" || end == "" {
+				t.Fatal("HEAD corpus lacks a complete legacy operation")
+			}
+			cases = append(cases, fixture{name: fmt.Sprintf("complete_%s_cause_%t", operation, withCause), data: start + body + end})
+		}
+	}
+	if used != 210 || used != len(corpus) {
+		t.Fatal("parity sequences did not cover the entire HEAD corpus")
+	}
+	line := func(operation, step, state string) string {
+		t.Helper()
+		for _, entry := range corpus {
+			if entry.Operation == operation && entry.Step == step && entry.State == state && entry.Cause == "" {
+				return entry.line
+			}
+		}
+		t.Fatal("missing HEAD corpus entry")
+		return ""
+	}
+	start := line("start", "operation", "started")
+	pending := start + line("start", "ports", "done") + line("start", "server", "failed")
+	oversizeNUL := strings.Repeat("\x00", 2*64*1024+7)
+	cases = append(cases,
+		fixture{name: "open_operation", data: start},
+		fixture{name: "pending_done_and_failed_steps", data: pending},
+		fixture{name: "json_prefix_tail", data: pending + `{"operation":`},
+		fixture{name: "nul_tail", data: pending + strings.Repeat("\x00", 7)},
+		fixture{name: "oversize_nul_tail", data: pending + oversizeNUL},
+		fixture{name: "nul_then_newline", data: pending + strings.Repeat("\x00", 7) + "\n"},
+		fixture{name: "oversize_nul_then_newline", data: pending + oversizeNUL + "\n"},
+		fixture{name: "oversize_nul_then_non_nul", data: pending + oversizeNUL + "x"},
+		fixture{name: "unknown_member", data: strings.Replace(start, "{", `{"unknown":true,`, 1)},
+		fixture{name: "unknown_operation", data: strings.Replace(start, `"operation":"start"`, `"operation":"unknown"`, 1)},
+		fixture{name: "unknown_step", data: start + strings.Replace(line("start", "ports", "done"), `"step":"ports"`, `"step":"unknown"`, 1)},
+		fixture{name: "invalid_state", data: strings.Replace(start, `"state":"started"`, `"state":"invalid"`, 1)},
+		fixture{name: "zero_timestamp", data: strings.Replace(start, corpusTimestamp(t, start), "0001-01-01T00:00:00Z", 1)},
+		fixture{name: "trailing_bytes_same_line", data: strings.TrimSuffix(start, "\n") + " {}\n"},
+		fixture{name: "step_without_operation", data: line("start", "ports", "done")},
+		fixture{name: "overlapping_operations", data: start + line("stop", "operation", "started")},
+		fixture{name: "mismatched_operation", data: start + line("stop", "stop", "done")},
+		fixture{name: "directory", directory: true},
+	)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c, m := unitCell(t)
+			if tc.cleanup {
+				m.Cleanup = &journalEntry{Operation: "remove", Step: "runtime_cleanup", State: "started", At: m.CreatedAt}
 				if err := writeAtomic(c.path("manifest.json"), m, nil); err != nil {
 					t.Fatal(err)
+				}
+			}
+			path := c.path("journal", "operations.jsonl")
+			if tc.directory {
+				if err := testMkdir(path, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			} else if !tc.absent {
+				if err := testWriteFile(path, []byte(tc.data), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			shipped, shippedErr := c.readJournal()
+			private, privateErr := c.readUpdateJournal()
+			if !reflect.DeepEqual(shipped.pending, private.pending) || !reflect.DeepEqual(shipped.done, private.done) ||
+				shipped.durableBytes != private.durableBytes || shipped.tornTail != private.tornTail ||
+				(shippedErr == nil) != (privateErr == nil) || fmt.Sprint(shippedErr) != fmt.Sprint(privateErr) {
+				t.Fatalf("journal reader mismatch: shipped pending=%#v done=%#v bytes=%d torn=%t error=%v; private pending=%#v done=%#v bytes=%d torn=%t error=%v",
+					shipped.pending, shipped.done, shipped.durableBytes, shipped.tornTail, shippedErr,
+					private.pending, private.done, private.durableBytes, private.tornTail, privateErr)
+			}
+			if strings.HasPrefix(tc.name, "complete_") && (shippedErr != nil || shipped.pending != nil || shipped.done != nil || shipped.tornTail || shipped.durableBytes != int64(len(tc.data))) {
+				t.Fatal("HEAD corpus sequence was not accepted as a complete operation")
+			}
+			if tc.cleanup && (shippedErr != nil || !reflect.DeepEqual(shipped.pending, &Interruption{Operation: "remove", Step: "runtime_cleanup"})) {
+				t.Fatal("manifest cleanup did not restore the pending interruption")
+			}
+			t.Logf("both: pending=%#v; done=%#v; durableBytes=%d; tornTail=%t; error=%v", shipped.pending, shipped.done, shipped.durableBytes, shipped.tornTail, shippedErr)
+		})
+	}
+}
+
+func corpusTimestamp(t *testing.T, line string) string {
+	t.Helper()
+	var entry map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(line), &entry); err != nil {
+		t.Fatal(err)
+	}
+	var timestamp string
+	if err := json.Unmarshal(entry["at"], &timestamp); err != nil {
+		t.Fatal(err)
+	}
+	return timestamp
+}
+
+func TestUpdatePrivateJournalContentRefusedByShippedReader(t *testing.T) {
+	entry := func(operation, step, state, extra string) string {
+		return fmt.Sprintf("{\"operation\":%q,\"step\":%q,\"state\":%q,\"at\":\"2026-01-02T03:04:05Z\"%s}\n", operation, step, state, extra)
+	}
+	type fixture struct{ name, prefix, line string }
+	start := entry("update", "operation", "started", `,"update_id":"update_test"`)
+	cases := []fixture{{name: "update_started", line: start}}
+	prefix := start
+	for _, step := range []string{"prepared", "maintenance_requested", "acknowledged", "quiesced", "recovery_verified", "migrating", "activated", "health_verified", "committed", "revert_stop", "operation"} {
+		for _, state := range []string{"started", "done", "failed"} {
+			if step == "operation" && state == "started" {
+				continue
+			}
+			cases = append(cases, fixture{name: step + "_" + state, prefix: prefix, line: entry("update", step, state, "")})
+		}
+		if step != "operation" {
+			prefix += entry("update", step, "done", "")
+		}
+	}
+	for _, value := range []string{`""`, "null"} {
+		cases = append(cases, fixture{name: "legacy_update_id_" + value, line: entry("stop", "operation", "started", `,"update_id":`+value)})
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c, _ := unitCell(t)
+			path := c.path("journal", "operations.jsonl")
+			if err := testWriteFile(path, []byte(tc.prefix+tc.line), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			private, err := c.readUpdateJournal()
+			if err != nil || private.tornTail || private.durableBytes != int64(len(tc.prefix+tc.line)) {
+				t.Fatalf("private reader refused valid update content: %v", err)
+			}
+			// Probe this exact line alone: an earlier update/start must not mask
+			// accidental acceptance of any subsequent update-bearing record.
+			if err := testWriteFile(path, []byte(tc.line), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			shipped, err := c.readJournal()
+			if err == nil || err.Error() != "invalid local cell journal; manual recovery required" || shipped.durableBytes != 0 {
+				t.Fatalf("shipped reader accepted update content: %v", err)
+			}
+		})
+	}
+}
+
+func TestUpdateHEADOptionalFieldsDowngrade(t *testing.T) {
+	t.Run("manifest", func(t *testing.T) {
+		for _, tc := range []struct{ name, member string }{
+			{"active_nonempty", `"active_generation":"generation-test"`},
+			{"active_empty", `"active_generation":""`},
+			{"active_null", `"active_generation":null`},
+			{"maintenance_nonzero", `"maintenance_generation":1`},
+			{"maintenance_zero", `"maintenance_generation":0`},
+			{"maintenance_null", `"maintenance_generation":null`},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				c, _ := unitCell(t)
+				// Splice raw bytes: marshaling Manifest would omit precisely the
+				// empty/null members whose rejection must survive a downgrade.
+				data := strings.Replace(updateHEADManifestFixture, "{", "{\n  "+tc.member+",", 1)
+				if err := testWriteFile(c.path("manifest.json"), []byte(data), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := readManifest(c.cfg.Root); err == nil || err.Error() != "invalid local cell record" {
+					t.Fatalf("shipped reader did not refuse generation member: %v", err)
 				}
 				var old updateHEADManifest
 				if err := readJSON(c.path("manifest.json"), &old); err == nil || err.Error() != "invalid local cell record" {

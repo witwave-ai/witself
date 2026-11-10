@@ -414,6 +414,8 @@ supported recovery contract before using the fence. No helper creates immutable
 update intent: the legacy manifest cannot authenticate a component-set identity.
 Retained record mutations require an existing private intent with exact immutable
 metadata matching the local installation.
+Manifest generation fields are deferred to the enforcement unit. The shipped
+reader refuses manifests carrying `active_generation` or `maintenance_generation`.
 
 `ChannelAdapter.PreflightUpdate` is not connected to update execution: importing
 trust from localcell would violate the shipped server/worker dependency boundary.

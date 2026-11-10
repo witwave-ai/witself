@@ -71,8 +71,6 @@ type Manifest struct {
 	Cleanup                   *journalEntry `json:"cleanup,omitempty"`
 	MigrationWait             time.Duration `json:"migration_wait,omitempty"`
 	JobRestartPolicy          string        `json:"job_restart_policy,omitempty"`
-	ActiveGeneration          string        `json:"active_generation,omitempty"`
-	MaintenanceGeneration     int           `json:"maintenance_generation,omitempty"`
 }
 
 // updateState names a durable boundary, not proof that the action completed.

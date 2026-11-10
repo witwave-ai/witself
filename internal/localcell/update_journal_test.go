@@ -222,11 +222,6 @@ func TestUpdateRecordAndJournal(t *testing.T) {
 		if err != nil || bytes.Contains(data, []byte("update_id")) {
 			t.Fatal("legacy journal entry gained update metadata")
 		}
-		manifest.ActiveGeneration, manifest.MaintenanceGeneration = "generation_test", 1
-		data, err = json.Marshal(manifest)
-		if err != nil || !bytes.Contains(data, []byte("active_generation")) || !bytes.Contains(data, []byte("maintenance_generation")) {
-			t.Fatal("committed update manifest fields were omitted")
-		}
 	})
 }
 
