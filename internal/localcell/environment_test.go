@@ -3,6 +3,10 @@ package localcell
 import (
 	"context"
 	"errors"
+	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
 	"os"
 	"os/exec"
@@ -104,26 +108,79 @@ func assertInstallerChildArguments(t *testing.T, c *Cell, m *Manifest, component
 	})
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
-	for {
-		result, readErr := os.ReadFile(marker + ".result")
-		if readErr == nil {
-			if string(result) != "accepted" {
-				t.Fatal("selected child arguments disclosed principal material")
-			}
-			if os.Remove(marker+".result") != nil {
-				t.Fatal("selected argument fixture result could not be retired")
-			}
-			return
-		}
+	if !waitInstallerArgumentResult(ctx, t, func() ([]byte, error) {
+		return os.ReadFile(marker + ".result")
+	}) {
+		return
+	}
+	if os.Remove(marker+".result") != nil {
+		t.Fatal("selected argument fixture result could not be retired")
+	}
+}
+
+type environmentFixtureReporter interface {
+	Helper()
+	Logf(string, ...any)
+	Fatal(...any)
+}
+
+func waitInstallerArgumentResult(ctx context.Context, t environmentFixtureReporter, read func() ([]byte, error)) bool {
+	t.Helper()
+	result, readErr := readEnvironmentFixtureOutput(ctx, read)
+	if readErr != nil {
+		t.Logf("child fixture read class=%s", environmentFixtureReadErrorClass(readErr, runtime.GOOS))
 		if !errors.Is(readErr, os.ErrNotExist) {
 			t.Fatal("selected argument fixture result was unavailable")
+			return false
+		}
+		t.Fatal("selected argument fixture did not report its private verdict")
+		return false
+	}
+	if string(result) != "accepted" {
+		t.Fatal("selected child arguments disclosed principal material")
+		return false
+	}
+	return true
+}
+
+// A Windows reader may race publication or a log writer's handle. Retry every
+// read error only within the caller's existing context; readable invalid content
+// remains an immediate assertion failure at the caller.
+func readEnvironmentFixtureOutput(ctx context.Context, read func() ([]byte, error)) ([]byte, error) {
+	for {
+		result, readErr := read()
+		if readErr == nil {
+			return result, nil
 		}
 		select {
 		case <-ctx.Done():
-			t.Fatal("selected argument fixture did not report its private verdict")
+			return nil, readErr
 		case <-time.After(10 * time.Millisecond):
 		}
 	}
+}
+
+// The platform is explicit so host tests can exercise Win32 classes without
+// interpreting Unix errno 5 or 32 as a Windows failure. Never log error text.
+func environmentFixtureReadErrorClass(err error, goos string) string {
+	if errors.Is(err, os.ErrNotExist) {
+		return "not-exist"
+	}
+	if goos == "windows" {
+		var errno syscall.Errno
+		if errors.As(err, &errno) {
+			switch errno {
+			case 32: // ERROR_SHARING_VIOLATION
+				return "sharing-violation"
+			case 5: // ERROR_ACCESS_DENIED
+				return "access-denied"
+			}
+		}
+	}
+	if errors.Is(err, os.ErrPermission) {
+		return "access-denied"
+	}
+	return "other"
 }
 
 func buildEnvironmentNamesChild(t *testing.T) string {
@@ -204,8 +261,11 @@ func TestChildrenReceiveOnlyAllowlistedEnvironmentNames(t *testing.T) {
 					ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 					defer cancel()
 					for {
-						data, err := os.ReadFile(c.path("logs", component+".log"))
+						data, err := readEnvironmentFixtureOutput(ctx, func() ([]byte, error) {
+							return os.ReadFile(c.path("logs", component+".log"))
+						})
 						if err != nil {
+							t.Logf("child fixture read class=%s", environmentFixtureReadErrorClass(err, runtime.GOOS))
 							t.Fatal("cannot read child environment-name output")
 						}
 						if len(strings.Fields(string(data))) >= len(want) {
@@ -253,8 +313,11 @@ func TestInstallerPrincipalsChildEnvironmentNames(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 			defer cancel()
 			for {
-				data, err := os.ReadFile(c.path("logs", component+".log"))
+				data, err := readEnvironmentFixtureOutput(ctx, func() ([]byte, error) {
+					return os.ReadFile(c.path("logs", component+".log"))
+				})
 				if err != nil {
+					t.Logf("child fixture read class=%s", environmentFixtureReadErrorClass(err, runtime.GOOS))
 					t.Fatal("selected environment child output was unavailable")
 				}
 				if len(strings.Fields(string(data))) >= len(want) {
@@ -436,5 +499,177 @@ func TestCommandsRequireExplicitBinaryPaths(t *testing.T) {
 		if _, err := c.reportedVersion(t.Context(), binary); err == nil || err.Error() != "component binary is required" {
 			t.Fatal("version command did not refuse before parent PATH lookup")
 		}
+	}
+}
+
+type environmentFixtureRecorder struct{ events []string }
+
+func (*environmentFixtureRecorder) Helper() {}
+func (r *environmentFixtureRecorder) Logf(format string, args ...any) {
+	r.events = append(r.events, fmt.Sprintf(format, args...))
+}
+func (r *environmentFixtureRecorder) Fatal(args ...any) {
+	r.events = append(r.events, fmt.Sprint(args...))
+}
+
+func TestEnvironmentFixtureReadRetries(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		err  error
+	}{
+		{"not-exist", os.ErrNotExist},
+		{"sharing-violation", syscall.Errno(32)},
+		{"access-denied", syscall.Errno(5)},
+		{"permission", os.ErrPermission},
+		{"other", errors.New("synthetic private error")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+			defer cancel()
+			recorder := &environmentFixtureRecorder{}
+			reads := 0
+			accepted := waitInstallerArgumentResult(ctx, recorder, func() ([]byte, error) {
+				reads++
+				if reads < 3 {
+					return []byte("refused"), &os.PathError{Op: "read", Path: "synthetic-private-path", Err: test.err}
+				}
+				return []byte("accepted"), nil
+			})
+			if !accepted || reads != 3 || len(recorder.events) != 0 {
+				t.Fatal("fixture read failed before the existing context expired instead of retrying")
+			}
+		})
+	}
+}
+
+func TestEnvironmentFixtureReadDeadline(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 25*time.Millisecond)
+	defer cancel()
+	reads := 0
+	_, err := readEnvironmentFixtureOutput(ctx, func() ([]byte, error) {
+		reads++
+		return nil, os.ErrPermission
+	})
+	if !errors.Is(err, os.ErrPermission) || !errors.Is(ctx.Err(), context.DeadlineExceeded) || reads < 1 {
+		t.Fatal("fixture read did not retain the last read error until the caller's deadline")
+	}
+}
+
+func TestInstallerArgumentResultFailureDiagnostics(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"missing", os.ErrNotExist, "selected argument fixture did not report its private verdict"},
+		{"unavailable", os.ErrPermission, "selected argument fixture result was unavailable"},
+		{"other", errors.New("synthetic private error"), "selected argument fixture result was unavailable"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			cancel()
+			recorder := &environmentFixtureRecorder{}
+			if waitInstallerArgumentResult(ctx, recorder, func() ([]byte, error) {
+				return nil, &os.PathError{Op: "read", Path: "synthetic-private-path", Err: test.err}
+			}) {
+				t.Fatal("unavailable fixture result was accepted")
+			}
+			want := []string{"child fixture read class=" + environmentFixtureReadErrorClass(test.err, runtime.GOOS), test.want}
+			if !slices.Equal(recorder.events, want) {
+				t.Fatal("fixture read did not log only its class before the unchanged fatal message")
+			}
+		})
+	}
+}
+
+func TestInstallerArgumentResultRejectsWrongValue(t *testing.T) {
+	for _, result := range []string{"", "refused", "accepted\n", "accepted extra"} {
+		recorder := &environmentFixtureRecorder{}
+		reads := 0
+		if waitInstallerArgumentResult(t.Context(), recorder, func() ([]byte, error) {
+			reads++
+			if reads > 1 {
+				t.Fatal("wrong fixture result was retried")
+			}
+			return []byte(result), nil
+		}) || reads != 1 || !slices.Equal(recorder.events, []string{"selected child arguments disclosed principal material"}) {
+			t.Fatal("wrong fixture result did not fail immediately with the unchanged assertion")
+		}
+	}
+}
+
+func TestEnvironmentFixtureReadErrorClass(t *testing.T) {
+	for _, test := range []struct {
+		name, goos, want string
+		err              error
+	}{
+		{"missing", "windows", "not-exist", os.ErrNotExist},
+		{"sharing", "windows", "sharing-violation", syscall.Errno(32)},
+		{"access", "windows", "access-denied", syscall.Errno(5)},
+		{"permission", "linux", "access-denied", os.ErrPermission},
+		{"unix-io", "linux", "other", syscall.Errno(5)},
+		{"unix-pipe", "linux", "other", syscall.Errno(32)},
+		{"other-errno", "windows", "other", syscall.Errno(6)},
+		{"other", "windows", "other", errors.New("synthetic private error")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			wrapped := fmt.Errorf("synthetic private context: %w", &os.PathError{Op: "read", Path: "synthetic-private-path", Err: test.err})
+			if got := environmentFixtureReadErrorClass(wrapped, test.goos); got != test.want {
+				t.Fatalf("read error class = %s, want %s", got, test.want)
+			}
+		})
+	}
+}
+
+// Keep the injected retry tests attached to all three real child-output readers.
+func TestEnvironmentFixtureReadSourceContract(t *testing.T) {
+	data, err := os.ReadFile("environment_test.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := strings.ReplaceAll(string(data), "\r\n", "\n")
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "environment_test.go", source, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		function, helper string
+		bounded          bool
+	}{
+		{"assertInstallerChildArguments", "waitInstallerArgumentResult", true},
+		{"waitInstallerArgumentResult", "readEnvironmentFixtureOutput", false},
+		{"TestChildrenReceiveOnlyAllowlistedEnvironmentNames", "readEnvironmentFixtureOutput", true},
+		{"TestInstallerPrincipalsChildEnvironmentNames", "readEnvironmentFixtureOutput", true},
+	} {
+		t.Run(test.function, func(t *testing.T) {
+			var function *ast.FuncDecl
+			for _, decl := range file.Decls {
+				if candidate, ok := decl.(*ast.FuncDecl); ok && candidate.Name.Name == test.function {
+					function = candidate
+					break
+				}
+			}
+			if function == nil {
+				t.Fatal("child-output reader disappeared")
+			}
+			calls := 0
+			ast.Inspect(function.Body, func(node ast.Node) bool {
+				call, ok := node.(*ast.CallExpr)
+				if ok {
+					if name, ok := call.Fun.(*ast.Ident); ok && name.Name == test.helper {
+						calls++
+					}
+				}
+				return true
+			})
+			if calls != 1 {
+				t.Fatal("child-output reader bypassed the bounded retry helper")
+			}
+			body := source[fset.Position(function.Pos()).Offset:fset.Position(function.End()).Offset]
+			if test.bounded && !strings.Contains(body, "context.WithTimeout(t.Context(), 5*time.Second)") {
+				t.Fatal("child-output reader changed its existing five-second context")
+			}
+		})
 	}
 }

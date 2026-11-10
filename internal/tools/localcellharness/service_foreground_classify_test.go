@@ -10,6 +10,7 @@ import (
 	"go/parser"
 	"go/token"
 	"os/exec"
+	"strings"
 	"testing"
 )
 
@@ -38,6 +39,156 @@ func classifyForegroundExit(commandErr, parentErr, exitErr error) foregroundExit
 	default:
 		return foregroundExitedCleanly
 	}
+}
+
+// Preserve only the first closed host failure site, never arbitrary stderr or
+// a guessed OS cause. Existing guarded detail lines retain every joined site
+// and lease-publication class. Every return is a literal so the portable raw-
+// capture contract can prove this one bounded CI diagnostic is value-free.
+func foregroundFailureClass(captured []byte) string {
+	if len(captured) == 0 {
+		return "no_output"
+	}
+	for _, line := range foregroundOutputLines(captured) {
+		switch strings.TrimSuffix(line, "\r") {
+		case "native service host site=host_config":
+			return "host_config"
+		case "native service host site=host_descriptor":
+			return "host_descriptor"
+		case "native service host site=host_prepare":
+			return "host_prepare"
+		case "native service host site=host_persisted_config":
+			return "host_persisted_config"
+		case "native service host site=initial_descriptor":
+			return "initial_descriptor"
+		case "native service host site=lease_directory":
+			return "lease_directory"
+		case "native service host site=lease_record":
+			return "lease_record"
+		case "native service host site=lease_write":
+			return "lease_write"
+		case "native service host site=control_secret":
+			return "control_secret"
+		case "native service host site=control_transport":
+			return "control_transport"
+		case "native service host site=control_cancelled":
+			return "control_cancelled"
+		case "native service host site=endpoint_descriptor":
+			return "endpoint_descriptor"
+		case "native service host site=endpoint_read":
+			return "endpoint_read"
+		case "native service host site=endpoint_write":
+			return "endpoint_write"
+		case "native service host site=endpoint_lease":
+			return "endpoint_lease"
+		case "native service host site=endpoint_remove":
+			return "endpoint_remove"
+		case "native service host site=supervisor_load":
+			return "supervisor_load"
+		case "native service host site=supervisor_traversal":
+			return "supervisor_traversal"
+		case "native service host site=supervisor_save":
+			return "supervisor_save"
+		case "native service host site=supervisor_start":
+			return "supervisor_start"
+		case "native service host site=supervisor_stop":
+			return "supervisor_stop"
+		case "native service host site=supervisor_repair":
+			return "supervisor_repair"
+		case "native service host site=supervisor_reconcile":
+			return "supervisor_reconcile"
+		case "native service host site=supervisor_health":
+			return "supervisor_health"
+		case "native service host site=supervisor_command":
+			return "supervisor_command"
+		case "native service host site=health_lock":
+			return "health_lock"
+		case "native service host site=health_tree":
+			return "health_tree"
+		case "native service host site=health_database":
+			return "health_database"
+		case "native service host site=health_credential":
+			return "health_credential"
+		case "native service host site=health_probe":
+			return "health_probe"
+		case "native service host site=health_ready":
+			return "health_ready"
+		case "native service host site=startup_reconcile":
+			return "startup_reconcile"
+		case "native service host site=startup_repair":
+			return "startup_repair"
+		case "native service host site=startup_stop":
+			return "startup_stop"
+		case "native service host site=shutdown_repair":
+			return "shutdown_repair"
+		case "native service host site=shutdown_stop":
+			return "shutdown_stop"
+		case "native service host site=boot_binding":
+			return "boot_binding"
+		case "native service host site=descriptor_write":
+			return "descriptor_write"
+		case "native service host site=unknown":
+			return "unknown"
+		}
+	}
+	return "unclassified"
+}
+
+func TestForegroundFailureClass(t *testing.T) {
+	for _, site := range []string{
+		"host_config", "host_descriptor", "host_prepare", "host_persisted_config",
+		"initial_descriptor", "lease_directory", "lease_record", "lease_write",
+		"control_secret", "control_transport", "control_cancelled",
+		"endpoint_descriptor", "endpoint_read", "endpoint_write", "endpoint_lease", "endpoint_remove",
+		"supervisor_load", "supervisor_traversal", "supervisor_save", "supervisor_start",
+		"supervisor_stop", "supervisor_repair", "supervisor_reconcile", "supervisor_health", "supervisor_command",
+		"health_lock", "health_tree", "health_database", "health_credential", "health_probe", "health_ready",
+		"startup_reconcile", "startup_repair", "startup_stop", "shutdown_repair", "shutdown_stop",
+		"boot_binding", "descriptor_write", "unknown",
+	} {
+		t.Run(site, func(t *testing.T) {
+			if foregroundFailureClass([]byte("native service host site="+site+"\n")) != site {
+				t.Fatal("foreground failure diagnostic lost a known host site")
+			}
+		})
+	}
+	for _, test := range []struct{ name, captured, want string }{
+		{"empty", "", "no_output"},
+		{"private", "private /synthetic/home", "unclassified"},
+		{"unknown_site", "native service host site=private", "unclassified"},
+		{"private_suffix", "native service host site=lease_write /synthetic/home\n", "unclassified"},
+		{"partial_site", "native service host site=lease_writ", "unclassified"},
+		{"prefix", "private native service host site=lease_write\n", "unclassified"},
+		{"crlf", "native service host site=lease_write\r\n", "lease_write"},
+		{"lease_detail", "native service host lease_publish class=sharing_violation attempts=2 elapsed_ms=25\nnative service host site=lease_write\nlocalcell: service_control_refused\n", "lease_write"},
+		{"repeated", "native service host site=lease_write\nnative service host site=lease_write\n", "lease_write"},
+		{"joined", "native service host site=startup_repair\nnative service host site=shutdown_stop\n", "startup_repair"},
+		{"peer_only", "service_control accept=rejected step=peer:pid\n", "unclassified"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if foregroundFailureClass([]byte(test.captured)) != test.want {
+				t.Fatal("foreground failure diagnostic violated its closed value-free classes")
+			}
+		})
+	}
+}
+
+func TestWindowsForegroundFailureDiagnosticContract(t *testing.T) {
+	file, err := parser.ParseFile(token.NewFileSet(), "service_subprocess_windows_test.go", nil, 0)
+	if err != nil {
+		t.Fatal("cannot parse Windows foreground diagnostic source")
+	}
+	for _, declaration := range file.Decls {
+		function, ok := declaration.(*ast.FuncDecl)
+		if !ok || function.Name.Name != "windowsLogForegroundExit" {
+			continue
+		}
+		if len(function.Body.List) < 2 || foregroundSource(t, function.Body.List[1]) != `t.Logf("foreground_exit class=%s", foregroundFailureClass(captured))` {
+			t.Fatal("Windows foreground exit lost its unconditional value-free failure class")
+		}
+		return
+	}
+	t.Fatal("Windows foreground exit diagnostic helper is missing")
 }
 
 func TestClassifyForegroundExit(t *testing.T) {
