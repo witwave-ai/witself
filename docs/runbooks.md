@@ -1231,6 +1231,37 @@ Do not disable the cluster's policy controller as a rollback technique. Keep
 the address inventory maintained while enabled, and repeat the relevant probes
 after endpoint, DNS, CNI, namespace, label, or policy changes.
 
+## Verify a scheduled PostgreSQL backup with a disposable restore
+
+Provision a new, empty, disposable database on a PostgreSQL 18 server, the
+major the backup image dumps from, with the required extensions available. Use
+a `psql` client at least that new: the dump carries `\restrict` lines that
+older clients reject. Supply `RESTORE_DATABASE_URL` privately in the
+environment, keep shell tracing disabled, and provide the AWS CLI's R2
+credentials privately. The script passes the URL to `psql` as an argument, so
+it is visible in the process list while the check runs; use a single-user
+machine and a throwaway credential for the disposable target. The age identity
+must be a regular file accessible only to its owner. Run:
+
+```bash
+scripts/verify-scheduled-backup-restore.sh \
+  --object "$ENCRYPTED_BACKUP_S3_URI" --endpoint-url "$R2_ENDPOINT" \
+  --age-identity-file "$AGE_IDENTITY_FILE"
+```
+
+For an already downloaded object, replace `--object` and `--endpoint-url` with
+`--file PATH`. Add `--expect-schema-version N` when the expected migration
+version is known. `PASS` proves an initially empty target accepted the restore
+and passed schema-version, table, index and constraint checks with an exact row
+total; it does not provide application-level validation or the pre-migration
+manifest contract. Retain the value-free result as restore evidence, complete
+the application checks in
+[Scheduled PostgreSQL backups](backup-and-recovery.md#scheduled-postgresql-backups),
+and dispose of the target separately. On failure, use `--keep-workdir` to retain
+the private diagnostic directory for operator inspection. A failed run can
+leave a partial restore in the target when the input stream ends early, so
+dispose of the target after a failure too and never reuse it.
+
 ## Back up both reviewed Civo databases before a migration
 
 Before running `scripts/roll-cell.sh` for a release that can advance the

@@ -1624,6 +1624,26 @@ aws --endpoint-url "$R2_ENDPOINT" s3 cp "$ENCRYPTED_BACKUP_S3_URI" - \
   | psql --no-psqlrc --set=ON_ERROR_STOP=1 --single-transaction "$RESTORE_DATABASE_URL"
 ```
 
+For the scripted check, supply `RESTORE_DATABASE_URL` privately in the environment,
+keep shell tracing disabled, and use a regular age identity file accessible only
+to its owner:
+
+```bash
+scripts/verify-scheduled-backup-restore.sh \
+  --object "$ENCRYPTED_BACKUP_S3_URI" --endpoint-url "$R2_ENDPOINT" \
+  --age-identity-file "$AGE_IDENTITY_FILE"
+```
+
+Use `--file PATH` instead of `--object` and `--endpoint-url` for an already
+downloaded encrypted object; the input file is preserved. Add
+`--expect-schema-version N` to require a particular migration version.
+`PASS` proves the object restores into an initially empty target and passes
+schema-version, table, index and constraint checks with an exact row total; it
+does not provide application-level validation or the pre-migration manifest
+contract. Failures print a static reason; `--keep-workdir` retains the private
+diagnostic directory and prints its path for operator inspection. Dispose of the
+target database separately after the check.
+
 Check schema version, extension state, constraints/indexes, and application data
 before any operator-approved cutover. A successful upload is not evidence of a
 successful restore. Scheduled dumps do not claim the pre-migration script's
