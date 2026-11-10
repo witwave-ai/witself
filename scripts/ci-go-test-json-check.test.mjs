@@ -720,6 +720,78 @@ test('Windows shutdown regression assertions classify every fixed failure withou
   }
 });
 
+function lostACKFailure(outputs, reason, genericFatal = true) {
+  const parent = 'TestWindowsShutdownEscalation';
+  const child = `${parent}/lost`;
+  const generic = 'lost ACK with observed exit did not complete safely';
+  return {
+    input: stream(packages.flatMap(name => name === packages[0]
+      ? [event('start', name), event('run', name, parent), event('run', name, child),
+        ...[...outputs,
+          'shutdown kind=private-lost-ack-sentinel detail=private-lost-ack-sentinel budget=private-lost-ack-sentinel startup=private-lost-ack-sentinel',
+          ...(genericFatal ? [generic] : [])]
+          .map(Output => event('output', name, child, {Output: `    service_shutdown_windows_test.go:12: ${Output}\n`})),
+        event('fail', name, child), event('fail', name, parent), event('fail', name)] : packageEvents(name))),
+    output: summary({[packages[0]]: {pass: 0, fail: 2, failedNames: [parent, child],
+      why: {[parent]: reason === '(unclassified)' ? reason : `child failed: ${reason}`, [child]: reason}}}),
+    stderr: failureDiagnostic,
+    status: 1,
+  };
+}
+
+test('lost ACK final outcomes remain fixed value-free failure reasons', async () => {
+  // Independent expected literals: source enrollment must come from the real
+  // direct Error calls, including when the unchanged generic Fatal follows.
+  const messages = [
+    'lost ACK final outcome forced',
+    'lost ACK final outcome unknown deadline',
+    'lost ACK final outcome unknown ack',
+    'lost ACK final outcome unknown incarnation',
+    'lost ACK final outcome unknown force',
+    'lost ACK final outcome refused incarnation',
+    'lost ACK final outcome refused descriptor',
+    'lost ACK final outcome refused pipe',
+    'lost ACK final outcome refused ack',
+    'lost ACK final outcome refused migration',
+    'lost ACK final outcome refused force_rights',
+    'lost ACK final outcome refused force',
+    'lost ACK final outcome unclassified',
+  ];
+  for (const message of messages) {
+    const fixture = lostACKFailure(['irrelevant private-lost-ack-sentinel', message], message);
+    const result = await checkGoTestJSON([fixture.input]);
+    assert.equal(result.valid, false);
+    assert.equal(result.reason, failureDiagnostic.trimEnd());
+    assert.equal(`${result.lines.join('\n')}\n`, fixture.output);
+    assert(!JSON.stringify(result).includes('private-lost-ack-sentinel'));
+    assertFixture(script, fixture);
+  }
+});
+
+test('lost ACK final outcome rejects unregistered output', async () => {
+  for (const output of [
+    'lost ACK final outcome refused pipe:',
+    'lost ACK final outcome refused pipe private-lost-ack-sentinel',
+    'private-lost-ack-sentinel lost ACK final outcome refused pipe',
+    'lost ACK final outcome refused pipe=private-lost-ack-sentinel',
+    'lost ACK final outcome refused pipe/private-lost-ack-sentinel',
+    'lost ACK final outcome refused',
+    'lost ACK final outcome unregistered',
+    'arbitrary private-lost-ack-sentinel value=private-lost-ack-sentinel',
+  ]) {
+    for (const genericFatal of [false, true]) {
+      const reason = genericFatal ? 'lost ACK with observed exit did not complete safely' : '(unclassified)';
+      const fixture = lostACKFailure([output], reason, genericFatal);
+      const result = await checkGoTestJSON([fixture.input]);
+      assert.equal(result.valid, false);
+      assert.equal(result.reason, failureDiagnostic.trimEnd());
+      assert.equal(`${result.lines.join('\n')}\n`, fixture.output);
+      assert(!JSON.stringify(result).includes('private-lost-ack-sentinel'));
+      assertFixture(script, fixture);
+    }
+  }
+});
+
 test('child control and native proof retain each closed transport cause as why', async () => {
   for (const step of ['dial', 'deadline', 'eof', 'response']) {
     const message = `localcell: service_control_unavailable: transport:${step}`;

@@ -1177,6 +1177,20 @@ jobs:
         timeout-minutes: 5
         run: bash scripts/test-security-scan-workflow.sh
 
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/witself/test-assets
+          key: monitoring-test-assets-${{ runner.os }}-${{ hashFiles('scripts/testdata/monitoring-test-assets.pins') }}
+
+      - name: Fetch monitoring test assets
+        timeout-minutes: 6
+        run: |
+          assets=$(bash scripts/fetch-monitoring-test-assets.sh)
+          printf 'WITSELF_MONITORING_TEST_ASSETS=%s\n' "$assets" >> "$GITHUB_ENV"
+
+      - name: monitoring test asset fetch contract checks
+        run: bash scripts/test-fetch-monitoring-test-assets.sh
+
       - name: monitoring rollout capability checks
         run: |
           bash scripts/test-monitoring-rollout.sh

@@ -40,6 +40,8 @@ func TestWindowsShutdownFixtureBudget(t *testing.T) {
 	}{
 		{0, 600 * time.Millisecond},
 		{time.Millisecond, 600 * time.Millisecond},
+		{10 * time.Millisecond, 600 * time.Millisecond},
+		{50 * time.Millisecond, 600 * time.Millisecond},
 		{125 * time.Millisecond, 600 * time.Millisecond},
 		{150 * time.Millisecond, 600 * time.Millisecond},
 		{200 * time.Millisecond, 800 * time.Millisecond},
@@ -91,6 +93,13 @@ func TestWindowsShutdownFixtureBudgetSourceContract(t *testing.T) {
 	return f.cell.stopChildOutcomeWithBudget(ctx, "server", ProcessState{PID: f.record.PID, Alive: true, Matches: true}, budget)
 }` {
 		t.Fatal("shutdown fixture stop lost its shared budget or outer deadline reserve")
+	}
+	escalation := functionBody("service_shutdown_windows_test.go", "TestWindowsShutdownEscalation")
+	_, idempotent, found := strings.Cut(escalation, `t.Run("idempotent-ack"`)
+	idempotent, _, bounded := strings.Cut(idempotent, "t.Run(")
+	if !found || !bounded || strings.Contains(idempotent, "2*f.startup") ||
+		!strings.Contains(idempotent, "shutdownFixtureBudget(f.startup)") {
+		t.Fatal("idempotent ACK completion lost its shared protocol budget")
 	}
 }
 
@@ -266,7 +275,8 @@ func launchShutdownFixture(t *testing.T, mode string, barrier bool) windowsShutd
 	t.Setenv("WITSELF_HOME", t.TempDir())
 	t.Setenv("DSH_HOME", t.TempDir())
 	c, _ := descriptorTestCell(t)
-	c.cfg.Timeout = 20 * shutdownFixtureStartup(t, c)
+	startup := shutdownFixtureStartup(t, c)
+	c.cfg.Timeout = max(20*startup, shutdownFixtureBudget(startup))
 	environment, err := c.baseEnvironment()
 	if err != nil {
 		t.Fatal("fixture environment unavailable")
@@ -483,6 +493,7 @@ func TestWindowsShutdownEscalation(t *testing.T) {
 				assertWindowsProcessExited(t, f.handle)
 			case "lost":
 				if !outcome.permitsDrain() || outcome.Kind == serviceStopForced {
+					reportLostACKOutcome(t, outcome)
 					t.Logf("shutdown kind=%s detail=%s budget=%s startup=%s", outcome.Kind, outcome.Detail, shutdownFixtureBudget(f.startup), f.startup)
 					t.Fatal("lost ACK with observed exit did not complete safely")
 				}
@@ -527,7 +538,7 @@ func TestWindowsShutdownEscalation(t *testing.T) {
 		}
 		// The second ACK can arrive before its deferred callback. Observe handler
 		// completion before reading the callback count, so a removed once guard fails.
-		completion, cancel := context.WithTimeout(t.Context(), 2*f.startup)
+		completion, cancel := context.WithTimeout(t.Context(), shutdownFixtureBudget(f.startup))
 		defer cancel()
 		for {
 			handled, err := readPrivateFile(f.cell.path("tmp", "cancel-handled"))
@@ -536,8 +547,9 @@ func TestWindowsShutdownEscalation(t *testing.T) {
 			}
 			select {
 			case <-completion.Done():
+				t.Logf("handler completion budget=%s startup=%s", shutdownFixtureBudget(f.startup), f.startup)
 				t.Fatal("second cancel handler did not complete")
-			case <-time.After(f.startup / 100):
+			case <-time.After(max(f.startup/100, time.Millisecond)):
 			}
 		}
 		data, err := readPrivateFile(f.cell.path("tmp", "cancel-requested"))
@@ -599,7 +611,7 @@ func TestWindowsShutdownEscalation(t *testing.T) {
 		t.Cleanup(func() { windowsShutdownBeforeForce = old })
 		reached := false
 		windowsShutdownBeforeForce = func(_ *ProcessRecord) { reached = true; cancel() }
-		outcome := f.cell.stopChildOutcomeWithBudget(ctx, "server", ProcessState{PID: f.record.PID, Alive: true, Matches: true}, max(2*f.startup, 25*time.Millisecond))
+		outcome := f.cell.stopChildOutcomeWithBudget(ctx, "server", ProcessState{PID: f.record.PID, Alive: true, Matches: true}, shutdownFixtureBudget(f.startup))
 		if !reached || outcome.Kind != serviceStopUnknown || outcome.Detail != "shutdown:deadline" {
 			t.Fatal("caller cancellation at final force fence was ignored")
 		}
@@ -741,7 +753,7 @@ func TestWindowsShutdownParentDeadline(t *testing.T) {
 	if err != nil || !ack.Accepted || ack.Phase != shutdownPhaseReady {
 		t.Fatal("deadline fixture never accepted runtime-ready cancellation")
 	}
-	parentBudget := 4 * f.startup
+	parentBudget := shutdownFixtureBudget(f.startup)
 	ctx, cancel := context.WithTimeout(t.Context(), parentBudget)
 	defer cancel()
 	started := time.Now()
@@ -749,7 +761,7 @@ func TestWindowsShutdownParentDeadline(t *testing.T) {
 	if outcome.Kind != serviceStopUnknown || outcome.Detail != "shutdown:deadline" || ctx.Err() != context.DeadlineExceeded {
 		t.Fatal("parent exhaustion did not raise at the actual shutdown deadline")
 	}
-	// The allowance scales with this fixture's measured process startup. A
+	// The allowance scales with this fixture's floored shutdown budget. A
 	// detached app wait consumes eight parent budgets and must fail this check.
 	if time.Since(started) >= 4*parentBudget {
 		t.Fatal("app wait detached from the whole-tree deadline")
