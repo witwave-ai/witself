@@ -126,10 +126,12 @@ func TestJournalTornTailRepair(t *testing.T) {
 			t.Run(boundary+"/"+signature, func(t *testing.T) {
 				c, _ := unitCell(t)
 				if err := testMkdir(c.path("pg"), 0o700); err != nil {
+					t.Logf("journal repair error class: %s", journalRepairErrorClass(err))
 					t.Fatal(err)
 				}
 				const retained = "retained synthetic PostgreSQL bytes"
 				if err := testWriteFile(c.path("pg", "retained-data"), []byte(retained), 0o600); err != nil {
+					t.Logf("journal repair error class: %s", journalRepairErrorClass(err))
 					t.Fatal(err)
 				}
 				// Recover from a settled prior operation or the empty durable prefix,
@@ -167,19 +169,23 @@ func TestJournalTornTailRepair(t *testing.T) {
 				}
 				path := c.path("journal", "operations.jsonl")
 				if err := testWriteFile(path, data, 0o600); err != nil {
+					t.Logf("journal repair error class: %s", journalRepairErrorClass(err))
 					t.Fatal(err)
 				}
 				pgBefore, err := os.Stat(c.path("pg", "retained-data"))
 				if err != nil {
+					t.Logf("journal repair error class: %s", journalRepairErrorClass(err))
 					t.Fatal(err)
 				}
 				inspection, err := c.Inspect(t.Context())
 				if err != nil || !inspection.JournalTailIncomplete || (inspection.Interrupted != nil) != (cut > 0) {
+					t.Logf("journal repair error class: %s", journalRepairErrorClass(err))
 					t.Fatalf("Inspect did not recover the validated prefix: %v", err)
 				}
 				assertFileBytes(t, path, data, "Inspect changed the journal")
 				lock, err := c.own(false)
 				if err != nil {
+					t.Logf("journal repair error class: %s", journalRepairErrorClass(err))
 					t.Fatal(err)
 				}
 				if err := c.Repair(t.Context()); !errors.Is(err, ErrLocked) {
@@ -187,9 +193,11 @@ func TestJournalTornTailRepair(t *testing.T) {
 				}
 				assertFileBytes(t, path, data, "locked Repair changed the journal")
 				if err := lock.Close(); err != nil {
+					t.Logf("journal repair error class: %s", journalRepairErrorClass(err))
 					t.Fatal(err)
 				}
 				if err := c.Repair(t.Context()); err != nil {
+					t.Logf("journal repair error class: %s", journalRepairErrorClass(err))
 					t.Fatalf("Repair rejected a torn final append: %v", err)
 				}
 				repaired, err := os.ReadFile(path)
@@ -206,21 +214,26 @@ func TestJournalTornTailRepair(t *testing.T) {
 				}
 				inspection, err = c.Inspect(t.Context())
 				if err != nil || inspection.Interrupted != nil || inspection.JournalTailIncomplete {
+					t.Logf("journal repair error class: %s", journalRepairErrorClass(err))
 					t.Fatalf("Repair left unsettled journal state: %v", err)
 				}
 				manifest, err := os.ReadFile(c.path("manifest.json"))
 				if err != nil {
+					t.Logf("journal repair error class: %s", journalRepairErrorClass(err))
 					t.Fatal(err)
 				}
 				journalBefore, err := os.Stat(path)
 				if err != nil {
+					t.Logf("journal repair error class: %s", journalRepairErrorClass(err))
 					t.Fatal(err)
 				}
 				manifestBefore, err := os.Stat(c.path("manifest.json"))
 				if err != nil {
+					t.Logf("journal repair error class: %s", journalRepairErrorClass(err))
 					t.Fatal(err)
 				}
 				if err := c.Repair(t.Context()); err != nil {
+					t.Logf("journal repair error class: %s", journalRepairErrorClass(err))
 					t.Fatal(err)
 				}
 				for _, before := range []struct {
