@@ -51,6 +51,19 @@ function sourceLiterals(source, assertions, fixedCauses = false) {
     .filter(token => !token.startsWith('//') && !token.startsWith('/*'));
   const literals = [];
   const prefixes = [];
+  const classPrefixes = [];
+  const vocabulary = new Set();
+  if (assertions) {
+    for (const token of tokens) {
+      if (!token.startsWith('"')) continue;
+      let value;
+      try { value = JSON.parse(token); } catch { continue; }
+      if (!/^[a-z _=,-]{1,80}$/.test(value) || /[\r\n]/.test(value)) continue;
+      for (const word of value.split(/[ ,=]/)) {
+        if (/^[a-z][a-z_-]{0,39}$/.test(word)) vocabulary.add(word);
+      }
+    }
+  }
   if (fixedCauses) {
     // Enroll only complete direct var initializers in fixed_cause.go. Token
     // boundaries exclude comments, quoted examples, calls and expressions.
@@ -68,6 +81,17 @@ function sourceLiterals(source, assertions, fixedCauses = false) {
   for (let index = 0; index + 5 < tokens.length; index++) {
     const [receiver, dot, method, open, literal, close] = tokens.slice(index, index + 6);
     if (dot !== '.' || open !== '(' || !literal.startsWith('"')) continue;
+    if (assertions && /^[A-Za-z_]\w*$/.test(receiver) && method === 'Logf' && close === ',') {
+      let value;
+      try { value = JSON.parse(literal); } catch { continue; }
+      const prefix = value.slice(0, value.indexOf('%'));
+      if (value.endsWith('%s') && value.indexOf('%') === value.length - 2 &&
+        /(?:class: |class=)$/.test(prefix) && prefix.length >= 12 &&
+        /^[A-Za-z][A-Za-z0-9 _.,;:!?()'"=-]*$/.test(prefix) && !/\d{3}|[a-f0-9]{64}/i.test(prefix)) {
+        classPrefixes.push(prefix);
+      }
+      continue;
+    }
     if (assertions ? !/^(?:Fatal|Error|Fatalf|Errorf)$/.test(method) || !/^[A-Za-z_]\w*$/.test(receiver)
       : receiver !== 'errors' || method !== 'New') continue;
     let value;
@@ -90,7 +114,7 @@ function sourceLiterals(source, assertions, fixedCauses = false) {
     if (assertions && /[:=\\/]/.test(value)) continue;
     literals.push(value);
   }
-  return {literals, prefixes};
+  return {literals, prefixes, classPrefixes, vocabulary};
 }
 
 function diagnosticAllowlist() {
@@ -98,6 +122,7 @@ function diagnosticAllowlist() {
   const storeErrors = new Set();
   const assertions = new Map(selectablePackages.map(name => [name, new Set()]));
   const prefixes = new Map(selectablePackages.map(name => [name, new Map()]));
+  const classes = new Map(selectablePackages.map(name => [name, {prefixes: new Set(), vocabulary: new Set()}]));
   const testFiles = new Map(selectablePackages.map(name => [name, new Set()]));
   for (const name of selectablePackages) {
     const directory = new URL(`../${name.slice('github.com/witwave-ai/witself/'.length)}/`, import.meta.url);
@@ -115,6 +140,10 @@ function diagnosticAllowlist() {
         (isTest ? assertions.get(name) : name === storePackage ? storeErrors : errors).add(literal);
       }
       for (const {match, message} of sourceDiagnostics.prefixes) prefixes.get(name).set(match, message);
+      if (isTest) {
+        for (const prefix of sourceDiagnostics.classPrefixes) classes.get(name).prefixes.add(prefix);
+        for (const word of sourceDiagnostics.vocabulary) classes.get(name).vocabulary.add(word);
+      }
     }
   }
   // The store proof's cluster fixture reports setup/cleanup failures through
@@ -129,10 +158,27 @@ function diagnosticAllowlist() {
   // The helpers' fixed errors propagate across package boundaries. Assertions
   // remain local to their package. A copied script with no sources emits only
   // unclassified reasons; a missing source never licenses arbitrary output.
-  return {messages: new Map([...assertions].map(([name, messages]) => [name, new Set([...(name === storePackage ? storeErrors : errors), ...messages])])), prefixes, testFiles};
+  return {messages: new Map([...assertions].map(([name, messages]) => [name, new Set([...(name === storePackage ? storeErrors : errors), ...messages])])), prefixes, classes, testFiles};
 }
 
-const {messages: allowlist, prefixes: prefixAllowlist, testFiles} = diagnosticAllowlist();
+const {messages: allowlist, prefixes: prefixAllowlist, classes: classAllowlist, testFiles} = diagnosticAllowlist();
+
+function classPrefix(message, packageName) {
+  // Prefer the most specific enrolled format when fixed prefixes overlap.
+  let match;
+  for (const prefix of classAllowlist.get(packageName)?.prefixes ?? []) {
+    if (message.startsWith(prefix) && (match === undefined || prefix.length > match.length)) match = prefix;
+  }
+  return match;
+}
+
+function classDiagnostic(message, prefix, packageName) {
+  const value = message.slice(prefix.length);
+  const vocabulary = classAllowlist.get(packageName).vocabulary;
+  const accepted = value.length <= 160 && /^[a-z][a-z_-]*(?:[ ,=][a-z][a-z_-]*)*$/.test(value) &&
+    !/[\r\n]/.test(value) && value.split(/[ ,=]/).every(word => vocabulary.has(word));
+  return `${prefix}${accepted ? value : '(rejected)'}`;
+}
 
 // Mask before truncating so a secret crossing the display boundary cannot leave
 // an unmasked prefix. Password-file/environment fragments are suppressed to the
@@ -176,7 +222,7 @@ export async function checkGoTestJSON(input, requiredTests = [], {diagnose = fal
     ? requiredTests.length === 0 ? expectedPackages : expectedPackages.slice(0, 1)
     : packageValid ? [packageName] : [];
   const packages = new Map(packageNames.map(name => [name, {
-    started: false, summary: null, summaryLine: null, tests: new Map(), why: new Map(), diagnostics: new Map(),
+    started: false, summary: null, summaryLine: null, tests: new Map(), why: new Map(), classes: new Map(), diagnostics: new Map(),
     timedOut: new Set(), serviceOutcomes: new Set(), managerStages: [], managerMissing: new Set(), shutdownReceipts: [], pass: 0, skip: 0, fail: 0,
   }]));
   let invalid = !packageValid || requiredTests.some(name => typeof name !== 'string' || !testNamePattern.test(name) || /[a-f0-9]{64}/i.test(name)) ||
@@ -292,9 +338,20 @@ export async function checkGoTestJSON(input, requiredTests = [], {diagnose = fal
           state.diagnostics.set(name, diagnostics);
         }
       }
+      if (typeof event.Output === 'string') {
+        const classes = state.classes.get(name) ?? new Set();
+        for (const line of event.Output.split('\n')) {
+          if (classes.size === 3) break;
+          const message = line.replace(/^[ \t]*(?:[A-Za-z0-9_.-]+\.go:[0-9]+: )?/, '').replace(/\r$/, '');
+          const prefix = classPrefix(message, event.Package);
+          if (prefix !== undefined) classes.add(classDiagnostic(message, prefix, event.Package));
+        }
+        if (classes.size !== 0) state.classes.set(name, classes);
+      }
       if (!state.why.has(name) && typeof event.Output === 'string') {
         for (const line of event.Output.split('\n')) {
           const message = line.replace(/^[ \t]*(?:[A-Za-z0-9_.-]+\.go:[0-9]+: )?/, '').replace(/\r$/, '');
+          if (classPrefix(message, event.Package) !== undefined) continue;
           if (allowlist.get(event.Package)?.has(message)) {
             state.why.set(name, message);
             break;
@@ -391,6 +448,7 @@ export async function checkGoTestJSON(input, requiredTests = [], {diagnose = fal
           reason = child ? `child failed: ${child[1]}` : '(unclassified)';
         }
         lines.push(`why ${name} ${testName} :: ${reason}`);
+        for (const diagnostic of state.classes.get(testName) ?? []) lines.push(`class ${name} ${testName} :: ${diagnostic}`);
         for (const diagnostic of state.diagnostics.get(testName) ?? []) lines.push(`diagnose ${name} ${testName} :: ${diagnostic}`);
       }
     }
