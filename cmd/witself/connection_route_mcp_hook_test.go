@@ -98,35 +98,54 @@ func blackholeRouteDirectory(t *testing.T) *atomic.Int32 {
 	return calls
 }
 
+// routeMCPStepTimeout is a generous shared floor for the in-memory handshake,
+// individual tool calls, and shutdown under race instrumentation and contention.
+// It must never bound the lifetime of a session across the test body.
+const routeMCPStepTimeout = 30 * time.Second
+
+func newRouteMCPLifetime() (context.Context, context.CancelFunc) {
+	return context.WithCancel(context.Background())
+}
+
 func startRouteMCP(t *testing.T, cfg transcriptcapture.Config) *mcp.ClientSession {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := newRouteMCPLifetime()
+	started := time.Now()
 	clientTransport, serverTransport := mcp.NewInMemoryTransports()
 	done := make(chan error, 1)
 	go func() { done <- runConfiguredMCPServer(ctx, cfg, mcpServerOptions{}, serverTransport) }()
-	session, err := mcp.NewClient(&mcp.Implementation{Name: "route-test", Version: "1"}, nil).Connect(ctx, clientTransport, nil)
-	if err != nil {
-		cancel()
-		t.Fatal(err)
-	}
+	var session *mcp.ClientSession
+	// Register before connecting so a failed handshake also cancels and joins.
 	t.Cleanup(func() {
-		_ = session.Close()
 		cancel()
 		select {
 		case err := <-done:
 			if err != nil && !errors.Is(err, context.Canceled) {
+				t.Logf("MCP session lifetime before shutdown failure: %s", time.Since(started))
 				t.Errorf("MCP serve shutdown: %v", err)
 			}
-		case <-time.After(5 * time.Second):
+		case <-time.After(routeMCPStepTimeout):
+			t.Logf("MCP session lifetime before shutdown failure: %s", time.Since(started))
 			t.Error("MCP serve did not stop")
+			return
+		}
+		if session != nil {
+			_ = session.Close()
 		}
 	})
+	connectCtx, connectCancel := context.WithTimeout(ctx, routeMCPStepTimeout)
+	defer connectCancel()
+	var err error
+	session, err = mcp.NewClient(&mcp.Implementation{Name: "route-test", Version: "1"}, nil).Connect(connectCtx, clientTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	return session
 }
 
 func callRouteMCP(t *testing.T, session *mcp.ClientSession, tool string, wantFailure bool) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), routeMCPStepTimeout)
 	defer cancel()
 	result, err := session.CallTool(ctx, &mcp.CallToolParams{Name: tool, Arguments: map[string]any{}})
 	if err != nil {
