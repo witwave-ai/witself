@@ -34,7 +34,9 @@ type serviceShutdownProcess struct {
 
 // runServiceShutdownPolicy is the shared portable ACK/retry/exit policy. A lost
 // ACK never establishes acceptance: only an accepted reply or observed exit of
-// this retained process can advance the tree drain.
+// this retained process can advance the tree drain. A pipe refusal after a lost
+// ACK stops retries but defers the refusal until the application budget expires,
+// allowing an observed exit of the retained process to complete the drain.
 func runServiceShutdownPolicy(ctx context.Context, record ProcessRecord, request serviceShutdownRequest, forceRights bool, appBudget time.Duration, process serviceShutdownProcess) serviceStopOutcome {
 	result := func(kind serviceStopKind, detail string) serviceStopOutcome {
 		return serviceStopOutcome{Kind: kind, Component: record.Component, Detail: detail}
@@ -42,6 +44,8 @@ func runServiceShutdownPolicy(ctx context.Context, record ProcessRecord, request
 	appCtx, cancel := context.WithTimeout(ctx, appBudget)
 	defer cancel()
 	accepted := false
+	lostAck := false
+	deferredRefusal := ""
 	phase := ""
 	for {
 		alive, err := process.verify(record)
@@ -57,12 +61,14 @@ func runServiceShutdownPolicy(ctx context.Context, record ProcessRecord, request
 		if appCtx.Err() != nil {
 			break
 		}
-		if !accepted {
+		if !accepted && deferredRefusal == "" {
 			response, requestErr := process.send(appCtx, request)
 			if requestErr == nil {
 				accepted = true
 				phase = response.Phase
-			} else if !errors.Is(requestErr, errShutdownAckLost) {
+			} else if errors.Is(requestErr, errShutdownAckLost) {
+				lostAck = true
+			} else {
 				if appCtx.Err() != nil {
 					break
 				}
@@ -71,7 +77,11 @@ func runServiceShutdownPolicy(ctx context.Context, record ProcessRecord, request
 				if errors.As(requestErr, &refusal) {
 					detail = refusal.step
 				}
-				return result(serviceStopRefused, detail)
+				if lostAck && detail == "shutdown:pipe" {
+					deferredRefusal = detail
+				} else {
+					return result(serviceStopRefused, detail)
+				}
 			}
 		}
 		if process.wait(appCtx, 25*time.Millisecond) {
@@ -83,6 +93,9 @@ func runServiceShutdownPolicy(ctx context.Context, record ProcessRecord, request
 	}
 	if ctx.Err() != nil {
 		return result(serviceStopUnknown, "shutdown:deadline")
+	}
+	if deferredRefusal != "" {
+		return result(serviceStopRefused, deferredRefusal)
 	}
 	if !accepted {
 		return result(serviceStopUnknown, "shutdown:ack")
