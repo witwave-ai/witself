@@ -4,6 +4,12 @@ apps:
     namespace: witself
     chartVersion: {{.CivoPostgresChartVersion}}
     authSecretName: witself-postgresql-auth
+{{- with .PostgresShutdown }}
+    shutdown:
+      mode: {{ .Mode }}
+      timeoutSeconds: {{ .TimeoutSeconds }}
+      gracePeriodSeconds: {{ .GracePeriodSeconds }}
+{{- end }}
     backup:
       enabled: {{.PostgresBackup}}
     storage: 8Gi
