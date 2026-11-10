@@ -14,6 +14,29 @@ import (
 // can consume one request deadline before the policy retries cancellation.
 const shutdownAckReadDeadline = 250 * time.Millisecond
 
+const shutdownFixturePublishBudget = 2 * time.Second
+
+// Retry the entire private publication: a validator can temporarily deny the
+// publisher DELETE access to either the target or its pending source file.
+// Keep fixture timing independent of the production lease publisher.
+func shutdownFixtureRetryPublish(write func() error, classify func(error) string, sleep func(time.Duration), now func() time.Time) (attempts int, err error) {
+	start := now()
+	backoff := time.Millisecond
+	for {
+		attempts++
+		err = write()
+		if err == nil {
+			return attempts, nil
+		}
+		class := classify(err)
+		if (class != "sharing_violation" && class != "access_denied") || now().Sub(start) >= shutdownFixturePublishBudget {
+			return attempts, err
+		}
+		sleep(backoff)
+		backoff = min(2*backoff, 16*time.Millisecond)
+	}
+}
+
 func shutdownFixtureBudget(startup time.Duration) time.Duration {
 	return max(4*startup, 2*shutdownAckReadDeadline+100*time.Millisecond)
 }
@@ -149,17 +172,58 @@ func shutdownFixtureSourceFunction(t *testing.T, path, name string) string {
 
 func TestWindowsShutdownFixturePublicationSourceContract(t *testing.T) {
 	source := shutdownFixtureSourceFunction(t, "service_shutdown_windows_test.go", "TestWindowsShutdownChildHelper")
+	if strings.Count(source, "shutdownFixturePublishMarker(") != 6 || strings.Count(source, "writeAtomicBytes(") != 0 {
+		t.Fatal("shutdown fixture must route all six child publications through the retry helper")
+	}
+	for _, marker := range []string{"console-absent", "cancel-handled", "cancel-requested", "store-entered", "runtime-started", "console-probe-result"} {
+		if strings.Count(source, `shutdownFixturePublishMarker(filepath.Join(root, "tmp", "`+marker+`"),`) != 1 {
+			t.Fatal("shutdown fixture marker lost its single retry publication site")
+		}
+	}
+	adapter := shutdownFixtureSourceFunction(t, "service_shutdown_windows_test.go", "shutdownFixturePublishMarker")
+	if adapter != `{
+	return shutdownFixtureRetryPublish(func() error { return writeAtomicBytes(path, data, nil) },
+		shutdownFixtureReadErrorClass, time.Sleep, time.Now)
+}` {
+		t.Fatal("shutdown fixture retry adapter lost the private write or injected production operations")
+	}
+	data, err := os.ReadFile("service_shutdown_windows_test.go")
+	if err != nil {
+		t.Fatal("shutdown fixture publication source unavailable")
+	}
+	// One direct call belongs to the adapter; the other deliberately corrupts a
+	// descriptor in the test process and is not a fixture marker publication.
+	refusals := shutdownFixtureSourceFunction(t, "service_shutdown_windows_test.go", "TestWindowsChildDescriptorRefusals")
+	if strings.Count(string(data), "writeAtomicBytes(") != 2 || strings.Count(refusals, "writeAtomicBytes(") != 1 ||
+		!strings.Contains(refusals, `if writeAtomicBytes(f.record.ShutdownDescriptor, []byte("invalid"), nil) != nil {`) {
+		t.Fatal("shutdown fixture direct writes must be only the adapter and tampered descriptor test")
+	}
 	for _, required := range []string{
-		`if err := writeAtomicBytes(filepath.Join(root, "tmp", "cancel-handled"), []byte(strconv.Itoa(completed)), nil); err != nil {
+		`if _, err := shutdownFixturePublishMarker(filepath.Join(root, "tmp", "cancel-handled"), []byte(strconv.Itoa(completed))); err != nil {
 			os.Exit(shutdownFixturePublishExitCode(err, false))
 		}`,
-		`if err := writeAtomicBytes(filepath.Join(root, "tmp", "cancel-requested"), []byte(strconv.FormatUint(uint64(cancelCalls.Add(1)), 10)), nil); err != nil {
+		`if _, err := shutdownFixturePublishMarker(filepath.Join(root, "tmp", "cancel-requested"), []byte(strconv.FormatUint(uint64(cancelCalls.Add(1)), 10))); err != nil {
 			os.Exit(shutdownFixturePublishExitCode(err, true))
+		}`,
+		`if _, err := shutdownFixturePublishMarker(filepath.Join(root, "tmp", "console-absent"), []byte("absent")); err != nil {
+		os.Exit(78)
+	}`,
+		`if _, err := shutdownFixturePublishMarker(filepath.Join(root, "tmp", "store-entered"), []byte("entered")); err != nil {
+		os.Exit(80)
+	}`,
+		`if _, err := shutdownFixturePublishMarker(filepath.Join(root, "tmp", "runtime-started"), []byte("started")); err != nil {
+		os.Exit(82)
+	}`,
+		`if _, err := shutdownFixturePublishMarker(filepath.Join(root, "tmp", "console-probe-result"), []byte(strconv.Itoa(code))); err != nil {
+			os.Exit(75)
 		}`,
 	} {
 		if !strings.Contains(source, required) {
 			t.Fatal("shutdown fixture publication lost its checked error and process exit class")
 		}
+	}
+	if shutdownFixturePublishBudget != 2*time.Second || shutdownFixturePublishBudget*5 > shutdownFixtureLivenessBudget(0) {
+		t.Fatal("shutdown fixture publish budget must be two seconds and at most one fifth of the liveness floor")
 	}
 }
 

@@ -70,7 +70,7 @@ func TestWindowsShutdownChildHelper(_ *testing.T) {
 	if count != 0 || !errors.Is(consoleErr, windows.ERROR_INVALID_HANDLE) {
 		os.Exit(77)
 	}
-	if writeAtomicBytes(filepath.Join(root, "tmp", "console-absent"), []byte("absent"), nil) != nil {
+	if _, err := shutdownFixturePublishMarker(filepath.Join(root, "tmp", "console-absent"), []byte("absent")); err != nil {
 		os.Exit(78)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -86,7 +86,7 @@ func TestWindowsShutdownChildHelper(_ *testing.T) {
 		completed++
 		// Retain a failed publication as a fixed process exit class. A second
 		// file publication could fail for the same reason as the first one.
-		if err := writeAtomicBytes(filepath.Join(root, "tmp", "cancel-handled"), []byte(strconv.Itoa(completed)), nil); err != nil {
+		if _, err := shutdownFixturePublishMarker(filepath.Join(root, "tmp", "cancel-handled"), []byte(strconv.Itoa(completed))); err != nil {
 			os.Exit(shutdownFixturePublishExitCode(err, false))
 		}
 	}
@@ -95,7 +95,7 @@ func TestWindowsShutdownChildHelper(_ *testing.T) {
 	requestCancel := func() {
 		cancelMu.Lock()
 		defer cancelMu.Unlock()
-		if err := writeAtomicBytes(filepath.Join(root, "tmp", "cancel-requested"), []byte(strconv.FormatUint(uint64(cancelCalls.Add(1)), 10)), nil); err != nil {
+		if _, err := shutdownFixturePublishMarker(filepath.Join(root, "tmp", "cancel-requested"), []byte(strconv.FormatUint(uint64(cancelCalls.Add(1)), 10))); err != nil {
 			os.Exit(shutdownFixturePublishExitCode(err, true))
 		}
 		if mode != "ignore" && mode != "lost-force" && mode != "lost-all" && mode != "migration" {
@@ -121,7 +121,7 @@ func TestWindowsShutdownChildHelper(_ *testing.T) {
 		_ = channel.Close()
 		os.Exit(0)
 	}
-	if writeAtomicBytes(filepath.Join(root, "tmp", "store-entered"), []byte("entered"), nil) != nil {
+	if _, err := shutdownFixturePublishMarker(filepath.Join(root, "tmp", "store-entered"), []byte("entered")); err != nil {
 		os.Exit(80)
 	}
 	if mode != "migration" {
@@ -129,7 +129,7 @@ func TestWindowsShutdownChildHelper(_ *testing.T) {
 			os.Exit(81)
 		}
 	}
-	if writeAtomicBytes(filepath.Join(root, "tmp", "runtime-started"), []byte("started"), nil) != nil {
+	if _, err := shutdownFixturePublishMarker(filepath.Join(root, "tmp", "runtime-started"), []byte("started")); err != nil {
 		os.Exit(82)
 	}
 	if mode == "normal-probe" {
@@ -156,13 +156,18 @@ func TestWindowsShutdownChildHelper(_ *testing.T) {
 			}
 		}
 		probeCancel()
-		if writeAtomicBytes(filepath.Join(root, "tmp", "console-probe-result"), []byte(strconv.Itoa(code)), nil) != nil {
+		if _, err := shutdownFixturePublishMarker(filepath.Join(root, "tmp", "console-probe-result"), []byte(strconv.Itoa(code))); err != nil {
 			os.Exit(75)
 		}
 	}
 	<-ctx.Done()
 	_ = channel.Close()
 	os.Exit(0)
+}
+
+func shutdownFixturePublishMarker(path string, data []byte) (int, error) {
+	return shutdownFixtureRetryPublish(func() error { return writeAtomicBytes(path, data, nil) },
+		shutdownFixtureReadErrorClass, time.Sleep, time.Now)
 }
 
 type windowsShutdownFixture struct {
@@ -587,6 +592,9 @@ func TestWindowsShutdownEscalation(t *testing.T) {
 		reached := false
 		windowsShutdownBeforeForce = func(record *ProcessRecord) {
 			reached = true
+			// The ACK can precede the callback's marker publication, including
+			// its sharing retry. Observe completion before the positive assertion.
+			waitShutdownMarker(t, f.cell.path("tmp", "cancel-requested"), shutdownFixtureLivenessBudget(f.startup))
 			if _, err := os.Stat(f.cell.path("tmp", "cancel-requested")); err != nil {
 				t.Error("force stage reached without actual accepted cancellation")
 			}
