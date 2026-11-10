@@ -198,11 +198,72 @@ func TestWindowsShutdownFixtureDiagnosticsSourceContract(t *testing.T) {
 		t.Fatal("shutdown fixture lost its publish diagnostic for subtests that do not read the marker")
 	}
 	deadline := shutdownFixtureSourceFunction(t, "service_shutdown_windows_test.go", "TestWindowsShutdownParentDeadline")
+	wait := `waitShutdownMarker(t, f.cell.path("tmp", "cancel-handled"), shutdownFixtureLivenessBudget(f.startup))`
+	accepted := strings.Index(deadline, `t.Fatal("deadline fixture never accepted runtime-ready cancellation")`)
+	waitIndex := strings.Index(deadline, wait)
+	budget := strings.Index(deadline, "parentBudget := shutdownFixtureBudget(f.startup)")
+	if accepted < 0 || waitIndex <= accepted || budget <= waitIndex || strings.Count(deadline, wait) != 1 {
+		t.Fatal("shutdown fixture parent deadline lost its pre-budget publication fence")
+	}
+	marker := shutdownFixtureSourceFunction(t, "service_shutdown_windows_test.go", "waitShutdownMarker")
+	if !strings.Contains(marker, "if _, err := readPrivateFile(path); err == nil {") || strings.Contains(marker, "os.Stat(") {
+		t.Fatal("shutdown fixture marker wait no longer fences private publication completion")
+	}
 	if !strings.Contains(deadline, `if outcome.Kind != serviceStopUnknown || outcome.Detail != "shutdown:deadline" || ctx.Err() != context.DeadlineExceeded {
 		t.Logf("shutdown parent deadline class: %s", shutdownFixtureDeadlineClass(outcome, ctx.Err()))
+		t.Logf("shutdown descriptor replay class: %s", f.descriptorClass())
 		t.Fatal("parent exhaustion did not raise at the actual shutdown deadline")
 	}`) {
 		t.Fatal("shutdown fixture parent deadline assertion or diagnostic changed")
+	}
+}
+
+func TestWindowsShutdownFixtureDescriptorReplaySourceContract(t *testing.T) {
+	reader := shutdownFixtureSourceFunction(t, "service_shutdown_windows_test.go", "shutdownFixtureReadDescriptor")
+	for _, required := range []string{
+		`if !shutdownDescriptorPath(root, path) {`,
+		`{"tree", func() error { return validatePrivateTree(root) }}`,
+		`{"root", func() error { return privateDir(root, false) }}`,
+		`{"service_dir", func() error { return privateDir(filepath.Join(root, "service"), false) }}`,
+		`{"children", func() error { return privateDir(filepath.Join(root, "service", "children"), false) }}`,
+		`{"record", func() error { return servicePrivateRecord(path) }}`,
+		`if err := check.read(); err != nil {`,
+		`return serviceShutdownDescriptor{}, check.step, err`,
+		`file, err := openPrivateFile(path, os.O_RDONLY, 0)`,
+		`return serviceShutdownDescriptor{}, "open", err`,
+		`defer func() { _ = file.Close() }()`,
+		`d, err := decodeShutdownDescriptor(file)`,
+		`return d, "decode", err`,
+		`return d, "none", nil`,
+	} {
+		if !strings.Contains(reader, required) {
+			t.Fatal("shutdown descriptor replay lost a read-only production observation")
+		}
+	}
+	// The replay deliberately expands the production reader's flattened error.
+	// Make changes to that production sequence require reviewing the replay too.
+	production := shutdownFixtureSourceFunction(t, "service_shutdown_windows.go", "readShutdownDescriptor")
+	if !strings.Contains(production, `if !shutdownDescriptorPath(root, path) || validatePrivateTree(root) != nil || privateDir(root, false) != nil ||
+		privateDir(filepath.Join(root, "service"), false) != nil || privateDir(filepath.Join(root, "service", "children"), false) != nil || servicePrivateRecord(path) != nil {`) ||
+		!strings.Contains(production, "openPrivateFile(path, os.O_RDONLY, 0)") || !strings.Contains(production, "return decodeShutdownDescriptor(f)") {
+		t.Fatal("shutdown descriptor replay must track the production reader checks")
+	}
+	replay := shutdownFixtureSourceFunction(t, "service_shutdown_windows_test.go", "descriptorClass")
+	for _, required := range []string{
+		`d, step, readErr := shutdownFixtureReadDescriptor(f.cell.cfg.Root, f.record.ShutdownDescriptor)`,
+		`rootErr := f.cell.validateRoot(false)`,
+		`service, serviceErr := f.cell.ServiceDescriptor()`,
+		`boot, bootErr := serviceBootID()`,
+		`match := shutdownFixtureDescriptorMatchClass(d, f.record, service, boot, readErr, serviceErr, bootErr)`,
+		`pending, scanErr := shutdownFixturePendingCount(f.cell.cfg.Root)`,
+		`"descriptor=" + step + " error=" + shutdownFixtureObservationClass(readErr)`,
+		`" root=" + shutdownFixtureObservationClass(rootErr) + " service=" + shutdownFixtureObservationClass(serviceErr)`,
+		`" boot=" + shutdownFixtureObservationClass(bootErr) + " match=" + match`,
+		`" pending=" + shutdownFixtureCountClass(pending) + " scan=" + shutdownFixtureObservationClass(scanErr)`,
+	} {
+		if !strings.Contains(replay, required) {
+			t.Fatal("shutdown descriptor replay lost its fixed classes or temporary count")
+		}
 	}
 }
 
