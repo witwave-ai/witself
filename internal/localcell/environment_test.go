@@ -613,9 +613,17 @@ func TestEnvironmentFixtureReadErrorClass(t *testing.T) {
 		{"other", "windows", "other", errors.New("synthetic private error")},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			// A simulated non-Windows row still runs on the host runtime, whose own
+			// syscall.Errno decides os.ErrPermission: errno 5 is EIO on Unix and
+			// ERROR_ACCESS_DENIED on Windows. Such a row proves only that the Win32
+			// numeric switch is not consulted; the generic sentinel class stands.
+			want := test.want
+			if test.goos != "windows" && want == "other" && errors.Is(test.err, os.ErrPermission) {
+				want = "access-denied"
+			}
 			wrapped := fmt.Errorf("synthetic private context: %w", &os.PathError{Op: "read", Path: "synthetic-private-path", Err: test.err})
-			if got := environmentFixtureReadErrorClass(wrapped, test.goos); got != test.want {
-				t.Fatalf("read error class = %s, want %s", got, test.want)
+			if got := environmentFixtureReadErrorClass(wrapped, test.goos); got != want {
+				t.Fatalf("read error class = %s, want %s", got, want)
 			}
 		})
 	}
