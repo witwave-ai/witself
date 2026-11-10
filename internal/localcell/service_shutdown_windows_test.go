@@ -84,14 +84,20 @@ func TestWindowsShutdownChildHelper(_ *testing.T) {
 		completedMu.Lock()
 		defer completedMu.Unlock()
 		completed++
-		_ = writeAtomicBytes(filepath.Join(root, "tmp", "cancel-handled"), []byte(strconv.Itoa(completed)), nil)
+		// Retain a failed publication as a fixed process exit class. A second
+		// file publication could fail for the same reason as the first one.
+		if err := writeAtomicBytes(filepath.Join(root, "tmp", "cancel-handled"), []byte(strconv.Itoa(completed)), nil); err != nil {
+			os.Exit(shutdownFixturePublishExitCode(err, false))
+		}
 	}
 	var cancelCalls atomic.Uint32
 	var cancelMu sync.Mutex
 	requestCancel := func() {
 		cancelMu.Lock()
 		defer cancelMu.Unlock()
-		_ = writeAtomicBytes(filepath.Join(root, "tmp", "cancel-requested"), []byte(strconv.FormatUint(uint64(cancelCalls.Add(1)), 10)), nil)
+		if err := writeAtomicBytes(filepath.Join(root, "tmp", "cancel-requested"), []byte(strconv.FormatUint(uint64(cancelCalls.Add(1)), 10)), nil); err != nil {
+			os.Exit(shutdownFixturePublishExitCode(err, true))
+		}
 		if mode != "ignore" && mode != "lost-force" && mode != "lost-all" && mode != "migration" {
 			cancel()
 		}
@@ -166,6 +172,13 @@ type windowsShutdownFixture struct {
 	startup time.Duration
 }
 
+func (f windowsShutdownFixture) completionClass() string {
+	handled, err := readPrivateFile(f.cell.path("tmp", "cancel-handled"))
+	var code uint32
+	exitErr := windows.GetExitCodeProcess(f.handle, &code)
+	return shutdownFixtureCompletionClass(handled, err, code, exitErr)
+}
+
 // Measure this test binary's process startup before selecting behavioural waits.
 func shutdownFixtureStartup(t *testing.T, c *Cell) time.Duration {
 	t.Helper()
@@ -233,7 +246,16 @@ func launchShutdownFixture(t *testing.T, mode string, barrier bool) windowsShutd
 	if !barrier {
 		waitShutdownMarker(t, c.path("tmp", "runtime-started"), max(10*time.Since(started), shutdownFixtureLivenessBudget(startup)))
 	}
-	return windowsShutdownFixture{c, record, handle, time.Since(started)}
+	f := windowsShutdownFixture{c, record, handle, time.Since(started)}
+	// A fixture that exits on a failed marker publication can fail a subtest
+	// that never reads the marker. Name the class there too.
+	t.Cleanup(func() {
+		var code uint32
+		if t.Failed() && windows.GetExitCodeProcess(f.handle, &code) == nil && code >= 90 && code <= 97 {
+			t.Logf("shutdown handler completion class: %s", f.completionClass())
+		}
+	})
+	return f
 }
 
 func waitShutdownMarker(t *testing.T, path string, budget time.Duration) {
@@ -439,19 +461,23 @@ func TestWindowsShutdownEscalation(t *testing.T) {
 		f := launchShutdownFixture(t, "ignore", false)
 		d, err := readShutdownDescriptor(f.cell.cfg.Root, f.record.ShutdownDescriptor)
 		if err != nil {
+			t.Logf("shutdown handler completion class: %s", f.completionClass())
 			t.Fatal("descriptor unavailable")
 		}
 		id, err := shutdownRandom(16)
 		if err != nil {
+			t.Logf("shutdown handler completion class: %s", f.completionClass())
 			t.Fatal("request fixture unavailable")
 		}
 		request := d.request("cancel", id)
 		first, err := windowsShutdownRequest(t.Context(), d, request)
 		if err != nil {
+			t.Logf("shutdown handler completion class: %s", f.completionClass())
 			t.Fatal("clean cancel request refused")
 		}
 		second, err := windowsShutdownRequest(t.Context(), d, request)
 		if err != nil || first != second {
+			t.Logf("shutdown handler completion class: %s", f.completionClass())
 			t.Fatal("retried cancel did not return identical ACK")
 		}
 		// The second ACK can arrive before its deferred callback. Observe handler
@@ -466,16 +492,21 @@ func TestWindowsShutdownEscalation(t *testing.T) {
 			select {
 			case <-completion.Done():
 				t.Logf("handler completion budget=%s startup=%s", shutdownFixtureLivenessBudget(f.startup), f.startup)
+				var code uint32
+				exitErr := windows.GetExitCodeProcess(f.handle, &code)
+				t.Logf("shutdown handler completion class: %s", shutdownFixtureCompletionClass(handled, err, code, exitErr))
 				t.Fatal("second cancel handler did not complete")
 			case <-time.After(max(f.startup/100, time.Millisecond)):
 			}
 		}
 		data, err := readPrivateFile(f.cell.path("tmp", "cancel-requested"))
 		if err != nil || string(data) != "1" {
+			t.Logf("shutdown handler completion class: %s", f.completionClass())
 			t.Fatal("retry invoked cancellation more than once")
 		}
 		request.Action = "release"
 		if _, err := windowsShutdownRequest(t.Context(), d, request); err == nil {
+			t.Logf("shutdown handler completion class: %s", f.completionClass())
 			t.Fatal("request identifier reused for different action")
 		}
 	})
@@ -677,6 +708,7 @@ func TestWindowsShutdownParentDeadline(t *testing.T) {
 	started := time.Now()
 	outcome := f.cell.stopChildOutcomeWithBudget(ctx, "server", ProcessState{PID: f.record.PID, Alive: true, Matches: true}, 8*parentBudget)
 	if outcome.Kind != serviceStopUnknown || outcome.Detail != "shutdown:deadline" || ctx.Err() != context.DeadlineExceeded {
+		t.Logf("shutdown parent deadline class: %s", shutdownFixtureDeadlineClass(outcome, ctx.Err()))
 		t.Fatal("parent exhaustion did not raise at the actual shutdown deadline")
 	}
 	// The allowance scales with this fixture's floored shutdown budget. A
