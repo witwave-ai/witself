@@ -2020,12 +2020,14 @@ step before any decrease.
    key: older binaries reject the inventory, including the `health` command
    that runs for both cells at the end of a train. A dispatcher build from
    `main` alone is not sufficient.
-3. The deletion-protection plan review refuses a replacement of
-   `civo:index/kubernetesCluster:KubernetesCluster`. Today
-   [the review](../infra/pulumi/cmd/witself-infra/deletion_plan.go) protects
-   only database and secret-store types, so **this procedure is not yet
-   approved for use**. A provider-forced Civo cluster replacement would
-   delete the in-cluster PostgreSQL volumes.
+3. Use a release whose [deletion-protection plan review](../infra/pulumi/cmd/witself-infra/deletion_plan.go)
+   refuses `delete`, `replace`, `create-replacement`, `delete-replaced`,
+   `read-replacement`, `discard-replaced` and `import-replacement` steps on
+   `civo:index/kubernetesCluster:KubernetesCluster` and the Civo workload
+   namespace `witself-namespace` in both `preview` and `up`. Keep deletion
+   protection enabled (the default when neither the cell nor inventory
+   defaults records the key). Replacing the Civo cluster or workload
+   namespace would delete the in-cluster PostgreSQL volumes.
 4. A read-only `preview` has shown, once, that a node-count change is an
    in-place `pools.nodeCount` update of `civo-cluster` in the pinned
    `pulumi-civo` v2.4.8 provider. Mocks cannot establish this.

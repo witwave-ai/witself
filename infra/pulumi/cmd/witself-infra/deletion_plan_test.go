@@ -220,3 +220,143 @@ func TestProtectionPlanFailsClosedOnPreviewErrors(t *testing.T) {
 		}
 	}
 }
+
+const civoProtectionTestCell = "civo-sandbox-use1-serving"
+
+func civoPlanProtection(t *testing.T, field string) bool {
+	t.Helper()
+	t.Setenv("WITSELF_HOME", t.TempDir())
+	t.Setenv("DSH_HOME", t.TempDir())
+	path := writeConfig(t, "version: 1\ncells:\n  "+civoProtectionTestCell+":\n    cloud: civo\n    account_alias: sandbox\n    region: nyc1\n    role: serving\n"+field)
+	enabled, err := loadCellDeletionProtection(civoProtectionTestCell, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return enabled
+}
+
+func reviewCivoPlan(t *testing.T, s *protectionPlanStack, command string, enabled bool) error {
+	t.Helper()
+	if command == "preview" {
+		_, err := previewWithDeletionProtection(context.Background(), s, civoProtectionTestCell, enabled)
+		return err
+	}
+	_, err := upWithDeletionProtection(context.Background(), s, civoProtectionTestCell, enabled, io.Discard)
+	if _, statErr := os.Stat(s.planPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("temporary plan remains: %v", statErr)
+	}
+	return err
+}
+
+func TestCivoProtectionPlanDestructiveOperations(t *testing.T) {
+	for _, inventory := range []struct {
+		name  string
+		field string
+		block bool
+	}{
+		{name: "absent defaults enabled", block: true},
+		{name: "recorded false", field: "    deletion_protection: false\n"},
+	} {
+		t.Run(inventory.name, func(t *testing.T) {
+			enabled := civoPlanProtection(t, inventory.field)
+			if enabled != inventory.block {
+				t.Fatalf("recorded protection = %t, want %t", enabled, inventory.block)
+			}
+			for _, resource := range []struct{ typ, name string }{
+				{"civo:index/kubernetesCluster:KubernetesCluster", "civo-cluster"},
+				{"kubernetes:core/v1:Namespace", "witself-namespace"},
+			} {
+				t.Run(resource.name, func(t *testing.T) {
+					for _, op := range []apitype.OpType{
+						apitype.OpDelete, apitype.OpReplace, apitype.OpCreateReplacement,
+						apitype.OpDeleteReplaced, apitype.OpReadReplacement, apitype.OpDiscardReplaced,
+						apitype.OpImportReplacement,
+					} {
+						t.Run(string(op), func(t *testing.T) {
+							for _, command := range []string{"preview", "up"} {
+								t.Run(command, func(t *testing.T) {
+									urn := "urn:pulumi:test::witself::" + resource.typ + "::" + resource.name
+									s := &protectionPlanStack{t: t, closeStream: command == "preview", steps: []apitype.StepEventMetadata{{
+										Type: resource.typ, URN: urn, Op: op,
+										Old: &apitype.StepEventStateMetadata{Protect: false},
+									}}}
+									err := reviewCivoPlan(t, s, command, enabled)
+									if inventory.block {
+										want := "deletion protection refuses a plan that would delete or force replacement of Civo cluster/workload-namespace resources: " + urn + "; in-cluster PostgreSQL volumes would be deleted. For intentional replacement, edit cell \"civo-sandbox-use1-serving\" in the inventory to deletion_protection: false, then run a separate up that applies ONLY unprotection before the replacement or destroy"
+										if err == nil || err.Error() != want || s.upCalls != 0 {
+											t.Fatalf("destructive plan: calls=%d, err=%v; want %q and no Up", s.upCalls, err, want)
+										}
+									} else {
+										wantCalls := 0
+										if command == "up" {
+											wantCalls = 1
+										}
+										if err != nil || s.upCalls != wantCalls {
+											t.Fatalf("recorded false plan: calls=%d, err=%v; want %d calls", s.upCalls, err, wantCalls)
+										}
+									}
+								})
+							}
+						})
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestCivoProtectionPlanAllowsInPlaceOperations(t *testing.T) {
+	enabled := civoPlanProtection(t, "")
+	for _, command := range []string{"preview", "up"} {
+		for _, op := range []apitype.OpType{apitype.OpUpdate, apitype.OpSame, apitype.OpRead, apitype.OpRefresh} {
+			t.Run(command+"/"+string(op), func(t *testing.T) {
+				s := &protectionPlanStack{t: t, closeStream: true, steps: []apitype.StepEventMetadata{
+					{Type: "civo:index/kubernetesCluster:KubernetesCluster", URN: "urn:pulumi:test::witself::civo:index/kubernetesCluster:KubernetesCluster::civo-cluster", Op: op, Diffs: []string{"pools.nodeCount"}},
+					{Type: "kubernetes:core/v1:Namespace", URN: "urn:pulumi:test::witself::kubernetes:core/v1:Namespace::witself-namespace", Op: op},
+					{Type: "civo:index/firewall:Firewall", Op: apitype.OpUpdate},
+					{Type: "kubernetes:core/v1:Namespace", URN: "urn:pulumi:test::witself::kubernetes:core/v1:Namespace::unrelated", Op: apitype.OpReplace},
+				}}
+				wantCalls := 0
+				if command == "up" {
+					wantCalls = 1
+				}
+				if err := reviewCivoPlan(t, s, command, enabled); err != nil || s.upCalls != wantCalls {
+					t.Fatalf("in-place plan: calls=%d, err=%v; want %d calls", s.upCalls, err, wantCalls)
+				}
+			})
+		}
+	}
+}
+
+func TestCivoProtectionPlanRequiresSeparateUnprotectUp(t *testing.T) {
+	enabled := civoPlanProtection(t, "    deletion_protection: false\n")
+	s := &protectionPlanStack{t: t, steps: []apitype.StepEventMetadata{{
+		Type: "civo:index/kubernetesCluster:KubernetesCluster", URN: "urn:pulumi:test::witself::civo:index/kubernetesCluster:KubernetesCluster::civo-cluster",
+		Op: apitype.OpReplace, Old: &apitype.StepEventStateMetadata{Protect: true}, New: &apitype.StepEventStateMetadata{Protect: false},
+	}}}
+	if err := reviewCivoPlan(t, s, "up", enabled); err == nil || s.upCalls != 0 {
+		t.Fatalf("same-up unprotect+replace: calls=%d, err=%v", s.upCalls, err)
+	}
+	s.steps[0].Old.Protect = false
+	if err := reviewCivoPlan(t, s, "up", enabled); err != nil || s.upCalls != 1 {
+		t.Fatalf("previously unprotected replacement: calls=%d, err=%v", s.upCalls, err)
+	}
+}
+
+func TestCivoProtectionPreviewListsEveryResource(t *testing.T) {
+	enabled := civoPlanProtection(t, "")
+	s := &protectionPlanStack{t: t, steps: []apitype.StepEventMetadata{
+		{Type: "civo:index/kubernetesCluster:KubernetesCluster", URN: "cluster-z", Op: apitype.OpReplace},
+		{Type: "civo:index/kubernetesCluster:KubernetesCluster", URN: "cluster-a", Op: apitype.OpDelete},
+		{Type: "civo:index/kubernetesCluster:KubernetesCluster", URN: "cluster-z", Op: apitype.OpCreateReplacement},
+		{Type: "aws:rds/instance:Instance", URN: "store", Op: apitype.OpDelete},
+	}}
+	err := reviewCivoPlan(t, s, "preview", enabled)
+	if err == nil || !strings.Contains(err.Error(), "cluster-a, cluster-z;") || strings.Count(err.Error(), "cluster-z") != 1 {
+		t.Fatalf("Civo replacement refusal = %v", err)
+	}
+	wantStore := protectionPlanError(civoProtectionTestCell, map[string]bool{"store": true})
+	if !strings.Contains(err.Error(), wantStore.Error()) {
+		t.Fatalf("mixed plan lost store refusal: %v", err)
+	}
+}

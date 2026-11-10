@@ -49,12 +49,15 @@ func previewWithDeletionProtection(ctx context.Context, stack protectionStack, c
 	reviewed := make(chan error, 1)
 	go func() {
 		violations := map[string]bool{}
+		civoViolations := map[string]bool{}
 		var streamErr error
+		defer func() {
+			reviewed <- errors.Join(streamErr, protectionPlanError(cellName, violations), civoProtectionPlanError(cellName, civoViolations))
+		}()
 		for {
 			select {
 			case event, ok := <-stream:
 				if !ok {
-					reviewed <- errors.Join(streamErr, protectionPlanError(cellName, violations))
 					return
 				}
 				if event.Error != nil {
@@ -71,13 +74,16 @@ func previewWithDeletionProtection(ctx context.Context, stack protectionStack, c
 						if name == "" {
 							name = step.Type
 						}
-						violations[name] = true
+						if protectedCivoDataResource(step) {
+							civoViolations[name] = true
+						} else {
+							violations[name] = true
+						}
 					}
 				}
 			case <-done:
 				// Automation API finishes sending events before Preview returns.
 				// The done path also handles failures before it opened the stream.
-				reviewed <- errors.Join(streamErr, protectionPlanError(cellName, violations))
 				return
 			}
 		}
@@ -103,8 +109,24 @@ func protectedStoreResource(resourceType string) bool {
 	}
 }
 
+// These resources contain the GitOps-managed PostgreSQL volumes. Keep this
+// plan-only classification separate from protectedStoreResource, which is also
+// used to verify persisted unprotection on the destroy path.
+func protectedCivoDataResource(step apitype.StepEventMetadata) bool {
+	switch step.Type {
+	case "civo:index/kubernetesCluster:KubernetesCluster":
+		return true
+	case "kubernetes:core/v1:Namespace":
+		// Only the Civo program registers this workload namespace. Do not
+		// treat unrelated namespaces as database stores.
+		return strings.HasSuffix(step.URN, "::witself-namespace")
+	default:
+		return false
+	}
+}
+
 func protectedStoreDestruction(step apitype.StepEventMetadata, enabled bool) (bool, error) {
-	if !protectedStoreResource(step.Type) {
+	if !protectedStoreResource(step.Type) && !protectedCivoDataResource(step) {
 		return false, nil
 	}
 	switch step.Op {
@@ -134,4 +156,16 @@ func protectionPlanError(cellName string, violations map[string]bool) error {
 	}
 	sort.Strings(resources)
 	return fmt.Errorf("deletion protection refuses a plan that would delete or force replacement of database/secret-store resources: %s; protection must be enabled in place, never by replacing an existing store. For intentional replacement, edit cell %q in the inventory to deletion_protection: false, then run a separate up that applies ONLY unprotection before the replacement or destroy. If the provider requires replacement to enable protection, use its supported in-place protection operation and refresh first, or arrange an explicitly reviewed migration to a new store", strings.Join(resources, ", "), cellName)
+}
+
+func civoProtectionPlanError(cellName string, violations map[string]bool) error {
+	if len(violations) == 0 {
+		return nil
+	}
+	resources := make([]string, 0, len(violations))
+	for urn := range violations {
+		resources = append(resources, urn)
+	}
+	sort.Strings(resources)
+	return fmt.Errorf("deletion protection refuses a plan that would delete or force replacement of Civo cluster/workload-namespace resources: %s; in-cluster PostgreSQL volumes would be deleted. For intentional replacement, edit cell %q in the inventory to deletion_protection: false, then run a separate up that applies ONLY unprotection before the replacement or destroy", strings.Join(resources, ", "), cellName)
 }
