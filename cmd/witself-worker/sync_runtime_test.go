@@ -118,13 +118,22 @@ func TestWorkerLocalRuntimeSyncPostgres(t *testing.T) {
 	for _, mode := range []string{"hosted", "local", "sync"} {
 		t.Run(mode, func(t *testing.T) {
 			fixture := testenv.NewPostgresSchema(t, testenv.RequirePostgres(t))
-			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-			defer cancel()
-			st, err := store.Open(ctx, fixture.DSN())
+			setupCtx, cancelSetup := context.WithTimeout(context.Background(), testenv.MigrationBudget(0))
+			defer cancelSetup()
+			st, err := store.Open(setupCtx, fixture.DSN())
 			if err != nil {
 				t.Fatal("open worker startup fixture failed")
 			}
 			defer st.Close()
+			started := time.Now()
+			if err := st.Migrate(); err != nil {
+				t.Fatal("worker startup migrations failed")
+			}
+			work := time.Since(started)
+			budget := testenv.MigrationBudget(work)
+			t.Logf("sync startup budget %s", budget)
+			ctx, cancel := context.WithTimeout(context.Background(), budget)
+			defer cancel()
 			db, err := pgx.Connect(ctx, fixture.DSN())
 			if err != nil {
 				t.Fatal("open worker schema observer failed")
@@ -133,7 +142,7 @@ func TestWorkerLocalRuntimeSyncPostgres(t *testing.T) {
 			if mode == "sync" && testenv.EnsureSyncPrincipalRoles(ctx, db, store.SyncPrincipalRoleNames()...) != nil {
 				t.Fatal("worker sync principal fixture provisioning failed")
 			}
-			cfg := runtimeconfig.Config{Local: mode != "hosted", SyncSchema: mode == "sync", MigrationWait: time.Minute}
+			cfg := runtimeconfig.Config{Local: mode != "hosted", SyncSchema: mode == "sync", MigrationWait: budget}
 			if err := migrateWorkerStore(ctx, st, cfg); err != nil {
 				t.Fatal("worker startup migrations failed")
 			}
