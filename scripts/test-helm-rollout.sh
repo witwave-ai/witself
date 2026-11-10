@@ -668,7 +668,8 @@ extract_document Application witself-postgresql "$civo_apps_render" "$civo_postg
 extract_document Application witself-postgresql "$civo_backup_apps_render" "$civo_backup_postgres_application"
 extract_document Application witself-postgresql "$civo_legacy_apps_render" "$civo_legacy_postgres_application"
 extract_document Application witself-postgresql "$civo_default_preset_apps_render" "$civo_default_preset_postgres_application"
-require_line "          resourcesPreset: micro" "$civo_postgres_application"
+require_line "          resourcesPreset: small" "$civo_postgres_application"
+reject_line "          resourcesPreset: micro" "$civo_postgres_application"
 reject_line "          resourcesPreset: nano" "$civo_postgres_application"
 # The restore-drill target imports the largest routed account's archive; nano
 # OOM-killed it (2026-09-27), so the backup cell pins the medium preset.
@@ -773,7 +774,7 @@ for recovery_phase in restore serving; do
     --set apps.witselfServer.worker.enabled="$recovery_worker_enabled" \
     >"$recovery_apps"
   extract_document Application witself-postgresql "$recovery_apps" "$recovery_postgres"
-  require_line "          resourcesPreset: micro" "$recovery_postgres"
+  require_line "          resourcesPreset: small" "$recovery_postgres"
   require_line '            size: "8Gi"' "$recovery_postgres"
   # PostgreSQL metrics are off during monitoring phase 1; subsequent phases
   # enable its selected ServiceMonitor. The phase helper verifies both forms.

@@ -7,9 +7,10 @@ apps:
     backup:
       enabled: {{.PostgresBackup}}
     storage: 8Gi
-    # Nano's 192Mi limit exhausted this cell's measured PostgreSQL working set.
-    # Micro adds headroom; the other Civo cells inherit nano.
-    resourcesPreset: micro
+    # Nano's 192Mi limit exhausted this cell's measured PostgreSQL working set,
+    # and micro's 384Mi limit was OOM-killed on 2026-11-10. Small raises the
+    # memory limit to 768Mi and the request to 512Mi.
+    resourcesPreset: small
     # Preserve this cell's running image content; do not align the backup pin.
     # The tag-to-digest change plus exporter activation causes ONE PostgreSQL
     # restart. Both server replicas are expected to crash-loop for ~1 minute
