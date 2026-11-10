@@ -319,6 +319,12 @@ jobs:
       - name: roll cell backup gate checks
         run: bash scripts/test-roll-cell-gate.sh
 
+      - name: Fetch monitoring test assets
+        timeout-minutes: 6
+        run: |
+          assets=$(bash scripts/fetch-monitoring-test-assets.sh)
+          printf 'WITSELF_MONITORING_TEST_ASSETS=%s\n' "$assets" >> "$GITHUB_ENV"
+
       - name: monitoring rollout capability checks
         run: |
           bash scripts/test-monitoring-rollout.sh

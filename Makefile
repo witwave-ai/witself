@@ -468,6 +468,7 @@ check-infra: ## Gates for nested Pulumi plus the isolated Cloudflare Workers
 	bash scripts/test-security-scan-workflow.sh
 	bash scripts/test-billing-transition-rollout-preflight.sh
 	bash scripts/test-capture-billing-rollout-inventory.sh
+	bash scripts/test-fetch-monitoring-test-assets.sh
 	bash scripts/test-monitoring-rollout.sh
 	bash scripts/test-monitoring-alert-canary.sh
 	bash scripts/test-avatar-acceptance.sh
