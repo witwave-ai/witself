@@ -405,6 +405,22 @@ The frozen format and vectors above are unchanged. Historical references above
 to B3 work describe the B1/B2 boundary; the following contract records what B3
 implements and what still requires LC-S7D integration.
 
+LC-S7D1A lands private update-record, journal and maintenance-fence foundations
+only. No enforcement site is wired, and there is no public update or repair
+path into these helpers. No shipped command starts or resumes an update. No
+supported operation clears a maintenance fence; manual deletion is not safe
+recovery. A future enforcement unit must establish legacy-path parity and a
+supported recovery contract before using the fence. No helper creates immutable
+update intent: the legacy manifest cannot authenticate a component-set identity.
+Retained record mutations require an existing private intent with exact immutable
+metadata matching the local installation.
+
+`ChannelAdapter.PreflightUpdate` is not connected to update execution: importing
+trust from localcell would violate the shipped server/worker dependency boundary.
+Authenticated installation/channel identity, safe staged-generation discard and
+migration lock/process observation remain prerequisites, alongside channel
+preflight, staging and activation. D2 owns recovery points and restore.
+
 `channel receipt|inspect|preflight` and `payload stage|activate|retire|inspect`
 require an explicit `--root`, `--component-set-dir` and `--trust-root-pem`.
 The supplied PEM must be a public TEST-ONLY root. Target selection is explicit

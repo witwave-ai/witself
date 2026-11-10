@@ -239,10 +239,14 @@ func (c *Cell) journalCause(operation, step, state, cause string) error {
 // journalProgress contains only validated, newline-terminated records. The
 // durable prefix may be empty when the first append tears.
 type journalProgress struct {
-	pending      *Interruption
-	done         map[string]bool
-	durableBytes int64
-	tornTail     bool
+	pending        *Interruption
+	done           map[string]bool
+	durableBytes   int64
+	tornTail       bool
+	updateID       string
+	updateState    updateState
+	updateMaxState updateState
+	updateComplete bool
 }
 
 func (p journalProgress) installComplete(manifests ...*Manifest) bool {
@@ -424,4 +428,127 @@ func (c *Cell) step(operation, step string, fn func() error) error {
 		return errInterrupted
 	}
 	return c.journal(operation, step, "done")
+}
+
+type updateJournalEntry struct {
+	Operation string    `json:"operation"`
+	Step      string    `json:"step"`
+	State     string    `json:"state"`
+	At        time.Time `json:"at"`
+	Cause     string    `json:"cause,omitempty"`
+	UpdateID  string    `json:"update_id,omitempty"`
+}
+
+// readUpdateJournal is reserved for private update helpers. Shipped lifecycle
+// readers continue to reject update entries and never reconcile update records.
+func (c *Cell) readUpdateJournal() (journalProgress, error) {
+	var progress journalProgress
+	path := c.path("journal", "operations.jsonl")
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		progress.pending, err = c.cleanupInterruption()
+		return progress, err
+	}
+	if err != nil || !info.Mode().IsRegular() {
+		return progress, errors.New("invalid local cell journal")
+	}
+	f, err := openPrivateFile(path, os.O_RDONLY, 0)
+	if err != nil {
+		return progress, errors.New("cannot read local cell journal")
+	}
+	defer func() { _ = f.Close() }()
+	reader := bufio.NewReaderSize(f, 64*1024)
+	for {
+		line, readErr := reader.ReadSlice('\n')
+		if len(line) == 0 && errors.Is(readErr, io.EOF) {
+			break
+		}
+		if errors.Is(readErr, bufio.ErrBufferFull) && line[len(line)-1] == 0 {
+			// Keep the record-size bound, but consume arbitrary crash zero-fill
+			// without retaining it. A newline or non-NUL after it is corruption.
+			line = bytes.Clone(bytes.TrimRight(line, "\x00"))
+			for errors.Is(readErr, bufio.ErrBufferFull) {
+				var padding []byte
+				padding, readErr = reader.ReadSlice('\n')
+				if len(bytes.TrimRight(padding, "\x00")) != 0 {
+					return progress, errors.New("invalid local cell journal; manual recovery required")
+				}
+			}
+		}
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			return progress, errors.New("cannot read local cell journal; manual recovery required")
+		}
+		if errors.Is(readErr, io.EOF) {
+			tail := bytes.TrimRight(line, "\x00")
+			decoder := json.NewDecoder(bytes.NewReader(tail))
+			decodeErr := decoder.Decode(new(any))
+			if len(tail) != 0 && !errors.Is(decodeErr, io.ErrUnexpectedEOF) &&
+				(decodeErr != nil || decoder.Decode(new(any)) != io.EOF) {
+				return progress, errors.New("invalid local cell journal; manual recovery required")
+			}
+			progress.tornTail = true
+			break
+		}
+		var entry updateJournalEntry
+		decoder := json.NewDecoder(bytes.NewReader(line))
+		decoder.DisallowUnknownFields()
+		decodeErr := decoder.Decode(&entry)
+		if decodeErr != nil || decoder.Decode(new(any)) != io.EOF || (entry.State != "started" && entry.State != "done" && entry.State != "failed") || !validUpdateJournalStep(entry.Operation, entry.Step) || entry.At.IsZero() {
+			return progress, errors.New("invalid local cell journal; manual recovery required")
+		}
+		if entry.Step == "operation" && entry.State == "started" {
+			if progress.pending != nil {
+				return progress, errors.New("overlapping local cell journal operations")
+			}
+			progress.pending = &Interruption{Operation: entry.Operation, Step: entry.Step}
+			progress.done = make(map[string]bool)
+			if entry.Operation == "update" {
+				if !validUpdateOperationID(entry.UpdateID) {
+					return progress, errUpdatePartialState
+				}
+				progress.updateID, progress.updateState, progress.updateMaxState, progress.updateComplete = entry.UpdateID, "", "", false
+			} else if entry.UpdateID != "" {
+				return progress, errUpdatePartialState
+			}
+		} else if progress.pending != nil {
+			if entry.UpdateID != "" {
+				return progress, errUpdatePartialState
+			}
+			if entry.Operation != progress.pending.Operation {
+				return progress, errors.New("mismatched local cell journal operation")
+			}
+			progress.pending.Step = entry.Step
+			progress.done[entry.Step] = entry.State == "done"
+			if entry.Operation == "update" && updateState(entry.Step).valid() {
+				if !validUpdateJournalTransition(progress.updateState, updateState(entry.Step)) {
+					return progress, errUpdatePartialState
+				}
+				progress.updateState = updateState(entry.Step)
+				if updateStateIndex(progress.updateState) > updateStateIndex(progress.updateMaxState) {
+					progress.updateMaxState = progress.updateState
+				}
+			}
+			if entry.Step == "operation" && entry.State == "done" {
+				if entry.Operation == "update" {
+					progress.updateComplete = true
+				}
+				progress.pending = nil
+				progress.done = nil
+			}
+		} else {
+			return progress, errors.New("unfenced local cell journal step")
+		}
+		progress.durableBytes += int64(len(line))
+	}
+	if progress.pending == nil {
+		progress.pending, err = c.cleanupInterruption()
+	}
+	return progress, err
+}
+
+func validUpdateJournalStep(operation, step string) bool {
+	if operation == "update" {
+		return step == "operation" || step == "revert_stop" || updateState(step).valid()
+	}
+	return validJournalStep(operation, step)
 }
