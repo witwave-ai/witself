@@ -1,6 +1,7 @@
 package gitopsvalues
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -97,6 +98,7 @@ type Switches struct {
 	MemoryAlerts            bool                 `yaml:"memory_alerts,omitempty"`
 	ControlPlaneAlerts      bool                 `yaml:"control_plane_alerts,omitempty"`
 	PostgresBackup          bool                 `yaml:"postgres_backup,omitempty"`
+	PostgresFastShutdown    bool                 `yaml:"postgres_fast_shutdown,omitempty"`
 	RequestBudget           *RequestBudgetSwitch `yaml:"request_budget,omitempty"`
 }
 
@@ -139,6 +141,9 @@ func loadCatalog(root string) (*Catalog, error) {
 	sort.Strings(names)
 	for _, name := range names {
 		cell := cfg.Cells[name]
+		if cell.Switches.PostgresFastShutdown && !deploysCivoPostgres(cell) {
+			return nil, fmt.Errorf("%s: cell %q sets postgres_fast_shutdown but does not deploy in-cluster Civo PostgreSQL", path, name)
+		}
 		if cell.Unprovisioned && cell.Switches.DomainDocumentationOnly {
 			return nil, fmt.Errorf("%s: cell %q sets unprovisioned with domain_documentation_only; an unprovisioned cell needs an authoritative API host", path, name)
 		}
@@ -182,6 +187,30 @@ func loadCatalog(root string) (*Catalog, error) {
 		return nil, err
 	}
 	return &cfg, nil
+}
+
+// Civo's family template supplies identity only; the selected overlay must
+// actually enable the database. Omitted switches use their false defaults.
+func deploysCivoPostgres(cell CellConfig) bool {
+	if cell.Cloud != "civo" || cell.Overlay == "" {
+		return false
+	}
+	overlay := templates.Lookup(cell.Overlay)
+	if overlay == nil {
+		return false
+	}
+	var output bytes.Buffer
+	if err := overlay.Execute(&output, templateData{}); err != nil {
+		return false
+	}
+	var values struct {
+		Apps struct {
+			CivoPostgres struct {
+				Enabled bool `yaml:"enabled"`
+			} `yaml:"civoPostgres"`
+		} `yaml:"apps"`
+	}
+	return yaml.Unmarshal(output.Bytes(), &values) == nil && values.Apps.CivoPostgres.Enabled
 }
 
 // validateRequestBudgetPlans validates raw plan nodes after strict decoding and

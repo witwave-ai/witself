@@ -64,6 +64,7 @@ cells:
       domain_documentation_only: true
       memory_alerts: false
       postgres_backup: false
+      postgres_fast_shutdown: true
   civo-sandbox-use1-serving:
     cloud: civo
     region: nyc1

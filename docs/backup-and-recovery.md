@@ -1354,6 +1354,22 @@ The new digest may be unavailable in GHCR until the next release mirrors it;
 complete publication and the `--postgres-image` roll before reconciling this
 intermediate values change.
 
+### Enabling the clean-stop hook on a cell
+
+Enabling the clean-stop hook on a serving cell is an operator decision. Take a
+restore-verified backup first, then set that cell's
+`switches.postgres_fast_shutdown: true` in `.gitops/cells/catalog.yaml` and run
+`make gitops-cell-values` before the reviewed roll.
+
+The roll that applies the hook still stops the database the old way once:
+expect `automatic recovery in progress` on that one start. After the hook is
+applied, prove it with one deliberate `kubectl delete pod` of the PostgreSQL
+pod. Read the server log for `database system is shut down` and, on the next
+start, `database system was shut down at`. A `FailedPreStopHook` warning event
+is expected on a clean stop because the hook's own exec ends when the server
+exits. Do not use `kubectl rollout restart`: it edits the template that Argo CD
+self-heals.
+
 ### Scheduled PostgreSQL backups
 
 The cell apps chart includes a **default-off** logical dump every six hours to
