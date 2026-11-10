@@ -4,6 +4,7 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 bash "$repo_root/scripts/test-witself-server-image.sh"
 bash "$repo_root/scripts/test-postgres-backup.sh"
+bash "$repo_root/scripts/test-verify-scheduled-backup-restore.sh"
 ruby "$repo_root/scripts/testdata/postgres-mirror-chart.rb" "$repo_root"
 ruby "$repo_root/scripts/testdata/apps-server-resources.rb" "$repo_root"
 ruby "$repo_root/scripts/testdata/apps-server-request-budget.rb" "$repo_root"
