@@ -7,6 +7,11 @@ usage() {
 usage: scripts/roll-train.sh VERSION [options]
   --no-schema-change       Attest that this release cannot advance the DB schema
   --backup-evidence DIR    Forward verified backup artifacts (repeat up to twice)
+EOF
+  if [ "${SHOW_EVIDENCE_AGE_USAGE:-true}" = true ]; then
+    printf '%s\n' '  --evidence-max-age DURATION  Positive whole hours/minutes, no leading zeroes (default 24h; max 72h/4320m)'
+  fi
+  cat <<'EOF'
   --cells BACKUP,SERVING   Full cell directory names, in wave order
                           Default: civo-sandbox-use1-backup,civo-sandbox-use1-serving
   --serving-url URL        Serving HTTP(S) origin (default: https://cell.apiHost)
@@ -23,6 +28,12 @@ VERSION must be MAJOR.MINOR.PATCH without v. A real roll requires either
 --no-schema-change or --backup-evidence; these options are mutually exclusive.
 Backup evidence requires a reviewed --cells pair in BACKUP,SERVING order: the
 default pair or civo-sandbox-use1-backup,civo-prod-use1-serving.
+EOF
+  if [ "${SHOW_EVIDENCE_AGE_USAGE:-true}" = true ]; then
+    printf '%s\n' '--evidence-max-age requires --backup-evidence and cannot accompany --no-schema-change.' \
+      'Each wave checks evidence age when it runs; evidence can age out between waves.'
+  fi
+  cat <<'EOF'
 Uses configured Git identity and Signed-off-by, never force-pushes, and leaves
 the current worktree and PR for inspection on failure. No automatic resume.
 EOF
@@ -31,6 +42,17 @@ EOF
 die() { printf 'roll-train: ERROR: %s\n' "$*" >&2; exit 1; }
 usage_error() { usage >&2; printf 'roll-train: %s\n' "$*" >&2; exit 2; }
 log() { printf 'roll-train: %s\n' "$*"; }
+
+# Bound the digit count before arithmetic to reject overflow and leading zeroes.
+valid_evidence_max_age() {
+  if [[ "$1" =~ ^[1-9][0-9]?h$ ]]; then
+    [ "${1%h}" -le 72 ]
+  elif [[ "$1" =~ ^[1-9][0-9]{0,3}m$ ]]; then
+    [ "${1%m}" -le 4320 ]
+  else
+    return 1
+  fi
+}
 
 valid_version() { [[ "$1" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; }
 
@@ -862,6 +884,16 @@ main() {
   CI_TIMEOUT=3600 ARGO_TIMEOUT=1200 POLL_INTERVAL=15
   local cells=civo-sandbox-use1-backup,civo-sandbox-use1-serving option value evidence
   local common release runs host live current tool cell values field pin serving_pins_match
+  local evidence_max_age='' bypass=false override=false
+  local SHOW_EVIDENCE_AGE_USAGE=true
+  # Preserve existing bypass-route usage output even on early parse errors.
+  for option in "$@"; do
+    case "$option" in
+      --no-schema-change|--first-sync) bypass=true ;;
+      --evidence-max-age) override=true ;;
+    esac
+  done
+  if [ "$bypass" = true ] && [ "$override" = false ]; then SHOW_EVIDENCE_AGE_USAGE=false; fi
   local evidence_dirs=()
   GATE_ARGS=()
   while [ "$#" -gt 0 ]; do
@@ -870,7 +902,7 @@ main() {
       --dry-run) DRY_RUN=true; shift ;;
       --no-schema-change) NO_SCHEMA_CHANGE=true; shift ;;
       --resume) RESUME=true; shift ;;
-      --cells|--serving-url|--workdir|--ci-timeout|--argo-timeout|--poll-interval|--backup-evidence)
+      --cells|--serving-url|--workdir|--ci-timeout|--argo-timeout|--poll-interval|--backup-evidence|--evidence-max-age)
         option=$1
         [ "$#" -ge 2 ] || usage_error "$option requires a value"
         value=$2
@@ -886,6 +918,11 @@ main() {
               --argo-timeout) ARGO_TIMEOUT=$value ;;
               --poll-interval) POLL_INTERVAL=$value ;;
             esac ;;
+          --evidence-max-age)
+            if [ -n "$evidence_max_age" ] || ! valid_evidence_max_age "$value"; then
+              usage_error "--evidence-max-age requires positive whole hours or minutes (1h..72h or 1m..4320m), no leading zeroes, specified once"
+            fi
+            evidence_max_age=$value ;;
           --backup-evidence)
             [ "${#evidence_dirs[@]}" -lt 2 ] || usage_error "--backup-evidence may be specified at most twice"
             evidence_dirs+=("$value") ;;
@@ -903,6 +940,10 @@ main() {
   fi
   BACKUP_CELL=${cells%,*}; SERVING_CELL=${cells#*,}
   [ "$BACKUP_CELL" != "$SERVING_CELL" ] || usage_error "backup and serving cells must differ"
+  if [ -n "$evidence_max_age" ]; then
+    [ "$NO_SCHEMA_CHANGE" = false ] && [ "${#evidence_dirs[@]}" -gt 0 ] ||
+      usage_error "--evidence-max-age requires --backup-evidence and cannot accompany --no-schema-change"
+  fi
   if [ "$NO_SCHEMA_CHANGE" = true ]; then
     [ "${#evidence_dirs[@]}" -eq 0 ] || usage_error "--no-schema-change and --backup-evidence are mutually exclusive"
     GATE_ARGS=(--no-schema-change)
@@ -915,6 +956,7 @@ main() {
         *) usage_error "--backup-evidence requires a reviewed BACKUP,SERVING pair" ;;
       esac
       GATE_ARGS=(--evidence-cells "$cells")
+      if [ -n "$evidence_max_age" ]; then GATE_ARGS+=(--evidence-max-age "$evidence_max_age"); fi
     fi
     SCHEMA_STATEMENT="Schema attestation: none; roll-cell.sh must verify backup/restore evidence for the selected pair before editing either pin in each wave."
   fi

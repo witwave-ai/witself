@@ -16,8 +16,22 @@
 # Example shape: scripts/roll-cell.sh CELL_NAME RELEASED_VERSION --no-schema-change
 set -euo pipefail
 
+# Keep usage failures on existing bypass routes byte-identical when no age
+# option is supplied; advertise the new option for evidence-route usage.
+SHOW_EVIDENCE_AGE_USAGE=true
+BYPASS_USAGE=false
+AGE_OVERRIDE_USAGE=false
+for argument in "$@"; do
+  case "$argument" in
+    --no-schema-change|--first-sync) BYPASS_USAGE=true ;;
+    --evidence-max-age) AGE_OVERRIDE_USAGE=true ;;
+  esac
+done
+if [ "$BYPASS_USAGE" = true ] && [ "$AGE_OVERRIDE_USAGE" = false ]; then SHOW_EVIDENCE_AGE_USAGE=false; fi
 usage() {
-  echo "usage: $0 <cell-name> <version> [--backup-image] [--postgres-image] [--evidence-cells BACKUP,SERVING] (--backup-evidence DIR [--backup-evidence DIR] | --no-schema-change | --first-sync)" >&2
+  local age_option=' [--evidence-max-age DURATION]'
+  if [ "$SHOW_EVIDENCE_AGE_USAGE" = false ]; then age_option=''; fi
+  echo "usage: $0 <cell-name> <version> [--backup-image] [--postgres-image] [--evidence-cells BACKUP,SERVING] (--backup-evidence DIR [--backup-evidence DIR]$age_option | --no-schema-change | --first-sync)" >&2
 }
 
 die() {
@@ -25,7 +39,20 @@ die() {
   exit 2
 }
 
+# Bound the digit count before arithmetic to reject overflow and leading zeroes.
+valid_evidence_max_age() {
+  if [[ "$1" =~ ^[1-9][0-9]?h$ ]]; then
+    [ "${1%h}" -le 72 ]
+  elif [[ "$1" =~ ^[1-9][0-9]{0,3}m$ ]]; then
+    [ "${1%m}" -le 4320 ]
+  else
+    return 1
+  fi
+}
+
 BACKUP_EVIDENCE=()
+EVIDENCE_MAX_AGE=24h
+EVIDENCE_MAX_AGE_SET=false
 EVIDENCE_CELLS=""
 NO_SCHEMA_CHANGE=false
 FIRST_SYNC=false
@@ -46,6 +73,19 @@ while [ "$#" -gt 0 ]; do
       [ "$#" -ge 2 ] || die "--evidence-cells requires BACKUP,SERVING"
       [ -z "$EVIDENCE_CELLS" ] || die "--evidence-cells may be specified only once"
       EVIDENCE_CELLS=$2
+      shift 2
+      ;;
+    --evidence-max-age)
+      if [ "$#" -lt 2 ]; then
+        usage
+        die "--evidence-max-age requires a duration"
+      fi
+      if [ "$EVIDENCE_MAX_AGE_SET" = true ] || ! valid_evidence_max_age "$2"; then
+        usage
+        die "--evidence-max-age requires positive whole hours or minutes (1h..72h or 1m..4320m), no leading zeroes, specified once"
+      fi
+      EVIDENCE_MAX_AGE=$2
+      EVIDENCE_MAX_AGE_SET=true
       shift 2
       ;;
     --backup-evidence)
@@ -100,6 +140,12 @@ if [ "${#POSITIONAL[@]}" -ne 2 ]; then
 fi
 CELL="${POSITIONAL[0]}"
 VERSION="${POSITIONAL[1]}"
+
+if [ "$EVIDENCE_MAX_AGE_SET" = true ] &&
+   { [ "$NO_SCHEMA_CHANGE" = true ] || [ "$FIRST_SYNC" = true ]; }; then
+  usage
+  die "--evidence-max-age cannot be combined with --no-schema-change or --first-sync"
+fi
 
 if [ "$FIRST_SYNC" = true ] &&
    { [ "$NO_SCHEMA_CHANGE" = true ] || [ "${#BACKUP_EVIDENCE[@]}" -gt 0 ] || [ -n "$EVIDENCE_CELLS" ]; }; then
@@ -196,10 +242,10 @@ else
   if [ -z "$ADMIN_PATH" ] || [ ! -f "$ADMIN_PATH" ] || [ ! -x "$ADMIN_PATH" ]; then
     die "backup evidence verifier is not executable; set WITSELF_ADMIN_BIN to an executable witself-admin binary"
   fi
-  if ! "$ADMIN" backup-evidence verify --release "$VERSION" --cell "${EVIDENCE_CELLS%,*}" --cell "${EVIDENCE_CELLS#*,}" -- "${BACKUP_EVIDENCE[@]}"; then
+  if ! "$ADMIN" backup-evidence verify --release "$VERSION" --cell "${EVIDENCE_CELLS%,*}" --cell "${EVIDENCE_CELLS#*,}" --max-age "$EVIDENCE_MAX_AGE" -- "${BACKUP_EVIDENCE[@]}"; then
     die "backup evidence verification failed; rollout aborted before any values file edit"
   fi
-  echo "backup evidence verified for release $VERSION (${#BACKUP_EVIDENCE[@]} artifact directories)"
+  echo "backup evidence verified for release $VERSION (${#BACKUP_EVIDENCE[@]} artifact directories; max age $EVIDENCE_MAX_AGE)"
 fi
 
 # Older release charts silently ignore image.digest. Check the exact local

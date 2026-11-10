@@ -1276,12 +1276,19 @@ Do not run a live restore as part of this procedure.
 to the values generator.
 Pass each verified artifact directory with `--backup-evidence` (one per
 reviewed cell); the helper first runs `witself-admin backup-evidence verify
---release "$RELEASE_VERSION"` on those directories and aborts with the values
-file untouched on any nonzero exit, or when no verifier binary is executable
+--release "$RELEASE_VERSION" --max-age 24h` on those directories and aborts with
+the values file untouched on any nonzero exit, or when no verifier binary is executable
 (`WITSELF_ADMIN_BIN` overrides the binary resolved from `PATH`). For a release
 that cannot advance the database schema, attest that explicitly with
 `--no-schema-change` instead; the two options are mutually exclusive, and
 omitting both fails closed.
+
+On the backup-evidence route, `--evidence-max-age DURATION` overrides the
+24-hour default. All three roll scripts (`roll-cell.sh`, `roll-train.sh`, and
+`release-chain.sh`) accept only positive whole hours or minutes (`<N>h` or
+`<N>m`, decimal digits without leading zeros), at most `72h` or `4320m`.
+The option cannot disable the bound and is invalid with `--no-schema-change`
+or `--first-sync`; the chain and train forward an explicit override unchanged.
 
 A cell that the catalog records as onboarded and never provisioned
 (`unprovisioned: true` in `.gitops/cells/catalog.yaml`) has no database, so
@@ -1293,8 +1300,8 @@ scripts/roll-cell.sh civo-prod-use1-serving "$RELEASE_VERSION" --first-sync --ba
 ```
 
 `--first-sync` cannot be combined with `--no-schema-change`,
-`--backup-evidence` or `--evidence-cells` and never runs the verifier. Before
-any registry request or values edit it requires, in order: the catalog marker
+`--backup-evidence`, `--evidence-cells` or `--evidence-max-age` and never runs the
+verifier. Before any registry request or values edit it requires, in order: the catalog marker
 and a generated values file; a target release no lower than the cell's
 `chartVersion` and `imageTag`; no kube context named `witself-<cell>` in the
 active kube configuration; and an API host that this machine cannot resolve
@@ -1393,7 +1400,7 @@ kubeconfig or new secret is needed.
 
 ```text
 scripts/roll-train.sh VERSION
-  [--no-schema-change | --backup-evidence DIR [--backup-evidence DIR]]
+  [--no-schema-change | --backup-evidence DIR [--backup-evidence DIR] [--evidence-max-age DURATION]]
   [--cells BACKUP,SERVING] [--serving-url URL] [--workdir DIR]
   [--ci-timeout SECONDS] [--argo-timeout SECONDS]
   [--poll-interval SECONDS] [--resume] [--dry-run]
@@ -1417,8 +1424,10 @@ scripts/roll-train.sh "$VERSION" --no-schema-change \
 ```
 
 For a schema-changing release, complete the two-database backup procedure
-above, then pass both verified artifact directories. The existing
-`roll-cell.sh` backup-evidence gate runs for each wave:
+above, then pass both verified artifact directories. The `roll-cell.sh`
+backup-evidence gate applies the 24-hour default (or `--evidence-max-age`
+override) when each wave runs; evidence that ages out between waves blocks
+the later wave:
 
 ```sh
 scripts/roll-train.sh "$VERSION" \
@@ -1429,8 +1438,8 @@ scripts/roll-train.sh "$VERSION" \
 
 The host needs Bash, Git, authenticated `gh`, `jq`, Mike Farah's `yq`,
 `kubectl`, and `curl`, plus a configured Git author for signed-off commits.
-The backup-evidence route also requires the verifier described above and
-accepts only a reviewed cell pair in `BACKUP,SERVING` order: the default pair,
+The backup-evidence route also requires the verifier and age bound described
+above and accepts only a reviewed cell pair in `BACKUP,SERVING` order: the default pair,
 or `civo-sandbox-use1-backup,civo-prod-use1-serving` for the production serving
 cell. Each wave forwards the selected pair to `roll-cell.sh` as
 `--evidence-cells`, so the verifier checks those two databases. Any other
@@ -1572,8 +1581,10 @@ scripts/roll-train.sh "$VERSION" \
 ```
 
 Read the plan with `--dry-run` first, and pass `--serving-url` when the live
-host differs from the cell values. The production cell must be provisioned,
-reachable through its kube context and answering `/v1/version`, and
+host differs from the cell values. The same 24-hour evidence bound applies;
+add `--evidence-max-age DURATION` only to choose another allowed bound.
+The production cell must be provisioned, reachable through its kube context
+and answering `/v1/version`, and
 `witself-admin` must be 0.0.315 or newer.
 
 Wave 1 is still `civo-sandbox-use1-backup`. Wave 2 is `civo-prod-use1-serving`,

@@ -1772,9 +1772,15 @@ file; record it alongside the manifest's `backup_id` and
 `ciphertext_sha256` in the private rollout record. `--cell CELL` (repeatable)
 narrows the required-cell set within the reviewed pair for partial checks;
 other cell names are rejected. `--max-age DURATION`
-optionally rejects evidence older than an operator-chosen bound; the gate
-itself expresses currency through the exact target release, so no default
-age limit is imposed. The command verifies retained evidence; it does not
+optionally rejects evidence older than an operator-chosen bound; the standalone
+verifier has no default age limit. The roll scripts apply a 24-hour bound by
+default. Their `--evidence-max-age DURATION` override accepts only positive whole
+hours or minutes (`<N>h` or `<N>m`, decimal digits without leading zeros), up to
+`72h` or `4320m`; it cannot disable the bound and is invalid with
+`--no-schema-change` or `--first-sync`. `release-chain.sh` and `roll-train.sh`
+forward an explicit override unchanged on the backup-evidence route. The train
+checks evidence when each wave runs, so evidence that ages out between waves
+blocks the later wave. The command verifies retained evidence; it does not
 replace running the backup script, and a passing summary is not a
 substitute for the encrypted artifacts themselves. `scripts/roll-cell.sh`
 runs this command automatically on the directories passed with

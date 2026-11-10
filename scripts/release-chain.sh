@@ -38,6 +38,7 @@ usage: scripts/release-chain.sh VERSION --order cp-first|cells-first --serving-u
   --drill-account-id ID           } (as --account-id)                                     [required]
   --drill-cell NAME               }
   --backup-evidence DIR           Forwarded to roll-train.sh (give twice) for a schema release
+  --evidence-max-age DURATION     With --backup-evidence only: whole hours/minutes, no leading zeroes (default 24h; max 72h/4320m)
   --repo OWNER/NAME               Forwarded to release-tag.sh
   --workdir DIR                   Stage logs; forwarded to roll-train.sh and the deploy
   --avoid-window HHMM-HHMM        Backup window no stage may start in (2330-0045)
@@ -48,15 +49,27 @@ Covers the sandbox pair only; refuses to run while civo-prod-use1-serving is reg
 USAGE
 }
 
+# Bound the digit count before arithmetic to reject overflow and leading zeroes.
+valid_evidence_max_age() {
+  if [[ "$1" =~ ^[1-9][0-9]?h$ ]]; then
+    [ "${1%h}" -le 72 ]
+  elif [[ "$1" =~ ^[1-9][0-9]{0,3}m$ ]]; then
+    [ "${1%m}" -le 4320 ]
+  else
+    return 1
+  fi
+}
+
 VERSION='' ORDER='' SERVING_URL='' EDGE_FILE='' ENV_FILE='' CF_FILE='' FLEET=''
 ID='' DRILL=civo-sandbox-use1-backup REPO=witwave-ai/witself WORKDIR=''
 WINDOW=2330-0045 TRAIN_CLEARANCE=150 MAX_WINDOW_WAIT=240
 EXECUTE=false ATTEST_EMAIL=false ATTEST_SIGNUP=false EVIDENCE_COUNT=0
+EVIDENCE_MAX_AGE=''
 EVIDENCE_ARGS=()
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --help) usage; exit 0 ;;
-    --order|--serving-url|--edge-token-file|--deploy-env-file|--cloudflare-token-file|--fleet-token-file|--drill-account-id|--drill-cell|--backup-evidence|--repo|--workdir|--avoid-window|--train-clearance-min|--max-window-wait-min)
+    --order|--serving-url|--edge-token-file|--deploy-env-file|--cloudflare-token-file|--fleet-token-file|--drill-account-id|--drill-cell|--backup-evidence|--evidence-max-age|--repo|--workdir|--avoid-window|--train-clearance-min|--max-window-wait-min)
       [ "$#" -ge 2 ] && [ -n "$2" ] || ro_usage_error "missing value for $1"
       case "$1" in
         --order) ORDER=$2 ;;
@@ -67,6 +80,11 @@ while [ "$#" -gt 0 ]; do
         --fleet-token-file) FLEET=$2 ;;
         --drill-account-id) ID=$2 ;;
         --drill-cell) DRILL=$2 ;;
+        --evidence-max-age)
+          if [ -n "$EVIDENCE_MAX_AGE" ] || ! valid_evidence_max_age "$2"; then
+            ro_usage_error '--evidence-max-age requires positive whole hours or minutes (1h..72h or 1m..4320m), no leading zeroes, specified once'
+          fi
+          EVIDENCE_MAX_AGE=$2 ;;
         --backup-evidence)
           [ "$EVIDENCE_COUNT" -lt 2 ] || ro_usage_error 'give --backup-evidence exactly twice'
           [ -d "$2" ] || ro_usage_error 'backup evidence must name an existing directory'
@@ -93,6 +111,9 @@ ro_valid_version "$VERSION" || ro_usage_error 'VERSION must be a decimal major.m
 [[ "$ID" =~ ^[A-Za-z0-9_-]{1,128}$ ]] || ro_usage_error 'invalid or missing drill account id'
 [[ "$DRILL" =~ ^[a-z0-9-]{1,64}$ ]] || ro_usage_error 'invalid drill cell'
 [ -n "$EDGE_FILE" ] && [ -n "$ENV_FILE" ] && [ -n "$FLEET" ] || ro_usage_error 'edge, deploy environment and fleet files are required'
+if [ -n "$EVIDENCE_MAX_AGE" ] && [ "$EVIDENCE_COUNT" -eq 0 ]; then
+  ro_usage_error '--evidence-max-age requires --backup-evidence'
+fi
 [ "$EVIDENCE_COUNT" -ne 1 ] || ro_usage_error 'give --backup-evidence exactly twice'
 [[ "$WINDOW" =~ ^[0-9]{4}-[0-9]{4}$ ]] || ro_usage_error 'invalid backup window'
 ro_hhmm_minutes "${WINDOW%-*}" >/dev/null || ro_usage_error 'invalid backup window'
@@ -174,7 +195,10 @@ if [ -n "$CF_FILE" ]; then DEPLOY_ARGS+=(--cloudflare-token-file "$CF_FILE"); fi
 if [ "$ATTEST_EMAIL" = true ]; then DEPLOY_ARGS+=(--attest-canonical-email-active); fi
 if [ "$ATTEST_SIGNUP" = true ]; then DEPLOY_ARGS+=(--attest-signup-open-active); fi
 TRAIN_ARGS=("$VERSION" --serving-url "$SERVING_URL")
-if [ "$EVIDENCE_COUNT" -gt 0 ]; then TRAIN_ARGS+=("${EVIDENCE_ARGS[@]}"); fi
+if [ "$EVIDENCE_COUNT" -gt 0 ]; then
+  TRAIN_ARGS+=("${EVIDENCE_ARGS[@]}")
+  if [ -n "$EVIDENCE_MAX_AGE" ]; then TRAIN_ARGS+=(--evidence-max-age "$EVIDENCE_MAX_AGE"); fi
+fi
 if [ -n "$WORKDIR" ]; then
   DEPLOY_ARGS+=(--workdir "$WORKDIR")
   TRAIN_ARGS+=(--workdir "$WORKDIR")
