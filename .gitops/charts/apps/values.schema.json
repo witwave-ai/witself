@@ -160,6 +160,16 @@
         "civoPostgres": {
           "type": "object",
           "properties": {
+            "shutdown": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["mode", "timeoutSeconds", "gracePeriodSeconds"],
+              "properties": {
+                "mode": { "type": "string", "enum": ["fast"] },
+                "timeoutSeconds": { "type": "integer", "minimum": 30, "maximum": 600 },
+                "gracePeriodSeconds": { "type": "integer", "minimum": 60, "maximum": 900 }
+              }
+            },
             "backup": {
               "type": "object",
               "additionalProperties": false,

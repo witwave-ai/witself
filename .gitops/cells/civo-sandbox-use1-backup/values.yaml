@@ -18,6 +18,10 @@ apps:
     namespace: witself
     chartVersion: 18.8.0
     authSecretName: witself-postgresql-auth
+    shutdown:
+      mode: fast
+      timeoutSeconds: 180
+      gracePeriodSeconds: 240
     backup:
       enabled: false
     storage: 8Gi

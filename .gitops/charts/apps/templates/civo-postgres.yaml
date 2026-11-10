@@ -1,5 +1,10 @@
 {{- $pg := .Values.apps.civoPostgres -}}
 {{- $metricsEnabled := or $pg.metrics.enabled $pg.backup.enabled -}}
+{{- if hasKey $pg "shutdown" -}}
+{{- if lt (int $pg.shutdown.gracePeriodSeconds) (add (int $pg.shutdown.timeoutSeconds) 30) -}}
+{{- fail "apps.civoPostgres.shutdown.gracePeriodSeconds must be at least 30 seconds greater than timeoutSeconds" -}}
+{{- end -}}
+{{- end -}}
 {{- if and $pg.enabled (eq .Values.cell.cloud "civo") }}
 {{- if and $pg.metrics.serviceMonitor.enabled (not $metricsEnabled) -}}
 {{- fail "apps.civoPostgres.metrics.serviceMonitor.enabled requires apps.civoPostgres.metrics.enabled" -}}
@@ -57,6 +62,28 @@ spec:
             enabled: true
             size: {{ $pg.storage | quote }}
           resourcesPreset: {{ default "nano" $pg.resourcesPreset }}
+          {{- if hasKey $pg "shutdown" }}
+          terminationGracePeriodSeconds: {{ $pg.shutdown.gracePeriodSeconds }}
+          lifecycleHooks:
+            preStop:
+              exec:
+                command:
+                  - /bin/sh
+                  - -c
+                  - |
+                    pg_ctl_path=$(command -v pg_ctl) || pg_ctl_path=/opt/bitnami/postgresql/bin/pg_ctl
+                    "$pg_ctl_path" -D "$PGDATA" -m fast -w -t {{ $pg.shutdown.timeoutSeconds }} stop
+                    stop_status=$?
+                    if [ "$stop_status" -eq 0 ]; then
+                      exit 0
+                    fi
+                    "$pg_ctl_path" -D "$PGDATA" status
+                    status_status=$?
+                    if [ "$status_status" -eq 3 ]; then
+                      exit 0
+                    fi
+                    exit "$stop_status"
+          {{- end }}
           {{- if or .Values.egressPolicy.enabled (not $pg.networkPolicy.enabled) (not $pg.networkPolicy.allowExternal) }}
           networkPolicy:
             # The upstream restrictive policy retains generic client peers.

@@ -60,6 +60,12 @@ func resolveCell(name string, cfg *Catalog) (templateData, error) {
 	if apiHost == "" {
 		apiHost = "api." + name + "." + parent
 	}
+	// Stage the clean-stop hook on the non-serving restore target first. The
+	// serving cells remain unchanged until the owner proves the live image.
+	var shutdown *postgresShutdown
+	if name == "civo-sandbox-use1-backup" {
+		shutdown = &postgresShutdown{Mode: "fast", TimeoutSeconds: 180, GracePeriodSeconds: 240}
+	}
 	return templateData{
 		Name:                    name,
 		Cloud:                   entry.Cloud,
@@ -85,6 +91,7 @@ func resolveCell(name string, cfg *Catalog) (templateData, error) {
 		MemoryAlerts:            entry.Switches.MemoryAlerts,
 		ControlPlaneAlerts:      entry.Switches.ControlPlaneAlerts,
 		PostgresBackup:          entry.Switches.PostgresBackup,
+		PostgresShutdown:        shutdown,
 		RequestBudget:           entry.Switches.RequestBudget,
 		overlayName:             entry.Overlay,
 	}, nil

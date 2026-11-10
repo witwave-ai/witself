@@ -12,6 +12,14 @@ import (
 //go:embed templates/*.tmpl overlays/*.tmpl
 var embedded embed.FS
 
+// postgresShutdown is the wrapper's typed, optional fast-stop configuration.
+// Commands are constructed by the apps chart, never by generated cell values.
+type postgresShutdown struct {
+	Mode               string `yaml:"mode"`
+	TimeoutSeconds     int    `yaml:"timeoutSeconds"`
+	GracePeriodSeconds int    `yaml:"gracePeriodSeconds"`
+}
+
 type templateData struct {
 	Name                        string
 	Cloud                       string
@@ -45,6 +53,7 @@ type templateData struct {
 	MemoryAlerts                bool
 	ControlPlaneAlerts          bool
 	PostgresBackup              bool
+	PostgresShutdown            *postgresShutdown
 	RequestBudget               *RequestBudgetSwitch
 	Overlay                     string
 	overlayName                 string
