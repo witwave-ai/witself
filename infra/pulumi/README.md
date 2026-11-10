@@ -601,14 +601,28 @@ inventory exceed the quota, even a routine `up` is refused. This includes the
 cells with `config remove-cell`. Never record `civo_core_quota` above Civo's
 real quota to get past the guard.
 
-Deletion protection does not currently cover the Civo cluster. A
-provider-forced replacement would delete the in-cluster PostgreSQL volumes.
-Before first use, the plan review must refuse a replacement of
-`civo:index/kubernetesCluster:KubernetesCluster`, and a read-only preview
-must have confirmed that changing `pools.nodeCount` is an in-place update
-in the pinned provider.
+The deletion-protection plan review used by both `preview` and `up` refuses
+`delete`, `replace`, `create-replacement`, `delete-replaced`,
+`read-replacement`, `discard-replaced` and `import-replacement` steps on
+`civo:index/kubernetesCluster:KubernetesCluster` and the Civo workload namespace
+`witself-namespace`. Replacing either would delete the in-cluster PostgreSQL
+volumes. Protection defaults to enabled when neither the cell nor inventory
+defaults records `deletion_protection`. Recording `deletion_protection: false`
+on a Civo cell permits replacement on the next `up`: the cluster and workload
+namespace registrations do not set Pulumi `Protect`, so there is no separate
+unprotection interlock for replacement. Only `destroy` inspects the persisted
+stack state and refuses while it still records protection, so a cell whose
+state carries the protection fields needs an applied unprotection `up` first;
+legacy state that predates those fields records none and passes that check.
+Keep protection enabled for a node-count change. Before first use, a read-only
+preview must still confirm that changing `pools.nodeCount` is an in-place
+update in the pinned provider.
 Mocks cannot establish that safety; follow the runbook and stop on any
 replacement or unrelated change.
+
+The review covers resources in the Pulumi plan; it does not cover deletions
+cascaded inside the cluster by Argo CD Application finalizers, so the volume
+reclaim policy is a separate control.
 
 A decrease is enforced only by review, not by code: every machine that may
 run `up -cell` for a scaled cell must carry the same recorded count, or an

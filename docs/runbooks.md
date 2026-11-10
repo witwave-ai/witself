@@ -523,8 +523,17 @@ CLI `preview` and the preview performed by `up` refuse database/store deletion
 or replacement while the effective field is true, including legacy resources
 whose old state has `protect=false`. The error lists the affected resource
 URNs. `up` applies the exact reviewed saved plan; its private temporary plan
-is removed afterward. With the field false, previous applied protection still
-blocks combining unprotection and replacement in one update.
+is removed afterward. With the field false, previously applied Pulumi or
+native protection still blocks combining unprotection and replacement in one
+update for database/secret stores.
+
+For Civo, the cluster and workload namespace registrations do not set Pulumi
+`Protect`: recording `deletion_protection: false` permits replacement on the
+next `up`, without a separate unprotection interlock. Only `destroy` inspects
+the persisted stack state and refuses while it still records protection, so a
+cell whose state carries the protection fields needs an applied unprotection
+`up` first. Legacy state that predates those fields records no protection and
+passes that check. Keep protection enabled throughout a node-count change.
 
 If a provider proposes replacement to enable protection, do not apply it.
 Use a provider-supported in-place protection operation, then
@@ -544,6 +553,13 @@ explains why protection adoption also needs plan review. Synthetic engine-event
 tests cover that refusal because resource mocks do not execute provider diffs.
 
 ### Two-step unprotect, then destroy or replace
+
+For Civo replacement, this sequence is an operator procedure, not an enforced
+two-step interlock: recording false already permits replacement on the next
+`up`. Before `destroy`, the tool refuses while the persisted stack state still
+records protection, which enforces the separate applied update for every cell
+whose state carries the protection fields. Legacy state that predates those
+fields records no protection and passes that check.
 
 1. Record the break-glass decision in the operator's inventory
    (`~/.witself/infra.yaml`, or the same `-config` path used to provision the
@@ -2020,12 +2036,14 @@ step before any decrease.
    key: older binaries reject the inventory, including the `health` command
    that runs for both cells at the end of a train. A dispatcher build from
    `main` alone is not sufficient.
-3. The deletion-protection plan review refuses a replacement of
-   `civo:index/kubernetesCluster:KubernetesCluster`. Today
-   [the review](../infra/pulumi/cmd/witself-infra/deletion_plan.go) protects
-   only database and secret-store types, so **this procedure is not yet
-   approved for use**. A provider-forced Civo cluster replacement would
-   delete the in-cluster PostgreSQL volumes.
+3. Use a release whose [deletion-protection plan review](../infra/pulumi/cmd/witself-infra/deletion_plan.go)
+   refuses `delete`, `replace`, `create-replacement`, `delete-replaced`,
+   `read-replacement`, `discard-replaced` and `import-replacement` steps on
+   `civo:index/kubernetesCluster:KubernetesCluster` and the Civo workload
+   namespace `witself-namespace` in both `preview` and `up`. Keep deletion
+   protection enabled (the default when neither the cell nor inventory
+   defaults records the key). Replacing the Civo cluster or workload
+   namespace would delete the in-cluster PostgreSQL volumes.
 4. A read-only `preview` has shown, once, that a node-count change is an
    in-place `pools.nodeCount` update of `civo-cluster` in the pinned
    `pulumi-civo` v2.4.8 provider. Mocks cannot establish this.
