@@ -14,12 +14,12 @@ import (
 
 func TestMessageRetentionDeletesWholeInactiveThreadsPostgres(t *testing.T) {
 	baseDSN := testenv.RequirePostgres(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-	defer cancel()
 	st, _ := newMigrationTestStore(t, baseDSN)
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
 
 	provisioned, err := st.ProvisionAccount(
 		ctx,
@@ -293,12 +293,12 @@ func TestMessageRetentionDeletesWholeInactiveThreadsPostgres(t *testing.T) {
 
 func TestMessageRetentionHeldThreadDoesNotStarveLaterThreadsPostgres(t *testing.T) {
 	baseDSN := testenv.RequirePostgres(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-	defer cancel()
 	st, _ := newMigrationTestStore(t, baseDSN)
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
 
 	provisioned, err := st.ProvisionAccount(
 		ctx,
@@ -428,12 +428,12 @@ func TestMessageRetentionHeldThreadDoesNotStarveLaterThreadsPostgres(t *testing.
 
 func TestMessageRetentionReplicasClaimDifferentLanesPostgres(t *testing.T) {
 	baseDSN := testenv.RequirePostgres(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-	defer cancel()
 	st, _ := newMigrationTestStore(t, baseDSN)
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
 
 	type fixture struct {
 		accountID string
@@ -611,12 +611,12 @@ func TestMessageRetentionReplicasClaimDifferentLanesPostgres(t *testing.T) {
 
 func TestMessageRetentionContentionDefersWithoutBlockingUserReplyPostgres(t *testing.T) {
 	baseDSN := testenv.RequirePostgres(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-	defer cancel()
 	st, _ := newMigrationTestStore(t, baseDSN)
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
 
 	account, err := st.ProvisionAccount(
 		ctx,
@@ -831,12 +831,12 @@ func TestMessageRetentionContentionDefersWithoutBlockingUserReplyPostgres(t *tes
 
 func TestMessageRetentionRepairsStaleActivityBeforeDeletePostgres(t *testing.T) {
 	baseDSN := testenv.RequirePostgres(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-	defer cancel()
 	st, _ := newMigrationTestStore(t, baseDSN)
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
 	fixture := newMessageRetentionTestFixture(ctx, t, st, "stale-projection")
 	message, err := st.SendMessage(ctx, fixture.principal, SendMessageInput{
 		ToAgent: fixture.recipientID, Body: "recent message",
@@ -881,12 +881,12 @@ func TestMessageRetentionRepairsStaleActivityBeforeDeletePostgres(t *testing.T) 
 
 func TestMessageRetentionOversizeThreadQuarantinesWithoutStarvationPostgres(t *testing.T) {
 	baseDSN := testenv.RequirePostgres(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-	defer cancel()
 	st, _ := newMigrationTestStore(t, baseDSN)
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
 	fixture := newMessageRetentionTestFixture(ctx, t, st, "oversize")
 	normal, err := st.SendMessage(ctx, fixture.principal, SendMessageInput{
 		ToAgent: fixture.recipientID, Body: "later eligible thread",
@@ -976,12 +976,12 @@ func TestMessageRetentionCumulativeGraphBudgetDefersLaterThreadsPostgres(
 	t *testing.T,
 ) {
 	baseDSN := testenv.RequirePostgres(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-	defer cancel()
 	st, _ := newMigrationTestStore(t, baseDSN)
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
 	fixture := newMessageRetentionTestFixture(ctx, t, st, "batch-budget")
 	first, err := st.SendMessage(ctx, fixture.principal, SendMessageInput{
 		ToAgent:        fixture.recipientID,
@@ -1199,12 +1199,12 @@ func TestMessageRetentionTimedOutLaneBacksOffWhileLaterLaneProgressesPostgres(
 	t *testing.T,
 ) {
 	baseDSN := testenv.RequirePostgres(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-	defer cancel()
 	st, _ := newMigrationTestStore(t, baseDSN)
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
 
 	type fixtureWithLane struct {
 		messageRetentionTestFixture
@@ -1395,12 +1395,12 @@ func TestMessageRetentionTimedOutLaneBacksOffWhileLaterLaneProgressesPostgres(
 
 func TestMessageRetentionStaleLaneGenerationCannotDeletePostgres(t *testing.T) {
 	baseDSN := testenv.RequirePostgres(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-	defer cancel()
 	st, _ := newMigrationTestStore(t, baseDSN)
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
 	fixture := newMessageRetentionTestFixture(ctx, t, st, "stale-lane")
 	message, err := st.SendMessage(ctx, fixture.principal, SendMessageInput{
 		ToAgent:        fixture.recipientID,
@@ -1553,7 +1553,7 @@ func TestMessageRetentionStaleLaneGenerationCannotDeletePostgres(t *testing.T) {
 
 func TestMessageRetentionMigrationBackfillsAndReappliesPostgres(t *testing.T) {
 	baseDSN := testenv.RequirePostgres(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second+testenv.MigrationBudget(0))
 	defer cancel()
 	st, dsn := newMigrationTestStore(t, baseDSN)
 
@@ -1917,12 +1917,12 @@ func TestMessageRetentionMigrationBackfillsAndReappliesPostgres(t *testing.T) {
 
 func TestMessageRetentionInterruptedDownFailsClosedPostgres(t *testing.T) {
 	baseDSN := testenv.RequirePostgres(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-	defer cancel()
 	st, _ := newMigrationTestStore(t, baseDSN)
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
 	fixture := newMessageRetentionTestFixture(ctx, t, st, "interrupted-down")
 	parent, err := st.SendMessage(ctx, fixture.principal, SendMessageInput{
 		ToAgent: fixture.recipientID, Body: "old parent",

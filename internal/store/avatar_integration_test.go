@@ -163,7 +163,7 @@ func TestMigration51BackfillBatchesLargeHistoryPostgres(t *testing.T) {
 	baseDSN := testenv.RequirePostgres(t)
 	st, dsn := newMigrationTestStore(t, baseDSN)
 	migrationTestUpTo(t, dsn, 50)
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second+testenv.MigrationBudget(0))
 	defer cancel()
 	provisioned, err := st.ProvisionAccount(ctx,
 		"avatar-quota-batched-migration@witwave.ai", "avatar quota batched migration", time.Hour)
@@ -285,7 +285,7 @@ func TestMigration51Schema50WriterRemainsReadableExportableAndRestartBackfilledP
 	baseDSN := testenv.RequirePostgres(t)
 	st, dsn := newMigrationTestStore(t, baseDSN)
 	migrationTestUpTo(t, dsn, 50)
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second+testenv.MigrationBudget(0))
 	defer cancel()
 	provisioned, err := st.ProvisionAccount(ctx,
 		"avatar-mixed-writer@witwave.ai", "avatar mixed writer", time.Hour)
@@ -526,7 +526,7 @@ func TestAvatarQuotaReconciliationLegacyHistoriesRoundTripPostgres(t *testing.T)
 			} else if err := st.Migrate(); err != nil {
 				t.Fatal(err)
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second+testenv.MigrationBudget(0))
 			defer cancel()
 			provisioned, err := st.ProvisionAccount(ctx,
 				fmt.Sprintf("avatar-quota-reconcile-%d@witwave.ai", time.Now().UnixNano()),
@@ -802,12 +802,12 @@ func TestMigration54QuarantinesLegacyWritersAndRefusesV1DowngradePostgres(t *tes
 
 func TestMigration54DownLocksBeforeRendererSafetyCheckPostgres(t *testing.T) {
 	baseDSN := testenv.RequirePostgres(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
 	st, dsn := newMigrationTestStore(t, baseDSN)
 	migrationTestUpTo(t, dsn, 41)
 	insertMigrationTestMemoryPrincipals(t, st)
 	migrationTestUpTo(t, dsn, 54)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 
 	pack := avatardomain.BuiltInFlatVectorStylePack()
 	reference := pack.References[0]
@@ -1086,12 +1086,12 @@ func TestAvatarMigrationsBackfillStateAndAddStyleRolloutsPostgres(t *testing.T) 
 
 func TestAvatarStyleRevisionConstraintUsesWriterCompatibleValidationPostgres(t *testing.T) {
 	baseDSN := testenv.RequirePostgres(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
 	st, dsn := newMigrationTestStore(t, baseDSN)
 	migrationTestUpTo(t, dsn, 41)
 	insertMigrationTestMemoryPrincipals(t, st)
 	migrationTestUpTo(t, dsn, int64(avatarStyleRolloutArchiveSchema-1))
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second+testenv.MigrationBudget(0))
+	defer cancel()
 	const extraProfiles = 20000
 	if _, err := st.pool.Exec(ctx, `
 		INSERT INTO agents (id,realm_id,name)
@@ -1289,10 +1289,10 @@ func TestAvatarStyleRolloutDownMigrationFailsClosedPostgres(t *testing.T) {
 
 func TestAvatarStyleRolloutDownMigrationLocksBeforeSafetyCheckPostgres(t *testing.T) {
 	baseDSN := testenv.RequirePostgres(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
 	st, dsn := newMigrationTestStore(t, baseDSN)
 	migrationTestUpTo(t, dsn, 54)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 	provisioned, _ := provisionActiveRolloutAccountForTest(ctx, t, st, "down-race")
 	realm := createRolloutRealmWithAgentsForTest(ctx, t, st, provisioned.AccountID, "down-race", 0)
 	if err := migrationTestDown(t, dsn, false); err != nil { // remove renderer provenance
@@ -1354,9 +1354,7 @@ func TestAvatarStyleRolloutDownMigrationLocksBeforeSafetyCheckPostgres(t *testin
 
 func TestAvatarLifecycleIsolationIdempotencyAndStylePropagationPostgres(t *testing.T) {
 	dsn := testenv.RequirePostgres(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	st, err := Open(ctx, dsn)
+	st, err := Open(context.Background(), dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1364,6 +1362,8 @@ func TestAvatarLifecycleIsolationIdempotencyAndStylePropagationPostgres(t *testi
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
 
 	provisioned, err := st.ProvisionAccount(ctx, "avatar-store@witwave.ai", "avatar store", time.Hour)
 	if err != nil {

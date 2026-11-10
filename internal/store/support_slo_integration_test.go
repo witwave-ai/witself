@@ -14,9 +14,7 @@ import (
 // Counts use deltas because other tests can leave tickets in the shared schema.
 func TestReadSupportSLOMetricsPostgres(t *testing.T) {
 	dsn := testenv.RequirePostgres(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-	defer cancel()
-	st, err := Open(ctx, dsn)
+	st, err := Open(context.Background(), dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -24,6 +22,8 @@ func TestReadSupportSLOMetricsPostgres(t *testing.T) {
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
 
 	before, err := st.ReadSupportSLOMetrics(ctx)
 	if err != nil {

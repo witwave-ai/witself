@@ -30,9 +30,7 @@ func drainAvatarStyleRolloutsForTest(ctx context.Context, t *testing.T, st *Stor
 
 func TestAvatarStyleRolloutBoundedFencedAndLifecycleSafePostgres(t *testing.T) {
 	dsn := testenv.RequirePostgres(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	st, err := Open(ctx, dsn)
+	st, err := Open(context.Background(), dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -40,6 +38,8 @@ func TestAvatarStyleRolloutBoundedFencedAndLifecycleSafePostgres(t *testing.T) {
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
 	provisioned, err := st.ProvisionAccount(ctx,
 		fmt.Sprintf("avatar-rollout-%d@witwave.ai", time.Now().UnixNano()),
 		"avatar rollout", time.Hour)
@@ -299,9 +299,7 @@ func TestAvatarStyleRolloutBoundedFencedAndLifecycleSafePostgres(t *testing.T) {
 
 func TestAvatarStyleRolloutPartialArchiveResumesAfterActivationPostgres(t *testing.T) {
 	dsn := testenv.RequirePostgres(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-	defer cancel()
-	st, err := Open(ctx, dsn)
+	st, err := Open(context.Background(), dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -309,6 +307,8 @@ func TestAvatarStyleRolloutPartialArchiveResumesAfterActivationPostgres(t *testi
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
 	provisioned, err := st.ProvisionAccount(ctx,
 		fmt.Sprintf("avatar-rollout-archive-%d@witwave.ai", time.Now().UnixNano()),
 		"avatar rollout archive", time.Hour)
@@ -375,9 +375,7 @@ func TestAvatarStyleRolloutPartialArchiveResumesAfterActivationPostgres(t *testi
 
 func TestAvatarStylePublishAndConcurrentCreateCannotLoseTargetPostgres(t *testing.T) {
 	dsn := testenv.RequirePostgres(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	st, err := Open(ctx, dsn)
+	st, err := Open(context.Background(), dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -385,6 +383,8 @@ func TestAvatarStylePublishAndConcurrentCreateCannotLoseTargetPostgres(t *testin
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 	provisioned, err := st.ProvisionAccount(ctx,
 		fmt.Sprintf("avatar-rollout-create-%d@witwave.ai", time.Now().UnixNano()),
 		"avatar rollout create", time.Hour)
@@ -435,9 +435,7 @@ func TestAvatarStylePublishAndConcurrentCreateCannotLoseTargetPostgres(t *testin
 
 func TestAvatarStyleRolloutSchedulerIsFairAndSkipsLockedOldestPostgres(t *testing.T) {
 	dsn := testenv.RequirePostgres(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	st, err := Open(ctx, dsn)
+	st, err := Open(context.Background(), dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -445,6 +443,8 @@ func TestAvatarStyleRolloutSchedulerIsFairAndSkipsLockedOldestPostgres(t *testin
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 	provisioned, operator := provisionActiveRolloutAccountForTest(ctx, t, st, "scheduler")
 	defer func() { _ = deleteAccountForIntegrationTest(context.Background(), st, provisioned.AccountID) }()
 	realmA := createRolloutRealmWithAgentsForTest(ctx, t, st, provisioned.AccountID, "fair-a", 3)
@@ -507,9 +507,7 @@ func TestAvatarStyleRolloutSchedulerIsFairAndSkipsLockedOldestPostgres(t *testin
 
 func TestAvatarStyleRolloutTimeoutBackoffDoesNotStarveAnotherRealmPostgres(t *testing.T) {
 	dsn := testenv.RequirePostgres(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	st, err := Open(ctx, dsn)
+	st, err := Open(context.Background(), dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -517,6 +515,8 @@ func TestAvatarStyleRolloutTimeoutBackoffDoesNotStarveAnotherRealmPostgres(t *te
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 	provisioned, operator := provisionActiveRolloutAccountForTest(ctx, t, st, "timeout")
 	defer func() { _ = deleteAccountForIntegrationTest(context.Background(), st, provisioned.AccountID) }()
 	realmA := createRolloutRealmWithAgentsForTest(ctx, t, st, provisioned.AccountID, "timeout-a", 1)
@@ -597,9 +597,7 @@ func TestAvatarStyleRolloutTimeoutBackoffDoesNotStarveAnotherRealmPostgres(t *te
 
 func TestAvatarStyleRolloutCallerCancellationDoesNotRecordFailurePostgres(t *testing.T) {
 	dsn := testenv.RequirePostgres(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	st, err := Open(ctx, dsn)
+	st, err := Open(context.Background(), dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -607,6 +605,8 @@ func TestAvatarStyleRolloutCallerCancellationDoesNotRecordFailurePostgres(t *tes
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 	provisioned, operator := provisionActiveRolloutAccountForTest(ctx, t, st, "caller-cancel")
 	defer func() { _ = deleteAccountForIntegrationTest(context.Background(), st, provisioned.AccountID) }()
 	realm := createRolloutRealmWithAgentsForTest(ctx, t, st, provisioned.AccountID, "caller-cancel", 1)
@@ -664,9 +664,7 @@ func TestAvatarStyleRolloutCallerCancellationDoesNotRecordFailurePostgres(t *tes
 
 func TestAvatarStyleRolloutAccountCloseSupersedesOpenJobsPostgres(t *testing.T) {
 	dsn := testenv.RequirePostgres(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	st, err := Open(ctx, dsn)
+	st, err := Open(context.Background(), dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -674,6 +672,8 @@ func TestAvatarStyleRolloutAccountCloseSupersedesOpenJobsPostgres(t *testing.T) 
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 	provisioned, operator := provisionActiveRolloutAccountForTest(ctx, t, st, "account-close")
 	defer func() { _ = deleteAccountForIntegrationTest(context.Background(), st, provisioned.AccountID) }()
 	realmA := createRolloutRealmWithAgentsForTest(ctx, t, st, provisioned.AccountID, "close-a", 2)
@@ -730,9 +730,7 @@ func TestAvatarStyleRolloutAccountCloseSupersedesOpenJobsPostgres(t *testing.T) 
 
 func TestAvatarStyleRolloutWorkerReconcilesLegacyClosedAccountJobPostgres(t *testing.T) {
 	dsn := testenv.RequirePostgres(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	st, err := Open(ctx, dsn)
+	st, err := Open(context.Background(), dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -740,6 +738,8 @@ func TestAvatarStyleRolloutWorkerReconcilesLegacyClosedAccountJobPostgres(t *tes
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 	provisioned, operator := provisionActiveRolloutAccountForTest(ctx, t, st, "legacy-close")
 	defer func() { _ = deleteAccountForIntegrationTest(context.Background(), st, provisioned.AccountID) }()
 	realm := createRolloutRealmWithAgentsForTest(ctx, t, st, provisioned.AccountID, "legacy-close", 1)
@@ -774,9 +774,7 @@ func TestAvatarStyleRolloutWorkerReconcilesLegacyClosedAccountJobPostgres(t *tes
 
 func TestAvatarStyleRolloutLargeRealmUsesRevisionIndexPostgres(t *testing.T) {
 	dsn := testenv.RequirePostgres(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-	defer cancel()
-	st, err := Open(ctx, dsn)
+	st, err := Open(context.Background(), dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -784,6 +782,8 @@ func TestAvatarStyleRolloutLargeRealmUsesRevisionIndexPostgres(t *testing.T) {
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
 	provisioned, operator := provisionActiveRolloutAccountForTest(ctx, t, st, "plan")
 	defer func() { _ = deleteAccountForIntegrationTest(context.Background(), st, provisioned.AccountID) }()
 	realm, err := st.CreateRealm(ctx, provisioned.AccountID, "large-plan")

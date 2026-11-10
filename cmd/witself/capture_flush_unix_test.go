@@ -36,6 +36,8 @@ func captureFlushHelperExecutable(t *testing.T) string {
 	t.Setenv("CAPTURE_FLUSH_TEST_BINARY", executable)
 	directory := t.TempDir()
 	t.Setenv("CAPTURE_FLUSH_TEST_DIRECTORY", directory)
+	t.Setenv("WITSELF_HOME", filepath.Join(directory, "state"))
+	t.Setenv("DSH_HOME", filepath.Join(directory, "dsh"))
 	wrapper := filepath.Join(directory, "witself-flush-helper")
 	if err := os.WriteFile(wrapper, []byte("#!/bin/sh\nexec \"$CAPTURE_FLUSH_TEST_BINARY\" -test.run='^TestCaptureFlushHelperProcess$' -- \"$@\"\n"), 0o700); err != nil {
 		t.Fatal(err)
@@ -44,26 +46,43 @@ func captureFlushHelperExecutable(t *testing.T) string {
 	return directory
 }
 
-// captureFlushHelperFileWait bounds how long a test waits for the re-executed
-// helper process to write its observation file. The helper is a fresh test
-// binary that must be scheduled, start, and flush; on a loaded host that took
-// more than the previous 5 s bound (2026-09-05 gate flake:
-// "timed out waiting for helper file detached-observed" at 8 s). The bound is
-// generous because it only guards against a hung helper — the assertions on the
-// file's contents and ordering are unchanged.
-const captureFlushHelperFileWait = 60 * time.Second
+// captureFlushHelperFileWait bounds a helper's liveness, not its performance.
+// Reuse the elapsed time of work the fixture already performed, so a loaded
+// race-detector host gets headroom without another calibration subprocess.
+// The floor also covers helpers whose preceding work did not start a process.
+func captureFlushHelperFileWait(observedElapsed time.Duration) time.Duration {
+	return max(2*time.Minute, 8*observedElapsed)
+}
 
-func readCaptureFlushTestFile(t *testing.T, path string) []byte {
+// An optional completeness check supports the append-only shell recorder; its
+// final newline must be present before the ordering assertion reads the log.
+func readCaptureFlushTestFile(t *testing.T, path string, observedElapsed time.Duration, complete ...func([]byte) bool) []byte {
 	t.Helper()
-	deadline := time.Now().Add(captureFlushHelperFileWait)
+	deadline := time.Now().Add(captureFlushHelperFileWait(observedElapsed))
 	for time.Now().Before(deadline) {
 		if raw, err := os.ReadFile(path); err == nil && len(raw) > 0 {
-			return raw
+			if len(complete) == 0 || complete[0](raw) {
+				return raw
+			}
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("timed out waiting for helper file %s", filepath.Base(path))
 	return nil
+}
+
+// Publish observations only after the complete write. A reader accepting any
+// nonempty file could otherwise observe the prefix of an in-progress write.
+func writeCaptureFlushTestFile(t *testing.T, path string, raw []byte) {
+	t.Helper()
+	temporary := path + ".tmp"
+	defer func() { _ = os.Remove(temporary) }()
+	if err := os.WriteFile(temporary, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(temporary, path); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestBackgroundCaptureFlushSurvivesParentExitAndHangup(t *testing.T) {
@@ -75,6 +94,7 @@ func TestBackgroundCaptureFlushSurvivesParentExitAndHangup(t *testing.T) {
 	// Model a headless runtime with its own session, which cleans up the whole
 	// process group as its final hook finishes.
 	parent.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	started := time.Now()
 	err := parent.Run()
 	var exitErr *exec.ExitError
 	if !errors.As(err, &exitErr) {
@@ -85,7 +105,7 @@ func TestBackgroundCaptureFlushSurvivesParentExitAndHangup(t *testing.T) {
 		t.Fatalf("short-lived parent status = %v, want SIGHUP", exitErr.Sys())
 	}
 	var child captureFlushProcessIdentity
-	if err := json.Unmarshal(readCaptureFlushTestFile(t, filepath.Join(directory, "child-ready")), &child); err != nil {
+	if err := json.Unmarshal(readCaptureFlushTestFile(t, filepath.Join(directory, "child-ready"), time.Since(started)), &child); err != nil {
 		t.Fatal(err)
 	}
 	if child.PID == parent.Process.Pid || child.PGID != child.PID || child.SID != child.PID {
@@ -93,10 +113,8 @@ func TestBackgroundCaptureFlushSurvivesParentExitAndHangup(t *testing.T) {
 	}
 	// Only release the child after Wait proves the parent exited. The child's
 	// final write therefore demonstrates work completed after parent death.
-	if err := os.WriteFile(filepath.Join(directory, "parent-exited"), []byte("yes"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if got := string(readCaptureFlushTestFile(t, filepath.Join(directory, "child-survived"))); got != "yes" {
+	writeCaptureFlushTestFile(t, filepath.Join(directory, "parent-exited"), []byte("yes"))
+	if got := string(readCaptureFlushTestFile(t, filepath.Join(directory, "child-survived"), time.Since(started))); got != "yes" {
 		t.Fatalf("child completion = %q", got)
 	}
 }
@@ -115,7 +133,7 @@ func TestHookForegroundFlushHonorsBudget(t *testing.T) {
 	if elapsed < hookForegroundFlushMaxDuration-500*time.Millisecond || elapsed > hookForegroundFlushMaxDuration+time.Second {
 		t.Fatalf("stalled foreground flush took %s; budget = %s", elapsed, hookForegroundFlushMaxDuration)
 	}
-	pid, err := strconv.Atoi(string(readCaptureFlushTestFile(t, filepath.Join(directory, "stall-ready"))))
+	pid, err := strconv.Atoi(string(readCaptureFlushTestFile(t, filepath.Join(directory, "stall-ready"), elapsed)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,13 +177,14 @@ func TestTerminalHookFlushesForegroundBeforeDetached(t *testing.T) {
 				priorStdin := os.Stdin
 				os.Stdin = input
 				t.Cleanup(func() { os.Stdin = priorStdin })
+				started := time.Now()
 				stdout, stderr, code := captureFactDeleteCLI(t, func() int {
 					return transcriptHook([]string{"--runtime", transcriptcapture.RuntimeClaudeCode})
 				})
 				if code != 0 || stdout != "" || stderr != "" {
 					t.Fatalf("terminal hook = %d stdout=%q stderr=%q", code, stdout, stderr)
 				}
-				if got := string(readCaptureFlushTestFile(t, filepath.Join(directory, "detached-observed"))); got != "foreground\ndetached\n" {
+				if got := string(readCaptureFlushTestFile(t, filepath.Join(directory, "detached-observed"), time.Since(started))); got != "foreground\ndetached\n" {
 					t.Fatalf("flush order = %q", got)
 				}
 			})
@@ -181,6 +200,7 @@ func TestCaptureFlushHelperProcess(t *testing.T) {
 		return
 	}
 	directory := os.Getenv("CAPTURE_FLUSH_TEST_DIRECTORY")
+	started := time.Now()
 	if mode == "parent" {
 		if err := os.Setenv("CAPTURE_FLUSH_HELPER_MODE", "child"); err != nil {
 			t.Fatal(err)
@@ -188,7 +208,7 @@ func TestCaptureFlushHelperProcess(t *testing.T) {
 		if err := startBackgroundFlush(transcriptcapture.RuntimeClaudeCode); err != nil {
 			t.Fatal(err)
 		}
-		readCaptureFlushTestFile(t, filepath.Join(directory, "child-ready"))
+		readCaptureFlushTestFile(t, filepath.Join(directory, "child-ready"), time.Since(started))
 		if err := syscall.Kill(-syscall.Getpgrp(), syscall.SIGHUP); err != nil {
 			t.Fatal(err)
 		}
@@ -228,28 +248,20 @@ func TestCaptureFlushHelperProcess(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(directory, "child-ready"), identity, 0o600); err != nil {
-			t.Fatal(err)
-		}
-		readCaptureFlushTestFile(t, filepath.Join(directory, "parent-exited"))
-		if err := os.WriteFile(filepath.Join(directory, "child-survived"), []byte("yes"), 0o600); err != nil {
-			t.Fatal(err)
-		}
+		writeCaptureFlushTestFile(t, filepath.Join(directory, "child-ready"), identity)
+		readCaptureFlushTestFile(t, filepath.Join(directory, "parent-exited"), time.Since(started))
+		writeCaptureFlushTestFile(t, filepath.Join(directory, "child-survived"), []byte("yes"))
 	case "stall":
 		if os.Getenv(captureDetachedFlushEnv) != "" {
 			t.Fatal("foreground child inherited detached flusher flag")
 		}
-		if err := os.WriteFile(filepath.Join(directory, "stall-ready"), []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
-			t.Fatal(err)
-		}
+		writeCaptureFlushTestFile(t, filepath.Join(directory, "stall-ready"), []byte(strconv.Itoa(os.Getpid())))
 		time.Sleep(30 * time.Second)
 		t.Fatal("stalled foreground child was not terminated")
 	case "record":
 		path := filepath.Join(directory, "foreground-observed")
 		if os.Getenv(captureDetachedFlushEnv) == "" {
-			if err := os.WriteFile(path, []byte("foreground\n"), 0o600); err != nil {
-				t.Fatal(err)
-			}
+			writeCaptureFlushTestFile(t, path, []byte("foreground\n"))
 			if os.Getenv("CAPTURE_FLUSH_FAIL_FOREGROUND") == "true" {
 				os.Exit(17)
 			}
@@ -259,9 +271,7 @@ func TestCaptureFlushHelperProcess(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(directory, "detached-observed"), append(raw, []byte("detached\n")...), 0o600); err != nil {
-			t.Fatal(err)
-		}
+		writeCaptureFlushTestFile(t, filepath.Join(directory, "detached-observed"), append(raw, []byte("detached\n")...))
 	default:
 		t.Fatalf("unexpected child mode %q", mode)
 	}

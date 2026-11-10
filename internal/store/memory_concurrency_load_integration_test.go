@@ -126,13 +126,13 @@ func TestNarrativeMemoryConcurrencyLoadPostgres(t *testing.T) {
 	// sum plus one setup/migration unit; it is never a flat loop-wide timeout.
 	overallDeadline := 4*phaseDeadline + memoryConcurrencyLoadSetupGuard
 	startedAt := time.Now().UTC()
-	ctx, cancel := context.WithTimeout(context.Background(), overallDeadline)
-	defer cancel()
 
 	st, _ := newMigrationTestStore(t, dsn)
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), overallDeadline)
+	defer cancel()
 	var postgresVersion string
 	if err := st.pool.QueryRow(ctx, `SHOW server_version`).Scan(&postgresVersion); err != nil {
 		t.Fatalf("read PostgreSQL version: %v", err)

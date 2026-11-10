@@ -423,9 +423,7 @@ func assertUsageBoundsReport(t *testing.T, report UsageReport, points, totals in
 func newUsageBoundsFixture(t *testing.T) (context.Context, *Store, Principal) {
 	t.Helper()
 	dsn := testenv.RequirePostgres(t)
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	t.Cleanup(cancel)
-	st, err := Open(ctx, dsn)
+	st, err := Open(context.Background(), dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -433,6 +431,8 @@ func newUsageBoundsFixture(t *testing.T) (context.Context, *Store, Principal) {
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	t.Cleanup(cancel)
 	provisioned, err := st.ProvisionAccount(ctx, fmt.Sprintf("usage-bounds-%d@witwave.ai", time.Now().UnixNano()), "usage bounds", time.Hour)
 	if err != nil {
 		t.Fatal(err)

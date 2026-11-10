@@ -131,12 +131,12 @@ func TestNarrativeMemoryArchiveLoadPostgres(t *testing.T) {
 	}
 
 	startedAt := time.Now().UTC()
-	ctx, cancel := context.WithTimeout(context.Background(), memoryArchiveLoadOverall)
-	defer cancel()
 	st, _ := newMigrationTestStore(t, dsn)
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), memoryArchiveLoadOverall)
+	defer cancel()
 	var postgresVersion string
 	if err := st.pool.QueryRow(ctx, `SHOW server_version`).Scan(&postgresVersion); err != nil {
 		t.Fatalf("read PostgreSQL version: %v", err)

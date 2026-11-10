@@ -20,9 +20,7 @@ import (
 
 func TestAvatarPayloadCompactionExpandActivateGatePostgres(t *testing.T) {
 	dsn := testenv.RequirePostgres(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-	defer cancel()
-	phaseA, err := Open(ctx, dsn)
+	phaseA, err := Open(context.Background(), dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -33,6 +31,8 @@ func TestAvatarPayloadCompactionExpandActivateGatePostgres(t *testing.T) {
 	if err := phaseA.Migrate(); err != nil {
 		t.Fatal(err)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second+testenv.MigrationBudget(0))
+	defer cancel()
 	provisioned, err := phaseA.ProvisionAccount(ctx,
 		fmt.Sprintf("avatar-compaction-gate-%d@witwave.ai", time.Now().UnixNano()),
 		"avatar compaction gate", time.Hour)
@@ -282,9 +282,7 @@ func TestAvatarPayloadCompactionExpandActivateGatePostgres(t *testing.T) {
 
 func TestAvatarPayloadQuotaCompactionLifecyclePostgres(t *testing.T) {
 	dsn := testenv.RequirePostgres(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	st, err := Open(ctx, dsn, WithAvatarPayloadCompactionEnabled(true))
+	st, err := Open(context.Background(), dsn, WithAvatarPayloadCompactionEnabled(true))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -292,6 +290,8 @@ func TestAvatarPayloadQuotaCompactionLifecyclePostgres(t *testing.T) {
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
 	provisioned, err := st.ProvisionAccount(ctx,
 		fmt.Sprintf("avatar-quota-%d@witwave.ai", time.Now().UnixNano()),
 		"avatar quota", time.Hour)
@@ -643,9 +643,7 @@ func TestAvatarPayloadQuotaCompactionLifecyclePostgres(t *testing.T) {
 
 func TestAvatarContinuityFingerprintCompactionBoundariesPostgres(t *testing.T) {
 	dsn := testenv.RequirePostgres(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
-	defer cancel()
-	st, err := Open(ctx, dsn)
+	st, err := Open(context.Background(), dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -653,6 +651,8 @@ func TestAvatarContinuityFingerprintCompactionBoundariesPostgres(t *testing.T) {
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+	defer cancel()
 
 	type scenario struct {
 		accountID string

@@ -16,9 +16,7 @@ import (
 
 func TestMessageRequestArchiveRoundTripPostgres(t *testing.T) {
 	dsn := testenv.RequirePostgres(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-	defer cancel()
-	st, err := Open(ctx, dsn)
+	st, err := Open(context.Background(), dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -26,6 +24,8 @@ func TestMessageRequestArchiveRoundTripPostgres(t *testing.T) {
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
 
 	provisioned, err := st.ProvisionAccount(ctx,
 		"message-request-archive@witwave.ai", "message request archive", time.Hour)

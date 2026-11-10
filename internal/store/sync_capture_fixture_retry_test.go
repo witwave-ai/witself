@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/witwave-ai/witself/internal/testenv"
 )
 
 func syncCaptureFixtureRetryBudget(work time.Duration) time.Duration {
@@ -303,7 +305,7 @@ func TestSyncCaptureFixtureRetryPostgres(t *testing.T) {
 		for _, release := range []bool{true, false} {
 			scenario := map[bool]string{true: "released", false: "persisted"}[release]
 			t.Run(name+"/"+scenario, func(t *testing.T) {
-				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute+testenv.MigrationBudget(0))
 				defer cancel()
 				var old pgx.Tx
 				var pid uint32
@@ -494,7 +496,7 @@ func TestSyncCaptureFixtureRetryOverlapPostgres(t *testing.T) {
 	for _, activate := range []bool{false, true} {
 		name := map[bool]string{false: "enable", true: "activate"}[activate]
 		t.Run(name, func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute+testenv.MigrationBudget(0))
 			defer cancel()
 			var old pgx.Tx
 			st, p, work := seedSyncCaptureFixture(t, func(st *Store) {

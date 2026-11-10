@@ -510,7 +510,8 @@ func TestImportRawMIMEPathParityPostgres(t *testing.T) {
 	started := time.Now()
 	defer func() { t.Logf("parity wall_time=%s race=%t", time.Since(started), importPeakRaceEnabled) }()
 	dsn := testenv.RequirePostgres(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	// The fixture and later destinations migrate while sharing this work context.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute+testenv.MigrationBudget(0))
 	defer cancel()
 	seed := seedImportStateFixture(ctx, t, dsn, 2, 40, 5, 1, []int{1024, 3 << 19}, true, false)
 	expected := importStateContentDigests(ctx, t, seed.source, seed.fixture.AccountID)
@@ -567,7 +568,8 @@ func TestImportRowOwnershipPostgres(t *testing.T) {
 	started := time.Now()
 	defer func() { t.Logf("ownership wall_time=%s race=%t", time.Since(started), importPeakRaceEnabled) }()
 	dsn := testenv.RequirePostgres(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	// The fixture and later destinations migrate while sharing this work context.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute+testenv.MigrationBudget(0))
 	defer cancel()
 	// Nine replies among 60 entries exercise delayed lookups with a small fixture.
 	seed := seedImportStateFixture(ctx, t, dsn, 3, 60, 5, 2, []int{64 << 10}, true, true)
@@ -797,7 +799,8 @@ func TestImportStateMemoryPostgres(t *testing.T) {
 	}
 	for _, tier := range tiers {
 		t.Run(tier.name, func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(context.Background(), tier.budget)
+			// Preserve the workload budget while allowing the fixture migrations.
+			ctx, cancel := context.WithTimeout(context.Background(), tier.budget+testenv.MigrationBudget(0))
 			defer cancel()
 			seed := seedImportStateFixture(ctx, t, dsn, tier.transcripts, tier.entries, tier.memories, 2, []int{tier.email}, false, false)
 			if tier.name == "ci" {

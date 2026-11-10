@@ -16,12 +16,12 @@ import (
 )
 
 func TestMemoryCurationRollbackLateFailurePostgres(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
 	st, _ := newMigrationTestStore(t, testenv.RequirePostgres(t))
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
 	p := provisionMemoryCurationApplyPrincipal(ctx, t, st)
 	source, err := st.CaptureMemory(ctx, p, CaptureMemoryInput{
 		Content: "A synthetic source for rollback atomicity.", Kind: "decision",

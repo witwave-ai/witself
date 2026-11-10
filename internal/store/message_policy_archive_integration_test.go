@@ -14,8 +14,6 @@ import (
 
 func TestMessagePoliciesSurviveAccountArchiveRoundTripPostgres(t *testing.T) {
 	dsn := testenv.RequirePostgres(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-	defer cancel()
 	source, _ := newMigrationTestStore(t, dsn)
 	destination, _ := newMigrationTestStore(t, dsn)
 	if err := source.Migrate(); err != nil {
@@ -24,6 +22,8 @@ func TestMessagePoliciesSurviveAccountArchiveRoundTripPostgres(t *testing.T) {
 	if err := destination.Migrate(); err != nil {
 		t.Fatal(err)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
 
 	tests := []struct {
 		name     string

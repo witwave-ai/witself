@@ -26,13 +26,9 @@ func TestDSHNativeRetryFlushHelper(t *testing.T) {
 	if os.Getenv("DSH_HOME") == "" || os.Getenv("WITSELF_HOME") == "" || os.Getenv(captureDetachedFlushEnv) != "1" {
 		t.Fatal("isolated detached dsh homes are required")
 	}
-	if err := os.WriteFile(filepath.Join(directory, "started"), []byte("yes"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writeCaptureFlushTestFile(t, filepath.Join(directory, "started"), []byte("yes"))
 	code := transcriptFlush([]string{"--runtime", transcriptcapture.RuntimeDSH})
-	if err := os.WriteFile(filepath.Join(directory, "finished"), []byte{byte('0' + code)}, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writeCaptureFlushTestFile(t, filepath.Join(directory, "finished"), []byte{byte('0' + code)})
 }
 
 func TestDSHDetachedFlushRetriesSlowFollowingStopHook(t *testing.T) {
@@ -99,10 +95,11 @@ func TestDSHDetachedFlushRetriesSlowFollowingStopHook(t *testing.T) {
 		t.Fatal(err)
 	}
 	enqueueDSHFlushHook(t, map[string]any{"session_id": session, "hook_event_name": "Stop", "cwd": cwd})
+	started := time.Now()
 	if err := startBackgroundFlush(transcriptcapture.RuntimeDSH); err != nil {
 		t.Fatal(err)
 	}
-	readCaptureFlushTestFile(t, filepath.Join(directory, "started"))
+	readCaptureFlushTestFile(t, filepath.Join(directory, "started"), time.Since(started))
 	// dsh runs a three-second Stop command after Witself's hook. No later
 	// event enters the outbox, and the session is idle once this fence lands.
 	time.Sleep(3 * time.Second)
@@ -116,7 +113,7 @@ func TestDSHDetachedFlushRetriesSlowFollowingStopHook(t *testing.T) {
 	if writeErr != nil || closeErr != nil {
 		t.Fatal("append synthetic native fence failed")
 	}
-	if got := string(readCaptureFlushTestFile(t, filepath.Join(directory, "finished"))); got != "0" {
+	if got := string(readCaptureFlushTestFile(t, filepath.Join(directory, "finished"), time.Since(started))); got != "0" {
 		t.Fatal("detached flush stopped before the delayed native completion")
 	}
 	srv.Close()
@@ -137,6 +134,7 @@ func TestDSHStopDefersFlushUntilSynchronousHookReturns(t *testing.T) {
 	observation := filepath.Join(directory, "flush-observed")
 	t.Setenv("DSH_FLUSH_TEST_FILE", observation)
 	wrapper := filepath.Join(directory, "witself-flush-recorder")
+	// Keep append-only evidence if a regression launches both flush modes.
 	script := "#!/bin/sh\nif [ \"$WITSELF_CAPTURE_DETACHED_FLUSH\" = \"1\" ]; then\n  printf 'detached\\n' >> \"$DSH_FLUSH_TEST_FILE\"\nelse\n  printf 'foreground\\n' >> \"$DSH_FLUSH_TEST_FILE\"\nfi\n"
 	if err := os.WriteFile(wrapper, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
@@ -156,13 +154,16 @@ func TestDSHStopDefersFlushUntilSynchronousHookReturns(t *testing.T) {
 	priorStdin := os.Stdin
 	os.Stdin = input
 	t.Cleanup(func() { os.Stdin = priorStdin })
+	started := time.Now()
 	stdout, stderr, code := captureFactDeleteCLI(t, func() int {
 		return transcriptHook([]string{"--runtime", transcriptcapture.RuntimeDSH})
 	})
 	if code != 0 || stdout != "" || stderr != "" {
 		t.Fatal("dsh Stop hook failed")
 	}
-	if got := string(readCaptureFlushTestFile(t, observation)); got != "detached\n" {
+	if got := string(readCaptureFlushTestFile(t, observation, time.Since(started), func(raw []byte) bool {
+		return raw[len(raw)-1] == '\n'
+	})); got != "detached\n" {
 		t.Fatal("dsh Stop started a foreground flusher before returning")
 	}
 	pending, err := transcriptcapture.Pending(transcriptcapture.RuntimeDSH)

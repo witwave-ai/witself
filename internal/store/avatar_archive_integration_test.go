@@ -19,9 +19,7 @@ import (
 
 func TestAvatarArchiveCurrentSchemaRoundTripPostgres(t *testing.T) {
 	dsn := testenv.RequirePostgres(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-	defer cancel()
-	st, err := Open(ctx, dsn, WithAvatarPayloadCompactionEnabled(true))
+	st, err := Open(context.Background(), dsn, WithAvatarPayloadCompactionEnabled(true))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -29,6 +27,8 @@ func TestAvatarArchiveCurrentSchemaRoundTripPostgres(t *testing.T) {
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
 
 	provisioned, err := st.ProvisionAccount(ctx,
 		fmt.Sprintf("avatar-archive-%d@witwave.ai", time.Now().UnixNano()),
@@ -288,9 +288,7 @@ func TestAvatarArchiveCurrentSchemaRoundTripPostgres(t *testing.T) {
 
 func TestAvatarArchiveMixedRendererCompactionRoundTripPostgres(t *testing.T) {
 	dsn := testenv.RequirePostgres(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-	defer cancel()
-	st, err := Open(ctx, dsn, WithAvatarPayloadCompactionEnabled(true))
+	st, err := Open(context.Background(), dsn, WithAvatarPayloadCompactionEnabled(true))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -298,6 +296,8 @@ func TestAvatarArchiveMixedRendererCompactionRoundTripPostgres(t *testing.T) {
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
 
 	provisioned, err := st.ProvisionAccount(ctx,
 		fmt.Sprintf("avatar-mixed-renderer-%d@witwave.ai", time.Now().UnixNano()),
@@ -454,9 +454,7 @@ func TestAvatarArchiveMixedRendererCompactionRoundTripPostgres(t *testing.T) {
 
 func TestAvatarArchiveCurrentSchemaPreservesQuarantinedLegacyRendererPostgres(t *testing.T) {
 	dsn := testenv.RequirePostgres(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-	defer cancel()
-	st, err := Open(ctx, dsn)
+	st, err := Open(context.Background(), dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -464,6 +462,8 @@ func TestAvatarArchiveCurrentSchemaPreservesQuarantinedLegacyRendererPostgres(t 
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
 
 	provisioned, err := st.ProvisionAccount(ctx,
 		fmt.Sprintf("avatar-legacy-renderer-%d@witwave.ai", time.Now().UnixNano()),
@@ -617,9 +617,7 @@ func TestAvatarArchiveCurrentSchemaPreservesQuarantinedLegacyRendererPostgres(t 
 
 func TestAvatarArchiveSchema49SynthesizesDefaultsPostgres(t *testing.T) {
 	dsn := testenv.RequirePostgres(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-	defer cancel()
-	st, err := Open(ctx, dsn)
+	st, err := Open(context.Background(), dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -627,6 +625,8 @@ func TestAvatarArchiveSchema49SynthesizesDefaultsPostgres(t *testing.T) {
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
 
 	provisioned, err := st.ProvisionAccount(ctx,
 		fmt.Sprintf("avatar-legacy-%d@witwave.ai", time.Now().UnixNano()),
