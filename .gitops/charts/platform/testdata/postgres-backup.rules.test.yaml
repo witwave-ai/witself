@@ -2,19 +2,19 @@ rule_files:
   - ../files/postgres-backup.rules.yaml
 evaluation_interval: 30s
 tests:
-  - name: exact 26 hour threshold stays quiet and older backup pages after the hold
+  - name: exact 8 hour threshold stays quiet and older backup pages after the hold
     interval: 1m
     input_series:
       - series: witself_postgres_backup_last_success_timestamp_seconds{namespace="witself",service="witself-postgresql-metrics",instance="postgres-a:9187"}
-        values: 60+0x1620
+        values: 60+0x540
     alert_rule_test:
-      - eval_time: 26h1m
+      - eval_time: 8h1m
         alertname: WitselfPostgresBackupStale
         exp_alerts: []
-      - eval_time: 26h6m
+      - eval_time: 8h6m
         alertname: WitselfPostgresBackupStale
         exp_alerts: []
-      - eval_time: 26h7m
+      - eval_time: 8h7m
         alertname: WitselfPostgresBackupStale
         exp_alerts: &stale_alerts
           - exp_labels:
@@ -23,18 +23,18 @@ tests:
               service: witself-postgresql
               witself_alert: 'true'
             exp_annotations:
-              summary: PostgreSQL has no successful encrypted backup within 26 hours or its backup metric is absent.
+              summary: PostgreSQL has no successful encrypted backup within 8 hours or its backup metric is absent.
               runbook: docs/backup-and-recovery.md#scheduled-postgresql-backups
-  - name: daily successful dump keeps the stale page quiet
+  - name: successful dump every six hours keeps the stale page quiet
     interval: 1m
     input_series:
       - series: witself_postgres_backup_last_success_timestamp_seconds{namespace="witself",service="witself-postgresql-metrics"}
-        values: 60+0x1439 86400+0x180
+        values: 60+0x359 21600+0x180
     alert_rule_test:
-      - eval_time: 26h6m
+      - eval_time: 8h6m
         alertname: WitselfPostgresBackupStale
         exp_alerts: []
-      - eval_time: 27h
+      - eval_time: 9h
         alertname: WitselfPostgresBackupStale
         exp_alerts: []
   - name: no first result or missing backup metric pages even with unrelated healthy exporter
@@ -65,7 +65,7 @@ tests:
     interval: 1m
     input_series:
       - series: witself_postgres_backup_last_success_timestamp_seconds{namespace="witself",service="witself-postgresql-metrics"}
-        values: -93601+0x5 360+0x5
+        values: -28801+0x5 360+0x5
     alert_rule_test:
       - eval_time: 5m
         alertname: WitselfPostgresBackupStale

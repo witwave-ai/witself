@@ -77,7 +77,7 @@ Do these while nothing is broken. Most cannot be fixed during an incident.
 | Action | Performer and checkpoint |
 |---|---|
 | Serving-cell `witself-infra preview`, `up` or `destroy` | Founder-performed: a cell serving customers is production regardless of its inventory alias. Destroy remains prohibited during this incident by R1 and R3. |
-| List or fetch nightly dumps with the dump bucket credential (R7: list and fetch only) | Operator only after the founder's explicit go and a bold notice naming the cell and read operation. |
+| List or fetch scheduled dumps with the dump bucket credential (R7: list and fetch only) | Operator only after the founder's explicit go and a bold notice naming the cell and read operation. |
 | Kubernetes Secret restore with `decrypt-apply` | Operator only after the founder's explicit go and a bold notice naming the cell and affected Secret names. |
 | Merge the hold PR | Operator only after the founder's explicit go and a bold notice naming the cell and expected outage. |
 | `POST /v1/cells`, drain, undrain, directory writes or paging changes | Operator only after the founder's explicit go. |
@@ -192,7 +192,7 @@ do not infer paging delivery from a healthy Watchdog alone.
 | Node lost, Prometheus on the lost node | External dead-man until Prometheus recovers and resumes check-ins. | [Monitoring setup](runbooks.md#founder-open-plane-monitoring) |
 | PostgreSQL volume lost, cluster alive | `WitselfPostgreSQLExporterUnavailable` and `WitselfPostgresPVCMetricsUnavailable`, both critical after 10m; `WitselfProbeTargetDown`, critical after 10m. If the cell was accepting placements, `WitselfSignupProvisioningFailureRatioHigh`, warning (more than 20% and at least 3 failed provisioning attempts over 30m, for 5m), may fire if signups are attempted. | [PostgreSQL rules](../.gitops/charts/platform/files/postgresql.rules.yaml), [founder rules](../.gitops/charts/platform/files/founder-open-plane.rules.yaml), [probe rules](../.gitops/charts/platform/files/uptime-probes.rules.yaml) |
 | Non-monitored cell lost, serving Prometheus survives | `WitselfProbeTargetDown`, critical after 10m, with the registry name as target. If that cell was accepting placements, `WitselfSignupProvisioningFailureRatioHigh`, warning (more than 20% and at least 3 failed provisioning attempts over 30m, for 5m), may fire if signups are attempted. | [Probe rules](../.gitops/charts/platform/files/uptime-probes.rules.yaml) |
-| Backup stops succeeding, Prometheus survives | `WitselfPostgresBackupStale`, critical after 5m with no success for over 26 hours or a missing/nonpositive metric. `WitselfPostgresBackupFailed`, critical without a `for` delay on terminal failure or an unfinished attempt older than 7,200 seconds. | [Backup rules](../.gitops/charts/platform/files/postgres-backup.rules.yaml) |
+| Backup stops succeeding, Prometheus survives | `WitselfPostgresBackupStale`, critical after 5m with no success for over 8 hours or a missing/nonpositive metric. `WitselfPostgresBackupFailed`, critical without a `for` delay on terminal failure or an unfinished attempt older than 7,200 seconds. | [Backup rules](../.gitops/charts/platform/files/postgres-backup.rules.yaml) |
 
 The PostgreSQL exporter is a sidecar in the PostgreSQL pod, so it cannot
 report when that pod cannot start. All these in-cluster rules depend on their
@@ -311,17 +311,17 @@ declaring it lost. **[FOUNDER CHECKPOINT]**
 | Branch | Data at risk | Recovery source | Re-registration | Customer impact |
 |---|---|---|---|---|
 | A. Node loss | None if the volume reattaches intact | Existing volume | None | Outage while service and storage recover |
-| B. PVC loss | Writes after the recovery point | Nightly dump | None if endpoint and registration survive | Outage and data loss |
-| C. Cluster loss | Writes after the recovery point | Nightly dump | Same registry name; new credentials, and a new endpoint unless the host is preserved (load-balancer cells keep `api.<cell>.<domain>`) (G1) | Outage and data loss |
-| D. Region loss | Writes after the recovery point across affected cells | Nightly dump | As C, in the chosen region/provider | Multi-cell outage, data loss and location review (G15) |
+| B. PVC loss | Writes after the recovery point | Scheduled dump | None if endpoint and registration survive | Outage and data loss |
+| C. Cluster loss | Writes after the recovery point | Scheduled dump | Same registry name; new credentials, and a new endpoint unless the host is preserved (load-balancer cells keep `api.<cell>.<domain>`) (G1) | Outage and data loss |
+| D. Region loss | Writes after the recovery point across affected cells | Scheduled dump | As C, in the chosen region/provider | Multi-cell outage, data loss and location review (G15) |
 
 ## 6. Recovery sources and their RPO
 
 | Source | Storage and encryption | Recovery point | Can it restore a lost cell? |
 |---|---|---|---|
-| Nightly PostgreSQL dump | The operator-selected bucket. Key shape `<prefix>/<cell>/<UTC-timestamp>-<pod-uid>.sql.gz.age`; the cell is the inventory name. `pg_dump --no-owner --no-privileges`, gzip, then age encryption. | Scheduled at 03:00 UTC daily; a successful daily schedule can still lose nearly 24 hours of writes. No PITR. | Primary source for a cell whose dump is enabled and verified. The transport and restore automation remain G2. |
+| Scheduled PostgreSQL dump | The operator-selected bucket. Key shape `<prefix>/<cell>/<UTC-timestamp>-<pod-uid>.sql.gz.age`; the cell is the inventory name. `pg_dump --no-owner --no-privileges`, gzip, then age encryption. | Scheduled at 03:00, 09:00, 15:00, and 21:00 UTC; under a healthy schedule, the recovery point is about 6 hours plus dump time. No PITR. | Primary source for a cell whose dump is enabled and verified. The transport and restore automation remain G2. |
 | Per-account snapshots | R2 logical archives, with provider-managed encryption at rest and sealed content remaining ciphertext. | One generation per 1,440-minute interval from 00:00 UTC; a five-minute cron scans in directory order and resumes an unfinished pass across intervals. This is not a promise that all snapshots complete at midnight. | No committed disaster restore endpoint; rollback-only drills prove restorability (G3). |
-| Pre-migration dumps | Age-encrypted artifacts and matching identities in a protected directory outside the checkout. | Taken before schema-advancing trains; use the artifact's actual timestamp. | A separately reviewed manual recovery can use a restore-verified dump. Its custom format needs `pg_restore`, not the nightly plain-SQL pipeline. |
+| Pre-migration dumps | Age-encrypted artifacts and matching identities in a protected directory outside the checkout. | Taken before schema-advancing trains; use the artifact's actual timestamp. | A separately reviewed manual recovery can use a restore-verified dump. Its custom format needs `pg_restore`, not the scheduled plain-SQL pipeline. |
 | Evacuation archives | R2 logical archives; checksums prove integrity, not authentication. | Created by an evacuation while the source is available. | Not a replacement for whole-cell disaster backup; evacuation needs a live source. |
 
 Sources:
@@ -335,7 +335,7 @@ and [Decommission a cell](runbooks.md#decommission-a-cell-and-preserve-its-accou
   Before admitting accounts there, enable backups and verify the first dump
   by a disposable restore.
 - Dumps and account snapshots share a Cloudflare account. They do not provide
-  recovery from loss of that account. The nightly dumps have no copy outside
+  recovery from loss of that account. The scheduled dumps have no copy outside
   the Cloudflare account, and the repository configures no expiry for them.
   **[GAP] G13**. List available objects; do not assume any older dump exists.
 - Backup telemetry in `witself_ops.backup_runs`, in the cluster's `postgres`
@@ -495,7 +495,7 @@ input to this decision, even though the hold must precede provisioning.
 
 **Step 2.** **[FOUNDER CHECKPOINT]** **Choose the recovery point.**
 
-Default to the newest complete nightly dump of this cell whose key timestamp
+Default to the newest complete scheduled dump of this cell whose key timestamp
 (UTC, taken when that backup run started) is earlier than the start of the
 loss recorded in the protected incident record. Skip keys ending in
 `.incomplete`. The key's pod UID tells objects apart but does not show which
@@ -566,7 +566,7 @@ Preflight checklist:
 - compatible PostgreSQL major and pgvector available;
 - selected dump and matching decryption identity available.
 
-The nightly dump is compressed plain SQL. The documented pipeline is:
+The scheduled dump is compressed plain SQL. The documented pipeline is:
 
 ```bash
 set -o pipefail
@@ -588,9 +588,10 @@ The serving configuration disallows external PostgreSQL access. The
 repository supplies no checked-in transport and preflight-enforcing restore
 Job for this pipeline into a cell. **[GAP] G2**. The founder must approve that
 transport before execution. Do not substitute a custom-format `pg_restore`
-pipeline for the nightly SQL dump. See the
+pipeline for the scheduled SQL dump. See the
 [exec transport caveat](runbooks.md#restore-transport-kubectl-exec--i-can-hang-after-pg_restore-exits).
-Avoid overlapping the 03:00 UTC backup Job while its roles are unavailable.
+Avoid overlapping the 03:00, 09:00, 15:00, or 21:00 UTC backup Jobs while their
+roles are unavailable.
 
 **Step 5. Verify the restore before anything boots.**
 
@@ -617,7 +618,7 @@ SELECT
 | Unvalidated constraints | Zero. |
 | Installed vector extension | Match the source's installed-extension state; availability of pgvector in the image does not mean it was installed. |
 
-Nightly dumps have no restore-verified manifest contract. A successful upload
+Scheduled dumps have no restore-verified manifest contract. A successful upload
 does not prove a good dump. Establish the dump's applied Goose version from
 its source evidence or its Goose history inspected in a protected environment;
 do not infer it from the selected release. The restored version must equal
@@ -1063,7 +1064,7 @@ out-of-band account-specific support intake.
 | Detection to work starting | PHX1 incident | measured once, in the 2026-09-19 incident; not published |
 | Provision a Civo cluster with `witself-infra up` | PHX1 incident | measured once, in the 2026-09-19 incident; not published |
 | Restore a pre-migration dump (custom format) | PHX1 incident | measured once, in the 2026-09-19 incident; not published |
-| Restore the nightly R2 dump | No repository timing record | Unknown |
+| Restore the scheduled R2 dump | No repository timing record | Unknown |
 | Core service | PHX1 incident | measured once, in the 2026-09-19 incident; not published |
 | Full service: monitoring, backups, entitlement delivery | PHX1 incident | measured once, in the 2026-09-19 incident; not published |
 | Node loss: PostgreSQL volume reattachment | Not rehearsed | Unknown |
@@ -1117,7 +1118,7 @@ During an incident:
 - **G1.** No supported command sends or reads `registration_id`; occupied
   re-endpointing and identity verification require a separately reviewed API
   procedure.
-- **G2.** No checked-in tool restores nightly dumps into cell PostgreSQL with
+- **G2.** No checked-in tool restores scheduled dumps into cell PostgreSQL with
   transport, empty-target preflight, verification, role provisioning and safe
   recreation of a failed target.
 - **G3.** Per-account snapshots have no committed disaster-restore endpoint;
@@ -1142,9 +1143,9 @@ During an incident:
   service. The backup cell is unmonitored, and no Civo state check exists.
 - **G12.** The server hold needs an overlay change and merged PR; on rebuild,
   it must land before provisioning.
-- **G13.** The nightly dumps have no copy outside the Cloudflare account, and
+- **G13.** The scheduled dumps have no copy outside the Cloudflare account, and
   the repository configures no expiry for them.
-- **G14.** No written RTO/RPO target or repository timing record for a nightly
+- **G14.** No written RTO/RPO target or repository timing record for a scheduled
   whole-database restore.
 - **G15.** No prepared fallback region: the GitOps Civo mapping and the DPA
   cover NYC1; the infrastructure CLI's other Civo regions are outside the US.

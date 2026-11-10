@@ -8,7 +8,7 @@ groups:
         expr: |
           time() - max by (namespace) (
             witself_postgres_backup_last_success_timestamp_seconds{namespace="witself",service="witself-postgresql-metrics"}
-          ) > 93600
+          ) > 28800
           or max by (namespace) (
             witself_postgres_backup_last_success_timestamp_seconds{namespace="witself",service="witself-postgresql-metrics"}
           ) <= 0
@@ -19,7 +19,7 @@ groups:
           service: witself-postgresql
           witself_alert: "true"
         annotations:
-          summary: PostgreSQL has no successful encrypted backup within 26 hours or its backup metric is absent.
+          summary: PostgreSQL has no successful encrypted backup within 8 hours or its backup metric is absent.
           runbook: docs/backup-and-recovery.md#scheduled-postgresql-backups
       - alert: WitselfPostgresBackupFailed
         # SQL returns -1 while the latest attempt is running, 0 on terminal

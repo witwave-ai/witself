@@ -120,7 +120,7 @@ platform:
       # This opt-in reuses the existing alert receiver configuration.
       enabled: false
     postgresBackupAlerts:
-      # The cell catalog couples this opt-in to the encrypted daily dump.
+      # The cell catalog couples this opt-in to the encrypted scheduled dump.
       # It never enables the monitoring stack on an unmonitored cell.
       # Rules also evaluate while the existing receiver remains null-routed.
       enabled: false
