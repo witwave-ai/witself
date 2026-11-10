@@ -64,17 +64,19 @@ var groupCases = [][]string{
 }
 
 type witness struct {
-	mechanism string
-	test      string
-	line      int
-	assertion string
-	category  string
+	mechanism        string
+	test             string
+	line             int
+	assertion        string
+	category         string
+	prerequisiteLine int
+	prerequisite     string
 }
 
 var witnesses = []witness{
-	{"M1", groups[1] + "/initial-owned-file-privacy", 328, "initial native privacy refusal did not precede first payload write", "initial_privacy_before_write"},
-	{"M2", groups[2] + "/observed-reparse", 496, "observed native mismatch reached a payload effect", "observed_mismatch_before_effect"},
-	{"M2", groups[2] + "/observed-type", 496, "observed native mismatch reached a payload effect", "observed_mismatch_before_effect"},
+	{"M1", groups[1] + "/initial-owned-file-privacy", 332, "initial native privacy refusal did not precede first payload write", "initial_privacy_before_write", 329, "native fixture prerequisite failed: initial privacy observation"},
+	{"M2", groups[2] + "/observed-reparse", 504, "observed native mismatch reached a payload effect", "observed_mismatch_before_effect", 501, "native fixture prerequisite failed: mismatch observation"},
+	{"M2", groups[2] + "/observed-type", 504, "observed native mismatch reached a payload effect", "observed_mismatch_before_effect", 501, "native fixture prerequisite failed: mismatch observation"},
 }
 
 func historicalSkips() map[string][]string {
@@ -583,25 +585,47 @@ func parseEvents(result commandResult, w *witness, p *phase, pkg string) string 
 	if result.exit != 1 || packageTerminal != "fail" {
 		return "mutation_exit"
 	}
-	// Only the immutable fatal assertion's exact source location can establish
-	// the intended failure. An unrelated assertion or a t.Log marker cannot.
-	assertions := 0
+	// Only the behavioral fatal assertion's exact source location can establish
+	// the intended failure. Its preceding fixture guard cannot establish a kill.
+	assertions, prerequisites := 0, 0
 	for test, s := range states {
 		for _, line := range strings.Split(s.output.String(), "\n") {
 			match := diagnostic.FindStringSubmatch(line)
 			if match == nil {
 				continue
 			}
-			if test != w.test || match[1] != "private_generation_windows_test.go" || match[2] != strconv.Itoa(w.line) || match[3] != w.assertion {
+			if test != w.test {
+				return "wrong_assertion"
+			}
+			if prerequisiteDiagnostic(match[1], match[2], match[3]) {
+				prerequisites++
+				continue
+			}
+			if match[1] != "private_generation_windows_test.go" || match[2] != strconv.Itoa(w.line) || match[3] != w.assertion {
 				return "wrong_assertion"
 			}
 			assertions++
 		}
 	}
+	if prerequisites != 0 {
+		if prerequisites != 1 || assertions != 0 {
+			return "wrong_assertion"
+		}
+		return "prerequisite_failed"
+	}
 	if assertions != 1 {
 		return "missing_assertion"
 	}
 	return ""
+}
+
+func prerequisiteDiagnostic(file, line, message string) bool {
+	for _, w := range witnesses {
+		if message == w.prerequisite || (file == "private_generation_windows_test.go" && line == strconv.Itoa(w.prerequisiteLine)) {
+			return true
+		}
+	}
+	return false
 }
 
 // Inventory is a separate, complete scan: even a disqualifying early event

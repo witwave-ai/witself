@@ -324,7 +324,11 @@ func TestWindowsTrustPrivateGenerationPrivacyRefusals(t *testing.T) {
 			return nil
 		}
 		g, ops, path := windowsGenerationTestBuilder(t, hooks)
-		if g.write(ctx, "blocked.bin", 1, bytes.NewReader([]byte{1})) != ReasonStateIO || !changed || !observed || writes != 0 || g.completed {
+		result := g.write(ctx, "blocked.bin", 1, bytes.NewReader([]byte{1}))
+		if !changed || !observed {
+			t.Fatal("native fixture prerequisite failed: initial privacy observation")
+		}
+		if result != ReasonStateIO || writes != 0 || g.completed {
 			t.Fatal("initial native privacy refusal did not precede first payload write")
 		}
 		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
@@ -492,7 +496,11 @@ func TestWindowsTrustPrivateGenerationReparseAndReplacement(t *testing.T) {
 				return nil
 			}}
 			g, _, _ := windowsGenerationTestBuilder(t, hooks)
-			if g.write(ctx, "blocked", 1, bytes.NewReader([]byte{1})) != ReasonStateIO || !observed || writes != 0 {
+			result := g.write(ctx, "blocked", 1, bytes.NewReader([]byte{1}))
+			if !observed {
+				t.Fatal("native fixture prerequisite failed: mismatch observation")
+			}
+			if result != ReasonStateIO || writes != 0 {
 				t.Fatal("observed native mismatch reached a payload effect")
 			}
 			t.Log("bounded single native observation injection isolates the refusal before write")

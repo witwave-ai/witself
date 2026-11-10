@@ -5,10 +5,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"go/ast"
+	"go/format"
+	"go/parser"
+	"go/token"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -174,7 +179,7 @@ func TestNativeProofEvents(t *testing.T) {
 		{"panic", func(e []testEvent) []testEvent { e[3].Output = "panic: interrupted\n"; return e }},
 		{"marker-without-case", func(e []testEvent) []testEvent { return []testEvent{e[0], event("output", "", w.assertion), e[6]} }},
 		{"marker-from-log-line", func(e []testEvent) []testEvent {
-			e[3].Output = strings.ReplaceAll(e[3].Output, ":328:", ":327:")
+			e[3].Output = strings.ReplaceAll(e[3].Output, fmt.Sprintf(":%d:", w.line), fmt.Sprintf(":%d:", w.line-1))
 			return e
 		}},
 		{"logged-marker-other-assertion", func(e []testEvent) []testEvent {
@@ -338,6 +343,101 @@ func TestNativeProofEvents(t *testing.T) {
 			t.Fatal("unrelated skip accepted")
 		}
 	})
+}
+
+func TestNativeProofPrerequisiteFailures(t *testing.T) {
+	for _, w := range witnesses {
+		t.Run(w.test, func(t *testing.T) {
+			for _, mode := range []string{"exact-prerequisite", "text-only", "site-only", "both-fatals", "both-fatals-reversed", "duplicate-prerequisite"} {
+				t.Run(mode, func(t *testing.T) {
+					events := mutantEvents(w)
+					behavior := events[3].Output
+					line, message := w.prerequisiteLine, w.prerequisite
+					if mode == "text-only" {
+						line = w.line
+					}
+					if mode == "site-only" {
+						message = "private fixture diagnostic"
+					}
+					prerequisite := fmt.Sprintf("    private_generation_windows_test.go:%d: %s\n", line, message)
+					events[3].Output = prerequisite
+					wantStatus, wantCategory := "INCOMPLETE", "prerequisite_failed"
+					switch mode {
+					case "both-fatals":
+						events[3].Output += behavior
+					case "both-fatals-reversed":
+						events[3].Output = behavior + prerequisite
+					case "duplicate-prerequisite":
+						events[3].Output += prerequisite
+					}
+					if strings.HasPrefix(mode, "both-fatals") || mode == "duplicate-prerequisite" {
+						wantStatus, wantCategory = "FAIL", "wrong_assertion"
+					}
+					p := newPhase(w.mechanism, &w)
+					run := func(context.Context, string, []string, []string, string, string) commandResult {
+						return encodeEvents(events, 1)
+					}
+					runPhase(&p, &w, "", snapshot{}, "", nil, run)
+					if p.Status != wantStatus || p.Category != wantCategory || p.Exit != 1 {
+						t.Fatalf("prerequisite classification: %s / %s", p.Status, p.Category)
+					}
+					for _, item := range p.Inventory {
+						if !item.Run || item.Terminal != "fail" {
+							t.Fatal("prerequisite execution inventory lost")
+						}
+					}
+					data, err := json.Marshal(p)
+					if err != nil || bytes.Contains(data, []byte(message)) {
+						t.Fatal("prerequisite raw diagnostic projected")
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestPrerequisiteFailureReceipt(t *testing.T) {
+	for witnessIndex, w := range witnesses {
+		t.Run(w.test, func(t *testing.T) {
+			f := fixture(t)
+			phaseIndex := []int{1, 3, 4}[witnessIndex]
+			f.goResult = func(n int) commandResult {
+				if n == phaseIndex+1 {
+					events := mutantEvents(w)
+					events[3].Output = fmt.Sprintf("    private_generation_windows_test.go:%d: %s\n", w.prerequisiteLine, w.prerequisite)
+					return encodeEvents(events, 1)
+				}
+				for i, index := range []int{1, 3, 4} {
+					if n == index+1 {
+						return encodeEvents(mutantEvents(witnesses[i]), 1)
+					}
+				}
+				return encodeEvents(controlEvents(nil), 0)
+			}
+			path := filepath.Join(t.TempDir(), "receipt.json")
+			var out bytes.Buffer
+			if runCLI([]string{"--output", path}, &out, "windows", "amd64", nil, f.run) != 1 {
+				t.Fatal("prerequisite failure did not exit nonzero")
+			}
+			data, err := os.ReadFile(path)
+			var r receipt
+			if err != nil || json.Unmarshal(data, &r) != nil || r.Status != "INCOMPLETE" || r.Category != "phase_incomplete" || !r.Cleanup || !r.Preserved || r.NativeAccept || f.goCalls != 6 {
+				t.Fatal("prerequisite receipt or restored execution incomplete")
+			}
+			for i, p := range r.Phases {
+				if i == phaseIndex {
+					if p.Status != "INCOMPLETE" || p.Category != "prerequisite_failed" || p.Exit != 1 || p.Assertion != w.category {
+						t.Fatal("prerequisite receipt classification lost")
+					}
+				} else if p.Status != "PASS" {
+					t.Fatal("prerequisite failure displaced another phase")
+				}
+			}
+			if bytes.Contains(data, []byte(w.prerequisite)) || strings.Contains(out.String(), w.prerequisite) {
+				t.Fatal("prerequisite diagnostic escaped fixed categories")
+			}
+		})
+	}
 }
 
 type proofFixture struct {
@@ -673,6 +773,11 @@ func TestProofRedaction(t *testing.T) {
 func TestGoOverlayExecution(t *testing.T) {
 	// Real portable compiler evidence; this does not execute the Windows adapter.
 	root, scratch := t.TempDir(), t.TempDir()
+	// The go command resolves its working directory, so an overlay key under a
+	// symlinked temporary directory (the macOS default) would never match.
+	if resolved, err := filepath.EvalSymlinks(root); err == nil {
+		root = resolved
+	}
 	source := []byte("package overlayproof\nfunc value() int { return 1 }\n")
 	writeTestFile(t, filepath.Join(root, "go.mod"), []byte("module overlayproof\n\ngo 1.24\n"))
 	writeTestFile(t, filepath.Join(root, "value.go"), source)
@@ -751,4 +856,142 @@ func TestOverlay(t *testing.T) {
 			t.Fatal("portable actual source changed")
 		}
 	}
+}
+
+// These source pins make a failure at a behavioral fatal imply that the
+// fixture prerequisites passed earlier in that same execution, on every host.
+func TestNativeWitnessSourceContract(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "internal", "localcell", "trust", "private_generation_windows_test.go"))
+	if err != nil {
+		t.Fatal("native witness source unavailable")
+	}
+	lf := bytes.ReplaceAll(raw, []byte("\r\n"), []byte("\n"))
+	for _, newline := range []string{"LF", "CRLF"} {
+		t.Run(newline, func(t *testing.T) {
+			source := lf
+			if newline == "CRLF" {
+				source = bytes.ReplaceAll(lf, []byte("\n"), []byte("\r\n"))
+			}
+			fset := token.NewFileSet()
+			file, parseErr := parser.ParseFile(fset, "private_generation_windows_test.go", source, 0)
+			if parseErr != nil {
+				t.Fatal("native witness source does not parse")
+			}
+			for _, w := range witnesses {
+				t.Run(w.test, func(t *testing.T) {
+					guardCondition := "!observed"
+					behaviorCondition := "result != ReasonStateIO || writes != 0"
+					writeExpression := `g.write(ctx, "blocked", 1, bytes.NewReader([]byte{1}))`
+					prerequisiteText := "native fixture prerequisite failed: mismatch observation"
+					if w.mechanism == "M1" {
+						guardCondition = "!changed || !observed"
+						behaviorCondition += " || g.completed"
+						writeExpression = `g.write(ctx, "blocked.bin", 1, bytes.NewReader([]byte{1}))`
+						prerequisiteText = "native fixture prerequisite failed: initial privacy observation"
+					}
+					matches := 0
+					ast.Inspect(file, func(node ast.Node) bool {
+						block, ok := node.(*ast.BlockStmt)
+						if !ok {
+							return true
+						}
+						for i, statement := range block.List {
+							behavior, ok := statement.(*ast.IfStmt)
+							if !ok {
+								continue
+							}
+							fatal, text, ok := sourceContractFatal(behavior)
+							if !ok || text != w.assertion {
+								continue
+							}
+							matches++
+							if fset.Position(fatal.Pos()).Line != w.line {
+								t.Fatal("behavioral fatal line does not match tool pin")
+							}
+							if sourceContractText(t, fset, behavior.Cond) != behaviorCondition || sourceContractReferences(behavior.Cond, "changed", "observed") {
+								t.Fatal("behavioral condition includes prerequisites or drifted")
+							}
+							if i < 2 {
+								t.Fatal("behavioral assertion lacks preceding prerequisite and write")
+							}
+							guard, ok := block.List[i-1].(*ast.IfStmt)
+							if !ok {
+								t.Fatal("prerequisite guard is not immediately before behavioral assertion")
+							}
+							guardFatal, guardText, ok := sourceContractFatal(guard)
+							if !ok || guardText != prerequisiteText || guardText != w.prerequisite || fset.Position(guardFatal.Pos()).Line != w.prerequisiteLine {
+								t.Fatal("prerequisite fatal does not match source and tool pins")
+							}
+							assignment, ok := block.List[i-2].(*ast.AssignStmt)
+							if !ok || assignment.Tok != token.DEFINE || len(assignment.Lhs) != 1 || len(assignment.Rhs) != 1 {
+								t.Fatal("write result is not captured immediately before guard")
+							}
+							result, ok := assignment.Lhs[0].(*ast.Ident)
+							if !ok || result.Name != "result" || sourceContractText(t, fset, assignment.Rhs[0]) != writeExpression {
+								t.Fatal("captured write result drifted")
+							}
+							if sourceContractText(t, fset, guard.Cond) != guardCondition || sourceContractReferences(guard.Cond, "writes", "completed", result.Name) {
+								t.Fatal("prerequisite guard includes behavior or drifted")
+							}
+						}
+						return true
+					})
+					if matches != 1 {
+						t.Fatal("behavioral fatal is missing, duplicated, or structurally changed")
+					}
+				})
+			}
+		})
+	}
+}
+
+func sourceContractFatal(statement *ast.IfStmt) (*ast.CallExpr, string, bool) {
+	if statement.Init != nil || statement.Else != nil || len(statement.Body.List) != 1 {
+		return nil, "", false
+	}
+	expression, ok := statement.Body.List[0].(*ast.ExprStmt)
+	if !ok {
+		return nil, "", false
+	}
+	call, ok := expression.X.(*ast.CallExpr)
+	if !ok || len(call.Args) != 1 || call.Ellipsis.IsValid() {
+		return nil, "", false
+	}
+	selector, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || selector.Sel.Name != "Fatal" {
+		return nil, "", false
+	}
+	receiver, ok := selector.X.(*ast.Ident)
+	if !ok || receiver.Name != "t" {
+		return nil, "", false
+	}
+	literal, ok := call.Args[0].(*ast.BasicLit)
+	if !ok || literal.Kind != token.STRING {
+		return nil, "", false
+	}
+	text, err := strconv.Unquote(literal.Value)
+	return call, text, err == nil
+}
+
+func sourceContractText(t *testing.T, fset *token.FileSet, node ast.Node) string {
+	t.Helper()
+	var output bytes.Buffer
+	if format.Node(&output, fset, node) != nil {
+		t.Fatal("source contract expression could not be formatted")
+	}
+	return output.String()
+}
+
+func sourceContractReferences(node ast.Node, names ...string) bool {
+	found := false
+	ast.Inspect(node, func(node ast.Node) bool {
+		identifier, ok := node.(*ast.Ident)
+		if ok {
+			for _, name := range names {
+				found = found || identifier.Name == name
+			}
+		}
+		return true
+	})
+	return found
 }
