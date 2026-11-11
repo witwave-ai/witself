@@ -15,7 +15,8 @@ const maintenanceFenceMaxBytes = 4096
 // update record. Install, Start, Repair, and Remove check it under their
 // operation lock. PrepareService checks new publication, and reconcileServiceBoot
 // checks boot publication and stale-record cleanup under their existing locks.
-// Other service entry points do not yet enforce maintenance admission.
+// ServiceHealth admits provisioning under that lock as well. The service host
+// also observes the fence to defer scheduling; that read authorizes no effect.
 type maintenanceFence struct {
 	Generation  int       `json:"generation"`
 	OperationID string    `json:"operation_id"`

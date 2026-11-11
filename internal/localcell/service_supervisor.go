@@ -91,6 +91,12 @@ type supervisor struct {
 	exitDrainResult      error
 	shutdownBlocked      bool
 	shutdownFaultPending bool
+	maintenanceHeld      bool
+	maintenanceDisplay   bool
+	maintenanceBusy      bool
+	pendingStartup       serviceStartupPhase
+	startupFaulted       bool
+	completingStop       bool
 }
 
 // Run hosts exactly one owned tree. The lifetime lease is distinct from the
@@ -164,19 +170,15 @@ func (c *Cell) Run(ctx context.Context, policy SupervisorPolicy) (result error) 
 		// the lifetime lease and the same bounded, signal-independent context.
 		repairErr := retryServiceContention(stopCtx, s.hooks.repair)
 		stopErr := retryServiceContention(stopCtx, s.hooks.stop)
+		if serviceMaintenanceOnly(repairErr) {
+			repairErr = nil
+		}
 		result = errors.Join(result, serviceFailureAt(repairErr, "shutdown_repair"), serviceFailureAt(stopErr, "shutdown_stop"))
 	}()
 	s.phase = "startup"
-	if err := retryServiceContention(ctx, func(ctx context.Context) error {
-		return s.call(ctx, "reconcile", func(context.Context) error { return s.hooks.reconcile() })
-	}); err != nil {
-		return serviceFailureAt(err, "startup_reconcile")
-	}
-	if err := retryServiceContention(ctx, func(ctx context.Context) error { return s.call(ctx, "repair", s.hooks.repair) }); err != nil {
-		return serviceFailureAt(err, "startup_repair")
-	}
-	if err := retryServiceContention(ctx, func(ctx context.Context) error { return s.call(ctx, "stop", s.hooks.stop) }); err != nil {
-		return serviceFailureAt(err, "startup_stop")
+	s.pendingStartup = serviceStartupReconcile
+	if err := retryServiceContention(ctx, s.resumeServiceStartup); err != nil {
+		return err
 	}
 	var ticker *time.Ticker
 	ticks := s.hooks.ticks
@@ -301,6 +303,7 @@ func (s *supervisor) load(d ServiceDescriptor) (result error) {
 	}
 	s.record.Version = 1
 	s.status = ServiceStatus{DesiredState: d.DesiredState, State: d.DesiredState, Generation: d.Payload.Generation, LastStepOutcome: "not_run"}
+	s.startupFaulted = d.Faulted || len(s.record.Failures) >= 5
 	s.rememberProcesses(d)
 	return nil
 }
@@ -316,6 +319,25 @@ func (s *supervisor) tick(ctx context.Context) error {
 		return err
 	}
 	s.phase = "tick"
+	if s.pendingStartup != serviceStartupNone {
+		held, err := s.observeServiceMaintenance(ctx)
+		if errors.Is(err, ErrLocked) {
+			s.maintenanceDisplay = false
+			return s.busy()
+		}
+		if err != nil {
+			return err
+		}
+		if !held || s.pendingStartup == serviceStartupStop {
+			if err := s.resumeServiceStartup(ctx); err != nil {
+				if errors.Is(err, ErrLocked) {
+					s.maintenanceDisplay = false
+					return s.busy()
+				}
+				return err
+			}
+		}
+	}
 	err := s.step(ctx)
 	if ctx.Err() == nil {
 		s.phase, s.operation = "idle", "none"
@@ -368,9 +390,15 @@ func (s *supervisor) call(ctx context.Context, operation string, hook func(conte
 
 func (s *supervisor) step(ctx context.Context) (result error) {
 	previousStatus := s.status
+	previousHeld, previousDisplay := s.maintenanceHeld, s.maintenanceDisplay
+	previousBusy := s.maintenanceBusy
+	s.maintenanceDisplay = false
+	s.maintenanceBusy = false
 	defer func() {
 		if cancellation := serviceControlCancellation(ctx); cancellation != nil {
 			s.status = previousStatus
+			s.maintenanceHeld, s.maintenanceDisplay = previousHeld, previousDisplay
+			s.maintenanceBusy = previousBusy
 			var located *serviceFailure
 			if !errors.As(result, &located) || located.site != "control_cancelled" || !errors.Is(result, ctx.Err()) {
 				result = cancellation
@@ -380,6 +408,10 @@ func (s *supervisor) step(ctx context.Context) (result error) {
 		s.status.LastStepOutcome = "ok"
 		if result != nil {
 			s.status.LastStepOutcome, s.status.Healthy = "failed", false
+			s.maintenanceDisplay = false
+		}
+		if s.maintenanceDisplay {
+			s.status.HostExit = previousStatus.HostExit
 		}
 	}()
 	d, err := s.cell.ServiceDescriptor()
@@ -390,7 +422,18 @@ func (s *supervisor) step(ctx context.Context) (result error) {
 		return serviceFailureAt(err, "supervisor_traversal")
 	}
 	defer s.rememberProcesses(d)
-	if s.record.RepairRevision != d.RepairRevision {
+	held := false
+	if !s.completingStop {
+		held, err = s.observeServiceMaintenance(ctx)
+		if errors.Is(err, ErrLocked) {
+			return s.busy()
+		}
+		if err != nil {
+			return serviceFailureAt(err, "supervisor_traversal")
+		}
+	}
+	frozen := held || s.pendingStartup != serviceStartupNone
+	if !frozen && s.record.RepairRevision != d.RepairRevision {
 		s.record = supervisorRecord{Version: 1, RepairRevision: d.RepairRevision}
 		if err := s.save(); err != nil {
 			return err
@@ -402,13 +445,20 @@ func (s *supervisor) step(ctx context.Context) (result error) {
 	if cancellation := serviceControlCancellation(ctx); cancellation != nil {
 		return cancellation
 	}
-	if s.record.NextStart.After(latest) {
+	if !frozen && s.record.NextStart.After(latest) {
 		s.record.NextStart = latest
 		if err := s.save(); err != nil {
 			return err
 		}
 	}
 	s.status = ServiceStatus{DesiredState: d.DesiredState, State: d.DesiredState, Restarts: max(0, s.record.Attempts-1), Generation: d.Payload.Generation}
+	if held {
+		defer func() {
+			if result == nil && s.status.State != "busy" && !s.maintenanceBusy {
+				_ = s.holdMaintenance()
+			}
+		}()
+	}
 	if s.blockedServiceShutdown(ctx) {
 		return nil
 	}
@@ -433,7 +483,16 @@ func (s *supervisor) step(ctx context.Context) (result error) {
 			}
 			s.running = false
 		}
+		if !held && !s.completingStop && s.pendingStartup != serviceStartupNone {
+			return s.busy()
+		}
 		return nil
+	}
+	if held {
+		return s.holdMaintenance()
+	}
+	if s.pendingStartup != serviceStartupNone {
+		return s.busy()
 	}
 	if s.running {
 		if err := s.call(ctx, "health", s.hooks.health); err == nil {
@@ -443,6 +502,8 @@ func (s *supervisor) step(ctx context.Context) (result error) {
 			return s.busy()
 		} else if serviceControlCancellation(ctx) != nil {
 			return err
+		} else if errors.Is(err, errMaintenanceFenceActive) {
+			return s.holdMaintenance()
 		}
 		if err := s.call(ctx, "stop", s.hooks.stop); err != nil {
 			if serviceControlCancellation(ctx) != nil {
@@ -454,7 +515,7 @@ func (s *supervisor) step(ctx context.Context) (result error) {
 			return s.fault(ctx, "service_stop_refused")
 		}
 		s.running = false
-		return s.failed(ctx)
+		return s.failAfterMaintenanceObservation(ctx)
 	}
 	now := s.hooks.now()
 	if cancellation := serviceControlCancellation(ctx); cancellation != nil {
@@ -464,6 +525,8 @@ func (s *supervisor) step(ctx context.Context) (result error) {
 		s.status.State = "backoff"
 		return nil
 	}
+	previousRecord := s.record
+	previousRecord.Failures = slices.Clone(s.record.Failures)
 	s.record.Attempts++
 	if err := s.save(); err != nil {
 		return err
@@ -482,6 +545,15 @@ func (s *supervisor) step(ctx context.Context) (result error) {
 		if ctx.Err() != nil {
 			return nil
 		}
+		if errors.Is(err, errMaintenanceFenceActive) {
+			// Completed-call compensation only. A crash before this save can
+			// retain the provisional attempt, but never adds a failure.
+			s.record = previousRecord
+			if err := s.save(); err != nil {
+				return err
+			}
+			return s.holdMaintenance()
+		}
 		if err := s.call(ctx, "stop", s.hooks.stop); err != nil {
 			if errors.Is(err, ErrLocked) {
 				s.running = true
@@ -489,11 +561,15 @@ func (s *supervisor) step(ctx context.Context) (result error) {
 			}
 			return s.fault(ctx, "service_stop_refused")
 		}
-		return s.failed(ctx)
+		return s.failAfterMaintenanceObservation(ctx)
 	}
 	if err := s.call(ctx, "health", s.hooks.health); err != nil {
 		if serviceControlCancellation(ctx) != nil {
 			return err
+		}
+		if errors.Is(err, errMaintenanceFenceActive) {
+			s.running = true
+			return s.holdMaintenance()
 		}
 		if errors.Is(err, ErrLocked) {
 			s.running = true
@@ -506,7 +582,7 @@ func (s *supervisor) step(ctx context.Context) (result error) {
 			}
 			return s.fault(ctx, "service_stop_refused")
 		}
-		return s.failed(ctx)
+		return s.failAfterMaintenanceObservation(ctx)
 	}
 	s.running, s.status.Healthy = true, true
 	s.status.State, s.status.Restarts = "running", max(0, s.record.Attempts-1)
@@ -567,6 +643,10 @@ func supervisorBackoff(failures int, initial, ceiling time.Duration) time.Durati
 }
 
 func (s *supervisor) busy() error {
+	if s.status.State == "faulted" && (s.maintenanceHeld || s.pendingStartup != serviceStartupNone) {
+		s.maintenanceBusy = true
+		return nil
+	}
 	s.status.State, s.status.Reason, s.status.Healthy = "busy", "service_operation_in_progress", false
 	return nil
 }
@@ -594,7 +674,7 @@ func (s *supervisor) command(ctx context.Context, action string) (ServiceStatus,
 	}
 	ctx = context.WithValue(ctx, serviceControlCommandKey{}, true)
 	if err := serviceControlCancellation(ctx); err != nil {
-		return s.status, err
+		return s.projectedStatus(), err
 	}
 	if s.shutdownBlocked && (action == "stop" || action == "start" || action == "exit-host") {
 		return s.status, hostExitRefused("drain")
@@ -606,9 +686,7 @@ func (s *supervisor) command(ctx context.Context, action string) (ServiceStatus,
 	case "observe":
 		// Return the last completed supervisor snapshot, including its health
 		// result. Periodic supervision alone refreshes this observational view.
-		status := s.status
-		status.Processes = slices.Clone(s.status.Processes)
-		return status, nil
+		return s.projectedStatus(), nil
 	case "status", "health":
 		err = s.step(ctx)
 	case "stop":
@@ -620,7 +698,9 @@ func (s *supervisor) command(ctx context.Context, action string) (ServiceStatus,
 			}
 		}
 		if err == nil {
+			s.completingStop = true
 			err = s.step(ctx)
+			s.completingStop = false
 		}
 	case "start":
 		d, readErr := s.cell.ServiceDescriptor()
@@ -631,10 +711,28 @@ func (s *supervisor) command(ctx context.Context, action string) (ServiceStatus,
 		} else {
 			err = s.cell.SetServiceDesiredState(ctx, "running")
 			if err == nil {
-				err = s.step(ctx)
+				if s.pendingStartup != serviceStartupNone {
+					err = errServiceControlDeferred
+				} else {
+					err = s.step(ctx)
+				}
 			}
 		}
 	case "repair":
+		if s.pendingStartup != serviceStartupNone {
+			err = s.cell.SetServiceDesiredState(ctx, "stopped")
+			if err == nil {
+				var held bool
+				held, err = s.observeServiceMaintenance(ctx)
+				if err == nil {
+					err = errServiceControlDeferred
+					if held {
+						err = errMaintenanceFenceActive
+					}
+				}
+			}
+			break
+		}
 		err = s.cell.RepairService(ctx)
 		if err == nil {
 			s.shutdownBlocked, s.shutdownFaultPending = false, false
@@ -644,13 +742,14 @@ func (s *supervisor) command(ctx context.Context, action string) (ServiceStatus,
 	default:
 		err = ErrServiceControlRefused
 	}
-	if action == "health" && err == nil && !s.status.Healthy {
-		if s.status.State == "busy" {
+	status := s.projectedStatus()
+	if action == "health" && err == nil && !status.Healthy {
+		if status.State == "busy" {
 			// Contention prevented a decision; it is not a child failure.
 			err = errServiceControlDeferred
 		} else {
 			err = errServiceUnhealthy
 		}
 	}
-	return s.status, serviceFailureFallback(err, "supervisor_command")
+	return status, serviceFailureFallback(err, "supervisor_command")
 }

@@ -203,13 +203,6 @@ func TestServiceFailureSiteSourceContract(t *testing.T) {
 	if err != nil {
 		return serviceFailureFallback(err, "control_transport")`,
 			`result = errors.Join(result, serviceFailureAt(repairErr, "shutdown_repair"), serviceFailureAt(stopErr, "shutdown_stop"))`,
-			`return s.call(ctx, "reconcile", func(context.Context) error { return s.hooks.reconcile() })
-	}); err != nil {
-		return serviceFailureAt(err, "startup_reconcile")`,
-			`return s.call(ctx, "repair", s.hooks.repair) }); err != nil {
-		return serviceFailureAt(err, "startup_repair")`,
-			`return s.call(ctx, "stop", s.hooks.stop) }); err != nil {
-		return serviceFailureAt(err, "startup_stop")`,
 			`func (s *supervisor) load(d ServiceDescriptor) (result error) {
 	defer func() { result = serviceFailureFallback(result, "supervisor_load") }()`,
 			`return serviceFailureAt(writeAtomic(s.cell.path("service", "supervisor.json"), s.record, nil), "supervisor_save")`,
@@ -256,11 +249,32 @@ func TestServiceFailureSiteSourceContract(t *testing.T) {
 	}
 	if err != nil {
 		return serviceFailureAt(err, "supervisor_traversal")`,
-			`return s.status, serviceFailureFallback(err, "supervisor_command")`,
+			`return status, serviceFailureFallback(err, "supervisor_command")`,
+			`held, err = s.observeServiceMaintenance(ctx)
+		if errors.Is(err, ErrLocked) {
+			return s.busy()
+		}
+		if err != nil {
+			return serviceFailureAt(err, "supervisor_traversal")
+		}`,
 			`status, err := s.command(commandCtx, command.action)
 			cancel()
 			WriteServiceHostFailure(os.Stderr, err, "supervisor_command")
 			command.reply <- serviceReply{status: status, err: err}`,
+		},
+		"service_maintenance.go": {
+			`if err := s.call(ctx, "reconcile", func(context.Context) error { return s.hooks.reconcile() }); err != nil {
+			if ctx.Err() == nil && errors.Is(err, errMaintenanceFenceActive) {
+				return s.holdMaintenance()
+			}
+			return serviceFailureAt(err, "startup_reconcile")`,
+			`if err := s.call(ctx, "repair", s.hooks.repair); err != nil {
+			if ctx.Err() == nil && errors.Is(err, errMaintenanceFenceActive) {
+				return s.holdMaintenance()
+			}
+			return serviceFailureAt(err, "startup_repair")`,
+			`if err := s.call(ctx, "stop", s.hooks.stop); err != nil {
+			return serviceFailureAt(err, "startup_stop")`,
 		},
 		"service_control.go": {`func (c *Cell) readServiceControlSecret() (secretBytes []byte, result error) {
 	defer func() { result = serviceFailureAt(result, "control_secret") }()`,
@@ -391,7 +405,7 @@ func TestServiceFailureSiteSourceContract(t *testing.T) {
 			return true
 		})
 	}
-	want := []string{"lease_directory", "lease_record", "lease_write", "initial_descriptor", "control_transport", "shutdown_repair", "shutdown_stop", "startup_reconcile", "startup_repair", "startup_stop", "supervisor_load", "supervisor_save", "supervisor_traversal", "supervisor_command", "control_secret", "control_cancelled", "endpoint_read", "endpoint_write", "endpoint_write", "endpoint_remove", "endpoint_descriptor", "endpoint_descriptor", "endpoint_lease", "endpoint_lease", "endpoint_read", "endpoint_read", "endpoint_descriptor", "boot_binding", "descriptor_write"}
+	want := []string{"lease_directory", "lease_record", "lease_write", "initial_descriptor", "control_transport", "shutdown_repair", "shutdown_stop", "startup_reconcile", "startup_repair", "startup_stop", "supervisor_load", "supervisor_save", "supervisor_traversal", "supervisor_traversal", "supervisor_command", "control_secret", "control_cancelled", "endpoint_read", "endpoint_write", "endpoint_write", "endpoint_remove", "endpoint_descriptor", "endpoint_descriptor", "endpoint_lease", "endpoint_lease", "endpoint_read", "endpoint_read", "endpoint_descriptor", "boot_binding", "descriptor_write"}
 	sort.Strings(attached)
 	sort.Strings(want)
 	if !reflect.DeepEqual(attached, want) {
@@ -403,7 +417,7 @@ func TestServiceFailureSiteSourceContract(t *testing.T) {
 // new raw filesystem/lifecycle return cannot pass merely because its function
 // still contains the old reviewed wrapper somewhere else.
 func TestServiceFailureSiteProducerInventory(t *testing.T) {
-	producers := strings.Fields(`privateDir servicePrivateRecord openPrivateFile readPrivateFile readJSON readManifest writeAtomic writeAtomicBytes removePrivateFile validateRoot validatePrivate validatePrivateTree validateRootPath openLockFile serviceControlSecret ServiceDescriptor PrepareService New readServiceControlSecret readServiceControlEndpointRecord readServiceControlEndpointWithBoot readServiceControlEndpoint publishServiceControlEndpoint publishServiceControlEndpointWithBoot removeOwnedServiceControlEndpoint refreshOwnedServiceControlEndpoint removeServiceControlEndpoint listenServiceControl dialServiceControl serveServiceControl serveServiceControlForPlatform Control Run load save tick step call command Repair Stop Start SetServiceDesiredState RepairService setServiceFaulted bindServiceProcessBoot bindServiceProcessBootWithReader reconcileServiceBoot reconcileServiceBootWithReader reconcileOldBoot writeServiceDescriptor own newSupervisor acquireLease acquireServiceLease acquireServiceLeaseWithBoot stopServiceChildren ServiceHealth hook operation retryServiceContention publishServiceLease`)
+	producers := strings.Fields(`privateDir servicePrivateRecord openPrivateFile readPrivateFile readJSON readManifest writeAtomic writeAtomicBytes removePrivateFile validateRoot validatePrivate validatePrivateTree validateRootPath openLockFile serviceControlSecret ServiceDescriptor PrepareService New readServiceControlSecret readServiceControlEndpointRecord readServiceControlEndpointWithBoot readServiceControlEndpoint publishServiceControlEndpoint publishServiceControlEndpointWithBoot removeOwnedServiceControlEndpoint refreshOwnedServiceControlEndpoint removeServiceControlEndpoint listenServiceControl dialServiceControl serveServiceControl serveServiceControlForPlatform Control Run load save tick step call command Repair Stop Start SetServiceDesiredState RepairService setServiceFaulted bindServiceProcessBoot bindServiceProcessBootWithReader reconcileServiceBoot reconcileServiceBootWithReader reconcileOldBoot writeServiceDescriptor own newSupervisor acquireLease acquireServiceLease acquireServiceLeaseWithBoot stopServiceChildren ServiceHealth hook operation retryServiceContention publishServiceLease serviceMaintenanceObservation observeServiceMaintenance resumeServiceStartup failAfterMaintenanceObservation projectedStatus holdMaintenance serviceMaintenanceOnly`)
 	selected := make(map[string]bool)
 	for _, producer := range producers {
 		selected[producer] = true
@@ -418,17 +432,23 @@ func TestServiceFailureSiteProducerInventory(t *testing.T) {
 			"acquireServiceLeaseWithBoot": "openLockFile privateDir publishServiceLease servicePrivateRecord",
 		},
 		"service_supervisor.go": {
-			"Run":                    "ServiceDescriptor acquireLease acquireServiceLeaseWithBoot call call call command load newSupervisor retryServiceContention retryServiceContention retryServiceContention retryServiceContention retryServiceContention serveServiceControl tick tick",
+			"Run":                    "ServiceDescriptor acquireLease acquireServiceLeaseWithBoot command load newSupervisor retryServiceContention retryServiceContention retryServiceContention serveServiceControl serviceMaintenanceOnly tick tick",
 			"call":                   "hook",
-			"command":                "RepairService ServiceDescriptor SetServiceDesiredState SetServiceDesiredState call step step step step",
+			"command":                "RepairService ServiceDescriptor SetServiceDesiredState SetServiceDesiredState SetServiceDesiredState call observeServiceMaintenance projectedStatus projectedStatus projectedStatus step step step step",
 			"failed":                 "save",
 			"fault":                  "setServiceFaulted",
 			"load":                   "readJSON servicePrivateRecord",
 			"rememberProcesses":      "readJSON readJSON",
 			"retryServiceContention": "operation",
 			"save":                   "writeAtomic",
-			"step":                   "ServiceDescriptor call call call call call call call save save save save",
-			"tick":                   "step",
+			"step":                   "ServiceDescriptor call call call call call call call failAfterMaintenanceObservation failAfterMaintenanceObservation failAfterMaintenanceObservation holdMaintenance holdMaintenance holdMaintenance holdMaintenance holdMaintenance observeServiceMaintenance save save save save save",
+			"tick":                   "observeServiceMaintenance resumeServiceStartup step",
+		},
+		"service_maintenance.go": {
+			"serviceMaintenanceObservation":   "ServiceDescriptor own",
+			"observeServiceMaintenance":       "serviceMaintenanceObservation",
+			"resumeServiceStartup":            "call call call holdMaintenance holdMaintenance",
+			"failAfterMaintenanceObservation": "holdMaintenance observeServiceMaintenance",
 		},
 		"service_control.go": {
 			"Control":                        "dialServiceControl readServiceControlSecret",
