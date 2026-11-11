@@ -122,6 +122,11 @@ func serviceMaintenanceFence(t *testing.T, c *Cell, kind string) {
 		if testWriteFile(path, []byte(`{"generation":1,"operation_id":"fixture","since":"2026-11-10T00:00:00Z","foreign":"retained"}`), 0o600) != nil {
 			t.Fatal("cannot plant foreign maintenance evidence")
 		}
+	case "Oversized":
+		data := []byte(`{"generation":1,"operation_id":"fixture","since":"2026-11-10T00:00:00Z"}` + strings.Repeat(" ", (1<<20)+1) + "x")
+		if testWriteFile(path, data, 0o600) != nil {
+			t.Fatal("cannot plant oversized maintenance evidence")
+		}
 	case "Directory":
 		if testMkdir(path, 0o700) != nil {
 			t.Fatal("cannot plant directory maintenance evidence")
@@ -241,7 +246,7 @@ func serviceMaintenanceReleased(t *testing.T, c *Cell) {
 }
 
 func TestServiceMaintenancePreparationAdmission(t *testing.T) {
-	kinds := []string{"Absent", "Valid", "Corrupt", "Foreign", "Directory"}
+	kinds := []string{"Absent", "Valid", "Corrupt", "Foreign", "Directory", "Oversized"}
 	// POSIX mode and symlink fixtures are not Windows ACL/reparse fixtures.
 	if runtime.GOOS != "windows" {
 		kinds = append(kinds, "UnsafeMode", "Symlink")
@@ -337,7 +342,7 @@ func TestServiceMaintenancePreparationAdmission(t *testing.T) {
 
 func TestServiceMaintenanceBootAdmission(t *testing.T) {
 	for _, bootKind := range []string{"first", "same", "old"} {
-		for _, fence := range []string{"Absent", "Valid", "Corrupt", "Foreign"} {
+		for _, fence := range []string{"Absent", "Valid", "Corrupt", "Foreign", "Oversized"} {
 			t.Run(bootKind+"/"+fence, func(t *testing.T) {
 				c, d, boot := serviceMaintenanceBootFixture(t, bootKind)
 				serviceMaintenanceFence(t, c, fence)

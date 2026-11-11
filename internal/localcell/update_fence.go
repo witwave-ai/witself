@@ -1,10 +1,15 @@
 package localcell
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"time"
 )
+
+const maintenanceFenceMaxBytes = 4096
 
 // maintenanceFence is separate from desired service state and the derived
 // update record. Install, Start, Repair, and Remove check it under their
@@ -22,7 +27,36 @@ func (f maintenanceFence) valid() bool {
 }
 
 func (c *Cell) readMaintenanceFence() (*maintenanceFence, error) {
-	return c.readMaintenanceFenceWith(readJSON)
+	return c.readMaintenanceFenceWith(readMaintenanceFenceJSON)
+}
+
+func readMaintenanceFenceJSON(path string, dst any) error {
+	f, err := openPrivateFile(path, os.O_RDONLY, 0)
+	if err != nil {
+		return errors.New("cannot open local cell record")
+	}
+	defer func() { _ = f.Close() }()
+	return decodeMaintenanceFence(f, dst)
+}
+
+func decodeMaintenanceFence(r io.Reader, dst any) error {
+	// Read one extra byte so a valid prefix cannot hide an oversized fence.
+	data, err := io.ReadAll(io.LimitReader(r, maintenanceFenceMaxBytes+1))
+	if err != nil {
+		return errors.New("cannot read local cell record")
+	}
+	if len(data) > maintenanceFenceMaxBytes {
+		return errors.New("local cell record exceeds size limit")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(dst); err != nil {
+		return errors.New("invalid local cell record")
+	}
+	if decoder.Decode(new(any)) != io.EOF {
+		return errors.New("invalid trailing local cell record")
+	}
+	return nil
 }
 
 // readMaintenanceFenceWith separates absent, validated present, and refused
