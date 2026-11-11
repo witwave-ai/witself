@@ -29,6 +29,7 @@ type sealTestOps struct {
 	seen          map[string]int
 	before        func(string)
 	observeHook   func(string, int, *privateGenerationSealObservation)
+	parentHook    func() error
 	inventoryHook func(int, []privateGenerationSealEntry) []privateGenerationSealEntry
 	fail          string
 	failAt        int
@@ -74,7 +75,15 @@ func (o *sealTestOps) event(stage string) error {
 	return nil
 }
 
-func (o *sealTestOps) checkParent() error { return o.event("parent") }
+func (o *sealTestOps) checkParent() error {
+	if err := o.event("parent"); err != nil {
+		return err
+	}
+	if o.parentHook != nil {
+		return o.parentHook()
+	}
+	return nil
+}
 
 func (o *sealTestOps) openRecovery() (privateGenerationSealHandle, []byte, error) {
 	h := &sealTestHandle{ops: o, object: o.objects[0], recovery: true}
@@ -261,12 +270,18 @@ func TestPrivateGenerationSealPolicy(t *testing.T) {
 		{"exact-root-read-execute", func(*privateRecordPolicy) {}, true},
 		{"reversed-order", func(p *privateRecordPolicy) { p.aces[0], p.aces[1] = p.aces[1], p.aces[0] }, true},
 		{"user-is-System", func(p *privateRecordPolicy) { p.userIsSystem = true; p.aces = p.aces[:1] }, true},
+		{"user-is-System-no-entries", func(p *privateRecordPolicy) { p.userIsSystem = true; p.aces = nil }, false},
 		{"user-is-System-two-entries", func(p *privateRecordPolicy) { p.userIsSystem = true }, false},
+		{"user-is-System-three-entries", func(p *privateRecordPolicy) { p.userIsSystem = true; p.aces = append(p.aces, p.aces[0]) }, false},
+		{"user-is-System-four-entries", func(p *privateRecordPolicy) { p.userIsSystem = true; p.aces = append(p.aces, p.aces...) }, false},
+		{"user-is-System-System-classified", func(p *privateRecordPolicy) { p.userIsSystem = true; p.aces = p.aces[1:] }, false},
 		{"root-full-access", func(p *privateRecordPolicy) { p.aces[0].rights = 0x1f01ff; p.aces[1].rights = 0x1f01ff }, false},
 		{"extra-root-write", func(p *privateRecordPolicy) { p.aces[0].rights |= 0x0002 }, false},
 		{"extra-system-write", func(p *privateRecordPolicy) { p.aces[1].rights |= 0x0002 }, false},
 		{"more-restrictive-mask", func(p *privateRecordPolicy) { p.aces[0].rights &^= 0x0020 }, false},
+		{"system-missing-rights", func(p *privateRecordPolicy) { p.aces[1].rights &^= 0x0020 }, false},
 		{"generic-mask", func(p *privateRecordPolicy) { p.aces[0].rights = 0xa0000000 }, false},
+		{"system-generic-mask", func(p *privateRecordPolicy) { p.aces[1].rights = 0xa0000000 }, false},
 		{"wrong-owner", func(p *privateRecordPolicy) { p.ownerUser = false }, false},
 		{"invalid-descriptor", func(p *privateRecordPolicy) { p.valid = false }, false},
 		{"null-dacl", func(p *privateRecordPolicy) { p.daclPresent = false }, false},
@@ -275,16 +290,21 @@ func TestPrivateGenerationSealPolicy(t *testing.T) {
 		{"missing-user", func(p *privateRecordPolicy) { p.aces = p.aces[1:] }, false},
 		{"missing-System", func(p *privateRecordPolicy) { p.aces = p.aces[:1] }, false},
 		{"duplicate-user", func(p *privateRecordPolicy) { p.aces[1] = p.aces[0] }, false},
+		{"duplicate-System", func(p *privateRecordPolicy) { p.aces[0] = p.aces[1] }, false},
 		{"extra-entry", func(p *privateRecordPolicy) { p.aces = append(p.aces, p.aces[0]) }, false},
 		{"unknown-trustee", func(p *privateRecordPolicy) { p.aces[1].principal = recordUnknown }, false},
+		{"unknown-user-trustee", func(p *privateRecordPolicy) { p.aces[0].principal = recordUnknown }, false},
 		{"inherited", func(p *privateRecordPolicy) { p.aces[0].flags = 0x10 }, false},
 		{"inherit-only", func(p *privateRecordPolicy) { p.aces[0].flags = 0x08 }, false},
 		{"inheritance-flags", func(p *privateRecordPolicy) { p.aces[0].flags = 0x03 }, false},
 		{"deny-ace", func(p *privateRecordPolicy) { p.aces[0].kind = 1 }, false},
 		{"unknown-ace", func(p *privateRecordPolicy) { p.aces[0].kind = 0xff }, false},
+		{"system-wrong-kind", func(p *privateRecordPolicy) { p.aces[1].kind = 1 }, false},
+		{"system-nonzero-flags", func(p *privateRecordPolicy) { p.aces[1].flags = 0x10 }, false},
 		{"reparse", func(p *privateRecordPolicy) { p.reparse = true }, false},
 		{"ancestor-reparse", func(p *privateRecordPolicy) { p.ancestorReparse = true }, false},
 		{"wrong-type", func(p *privateRecordPolicy) { p.directory = false }, false},
+		{"want-directory-false", func(p *privateRecordPolicy) { p.wantDirectory = false }, false},
 		{"wrong-identity", func(p *privateRecordPolicy) { p.observedIdentity[2]++ }, false},
 	}
 	for _, tc := range cases {
@@ -497,6 +517,221 @@ func TestPrivateGenerationSealProtocol(t *testing.T) {
 	})
 }
 
+func TestPrivateGenerationSealFailedSessionIsTerminal(t *testing.T) {
+	ctx := context.Background()
+	for _, operation := range []string{"verify", "read"} {
+		t.Run(operation, func(t *testing.T) {
+			_, _, _, snapshot, o := sealTestFixture(t)
+			s, err := sealPrivateGeneration(ctx, snapshot, o)
+			if err != nil {
+				t.Fatal("seal prerequisite failed")
+			}
+			if operation == "verify" {
+				o.fail, o.failAt = "observe:verify:", o.seen["observe:verify:"]+1
+				err = s.verify(ctx)
+			} else {
+				// The full-tree read succeeds; fail the requested byte delivery.
+				o.fail, o.failAt = "read:data", o.seen["read:data"]+2
+				var data []byte
+				data, err = s.read(ctx, "data")
+				if data != nil {
+					t.Fatal("failed read returned bytes")
+				}
+			}
+			if err != ReasonStateIO || s.result != err || o.seen[o.fail] != o.failAt {
+				t.Fatal("targeted I/O failure did not become the stored outcome")
+			}
+			o.fail = ""
+			before := len(o.events)
+			for range 2 {
+				if s.verify(ctx) != err || len(o.events) != before {
+					t.Fatal("verify after failure changed outcome or performed a backend operation")
+				}
+				if data, later := s.read(ctx, "data"); later != err || data != nil || len(o.events) != before {
+					t.Fatal("read after failure changed outcome or performed a backend operation")
+				}
+				if s.close() != err || len(o.events) != before {
+					t.Fatal("close after failure changed outcome or performed a backend operation")
+				}
+			}
+			sealTestClosed(t, o, false)
+		})
+	}
+}
+
+func TestPrivateGenerationSealSessionOwnsSnapshot(t *testing.T) {
+	ctx := context.Background()
+	for _, field := range []string{"nodes", "parent-identities"} {
+		t.Run(field, func(t *testing.T) {
+			_, _, _, snapshot, o := sealTestFixture(t)
+			guards := [][3]uint64{{11, 0, 1}, {11, 0, 2}}
+			snapshot.parentIdentities = append([][3]uint64(nil), guards...)
+			s, err := sealPrivateGeneration(ctx, snapshot, o)
+			if err != nil {
+				t.Fatal("seal prerequisite failed")
+			}
+			t.Cleanup(func() { _ = s.close() })
+			parentChecks := 0
+			// Model the native adapter's comparison of retained guards with the
+			// owned snapshot; the platform-neutral protocol delegates that check.
+			o.parentHook = func() error {
+				parentChecks++
+				if !reflect.DeepEqual(s.snapshot.parentIdentities, guards) {
+					return ReasonStateIO
+				}
+				return nil
+			}
+			if field == "nodes" {
+				snapshot.nodes[3].digest[0]++
+			} else {
+				snapshot.parentIdentities[0][2]++
+			}
+			if s.verify(ctx) != nil || parentChecks == 0 {
+				t.Fatal("caller mutation changed session verification or bypassed parent checks")
+			}
+			if s.close() != nil {
+				t.Fatal("owned snapshot session close failed")
+			}
+			sealTestClosed(t, o, false)
+		})
+	}
+}
+
+func TestPrivateGenerationSealSystemSessionRequiresUserPrincipal(t *testing.T) {
+	_, _, _, snapshot, o := sealTestFixture(t)
+	p := sealTestPolicy(o.objects[0].identity, true, true)
+	p.userIsSystem = true
+	p.aces = p.aces[1:] // A System-classified ACE is not the required User ACE.
+	o.objects[0].policy = p
+	s, err := openSealedPrivateGeneration(context.Background(), snapshot, o)
+	sealTestRefused(t, s, err, ReasonStateIO, o)
+	if o.seen["observe:pre-open:"] != 1 || len(o.handles) != 0 || o.sets != 0 || o.restores != 0 {
+		t.Fatal("System-classified sole ACE escaped the sealed-root opening check")
+	}
+}
+
+func TestPrivateGenerationSealReadChecksWholeTree(t *testing.T) {
+	ctx := context.Background()
+	_, _, _, snapshot, o := sealTestFixture(t)
+	s, err := sealPrivateGeneration(ctx, snapshot, o)
+	if err != nil {
+		t.Fatal("seal prerequisite failed")
+	}
+	o.objects[4].data = []byte("changed") // Same size, different member from data.
+	before := o.seen["read:metadata"]
+	if data, err := s.read(ctx, "data"); err != ReasonStateIO || data != nil {
+		t.Fatal("read accepted corruption in an unrequested member or returned bytes")
+	}
+	if o.seen["read:metadata"] != before+1 || o.restores != 0 || o.sets != 1 {
+		t.Fatal("read did not verify the corrupt member or attempted rollback")
+	}
+	sealTestClosed(t, o, false)
+}
+
+func TestPrivateGenerationSealReadPostReadIdentity(t *testing.T) {
+	ctx := context.Background()
+	_, _, _, snapshot, o := sealTestFixture(t)
+	s, err := sealPrivateGeneration(ctx, snapshot, o)
+	if err != nil {
+		t.Fatal("seal prerequisite failed")
+	}
+	reads := o.seen["read:data"]
+	reached := false
+	o.observeHook = func(stage string, index int, observed *privateGenerationSealObservation) {
+		// Allow whole-tree verification, then fail only after bytes have been
+		// buffered for the requested read, with all earlier observations valid.
+		if stage == "post-read" && index == 3 && o.seen["read:data"] == reads+2 {
+			reached = true
+			observed.policy.observedIdentity[2]++
+		}
+	}
+	if data, err := s.read(ctx, "data"); err != ReasonStateIO || data != nil {
+		t.Fatal("post-read identity failure was accepted or exposed buffered bytes")
+	}
+	if !reached || o.restores != 0 || o.sets != 1 {
+		t.Fatal("post-read-only identity fault was not reached or attempted rollback")
+	}
+	sealTestClosed(t, o, false)
+}
+
+func TestPrivateGenerationSealCheckBoundaries(t *testing.T) {
+	// These observations are an independent contract for a root plus one short
+	// file (one ReadAt reaching EOF). Do not derive rows from the candidate trace.
+	// The second verify pass in seal is the post-set tree verification boundary.
+	cases := []struct {
+		name string
+		want []string
+	}{
+		{"seal", []string{
+			"pre-open:", "recovery:", "pre-open:", "reader:",
+			"ancestor:", "pre-open:data", "reader:data",
+			"verify:", "pre-inventory:", "post-inventory:",
+			"verify:data", "ancestor:", "pre-read:data", "post-read:data",
+			"pre-set:", "post-set:",
+			"verify:", "pre-inventory:", "post-inventory:",
+			"verify:data", "ancestor:", "pre-read:data", "post-read:data",
+		}},
+		{"read", []string{
+			"verify:", "pre-inventory:", "post-inventory:",
+			"verify:data", "ancestor:", "pre-read:data", "post-read:data",
+			"ancestor:", "pre-read:data", "post-read:data",
+		}},
+		{"rollback", []string{
+			"pre-open:", "recovery:", "pre-open:", "reader:",
+			"ancestor:", "pre-open:data", "reader:data",
+			"verify:", "pre-inventory:", "post-inventory:",
+			"verify:data", "ancestor:", "pre-read:data", "post-read:data",
+			"pre-set:", "post-set:", "rollback:", "restored:",
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, _, snapshot, _ := sealTestFixture(t)
+			snapshot.nodes = []privateGenerationSealNode{snapshot.nodes[0], snapshot.nodes[3]}
+			o := sealTestOpsForSnapshot(snapshot)
+			o.objects[1].data = []byte("data")
+			if tc.name == "rollback" {
+				o.fail = "observe:post-set:"
+			}
+			s, err := sealPrivateGeneration(context.Background(), snapshot, o)
+			if tc.name == "rollback" {
+				sealTestRefused(t, s, err, ReasonStateIO, o)
+				if o.restores != 1 {
+					t.Fatal("boundary trace did not restore after the post-set fault")
+				}
+			} else {
+				if err != nil {
+					t.Fatal("boundary trace seal prerequisite failed")
+				}
+				t.Cleanup(func() {
+					if s.close() != nil {
+						t.Error("boundary trace session close failed")
+					}
+					sealTestClosed(t, o, false)
+				})
+				if tc.name == "read" {
+					o.events = nil
+					if data, err := s.read(context.Background(), "data"); err != nil || string(data) != "data" {
+						t.Fatal("boundary trace read prerequisite failed")
+					}
+				}
+			}
+			var got, want []string
+			for _, event := range o.events {
+				if event == "parent" || strings.HasPrefix(event, "observe:") {
+					got = append(got, event)
+				}
+			}
+			for _, boundary := range tc.want {
+				want = append(want, "parent", "observe:"+boundary)
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("check boundary sequence differs: got %q; want %q", got, want)
+			}
+		})
+	}
+}
+
 func TestPrivateGenerationSealInventory(t *testing.T) {
 	ctx := context.Background()
 	t.Run("caller-shape-and-labels", func(t *testing.T) {
@@ -568,7 +803,7 @@ func TestPrivateGenerationSealInventory(t *testing.T) {
 			})
 		}
 	})
-	t.Run("bounded-snapshot-locator-copy", func(t *testing.T) {
+	t.Run("invalid-snapshot-locator-shapes", func(t *testing.T) {
 		for _, field := range []string{"parent-identities", "parent-path", "node-name"} {
 			t.Run(field, func(t *testing.T) {
 				_, _, _, snapshot, o := sealTestFixture(t)
@@ -591,7 +826,7 @@ func TestPrivateGenerationSealInventory(t *testing.T) {
 			})
 		}
 	})
-	t.Run("exact-bounds", func(t *testing.T) {
+	t.Run("node-validator-exact-bounds", func(t *testing.T) {
 		root := privateGenerationSealNode{privateGenerationSealExpected: privateGenerationSealExpected{directory: true, mode: 0500}, identity: [3]uint64{1, 0, 1}}
 		file := func(name string, id uint64) privateGenerationSealNode {
 			return privateGenerationSealNode{privateGenerationSealExpected: privateGenerationSealExpected{name: name, mode: 0644, digest: sha256.Sum256(nil)}, identity: [3]uint64{1, 0, id}}
@@ -739,7 +974,7 @@ func TestPrivateGenerationSealInventory(t *testing.T) {
 			t.Fatal("readonly projection repaired or mutation reached")
 		}
 	})
-	t.Run("read-reverifies-current-observations", func(t *testing.T) {
+	t.Run("read-rejects-changed-requested-content", func(t *testing.T) {
 		_, _, _, snapshot, o := sealTestFixture(t)
 		s, err := sealPrivateGeneration(ctx, snapshot, o)
 		if err != nil {
@@ -761,7 +996,9 @@ func TestPrivateGenerationSealInventory(t *testing.T) {
 
 func TestPrivateGenerationSealRollback(t *testing.T) {
 	ctx := context.Background()
-	t.Run("every-post-mutation-observation-failure", func(t *testing.T) {
+	// Sample the first occurrence of each event emitted after mutation. Boundary
+	// completeness and order are fixed by TestPrivateGenerationSealCheckBoundaries.
+	t.Run("first-emitted-post-mutation-event-failures", func(t *testing.T) {
 		_, _, _, snapshot, baseline := sealTestFixture(t)
 		s, err := sealPrivateGeneration(ctx, snapshot, baseline)
 		if err != nil {
