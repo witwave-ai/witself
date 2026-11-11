@@ -301,8 +301,6 @@ func TestMaintenanceFenceStopAndInspectionRemainUsable(t *testing.T) {
 	if err := lifecycleWriteFile(fencePath, fence); err != nil {
 		t.Fatal("cannot plant private maintenance fixture")
 	}
-	// Fixture removal is test cleanup, never a production clearing procedure.
-	t.Cleanup(func() { _ = os.Remove(fencePath) })
 	manifest := admissionRead(t, root, "manifest.json")
 	journal := admissionRead(t, root, "journal", "operations.jsonl")
 	after, err := cell.Inspect(t.Context())
