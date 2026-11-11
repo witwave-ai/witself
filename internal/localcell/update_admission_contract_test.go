@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"fmt"
 	"go/ast"
+	"go/build/constraint"
 	"go/format"
 	"go/parser"
 	"go/token"
 	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -38,7 +41,17 @@ func admissionStatements(source string) []string {
 // These independent pre-admission sequences preserve the legacy refusal order.
 // The final statement is the first guarded effect, never part of the allowance.
 var maintenanceAdmissionBoundaries = map[string]string{
-	"Install": `lock, err := c.own(true)
+	"Install": `timeout := c.cfg.Timeout
+if options.ManagedPrincipals {
+ timeout = c.readinessTimeout("server", &Manifest{})
+}
+ctx, cancel := context.WithTimeout(ctx, timeout)
+defer cancel()
+if options.ManagedPrincipals {
+ if _, err := os.Lstat(c.path("manifest.json")); !errors.Is(err, os.ErrNotExist) { return errPrincipalLayout }
+ if entries, err := os.ReadDir(c.path("pg")); (err == nil && len(entries) != 0) || (err != nil && !errors.Is(err, os.ErrNotExist)) { return errPrincipalLayout }
+}
+lock, err := c.own(true)
 if err != nil { return err }
 defer func() { _ = lock.Close() }()
 if _, err := readManifest(c.cfg.Root); !errors.Is(err, os.ErrNotExist) {
@@ -61,7 +74,10 @@ if !m.Installed { return errors.New("local cell installation is incomplete") }
 if err := c.serviceStartFence(); err != nil { return err }
 ` + maintenanceAdmissionStatement + `
 m.MigrationWait, m.JobRestartPolicy = c.runtimeSettings(m)`,
-	"Repair": `lock, err := c.ownExisting()
+	"Repair": `parent := ctx
+ctx, cancel := c.deadline(ctx)
+defer cancel()
+lock, err := c.ownExisting()
 if err != nil { return err }
 defer func() { _ = lock.Close() }()
 m, manifestErr := readManifest(c.cfg.Root)
@@ -73,12 +89,126 @@ if m != nil && m.PrincipalLayoutVersion != 0 {
 }
 ` + maintenanceAdmissionStatement + `
 progress, err := c.readJournal()`,
-	"Remove": `if err := c.exitServiceHostForRemoval(ctx); err != nil { return err }
+	"Remove": `ctx, cancel := c.serviceShutdownDeadline(ctx)
+defer cancel()
+if err := c.exitServiceHostForRemoval(ctx); err != nil { return err }
 lock, err := c.ownExisting()
 if err != nil { return err }
 defer func() { _ = lock.Close() }()
 ` + maintenanceAdmissionStatement + `
 if err := c.setServiceDesiredStateLocked("stopped"); err != nil && !errors.Is(err, os.ErrNotExist) { return err }`,
+}
+
+var maintenanceAdmissionParameters = map[string]string{
+	"Install": "ctx context.Context, options InstallOptions",
+	"Start":   "ctx context.Context",
+	"Repair":  "ctx context.Context",
+	"Remove":  "ctx context.Context, options RemoveOptions",
+}
+
+// maintenanceAdmissionOwner is the single approval predicate shared by both
+// source barriers. An empty result approves the exact signature and prefix;
+// otherwise the result names the invariant that refused the declaration.
+func maintenanceAdmissionOwner(file string, fn *ast.FuncDecl) string {
+	parameters, known := maintenanceAdmissionParameters[fn.Name.Name]
+	if file != "lifecycle.go" || !known || fn.Type.TypeParams != nil || fn.Recv == nil || len(fn.Recv.List) != 1 {
+		return "signature"
+	}
+	receiver := fn.Recv.List[0]
+	pointer, ok := receiver.Type.(*ast.StarExpr)
+	if !ok || len(receiver.Names) != 1 {
+		return "signature"
+	}
+	typ, ok := pointer.X.(*ast.Ident)
+	if !ok || typ.Name != "Cell" {
+		return "signature"
+	}
+	if admissionNodeText(&ast.FuncType{Params: fn.Type.Params}) != "func("+parameters+")" {
+		return "signature"
+	}
+	if fn.Type.Results == nil || len(fn.Type.Results.List) != 1 || len(fn.Type.Results.List[0].Names) != 0 {
+		return "signature"
+	}
+	result, ok := fn.Type.Results.List[0].Type.(*ast.Ident)
+	if !ok || result.Name != "error" {
+		return "signature"
+	}
+	want := admissionStatements(maintenanceAdmissionBoundaries[fn.Name.Name])
+	if fn.Body == nil || len(want) == 0 || len(fn.Body.List) < len(want) {
+		return "position"
+	}
+	for index, statement := range want {
+		if admissionNodeText(fn.Body.List[index]) != statement {
+			return "position"
+		}
+	}
+	return ""
+}
+
+// Scan text regardless of build selection: an alternate platform or tagged
+// owner must not silently replace one of the four approved declarations.
+func maintenanceAdmissionOwnerInventory(sources map[string]string) []string {
+	var failures []string
+	owners := map[string]int{}
+	for name, source := range sources {
+		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		source = strings.ReplaceAll(source, "\r\n", "\n")
+		if name == "lifecycle.go" {
+			for _, line := range strings.Split(source, "\n") {
+				line = strings.TrimSpace(line)
+				if constraint.IsGoBuild(line) || constraint.IsPlusBuild(line) {
+					failures = append(failures, "lifecycle_signature")
+				}
+			}
+		}
+		file, err := parser.ParseFile(token.NewFileSet(), name, source, 0)
+		if err != nil {
+			failures = append(failures, name+"_parse")
+			continue
+		}
+		for _, declaration := range file.Decls {
+			fn, ok := declaration.(*ast.FuncDecl)
+			if !ok {
+				continue
+			}
+			if _, expected := maintenanceAdmissionBoundaries[fn.Name.Name]; !expected || updateReceiverName(fn) != "Cell" {
+				continue
+			}
+			owners[fn.Name.Name]++
+			if name != "lifecycle.go" {
+				failures = append(failures, fn.Name.Name+"_signature")
+			}
+		}
+	}
+	for name := range maintenanceAdmissionBoundaries {
+		if owners[name] != 1 {
+			failures = append(failures, name+"_owner_count")
+		}
+	}
+	sort.Strings(failures)
+	return failures
+}
+
+func admissionReadSources(t *testing.T) map[string]string {
+	t.Helper()
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal("cannot inventory local cell sources")
+	}
+	sources := make(map[string]string)
+	for _, name := range files {
+		if strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		data, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatal("cannot read local cell source")
+		}
+		sources[name] = string(data)
+	}
+	return sources
 }
 
 func maintenanceAdmissionContract(source string) []string {
@@ -104,12 +234,15 @@ func maintenanceAdmissionContract(source string) []string {
 		if !ok {
 			continue
 		}
-		boundary, expected := maintenanceAdmissionBoundaries[fn.Name.Name]
+		_, expected := maintenanceAdmissionBoundaries[fn.Name.Name]
 		if !expected {
 			continue
 		}
 		owners[fn.Name.Name]++
 		fail := func(invariant string) { failures = append(failures, fn.Name.Name+"_"+invariant) }
+		if invariant := maintenanceAdmissionOwner("lifecycle.go", fn); invariant != "" {
+			fail(invariant)
+		}
 		admissions := updateOrdinaryAdmissions("lifecycle.go", fn)
 		if len(admissions) != 1 {
 			fail("literal_zero_direct_error_return")
@@ -117,20 +250,6 @@ func maintenanceAdmissionContract(source string) []string {
 		if fn.Body == nil {
 			fail("position")
 			continue
-		}
-		actual := make([]string, len(fn.Body.List))
-		for index, statement := range fn.Body.List {
-			actual[index] = admissionNodeText(statement)
-		}
-		want := admissionStatements(boundary)
-		matches := 0
-		for index := 0; index+len(want) <= len(actual); index++ {
-			if strings.Join(actual[index:index+len(want)], "\n") == strings.Join(want, "\n") {
-				matches++
-			}
-		}
-		if len(want) == 0 || matches != 1 {
-			fail("position")
 		}
 		ownCalls, lockReferences, closes := 0, 0, 0
 		var lockIdentifier *ast.Ident
@@ -184,6 +303,9 @@ func admissionReadLifecycle(t *testing.T) string {
 
 func TestMaintenanceFenceAdmissionSourceContract(t *testing.T) {
 	source := admissionReadLifecycle(t)
+	if failures := maintenanceAdmissionOwnerInventory(admissionReadSources(t)); len(failures) != 0 {
+		t.Fatalf("admission invariants: %v", failures)
+	}
 	for _, ending := range []string{"LF", "CRLF"} {
 		t.Run(ending, func(t *testing.T) {
 			input := source
@@ -221,6 +343,63 @@ func admissionMutateFunction(t *testing.T, source, name string, mutate func(stri
 	return ""
 }
 
+type admissionSourceMutation struct {
+	name, invariant string
+	change          func(string) string
+}
+
+func admissionEditStatements(source string, edit func([]ast.Stmt) []ast.Stmt) string {
+	file, err := parser.ParseFile(token.NewFileSet(), "lifecycle.go", "package localcell\n"+source, 0)
+	if err != nil {
+		return "<invalid>"
+	}
+	fn := file.Decls[0].(*ast.FuncDecl)
+	fn.Body.List = edit(fn.Body.List)
+	return admissionNodeText(fn)
+}
+
+// These same named edits exercise the approved snippets and each real owner.
+func maintenanceAdmissionBypasses() []admissionSourceMutation {
+	gate := admissionIndent(admissionStatements(maintenanceAdmissionStatement)[0])
+	prepend := func(statement string) func(string) string {
+		return func(source string) string { return strings.Replace(source, "{\n", "{\n"+statement+"\n", 1) }
+	}
+	early := "if c.cfg.Timeout == 42*time.Second { return nil }"
+	return []admissionSourceMutation{
+		{"EarlyReturnBeforeAdmission", "position", prepend(early)},
+		{"UnconditionalReturnBeforeAdmission", "position", prepend("return nil")},
+		{"ReceiverRebinding", "position", prepend("c = other")},
+		{"NamedResultDeferredSwallow", "signature", func(source string) string {
+			return prepend("defer func() { ret = nil }()")(strings.Replace(source, ") error {", ") (ret error) {", 1))
+		}},
+		{"SwitchReturnBeforeAdmission", "position", prepend("switch c.cfg.Timeout { case 44 * time.Second: return nil }")},
+		{"EarlyReturnImmediatelyBeforeAdmission", "position", func(source string) string {
+			return strings.Replace(source, gate, early+"\n"+gate, 1)
+		}},
+		{"GotoPastAdmission", "position", func(source string) string {
+			return strings.Replace(source, gate, "if c.cfg.Timeout == 45*time.Second { goto admitted }\n"+gate+"\nadmitted:", 1)
+		}},
+		{"NamedResultOnly", "signature", func(source string) string { return strings.Replace(source, ") error {", ") (ret error) {", 1) }},
+		{"ExtraResult", "signature", func(source string) string { return strings.Replace(source, ") error {", ") (bool, error) {", 1) }},
+		{"PreludeStatementDeleted", "position", func(source string) string {
+			return admissionEditStatements(source, func(statements []ast.Stmt) []ast.Stmt {
+				for index, statement := range statements {
+					if strings.HasPrefix(admissionNodeText(statement), "lock, err :=") {
+						return append(statements[:index+1], statements[index+2:]...)
+					}
+				}
+				return statements
+			})
+		}},
+		{"PreludeReordered", "position", func(source string) string {
+			return admissionEditStatements(source, func(statements []ast.Stmt) []ast.Stmt {
+				statements[0], statements[1] = statements[1], statements[0]
+				return statements
+			})
+		}},
+	}
+}
+
 func TestMaintenanceFenceAdmissionSourceContractMutations(t *testing.T) {
 	source := admissionReadLifecycle(t)
 	if failures := maintenanceAdmissionContract(source); len(failures) != 0 {
@@ -228,13 +407,9 @@ func TestMaintenanceFenceAdmissionSourceContractMutations(t *testing.T) {
 	}
 	gate := admissionIndent(admissionStatements(maintenanceAdmissionStatement)[0])
 	closeLock := admissionIndent(admissionStatements(`defer func() { _ = lock.Close() }()`)[0])
-	type mutation struct {
-		name, invariant string
-		change          func(string) string
-	}
 	for _, owner := range []string{"Install", "Start", "Repair", "Remove"} {
 		t.Run(owner, func(t *testing.T) {
-			mutations := []mutation{
+			mutations := []admissionSourceMutation{
 				{"Delete", "literal_zero_direct_error_return", func(body string) string { return strings.Replace(body, gate, "", 1) }},
 				{"PositiveGeneration", "literal_zero_direct_error_return", func(body string) string {
 					return strings.Replace(body, "maintenanceFenceAllows(0)", "maintenanceFenceAllows(7)", 1)
@@ -264,7 +439,7 @@ func TestMaintenanceFenceAdmissionSourceContractMutations(t *testing.T) {
 				{"DuplicateGate", "literal_zero_direct_error_return", func(body string) string { return strings.Replace(body, gate, gate+"\n"+gate, 1) }},
 			}
 			if owner != "Remove" {
-				mutations = append(mutations, mutation{"BeforeManifest", "position", func(body string) string {
+				mutations = append(mutations, admissionSourceMutation{"BeforeManifest", "position", func(body string) string {
 					body = strings.Replace(body, gate, "", 1)
 					anchor := "m, err := readManifest"
 					if owner == "Install" {
@@ -277,7 +452,7 @@ func TestMaintenanceFenceAdmissionSourceContractMutations(t *testing.T) {
 				}})
 			}
 			if owner == "Start" {
-				mutations = append(mutations, mutation{"BeforeServiceFence", "position", func(body string) string {
+				mutations = append(mutations, admissionSourceMutation{"BeforeServiceFence", "position", func(body string) string {
 					body = strings.Replace(body, gate, "", 1)
 					return strings.Replace(body, "if err := c.serviceStartFence()", gate+"\nif err := c.serviceStartFence()", 1)
 				}})
@@ -285,19 +460,20 @@ func TestMaintenanceFenceAdmissionSourceContractMutations(t *testing.T) {
 			if owner == "Remove" {
 				predrain := admissionIndent(admissionStatements(`if err := c.exitServiceHostForRemoval(ctx); err != nil { return err }`)[0])
 				mutations = append(mutations,
-					mutation{"DeletePredrain", "position", func(body string) string { return strings.Replace(body, predrain, "", 1) }},
-					mutation{"BeforePredrain", "position", func(body string) string {
+					admissionSourceMutation{"DeletePredrain", "position", func(body string) string { return strings.Replace(body, predrain, "", 1) }},
+					admissionSourceMutation{"BeforePredrain", "position", func(body string) string {
 						body = strings.Replace(body, gate, "", 1)
 						return strings.Replace(body, predrain, gate+"\n"+predrain, 1)
 					}},
 				)
 			}
-			mutations = append(mutations, mutation{"AfterFirstEffect", "position", func(body string) string {
+			mutations = append(mutations, admissionSourceMutation{"AfterFirstEffect", "position", func(body string) string {
 				last := admissionStatements(maintenanceAdmissionBoundaries[owner])
 				effect := admissionIndent(last[len(last)-1])
 				body = strings.Replace(body, gate, "", 1)
 				return strings.Replace(body, effect, effect+"\n"+gate, 1)
 			}})
+			mutations = append(mutations, maintenanceAdmissionBypasses()...)
 			for _, mutant := range mutations {
 				t.Run(mutant.name, func(t *testing.T) {
 					// Formatting first gives stable mutation targets on LF and CRLF checkouts.
@@ -335,6 +511,47 @@ func containsAdmissionFailure(failures []string, wanted string) bool {
 	return false
 }
 
+// Build fixture controls independently from the pinned strings. A deleted pin
+// must fail an approved fixture instead of weakening both sides of the oracle.
+func admissionApprovedOwners(t *testing.T) map[string]string {
+	t.Helper()
+	file, err := parser.ParseFile(token.NewFileSet(), "lifecycle.go", admissionReadLifecycle(t), 0)
+	if err != nil {
+		t.Fatal("control source does not parse")
+	}
+	owners := make(map[string]string)
+	gate := admissionStatements(maintenanceAdmissionStatement)[0]
+	for _, declaration := range file.Decls {
+		fn, ok := declaration.(*ast.FuncDecl)
+		if !ok {
+			continue
+		}
+		parameters, expected := maintenanceAdmissionParameters[fn.Name.Name]
+		if !expected {
+			continue
+		}
+		for index, statement := range fn.Body.List {
+			if admissionNodeText(statement) != gate {
+				continue
+			}
+			if index+1 >= len(fn.Body.List) {
+				t.Fatal("approved owner has no guarded effect")
+			}
+			var prefix []string
+			for _, statement := range fn.Body.List[:index+2] {
+				prefix = append(prefix, admissionNodeText(statement))
+			}
+			original := "func (c *Cell) " + fn.Name.Name + "(" + parameters + ") error {\n" + strings.Join(prefix, "\n") + "\nreturn nil\n}"
+			owners[fn.Name.Name] = admissionEditStatements(original, func(statements []ast.Stmt) []ast.Stmt { return statements })
+			break
+		}
+	}
+	if len(owners) != 4 {
+		t.Fatal("approved fixture owner count differs")
+	}
+	return owners
+}
+
 func TestMaintenanceFenceAdmissionGuardFixtures(t *testing.T) {
 	const foundation = `package localcell
 func (c *Cell) maintenanceFenceAllows(generation int) error { return nil }
@@ -343,13 +560,19 @@ func (c *Cell) updateStep() error { return nil }
 func (c *Cell) readUpdateJournal() error { return nil }
 `
 	type fixture struct {
-		name, file, source, extra string
-		rejected                  bool
+		name, file, source, extra, invariant string
+		approved, approvedExtra              string
+		rejected                             bool
 	}
 	var fixtures []fixture
+	approvedOwners := admissionApprovedOwners(t)
 	for _, owner := range []string{"Install", "Start", "Repair", "Remove"} {
-		approved := "func (c *Cell) " + owner + "() error { " + maintenanceAdmissionStatement + "; return nil }"
-		fixtures = append(fixtures, fixture{owner + "_Approved", "lifecycle.go", approved, "", false})
+		approved := approvedOwners[owner]
+		fixtures = append(fixtures, fixture{name: owner + "_Approved", file: "lifecycle.go", source: approved, approved: approved})
+		add := func(name, file, source, extra, invariant string) {
+			fixtures = append(fixtures, fixture{name: owner + "_" + name, file: file, source: source, extra: extra, invariant: invariant, approved: approved, rejected: true})
+		}
+		gate := admissionIndent(admissionStatements(maintenanceAdmissionStatement)[0])
 		for _, item := range []struct{ name, replacement string }{
 			{"MethodValue", "gate := c.maintenanceFenceAllows; _ = gate"},
 			{"AliasCall", "gate := c.maintenanceFenceAllows; _ = gate(0)"},
@@ -369,30 +592,44 @@ func (c *Cell) readUpdateJournal() error { return nil }
 			{"AdditionalReader", maintenanceAdmissionStatement + "; _ = c.readMaintenanceFence()"},
 			{"AdditionalJournal", maintenanceAdmissionStatement + "; _ = c.readUpdateJournal()"},
 		} {
-			fixtures = append(fixtures, fixture{owner + "_" + item.name, "lifecycle.go", strings.Replace(approved, maintenanceAdmissionStatement, item.replacement, 1), "", true})
+			add(item.name, "lifecycle.go", strings.Replace(approved, gate, item.replacement, 1), "", owner+"_position")
 		}
-		fixtures = append(fixtures,
-			fixture{owner + "_WrongFile", "other.go", approved, "", true},
-			fixture{owner + "_WrongReceiver", "lifecycle.go", strings.Replace(approved, "*Cell", "*Other", 1), "", true},
-			fixture{owner + "_ValueReceiver", "lifecycle.go", strings.Replace(approved, "*Cell", "Cell", 1), "", true},
-			fixture{owner + "_WrongFunction", "lifecycle.go", strings.Replace(approved, owner+"()", "Stop()", 1), "", true},
-		)
+		add("WrongFile", "other.go", approved, "", owner+"_signature")
+		add("WrongReceiver", "lifecycle.go", strings.Replace(approved, "*Cell", "*Other", 1), "", owner+"_signature")
+		add("ValueReceiver", "lifecycle.go", strings.Replace(approved, "*Cell", "Cell", 1), "", owner+"_signature")
+		add("WrongFunction", "lifecycle.go", strings.Replace(approved, owner+"(", "Stop(", 1), "", "Stop_signature")
+		add("WrongParameters", "lifecycle.go", strings.Replace(approved, "ctx context.Context", "ctx string", 1), "", owner+"_signature")
+		for _, mutation := range maintenanceAdmissionBypasses() {
+			changed := mutation.change(approved)
+			// Both control and rebinding variant declare the alternate binding. The
+			// named edit is solely the statement inserted in the approved body.
+			if mutation.name == "ReceiverRebinding" {
+				changed = "var other *Cell\n" + changed
+				fixtures = append(fixtures, fixture{name: owner + "_" + mutation.name, file: "lifecycle.go", source: changed, invariant: owner + "_" + mutation.invariant, approved: "var other *Cell\n" + approved, rejected: true})
+				continue
+			}
+			add(mutation.name, "lifecycle.go", changed, "", owner+"_"+mutation.invariant)
+		}
 	}
+	approved := approvedOwners["Start"]
 	for index, initializer := range []string{
 		`var result = (&Cell{}).maintenanceFenceAllows(0)`,
 		`var result = (&Cell{}).maintenanceFenceAllows`,
 		`var result = func(c *Cell) error { return c.maintenanceFenceAllows(0) }`,
 		`var result = func() error { return (&Cell{}).maintenanceFenceAllows(0) }()`,
 	} {
-		fixtures = append(fixtures, fixture{fmt.Sprintf("Initializer%d", index), "lifecycle.go", initializer, "", true})
+		fixtures = append(fixtures, fixture{name: fmt.Sprintf("Initializer%d", index), file: "lifecycle.go", source: approved + "\n" + initializer, invariant: "package initializer selects update helper", approved: approved, rejected: true})
 	}
 	fixtures = append(fixtures,
-		fixture{"FoundationAlias", "lifecycle.go", `func (c *Cell) Start() error { return alias(c, 0) }`, `var alias = (*Cell).maintenanceFenceAllows`, true},
-		fixture{"FoundationInit", "lifecycle.go", "", `func init() {}`, true},
-		fixture{"FoundationInitializer", "lifecycle.go", "", `var result = (&Cell{}).maintenanceFenceAllows(0)`, true},
+		fixture{name: "FoundationAlias", file: "lifecycle.go", source: strings.Replace(approved, admissionIndent(admissionStatements(maintenanceAdmissionStatement)[0]), `if err := alias(c, 0); err != nil { return err }`, 1), extra: `var alias = (*Cell).maintenanceFenceAllows`, invariant: "references update helper alias", approved: approved, approvedExtra: `var alias = (*Cell).maintenanceFenceAllows`, rejected: true},
+		fixture{name: "FoundationInit", file: "lifecycle.go", source: approved, extra: `func init() {}`, invariant: "update foundations contain init", approved: approved, rejected: true},
+		fixture{name: "FoundationInitializer", file: "lifecycle.go", source: approved, extra: `var result = (&Cell{}).maintenanceFenceAllows(0)`, invariant: "update foundations run code at package initialization", approved: approved, rejected: true},
 	)
 	for _, fixture := range fixtures {
 		t.Run(fixture.name, func(t *testing.T) {
+			if fixture.rejected && fixture.file+fixture.source+fixture.extra == "lifecycle.go"+fixture.approved+fixture.approvedExtra {
+				t.Fatal("mutation did not change its named site")
+			}
 			for _, ending := range []string{"LF", "CRLF"} {
 				t.Run(ending, func(t *testing.T) {
 					sources := map[string]string{"update_fence.go": foundation + fixture.extra, fixture.file: "package localcell\n" + fixture.source}
@@ -407,6 +644,79 @@ func (c *Cell) readUpdateJournal() error { return nil }
 					}
 					if (len(failures) != 0) != fixture.rejected {
 						t.Fatalf("guard rejected = %v, want %v: %v", len(failures) != 0, fixture.rejected, failures)
+					}
+					if fixture.rejected && !strings.Contains(strings.Join(failures, ";"), fixture.invariant) {
+						t.Fatalf("mutant survived named invariant %s: %v", fixture.invariant, failures)
+					}
+					owner, form, _ := strings.Cut(fixture.name, "_")
+					verifyContract := form == "WrongParameters"
+					for _, mutation := range maintenanceAdmissionBypasses() {
+						verifyContract = verifyContract || form == mutation.name
+					}
+					if verifyContract {
+						complete := "package localcell\n"
+						for _, candidate := range []string{"Install", "Start", "Repair", "Remove"} {
+							body := approvedOwners[candidate]
+							if candidate == owner {
+								body = fixture.source
+							}
+							complete += body + "\n"
+						}
+						if ending == "CRLF" {
+							complete = strings.ReplaceAll(complete, "\n", "\r\n")
+						}
+						contractFailures := maintenanceAdmissionContract(complete)
+						if containsAdmissionFailure(contractFailures, "parse") {
+							t.Fatal("guard fixture parse failure is not a kill")
+						}
+						if !containsAdmissionFailure(contractFailures, fixture.invariant) {
+							t.Fatalf("mutant survived named invariant %s: %v", fixture.invariant, contractFailures)
+						}
+					}
+				})
+			}
+		})
+	}
+	// This scan is independently exercised on a complete approved tree so a
+	// missing-owner rejection cannot mask a missed duplicate or build constraint.
+	control := "package localcell\n"
+	for _, owner := range []string{"Install", "Start", "Repair", "Remove"} {
+		control += approvedOwners[owner] + "\n"
+	}
+	for _, fixture := range []struct{ name, extra, prefix, invariant string }{
+		{"SecondStartBuildTagged", "//go:build reviewtag\n\npackage localcell\nfunc (c *Cell) Start(ctx context.Context) error { return nil }", "", "Start_owner_count"},
+		{"SecondStartGenericBuildTagged", "//go:build reviewtag\n\npackage localcell\nfunc (c *Cell[T]) Start(ctx context.Context) error { return nil }", "", "Start_owner_count"},
+		{"LifecycleGoBuild", "", "//go:build reviewtag\n\n", "lifecycle_signature"},
+		{"LifecycleLegacyBuild", "", "// +build reviewtag\n\n", "lifecycle_signature"},
+		{"LifecycleLegacyBuildNoSpace", "", "//+build reviewtag\n\n", "lifecycle_signature"},
+		{"LifecycleGoBuildTab", "", "//go:build\treviewtag\n\n", "lifecycle_signature"},
+		{"LifecycleLegacyBuildTab", "", "// +build\treviewtag\n\n", "lifecycle_signature"},
+	} {
+		t.Run(fixture.name, func(t *testing.T) {
+			for _, ending := range []string{"LF", "CRLF"} {
+				t.Run(ending, func(t *testing.T) {
+					sources := map[string]string{"lifecycle.go": control}
+					if failures := maintenanceAdmissionOwnerInventory(sources); len(failures) != 0 {
+						t.Fatalf("unchanged control: %v", failures)
+					}
+					sources["lifecycle.go"] = fixture.prefix + control
+					if fixture.extra != "" {
+						sources["tagged.go"] = fixture.extra
+					}
+					if sources["lifecycle.go"] == control && sources["tagged.go"] == "" {
+						t.Fatal("mutation did not change its named site")
+					}
+					if ending == "CRLF" {
+						for name, source := range sources {
+							sources[name] = strings.ReplaceAll(source, "\n", "\r\n")
+						}
+					}
+					failures := maintenanceAdmissionOwnerInventory(sources)
+					if strings.Contains(strings.Join(failures, ";"), "parse") {
+						t.Fatal("guard fixture parse failure is not a kill")
+					}
+					if !containsAdmissionFailure(failures, fixture.invariant) {
+						t.Fatalf("mutant survived named invariant %s: %v", fixture.invariant, failures)
 					}
 				})
 			}

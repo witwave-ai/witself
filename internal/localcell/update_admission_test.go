@@ -132,7 +132,7 @@ var admissionNames = []string{"Install", "StartLegacy", "StartSelected", "Repair
 func admissionSnapshot(t *testing.T, c *Cell) map[string]string {
 	t.Helper()
 	result := map[string]string{}
-	for _, name := range []string{"manifest.json", "journal", "journal/operations.jsonl", "journal/maintenance.json", "pg", "pg/retained-data", "run", "spool", "tmp", "logs", "service/descriptor.json"} {
+	for _, name := range []string{"manifest.json", "journal", "journal/operations.jsonl", "journal/maintenance.json", "pg", "pg/retained-data", "run", "spool", "tmp", "logs", "home", "service/descriptor.json"} {
 		info, err := os.Lstat(c.path(name))
 		if errors.Is(err, os.ErrNotExist) {
 			result[name] = "absent"
@@ -212,6 +212,23 @@ func TestMaintenanceFenceLifecycleAdmissions(t *testing.T) {
 				})
 			}
 		})
+	}
+}
+
+func TestMaintenanceFenceInstallMissingLayout(t *testing.T) {
+	f := newAdmissionFixture(t, "Install")
+	updateTestFence(t, f.cell)
+	for _, name := range []string{"spool", "logs", "tmp", "home"} {
+		if err := os.Remove(f.cell.path(name)); err != nil {
+			t.Fatal("cannot remove installation layout fixture")
+		}
+	}
+	before := admissionSnapshot(t, f.cell)
+	if err := f.run(t.Context()); err != errMaintenanceFenceActive {
+		t.Fatal("fenced Install did not return exact maintenance cause")
+	}
+	if !reflect.DeepEqual(before, admissionSnapshot(t, f.cell)) {
+		t.Fatal("fenced Install created missing layout directories")
 	}
 }
 
@@ -744,6 +761,14 @@ func admissionRunShutdownParity(t *testing.T) {
 	hooks.ticks = make(chan time.Time)
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
+	// Startup can fail before health is called. Bound that path independently
+	// so a broken admission reports its failure instead of hanging the package.
+	healthDeadline := make(chan struct{})
+	healthTimer := time.AfterFunc(8*c.cfg.Timeout, func() {
+		close(healthDeadline)
+		cancel()
+	})
+	defer healthTimer.Stop()
 	starts, repairs, stops := 0, 0, 0
 	hooks.reconcile = func() error { calls = append(calls, "reconcile"); return nil }
 	hooks.start = func(opCtx context.Context) error { calls = append(calls, "start"); starts++; return c.Start(opCtx) }
@@ -754,9 +779,10 @@ func admissionRunShutdownParity(t *testing.T) {
 		return c.stopServiceChildren(opCtx)
 	}
 	hooks.health = func(opCtx context.Context) error {
+		healthTimer.Stop()
 		calls = append(calls, "health")
 		// Model the unfinished operation that Run's deferred Repair must settle.
-		// Cancellation occurs in this existing callback, with no timer race.
+		// Passing cancellation occurs here after stopping the startup guard.
 		lock, err := c.ownExisting()
 		if err != nil {
 			return err
@@ -769,7 +795,13 @@ func admissionRunShutdownParity(t *testing.T) {
 		cancel()
 		return opCtx.Err()
 	}
-	if err := c.Run(ctx, SupervisorPolicy{hooks: &hooks}); err != nil {
+	runErr := c.Run(ctx, SupervisorPolicy{hooks: &hooks})
+	select {
+	case <-healthDeadline:
+		t.Fatal("embedded supervisor never reached health")
+	default:
+	}
+	if runErr != nil {
 		t.Fatal("embedded supervisor did not complete canceled shutdown")
 	}
 	if starts != 1 || repairs != 2 || stops != 2 || !slices.Equal(calls, []string{"reconcile", "repair", "stop", "start", "health", "repair", "stop"}) {

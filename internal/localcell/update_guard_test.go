@@ -5,8 +5,6 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
@@ -21,14 +19,23 @@ func updateReceiverName(fn *ast.FuncDecl) string {
 		return ""
 	}
 	receiver := fn.Recv.List[0].Type
-	if pointer, ok := receiver.(*ast.StarExpr); ok {
-		receiver = pointer.X
+	for {
+		switch node := receiver.(type) {
+		case *ast.StarExpr:
+			receiver = node.X
+		case *ast.ParenExpr:
+			receiver = node.X
+		case *ast.IndexExpr:
+			receiver = node.X
+		case *ast.IndexListExpr:
+			receiver = node.X
+		case *ast.Ident:
+			return node.Name
+		default:
+			return "<unknown>"
+		}
 	}
-	if name, ok := receiver.(*ast.Ident); ok {
-		return name.Name
-	}
-	// An unsupported receiver form cannot match an explicitly allowed method.
-	return "<unknown>"
+
 }
 
 // updateFoundationViolations reads source, not the build-selected package: dark
@@ -161,6 +168,19 @@ func updateFoundationViolations(sourceText map[string]string) []string {
 					}
 					if helpers[child.Sel.Name] {
 						violations = append(violations, fmt.Sprintf("%s: %s selects update helper %s", name, owner, child.Sel.Name))
+						if child.Sel.Name == "maintenanceFenceAllows" {
+							for _, declaration := range file.Decls {
+								fn, ok := declaration.(*ast.FuncDecl)
+								if !ok || fn.Name.Name != owner {
+									continue
+								}
+								invariant := maintenanceAdmissionOwner(name, fn)
+								if invariant == "" {
+									invariant = "literal_zero_direct_error_return"
+								}
+								violations = append(violations, owner+"_"+invariant)
+							}
+						}
 					}
 				case *ast.Ident:
 					var declaration ast.Node
@@ -239,20 +259,9 @@ func isUpdateFilePresent(sources map[string]*ast.File) bool {
 // Keep update execution unreachable. Only four ordinary maintenance admissions
 // are permitted; their exact lock position is checked by the admission contract.
 func TestUpdateFoundationsRemainUnwired(t *testing.T) {
-	files, err := filepath.Glob("*.go")
-	if err != nil {
-		t.Fatal("cannot inventory local cell sources")
-	}
-	sources := make(map[string]string)
-	for _, name := range files {
-		if strings.HasSuffix(name, "_test.go") {
-			continue
-		}
-		data, err := os.ReadFile(name)
-		if err != nil {
-			t.Fatal("cannot read local cell source")
-		}
-		sources[name] = string(data)
+	sources := admissionReadSources(t)
+	if failures := maintenanceAdmissionOwnerInventory(sources); len(failures) != 0 {
+		t.Fatalf("update foundations are wired: %s", strings.Join(failures, "; "))
 	}
 	for _, ending := range []string{"LF", "CRLF"} {
 		t.Run(ending, func(t *testing.T) {
@@ -331,23 +340,10 @@ func (c *Cell) maintenanceFenceAllows(generation int) error { return nil }
 // updateOrdinaryAdmissions exempts only one direct, literal-zero admission in
 // each explicitly owned lifecycle body. It never exempts the body itself.
 func updateOrdinaryAdmissions(file string, fn *ast.FuncDecl) map[*ast.SelectorExpr]bool {
-	if file != "lifecycle.go" || fn.Body == nil || fn.Recv == nil || len(fn.Recv.List) != 1 {
-		return nil
-	}
-	switch fn.Name.Name {
-	case "Install", "Start", "Repair", "Remove":
-	default:
+	if maintenanceAdmissionOwner(file, fn) != "" {
 		return nil
 	}
 	receiver := fn.Recv.List[0]
-	pointer, ok := receiver.Type.(*ast.StarExpr)
-	if !ok || len(receiver.Names) != 1 {
-		return nil
-	}
-	typ, ok := pointer.X.(*ast.Ident)
-	if !ok || typ.Name != "Cell" {
-		return nil
-	}
 	var admitted []*ast.SelectorExpr
 	for _, statement := range fn.Body.List {
 		conditional, ok := statement.(*ast.IfStmt)
