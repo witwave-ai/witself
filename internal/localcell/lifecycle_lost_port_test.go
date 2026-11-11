@@ -216,28 +216,30 @@ func lostPortProcessRecord(t *testing.T, root, component string) localcell.Proce
 	return record
 }
 
-// Calibrate using a complete Start of the same fixture, including its process
-// publication and HTTP readiness. The first bind failure consumes over half the
-// readiness budget; the second launch cannot become ready within the remainder.
-// A fresh retry budget crosses the elapsed bound, even if that retry succeeds.
+// Calibrate complete Starts, including process publication and HTTP readiness.
+// The first bind failure consumes over half the readiness budget; the second
+// launch cannot become ready within the remainder, even with the tolerance.
 func testLostPortReadinessBudget(t *testing.T, binaries localcell.Binaries) {
 	calibration, _ := installedLostPortCell(t, binaries)
-	start := time.Now()
-	if err := calibration.Start(t.Context()); err != nil {
-		t.Fatalf("lost-port timing calibration failed: %v", err)
+	samples := make([]time.Duration, 0, lostPortTimingSamples)
+	for range lostPortTimingSamples {
+		start := time.Now()
+		if err := calibration.Start(t.Context()); err != nil {
+			t.Fatalf("lost-port timing calibration failed: %v", err)
+		}
+		samples = append(samples, time.Since(start))
+		assertReady(t, calibration)
+		if err := calibration.Stop(t.Context()); err != nil {
+			t.Fatal("lost-port timing calibration did not stop")
+		}
 	}
-	singleStart := time.Since(start)
-	assertReady(t, calibration)
-	if err := calibration.Stop(t.Context()); err != nil {
-		t.Fatal("lost-port timing calibration did not stop")
-	}
-	budget := 21 * singleStart
+	budget := lostPortBudgetFor(samples)
 	var readinessStarted time.Time
 	cell, root := disposableCell(t, binaries, nil)
 	if err := cell.Install(t.Context(), localcell.InstallOptions{}); err != nil {
 		t.Fatal("lost-port budget fixture install failed")
 	}
-	cell, err := localcell.New(localcell.Config{Root: root, Binaries: binaries, Timeout: singleStart, MigrationWait: 20 * singleStart,
+	cell, err := localcell.New(localcell.Config{Root: root, Binaries: binaries, Timeout: budget.cellTimeout, MigrationWait: budget.migrationWait,
 		Failpoint: func(operation, step string) error {
 			if operation == "start" && step == "server" {
 				readinessStarted = time.Now()
@@ -248,23 +250,46 @@ func testLostPortReadinessBudget(t *testing.T, binaries localcell.Binaries) {
 		t.Fatal("cannot construct lost-port budget cell")
 	}
 	writeLostPortMarker(t, root, "fixture-steal-port-server", "once")
-	writeLostPortMarker(t, root, "fixture-steal-port-delay-server", (12 * singleStart).String())
-	writeLostPortMarker(t, root, "fixture-retry-delay-server", (18 * singleStart).String())
+	writeLostPortMarker(t, root, "fixture-steal-port-delay-server", budget.firstAttemptDelay.String())
+	writeLostPortMarker(t, root, "fixture-retry-delay-server", budget.retryDelay.String())
 	err = cell.Start(t.Context())
 	elapsed := time.Since(readinessStarted)
 	if readinessStarted.IsZero() {
 		t.Fatalf("lost-port budget fixture never reached server readiness: %v", err)
 	}
-	if elapsed > budget+5*singleStart {
-		t.Fatalf("lost-port retry extended the readiness budget: elapsed=%s budget=%s single-start=%s", elapsed, budget, singleStart)
-	}
 	if err == nil {
+		t.Logf("lost-port budget start returned successfully after %s", elapsed)
 		t.Fatal("lost-port retry became ready outside the original readiness budget")
+	}
+	if err.Error() == "local cell startup failed; rollback incomplete, repair required" {
+		t.Logf("lost-port budget start returned after %s with error: %v", elapsed, err)
+		t.Fatal("lost-port budget rollback did not complete")
+	}
+	if !strings.HasPrefix(err.Error(), "local cell start: server_ready failed") {
+		t.Logf("lost-port budget start error: %v", err)
+		t.Fatal("lost-port budget start failed outside server readiness")
+	}
+	journal, journalErr := os.ReadFile(filepath.Join(root, "journal", "operations.jsonl"))
+	var window time.Duration
+	if journalErr == nil {
+		window, journalErr = lostPortReadinessWindow(string(journal))
+	}
+	if journalErr != nil {
+		t.Logf("lost-port budget journal error: %v", journalErr)
+		t.Fatal("lost-port budget journal did not record one server readiness window")
+	}
+	if window <= 0 {
+		t.Logf("lost-port budget readiness window: %s", window)
+		t.Fatal("lost-port budget journal recorded a non-positive readiness window")
+	}
+	if window > budget.readiness+budget.tolerance {
+		t.Logf("lost-port budget readiness window %s exceeds readiness %s plus tolerance %s", window, budget.readiness, budget.tolerance)
+		t.Fatal("lost-port retry extended the readiness budget")
 	}
 	assertFixtureLaunches(t, root, "server", 2)
 	assertPortRecoveryCauses(t, root, "server", true)
-	assertStopped(t, cell)
-	t.Logf("lost-port retry budget: single-start=%s budget=%s elapsed=%s", singleStart, budget, elapsed)
+	assertLostPortBudgetStopped(t, cell)
+	t.Logf("lost-port retry budget: samples=%v unit=%s readiness=%s window=%s elapsed=%s", samples, budget.unit, budget.readiness, window, elapsed)
 }
 
 func TestFixtureListenerDiagnostics(t *testing.T) {
@@ -341,7 +366,8 @@ func assertFixtureLaunches(t *testing.T, root, component string, want int) {
 	t.Helper()
 	data, err := os.ReadFile(filepath.Join(root, "run", "fixture-launches-"+component))
 	if err != nil || string(data) != strconv.Itoa(want) {
-		t.Fatalf("lost-port %s launch count differs from %d", component, want)
+		t.Logf("lost-port fixture launches: component %s observed %q wanted %d read error %v", component, data, want, err)
+		t.Fatal("lost-port fixture launch count differs from the expected count")
 	}
 }
 
