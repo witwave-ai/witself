@@ -2,7 +2,7 @@ package localcell
 
 import (
 	"slices"
-	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -26,9 +26,17 @@ func TestUpdateJournalTransitionMatrix(t *testing.T) {
 	fromStates := append([]string{""}, states...)
 	fromStates = append(fromStates, "garbage", "operation", "revert_stop", "PREPARED", "prepared ")
 	toStates := append(slices.Clone(states), "", "garbage", "operation")
+	// CI's result checker accepts a closed subtest-name alphabet with no quote
+	// characters, so the empty state and the trailing space are spelled out.
+	label := func(state string) string {
+		if state == "" {
+			return "empty"
+		}
+		return strings.ReplaceAll(state, " ", "+")
+	}
 	for _, from := range fromStates {
 		for _, to := range toStates {
-			t.Run(strconv.Quote(from)+"/"+strconv.Quote(to), func(t *testing.T) {
+			t.Run(label(from)+"/"+label(to), func(t *testing.T) {
 				want := slices.Contains(allowed[from], to)
 				if got := validUpdateJournalTransition(updateState(from), updateState(to)); got != want {
 					t.Fatalf("transition %q -> %q = %t, want %t", from, to, got, want)

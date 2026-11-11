@@ -540,8 +540,9 @@ func TestUpdatePrivateJournalContentRefusedByShippedReader(t *testing.T) {
 			prefix += entry("update", step, "done", "")
 		}
 	}
-	for _, value := range []string{`""`, "null"} {
-		cases = append(cases, fixture{name: "legacy_update_id_" + value, line: entry("stop", "operation", "started", `,"update_id":`+value)})
+	// Names stay inside the closed subtest-name alphabet of CI's result checker.
+	for _, legacy := range []struct{ name, value string }{{"empty_string", `""`}, {"null", "null"}} {
+		cases = append(cases, fixture{name: "legacy_update_id_" + legacy.name, line: entry("stop", "operation", "started", `,"update_id":`+legacy.value)})
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
