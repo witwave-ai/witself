@@ -122,6 +122,7 @@ err = failure.cause
 }
 
 var maintenanceHostSchedulerCallers = map[string]int{
+	"service_control.go/serveServiceControlForPlatform/serviceMaintenanceOnly":           1,
 	"service_maintenance.go/observeServiceMaintenance/observeServiceMaintenanceInto":     1,
 	"service_maintenance.go/observeServiceMaintenanceInto/serviceMaintenanceObservation": 1,
 	"service_maintenance.go/resumeServiceStartup/holdMaintenance":                        2,
@@ -681,6 +682,9 @@ func maintenanceHostDecisionMutationFixtures(t *testing.T, sources map[string]st
 		{"StepProtectiveLatch", "step", "service_supervisor.go", "s.blockedServiceShutdown(ctx)", 0},
 		{"StepProtectiveCircuit", "step", "service_supervisor.go", "len(s.record.Failures) >= 5 && !d.Faulted", 0},
 		{"StepProtectiveDrain", "step", "service_supervisor.go", "d.DesiredState != \"running\" || d.Faulted", 0},
+		{"StepHeldQueryReturn", "step", "service_supervisor.go", "held && s.queryStep", 0},
+		{"StepHeldQueryLatch", "step", "service_supervisor.go", "s.shutdownBlocked", 0},
+		{"StepHeldQueryCircuit", "step", "service_supervisor.go", "len(s.record.Failures) >= 5 || d.Faulted", 0},
 		{"StepHeldProjection", "step", "service_supervisor.go", "held", 0},
 		{"StepHeldReturn", "step", "service_supervisor.go", "held", 1},
 		{"StepPendingBarrier", "step", "service_supervisor.go", "s.pendingStartup != serviceStartupNone", 0},
@@ -1294,6 +1298,14 @@ var maintenanceHostSupervisorPins = map[string]string{
 			}
 		}()
 	}
+	if held && s.queryStep {
+		if s.shutdownBlocked {
+			s.status.State, s.status.Reason, s.status.Healthy = "faulted", "service_stop_refused", false
+		} else if len(s.record.Failures) >= 5 || d.Faulted {
+			s.status.State, s.status.Reason = "faulted", "service_circuit_open"
+		}
+		return nil
+	}
 	if s.blockedServiceShutdown(ctx) {
 		return nil
 	}
@@ -1457,7 +1469,9 @@ var maintenanceHostSupervisorPins = map[string]string{
 		// result. Periodic supervision alone refreshes this observational view.
 		return s.projectedStatus(), nil
 	case "status", "health":
+		s.queryStep = true
 		err = s.step(ctx)
+		s.queryStep = false
 	case "stop":
 		err = s.cell.SetServiceDesiredState(ctx, "stopped")
 		if err == nil {

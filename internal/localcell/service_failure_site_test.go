@@ -467,7 +467,7 @@ func TestServiceFailureSiteProducerInventory(t *testing.T) {
 			"Control":                        "dialServiceControl readServiceControlSecret",
 			"readServiceControlSecret":       "serviceControlSecret validateRoot",
 			"serveServiceControl":            "serveServiceControlForPlatform",
-			"serveServiceControlForPlatform": "listenServiceControl readServiceControlSecret removeServiceControlEndpoint",
+			"serveServiceControlForPlatform": "listenServiceControl readServiceControlSecret removeServiceControlEndpoint serviceMaintenanceOnly",
 		},
 		"service_control_endpoint.go": {
 			"publishServiceControlEndpoint":         "publishServiceControlEndpointWithBoot",

@@ -97,6 +97,7 @@ type supervisor struct {
 	pendingStartup       serviceStartupPhase
 	startupFaulted       bool
 	completingStop       bool
+	queryStep            bool
 }
 
 // Run hosts exactly one owned tree. The lifetime lease is distinct from the
@@ -473,6 +474,14 @@ func (s *supervisor) step(ctx context.Context) (result error) {
 			}
 		}()
 	}
+	if held && s.queryStep {
+		if s.shutdownBlocked {
+			s.status.State, s.status.Reason, s.status.Healthy = "faulted", "service_stop_refused", false
+		} else if len(s.record.Failures) >= 5 || d.Faulted {
+			s.status.State, s.status.Reason = "faulted", "service_circuit_open"
+		}
+		return nil
+	}
 	if s.blockedServiceShutdown(ctx) {
 		return nil
 	}
@@ -702,7 +711,9 @@ func (s *supervisor) command(ctx context.Context, action string) (ServiceStatus,
 		// result. Periodic supervision alone refreshes this observational view.
 		return s.projectedStatus(), nil
 	case "status", "health":
+		s.queryStep = true
 		err = s.step(ctx)
+		s.queryStep = false
 	case "stop":
 		err = s.cell.SetServiceDesiredState(ctx, "stopped")
 		if err == nil {

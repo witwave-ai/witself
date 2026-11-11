@@ -130,6 +130,9 @@ func (c *Cell) Control(ctx context.Context, action string) (ServiceStatus, error
 	if response.StatusCode == http.StatusAccepted {
 		return ServiceStatus{}, errServiceControlDeferred
 	}
+	if serviceControlMaintenanceRefusal(action, response.StatusCode, response.Body) {
+		return ServiceStatus{}, errMaintenanceFenceActive
+	}
 	if action == "health" && response.StatusCode == http.StatusServiceUnavailable {
 		return ServiceStatus{}, errServiceUnhealthy
 	}
@@ -143,6 +146,26 @@ func (c *Cell) Control(ctx context.Context, action string) (ServiceStatus, error
 		return ServiceStatus{}, ErrServiceControlRefused
 	}
 	return status, nil
+}
+
+func serviceControlMaintenanceRefusal(action string, status int, body io.Reader) bool {
+	if (action != "start" && action != "repair") || status != http.StatusConflict {
+		return false
+	}
+	expected := errMaintenanceFenceActive.Error() + "\n"
+	buffer := make([]byte, len(expected)+1)
+	used := 0
+	for reads := 0; reads < 64; reads++ {
+		n, err := body.Read(buffer[used:])
+		used += n
+		if used > len(expected) {
+			return false
+		}
+		if err != nil {
+			return err == io.EOF && used == len(expected) && string(buffer[:used]) == expected
+		}
+	}
+	return false
 }
 
 // Keep the dial boundary in the error chain without exposing its address or the
@@ -259,6 +282,8 @@ func (c *Cell) serveServiceControlForPlatform(commands chan<- serviceCommand, pl
 				http.Error(w, "service_control_deferred", http.StatusAccepted)
 			} else if action == "health" && errors.Is(err, errServiceUnhealthy) {
 				http.Error(w, "service_unhealthy", http.StatusServiceUnavailable)
+			} else if (action == "start" || action == "repair") && serviceMaintenanceOnly(err) {
+				http.Error(w, errMaintenanceFenceActive.Error(), http.StatusConflict)
 			} else {
 				http.Error(w, "service_control_action_failed", http.StatusConflict)
 			}
