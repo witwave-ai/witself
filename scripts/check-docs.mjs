@@ -4,7 +4,7 @@
 import {execFileSync} from 'node:child_process';
 import {readFileSync, realpathSync, statSync} from 'node:fs';
 import {dirname, extname, isAbsolute, relative, resolve, sep} from 'node:path';
-import {pathToFileURL} from 'node:url';
+import {fileURLToPath} from 'node:url';
 import {collectDocsInputs, isDocsPath} from './docs-scope.mjs';
 
 export class DocsCheckError extends Error {
@@ -444,7 +444,15 @@ export function main(args = process.argv.slice(2)) {
   return result;
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+function invokedAsMain() {
+  try {
+    return Boolean(process.argv[1]) && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+
+if (invokedAsMain()) {
   try { main(); }
   catch (error) {
     console.error(error instanceof DocsCheckError ? error.message : 'docs checker could not complete');

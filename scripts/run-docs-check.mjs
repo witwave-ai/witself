@@ -3,9 +3,9 @@
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 import {execFileSync, spawnSync} from 'node:child_process';
-import {lstatSync, readFileSync} from 'node:fs';
+import {lstatSync, readFileSync, realpathSync} from 'node:fs';
 import {resolve} from 'node:path';
-import {pathToFileURL} from 'node:url';
+import {fileURLToPath} from 'node:url';
 import {classifyEvent, classifyLocal} from './ci-product-scope.mjs';
 import {captureDocsSnapshot} from './docs-scope.mjs';
 import {checkDocs} from './check-docs.mjs';
@@ -105,7 +105,15 @@ export function main(args = process.argv.slice(2)) {
   return runDocsChecks();
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+function invokedAsMain() {
+  try {
+    return Boolean(process.argv[1]) && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+
+if (invokedAsMain()) {
   try { main(); }
   catch (error) {
     for (const diagnostic of error.diagnostics ?? []) console.error(`${diagnostic.file}:${diagnostic.line}: ${diagnostic.message}`);

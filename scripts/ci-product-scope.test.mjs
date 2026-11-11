@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import {execFileSync} from 'node:child_process';
+import {execFileSync, spawnSync} from 'node:child_process';
 import {chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {dirname, join} from 'node:path';
@@ -647,5 +647,52 @@ test('docs collector rejects symlink parents, symlink sources, executable and mi
     }
     assert.throws(() => collectDocsInputs(f.cwd), mutation);
     assert.throws(() => captureDocsSnapshot(f.cwd), mutation);
+  }
+});
+
+function mainProbe(path, cwd) {
+  const result = spawnSync(process.execPath, [path, ...['--base', '--invalid']], {
+    cwd, encoding: 'utf8', env: {...process.env, GITHUB_OUTPUT: ''},
+  });
+  assert.ifError(result.error);
+  return {status: result.status, stdout: result.stdout, stderr: result.stderr};
+}
+
+function checkLinkedInvocation(t, kind) {
+  const directory = mkdtempSync(join(tmpdir(), 'witself-ci-product-scope-main-'));
+  t.after(() => rmSync(directory, {recursive: true, force: true}));
+  const real = fileURLToPath(new URL('./ci-product-scope.mjs', import.meta.url));
+  let linked;
+  if (kind === 'directory') {
+    const root = join(directory, 'linked-root');
+    symlinkSync(dirname(dirname(real)), root, 'junction');
+    linked = join(root, 'scripts', 'ci-product-scope.mjs');
+  } else {
+    linked = join(directory, 'different-name.mjs');
+    symlinkSync(real, linked);
+  }
+  const expected = mainProbe(real, directory);
+  assert.notDeepEqual(expected, {status: 0, stdout: '', stderr: ''}, 'probe must prove main ran');
+  assert.deepEqual(mainProbe(linked, directory), expected);
+}
+
+test('main runs through a linked directory', t => checkLinkedInvocation(t, 'directory'));
+test('main runs through a linked file', {
+  skip: process.platform === 'win32' ? 'file symbolic links need privilege on Windows' : false,
+}, t => checkLinkedInvocation(t, 'file'));
+
+test('import stays inert when argv names another file, is absent, or does not exist', t => {
+  const directory = mkdtempSync(join(tmpdir(), 'witself-ci-product-scope-import-'));
+  t.after(() => rmSync(directory, {recursive: true, force: true}));
+  const url = new URL('./ci-product-scope.mjs', import.meta.url).href;
+  for (const argument of [fileURLToPath(import.meta.url), undefined, join(directory, 'missing.mjs')]) {
+    const source = `process.argv[1] = ${JSON.stringify(argument)}; await import(${JSON.stringify(url)});`;
+    const result = spawnSync(process.execPath, ['--input-type=module', '-e', source], {
+      cwd: directory, encoding: 'utf8', env: {...process.env, GITHUB_OUTPUT: ''},
+    });
+    assert.ifError(result.error);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, '');
+    assert.equal(result.stderr, '');
   }
 });

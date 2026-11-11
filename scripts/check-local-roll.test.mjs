@@ -1,9 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {execFileSync} from 'node:child_process';
-import {mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync} from 'node:fs';
+import {execFileSync, spawnSync} from 'node:child_process';
+import {mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, symlinkSync} from 'node:fs';
 import {tmpdir} from 'node:os';
-import {join} from 'node:path';
+import {dirname, join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {checkLocalRoll, GateFailure, RollIneligible, validateRun, validateJobs, requiredJobs, requiredPublishSteps, main} from './check-local-roll.mjs';
 import {cleanupGitFixture, configureFixtureGit, fixtureGitArgs} from './test-support/git-fixture.mjs';
@@ -221,4 +221,51 @@ test('standalone CLI still refuses confirmed schema differences; only the select
       cwd: f.cwd, env: {...process.env, PATH: `${bin}:${process.env.PATH}`}, stdio: ['ignore', 'pipe', 'pipe'],
     }), error => error.status === 1 && error.stderr.toString().includes('release-may-advance-schema; focused approval refused') && !error.stdout.toString().includes('PASS'));
   } finally { rmSync(bin, {recursive: true, force: true}); }
+});
+
+function mainProbe(path, cwd) {
+  const result = spawnSync(process.execPath, [path, ...['--unknown']], {
+    cwd, encoding: 'utf8', env: process.env,
+  });
+  assert.ifError(result.error);
+  return {status: result.status, stdout: result.stdout, stderr: result.stderr};
+}
+
+function checkLinkedInvocation(t, kind) {
+  const directory = mkdtempSync(join(tmpdir(), 'witself-check-local-roll-main-'));
+  t.after(() => rmSync(directory, {recursive: true, force: true}));
+  const real = fileURLToPath(new URL('./check-local-roll.mjs', import.meta.url));
+  let linked;
+  if (kind === 'directory') {
+    const root = join(directory, 'linked-root');
+    symlinkSync(dirname(dirname(real)), root, 'junction');
+    linked = join(root, 'scripts', 'check-local-roll.mjs');
+  } else {
+    linked = join(directory, 'different-name.mjs');
+    symlinkSync(real, linked);
+  }
+  const expected = mainProbe(real, directory);
+  assert.notDeepEqual(expected, {status: 0, stdout: '', stderr: ''}, 'probe must prove main ran');
+  assert.deepEqual(mainProbe(linked, directory), expected);
+}
+
+test('main runs through a linked directory', t => checkLinkedInvocation(t, 'directory'));
+test('main runs through a linked file', {
+  skip: process.platform === 'win32' ? 'file symbolic links need privilege on Windows' : false,
+}, t => checkLinkedInvocation(t, 'file'));
+
+test('import stays inert when argv names another file, is absent, or does not exist', t => {
+  const directory = mkdtempSync(join(tmpdir(), 'witself-check-local-roll-import-'));
+  t.after(() => rmSync(directory, {recursive: true, force: true}));
+  const url = new URL('./check-local-roll.mjs', import.meta.url).href;
+  for (const argument of [fileURLToPath(import.meta.url), undefined, join(directory, 'missing.mjs')]) {
+    const source = `process.argv[1] = ${JSON.stringify(argument)}; await import(${JSON.stringify(url)});`;
+    const result = spawnSync(process.execPath, ['--input-type=module', '-e', source], {
+      cwd: directory, encoding: 'utf8', env: {...process.env, GITHUB_OUTPUT: ''},
+    });
+    assert.ifError(result.error);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, '');
+    assert.equal(result.stderr, '');
+  }
 });

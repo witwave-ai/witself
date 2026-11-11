@@ -2,10 +2,10 @@
 // Local-only, read-only approval of one canonical application pin update.
 // A failure never authorizes a roll and never changes GitHub's full CI policy.
 import {execFileSync} from 'node:child_process';
-import {mkdtempSync, mkdirSync, writeFileSync, rmSync} from 'node:fs';
+import {mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {pathToFileURL} from 'node:url';
+import {fileURLToPath} from 'node:url';
 import {classifyLocal} from './local-roll-scope.mjs';
 
 const repository = 'witwave-ai/witself';
@@ -236,4 +236,12 @@ export async function main(args = process.argv.slice(2)) {
     return 1;
   }
 }
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) process.exitCode = await main();
+function invokedAsMain() {
+  try {
+    return Boolean(process.argv[1]) && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+
+if (invokedAsMain()) process.exitCode = await main();

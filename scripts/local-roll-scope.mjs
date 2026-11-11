@@ -5,7 +5,7 @@ import {execFileSync} from 'node:child_process';
 import {createHash} from 'node:crypto';
 import {existsSync, lstatSync, readFileSync, realpathSync} from 'node:fs';
 import {join, resolve} from 'node:path';
-import {pathToFileURL} from 'node:url';
+import {fileURLToPath} from 'node:url';
 
 const catalogPath = '.gitops/cells/catalog.yaml';
 const versionPattern = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/;
@@ -281,4 +281,11 @@ export function main(args = process.argv.slice(2), cwd = process.cwd()) {
   console.log(JSON.stringify(result));
   return result;
 }
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main();
+function invokedAsMain() {
+  try {
+    return Boolean(process.argv[1]) && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+if (invokedAsMain()) main();

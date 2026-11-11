@@ -2,7 +2,8 @@
 // Required check names remain real checks in every lane. A missing, failed,
 // cancelled, or unexpectedly skipped dependency must never become green.
 import assert from 'node:assert/strict';
-import {pathToFileURL} from 'node:url';
+import {realpathSync} from 'node:fs';
+import {fileURLToPath} from 'node:url';
 
 export function assertGate(needs) {
   assert(needs && typeof needs === 'object' && !Array.isArray(needs), 'Missing dependency results');
@@ -31,7 +32,15 @@ export function assertGate(needs) {
   return docsOnly ? 'docs-only' : websiteOnly ? 'brochure-only' : 'application';
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+function invokedAsMain() {
+  try {
+    return Boolean(process.argv[1]) && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+
+if (invokedAsMain()) {
   const lane = assertGate(JSON.parse(process.env.NEEDS_JSON ?? 'null'));
   const messages = {
     'docs-only': 'PASS: docs-only change; documentation validation succeeded; application gates are not applicable.',
