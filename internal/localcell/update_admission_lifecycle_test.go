@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -235,6 +236,7 @@ func TestMaintenanceFenceAbsentLifecycleParity(t *testing.T) {
 					return nil
 				}
 				if err := cell.Start(t.Context()); !errors.Is(err, localcell.ErrLocked) {
+					t.Logf("operation contention class: %s", contenderErrorClass(err, runtime.GOOS))
 					t.Fatal("independent Start acquired the operation lock during readiness relaunch")
 				}
 				if step == "server_ready" {
