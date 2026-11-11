@@ -7,7 +7,8 @@ import (
 )
 
 // maintenanceFence is separate from desired service state and the derived
-// update record. These dark helpers have no lifecycle or command callers.
+// update record. Install, Start, Repair, and Remove check it under their
+// operation lock; other entry points do not yet enforce maintenance admission.
 type maintenanceFence struct {
 	Generation  int       `json:"generation"`
 	OperationID string    `json:"operation_id"`
@@ -24,7 +25,7 @@ func (c *Cell) readMaintenanceFence() (*maintenanceFence, error) {
 
 // readMaintenanceFenceWith separates absent, validated present, and refused
 // fences. An invalid parent without an observed leaf returns the original parent
-// error separately, so a future caller can preserve its legacy error ordering.
+// error separately, so callers can preserve their legacy error ordering.
 // Once observed, a fence disappearing during validation is always refused.
 func (c *Cell) readMaintenanceFenceWith(read func(string, any) error) (*maintenanceFence, error) {
 	path := c.path("journal", "maintenance.json")
@@ -55,7 +56,8 @@ func (c *Cell) readMaintenanceFenceWith(read func(string, any) error) (*maintena
 	return &fence, nil
 }
 
-// maintenanceFenceAllows is a dark predicate, not an enforced launch boundary.
+// maintenanceFenceAllows admits the four core lifecycle operations above.
+// It is not an independent boundary for lower-level launch or service helpers.
 // Zero denotes an ordinary caller; a positive generation requires an exact
 // durable fence match, including when no fence exists anymore.
 func (c *Cell) maintenanceFenceAllows(generation int) error {
