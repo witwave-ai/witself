@@ -593,6 +593,42 @@ test('interleaved packages, nested tests, parallel pauses, CRLF, and chunk bound
   assert.equal(`${result.lines.join('\n')}\n`, expected);
 });
 
+test('unit mode lists the ten slowest top-level tests of a package after its results', async () => {
+  const name = packages[0];
+  const timed = (testName, Elapsed, action = 'pass') => [event('run', name, testName), event(action, name, testName, {Elapsed})];
+  const ladder = Array.from({length: 11}, (_, index) => [`TestSlow${String(index).padStart(2, '0')}`, 5 + index]);
+  const events = [event('start', name), ...ladder.flatMap(([testName, seconds]) => timed(testName, seconds)),
+    ...timed('TestTieB', 15), ...timed('TestTieA', 15.2), ...timed('TestBelow', 4.99), ...timed('TestText', '99'),
+    event('run', name, 'TestParent'), event('run', name, 'TestParent/child'),
+    event('pass', name, 'TestParent/child', {Elapsed: 99}), event('pass', name, 'TestParent', {Elapsed: 0.5}),
+    ...timed('TestSlowFail', 30.6, 'fail'), event('fail', name),
+    ...packageEvents(packages[1]), ...packageEvents(packages[2])];
+  const expected = [`package ${name} pass=17 skip=0 fail=1`, `fail ${name} TestSlowFail`, `why ${name} TestSlowFail :: (unclassified)`,
+    ...[['TestSlowFail', 31], ['TestTieA', 15], ['TestSlow10', 15], ['TestTieB', 15], ['TestSlow09', 14], ['TestSlow08', 13],
+      ['TestSlow07', 12], ['TestSlow06', 11], ['TestSlow05', 10], ['TestSlow04', 9]]
+      .map(([testName, seconds]) => `slow ${name} ${testName} :: ${seconds}s`),
+    `package ${packages[1]} pass=1 skip=0 fail=0`, `package ${packages[2]} pass=1 skip=0 fail=0`];
+  assertFixture(script, {input: stream(events), output: `${expected.join('\n')}\n`, stderr: failureDiagnostic});
+  const result = await checkGoTestJSON([stream(events)]);
+  assert.deepEqual(result, {valid: false, lines: expected, reason: failureDiagnostic.trimEnd()});
+});
+
+test('slow test lines need a numeric elapsed time at the threshold and stay out of proof mode', async () => {
+  const name = packages[0];
+  const timedPackage = Elapsed => [event('start', name), event('run', name, 'TestFixture'),
+    event('pass', name, 'TestFixture', {Elapsed}), event('pass', name, undefined, {Elapsed: 600})];
+  const others = [...packageEvents(packages[1]), ...packageEvents(packages[2])];
+  for (const Elapsed of [undefined, null, '60', 4.999, Number.MAX_VALUE * 10, -60]) {
+    const result = await checkGoTestJSON([stream([...timedPackage(Elapsed), ...others])]);
+    assert.deepEqual(result, {valid: true, lines: summary().trimEnd().split('\n'), reason: null}, String(Elapsed));
+  }
+  const atThreshold = await checkGoTestJSON([stream([...timedPackage(5), ...others])]);
+  assert.deepEqual(atThreshold.lines, [`package ${name} pass=1 skip=0 fail=0`, `slow ${name} TestFixture :: 5s`,
+    `package ${packages[1]} pass=1 skip=0 fail=0`, `package ${packages[2]} pass=1 skip=0 fail=0`]);
+  const proof = await checkGoTestJSON([stream(timedPackage(60))], ['TestFixture']);
+  assert.deepEqual(proof, {valid: true, lines: [`package ${name} pass=1 skip=0 fail=0`], reason: null});
+});
+
 test('output values and dependency build output are discarded', () => {
   const secretMarker = 'private-fixture-marker';
   const events = [{Action: 'build-output', ImportPath: 'dependency', Output: secretMarker},

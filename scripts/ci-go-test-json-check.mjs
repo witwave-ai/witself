@@ -14,6 +14,10 @@ const storePackage = 'github.com/witwave-ai/witself/internal/store';
 const selectablePackages = Object.freeze([...expectedPackages, storePackage]);
 
 const terminalActions = new Set(['pass', 'skip', 'fail']);
+// The three-package unit step has one -timeout for a whole package; show
+// where its wall clock goes before growth turns into a timed-out stream.
+const slowTestSeconds = 5;
+const slowTestLimit = 10;
 const serviceProofTest = 'TestNativeServiceLifecycle';
 // Every manager stage has both a passing child assertion and one ordered,
 // value-free receipt. Capability or foreground success cannot satisfy this mode.
@@ -223,7 +227,7 @@ export async function checkGoTestJSON(input, requiredTests = [], {diagnose = fal
     : packageValid ? [packageName] : [];
   const packages = new Map(packageNames.map(name => [name, {
     started: false, summary: null, summaryLine: null, tests: new Map(), why: new Map(), classes: new Map(), diagnostics: new Map(),
-    timedOut: new Set(), serviceOutcomes: new Set(), managerStages: [], managerMissing: new Set(), shutdownReceipts: [], pass: 0, skip: 0, fail: 0,
+    timedOut: new Set(), serviceOutcomes: new Set(), managerStages: [], managerMissing: new Set(), shutdownReceipts: [], elapsed: new Map(), pass: 0, skip: 0, fail: 0,
   }]));
   let invalid = !packageValid || requiredTests.some(name => typeof name !== 'string' || !testNamePattern.test(name) || /[a-f0-9]{64}/i.test(name)) ||
     new Set(requiredTests).size !== requiredTests.length;
@@ -368,6 +372,9 @@ export async function checkGoTestJSON(input, requiredTests = [], {diagnose = fal
     else if (terminalActions.has(action) && (previous === 'running' || previous === 'paused')) {
       state.tests.set(name, action);
       state[action]++;
+      if (requiredTests.length === 0 && !name.includes('/') && Number.isFinite(event.Elapsed) && event.Elapsed >= slowTestSeconds) {
+        state.elapsed.set(name, event.Elapsed);
+      }
     } else reject(line);
   }
 
@@ -451,6 +458,12 @@ export async function checkGoTestJSON(input, requiredTests = [], {diagnose = fal
         for (const diagnostic of state.classes.get(testName) ?? []) lines.push(`class ${name} ${testName} :: ${diagnostic}`);
         for (const diagnostic of state.diagnostics.get(testName) ?? []) lines.push(`diagnose ${name} ${testName} :: ${diagnostic}`);
       }
+    }
+    // Top-level tests only: a parent's elapsed time already includes its
+    // children, and a parallel test's includes the time it spent paused.
+    for (const [testName, seconds] of [...state.elapsed]
+      .sort(([left, a], [right, b]) => b - a || left.localeCompare(right)).slice(0, slowTestLimit)) {
+      lines.push(`slow ${name} ${testName} :: ${Math.round(seconds)}s`);
     }
     // A timeout may stop the stream before Go emits individual fail records.
     for (const [testName, action] of state.tests) {
