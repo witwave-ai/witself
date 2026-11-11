@@ -178,7 +178,7 @@ func windowsSealTestGrantedAccess(t *testing.T, f *windowsGenerationSealFile) ui
 	var raw [56]byte // OBJECT_BASIC_INFORMATION, including GrantedAccess at byte 4.
 	var returned uint32
 	status, _, _ := query.Call(f.file.Fd(), 0, uintptr(unsafe.Pointer(&raw[0])), uintptr(len(raw)), uintptr(unsafe.Pointer(&returned)))
-	if uint32(status) != 0 || returned > uint32(len(raw)) {
+	if uint32(status) != 0 || returned < 8 || returned > uint32(len(raw)) {
 		t.Fatal("NOT RUN (Windows): native granted-access observation unavailable")
 	}
 	return binary.LittleEndian.Uint32(raw[4:8])
