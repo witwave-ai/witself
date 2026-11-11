@@ -30,6 +30,9 @@ const (
 
 const installerMigratorRole = "witself_sync_migrator"
 
+// openPrincipalCredentialFile permits replacement tests at the inspected-file open boundary.
+var openPrincipalCredentialFile = openPrivateFile
+
 var principalCredentialPurposes = [...]credentialPurpose{
 	credentialServer, credentialWorker, credentialMaintenance,
 	credentialSnapshot, credentialLegacy, credentialMigrator,
@@ -87,10 +90,13 @@ func (c *Cell) credentialPassword(m *Manifest, purpose credentialPurpose) (strin
 		}
 	}
 	before, err := os.Lstat(path)
-	if err != nil || !privatePrincipalCredential(path, before) {
+	if err != nil || !os.SameFile(before, before) || !privatePrincipalCredential(path, before) {
+		// Windows FileInfo resolves its file ID lazily from the pathname. The
+		// self-comparison pins it before the open, so a replacement that takes
+		// the pathname afterwards fails the identity check below.
 		return "", ErrLocalPrincipalCredentialsRefused
 	}
-	f, err := openPrivateFile(path, os.O_RDONLY, 0)
+	f, err := openPrincipalCredentialFile(path, os.O_RDONLY, 0)
 	if err != nil {
 		return "", ErrLocalPrincipalCredentialsRefused
 	}
