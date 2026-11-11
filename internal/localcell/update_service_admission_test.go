@@ -77,9 +77,15 @@ func serviceMaintenanceSnapshot(t *testing.T, c *Cell) map[string]serviceMainten
 		case info.Mode()&os.ModeSymlink != 0:
 			item.data, err = os.Readlink(path)
 		case info.Mode().IsRegular():
-			var data []byte
-			data, err = os.ReadFile(path)
-			item.data = string(data)
+			// A zero-length file has no bytes to compare and Lstat already
+			// reported its length, so it is never opened. The operation lock
+			// files are always empty, and while a contender holds one Windows
+			// refuses every read of its mandatorily locked byte range.
+			if info.Size() != 0 {
+				var data []byte
+				data, err = os.ReadFile(path)
+				item.data = string(data)
+			}
 		case entry.IsDir():
 		default:
 			return errors.New("maintenance snapshot encountered a non-fixture object")
