@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 // Only explicit brochure files or verified regular research-doc additions and
 // modifications can replace application gates. Mixed scopes take the full lane.
-import {appendFileSync, lstatSync, readFileSync} from 'node:fs';
+import {appendFileSync, lstatSync, readFileSync, realpathSync} from 'node:fs';
 import {execFileSync} from 'node:child_process';
-import {pathToFileURL} from 'node:url';
+import {fileURLToPath} from 'node:url';
 import {docsIndex, isDocsPath, validPath} from './docs-scope.mjs';
 import {checkLocalIntegrity} from './local-roll-scope.mjs';
 import {join} from 'node:path';
@@ -226,4 +226,12 @@ export function main(args = process.argv.slice(2), env = process.env) {
   return result;
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main();
+function invokedAsMain() {
+  try {
+    return Boolean(process.argv[1]) && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+
+if (invokedAsMain()) main();

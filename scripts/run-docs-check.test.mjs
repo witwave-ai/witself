@@ -1,9 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtempSync, mkdirSync, writeFileSync} from 'node:fs';
+import {mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync} from 'node:fs';
 import {tmpdir} from 'node:os';
-import {join} from 'node:path';
-import {execFileSync} from 'node:child_process';
+import {dirname, join, resolve} from 'node:path';
+import {fileURLToPath, pathToFileURL} from 'node:url';
+import {execFileSync, spawnSync} from 'node:child_process';
 import {runDocsChecks, captureLocalDocsState, docsScope, checkDocsWhitespace, main} from './run-docs-check.mjs';
 import {cleanupGitFixture, configureFixtureGit, fixtureGitArgs} from './test-support/git-fixture.mjs';
 
@@ -95,4 +96,58 @@ test('forced local scope checks index changes despite inherited unrelated GitHub
   const f = fixture(false, {cwd, env, classify: docsScope});
   assert.deepEqual(runDocsChecks(f.options), {passed: true, index_checked: true});
   assert.deepEqual(f.calls, [['go', ['test', './featurestatus', '-run', '^TestRunbookDocsIndexes$', '-count=1'], {cwd, env}]]);
+});
+
+const script = fileURLToPath(new URL('./run-docs-check.mjs', import.meta.url));
+const repository = resolve(dirname(script), '..');
+
+function assertMainProbe(path, cwd) {
+  // Arguments are rejected before document checks, Git commands, or child gates.
+  const result = spawnSync(process.execPath, [path, '--invalid'], {cwd, encoding: 'utf8', timeout: 10000});
+  assert.ifError(result.error);
+  assert.equal(result.signal, null);
+  return {status: result.status, stdout: result.stdout, stderr: result.stderr};
+}
+
+function assertLinkedMain(linked, cwd) {
+  const expected = assertMainProbe(script, cwd);
+  assert.notDeepEqual(expected, {status: 0, stdout: '', stderr: ''});
+  assert.deepEqual(assertMainProbe(linked, cwd), expected);
+}
+
+test('main guard runs through a linked directory', t => {
+  const directory = mkdtempSync(join(tmpdir(), 'main-guard-directory-'));
+  t.after(() => rmSync(directory, {recursive: true, force: true}));
+  const linked = join(directory, 'checkout');
+  symlinkSync(repository, linked, 'junction');
+  assertLinkedMain(join(linked, 'scripts', 'run-docs-check.mjs'), directory);
+});
+
+test('main guard runs through a linked file', {
+  skip: process.platform === 'win32' ? 'file symbolic links need privilege on Windows' : false,
+}, t => {
+  const directory = mkdtempSync(join(tmpdir(), 'main-guard-file-'));
+  t.after(() => rmSync(directory, {recursive: true, force: true}));
+  const linked = join(directory, 'renamed-tool.mjs');
+  symlinkSync(script, linked);
+  assertLinkedMain(linked, directory);
+});
+
+test('main guard keeps imports inert with absent, nonexistent, or another entry file', t => {
+  const directory = mkdtempSync(join(tmpdir(), 'main-guard-import-'));
+  t.after(() => rmSync(directory, {recursive: true, force: true}));
+  for (const entry of [undefined, join(directory, 'missing.mjs'), fileURLToPath(import.meta.url)]) {
+    const source = `process.argv[1] = ${JSON.stringify(entry)};
+      process.argv[2] = '--invalid';
+      await import(${JSON.stringify(pathToFileURL(script).href)});
+      console.log('imported');`;
+    const result = spawnSync(process.execPath, ['--input-type=module', '--eval', source], {
+      cwd: directory, encoding: 'utf8', timeout: 10000,
+    });
+    assert.ifError(result.error);
+    assert.equal(result.signal, null);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, 'imported\n');
+    assert.equal(result.stderr, '');
+  }
 });

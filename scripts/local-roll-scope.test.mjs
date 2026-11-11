@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import {execFileSync} from 'node:child_process';
+import {execFileSync, spawnSync} from 'node:child_process';
 import {chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {dirname, join} from 'node:path';
@@ -9,6 +9,47 @@ import {checkLocalContext, checkLocalIntegrity, classifyLocal} from './local-rol
 import {cleanupGitFixture, configureFixtureGit, fixtureGitArgs} from './test-support/git-fixture.mjs';
 
 const script = fileURLToPath(new URL('./local-roll-scope.mjs', import.meta.url));
+
+function assertLinkedInvocation(t, fileLink) {
+  const directory = mkdtempSync(join(tmpdir(), 'witself-local-roll-main-'));
+  t.after(() => rmSync(directory, {recursive: true, force: true}));
+  const link = join(directory, fileLink ? 'renamed-scope.mjs' : 'linked-repository');
+  if (fileLink) symlinkSync(script, link);
+  else symlinkSync(dirname(dirname(script)), link, 'junction');
+  const linkedScript = fileLink ? link : join(link, 'scripts', 'local-roll-scope.mjs');
+  // An option-shaped base is rejected before any Git or filesystem work.
+  const probe = file => {
+    const result = spawnSync(process.execPath, [file, '--base', '--mainguard-probe'], {cwd: directory, encoding: 'utf8'});
+    assert.ifError(result.error);
+    return {status: result.status, stdout: result.stdout, stderr: result.stderr};
+  };
+  const expected = probe(script);
+  assert.deepEqual(expected, {status: 0, stdout: '{"roll_only":false,"reason":"invalid-local-base"}\n', stderr: ''});
+  assert.notDeepEqual(expected, {status: 0, stdout: '', stderr: ''});
+  assert.deepEqual(probe(linkedScript), expected);
+}
+
+test('main runs through a linked directory', t => assertLinkedInvocation(t, false));
+
+test('main runs through a linked file', {
+  skip: process.platform === 'win32' ? 'file symbolic links need privilege on Windows' : false,
+}, t => assertLinkedInvocation(t, true));
+
+test('import stays inert when argv names another file, is absent, or does not exist', t => {
+  const directory = mkdtempSync(join(tmpdir(), 'witself-local-roll-import-'));
+  t.after(() => rmSync(directory, {recursive: true, force: true}));
+  const url = new URL('./local-roll-scope.mjs', import.meta.url).href;
+  for (const argument of [fileURLToPath(import.meta.url), undefined, join(directory, 'missing.mjs')]) {
+    // The option-shaped base keeps a wrongly activated main away from Git and prints its refusal.
+    const source = `process.argv[1] = ${JSON.stringify(argument)}; process.argv[2] = '--base'; process.argv[3] = '--mainguard-probe'; await import(${JSON.stringify(url)});`;
+    const result = spawnSync(process.execPath, ['--input-type=module', '-e', source], {cwd: directory, encoding: 'utf8'});
+    assert.ifError(result.error);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, '');
+    assert.equal(result.stderr, '');
+  }
+});
+
 const cell = 'civo-sandbox-use1-serving';
 const second = 'civo-sandbox-use1-backup';
 const valuesPath = name => `.gitops/cells/${name}/values.yaml`;

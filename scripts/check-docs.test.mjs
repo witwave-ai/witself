@@ -5,7 +5,7 @@ import {createHash} from 'node:crypto';
 import {mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, symlinkSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {dirname, join, resolve} from 'node:path';
-import {fileURLToPath} from 'node:url';
+import {fileURLToPath, pathToFileURL} from 'node:url';
 import {checkDocs, DocsCheckError} from './check-docs.mjs';
 import {collectDocsInputs} from './docs-scope.mjs';
 import {cleanupGitFixture, configureFixtureGit, fixtureGitArgs} from './test-support/git-fixture.mjs';
@@ -310,4 +310,55 @@ test('current repository proof validates the entire allowlist without changing i
   assert.equal(result.files.length, before.length);
   assert.ok(result.links_checked > 0);
   assert.deepEqual(snapshot(), before);
+});
+
+function assertMainProbe(path, cwd) {
+  // Arguments are rejected before document checks, Git commands, or child gates.
+  const result = spawnSync(process.execPath, [path, '--invalid'], {cwd, encoding: 'utf8', timeout: 10000});
+  assert.ifError(result.error);
+  assert.equal(result.signal, null);
+  return {status: result.status, stdout: result.stdout, stderr: result.stderr};
+}
+
+function assertLinkedMain(linked, cwd) {
+  const expected = assertMainProbe(script, cwd);
+  assert.notDeepEqual(expected, {status: 0, stdout: '', stderr: ''});
+  assert.deepEqual(assertMainProbe(linked, cwd), expected);
+}
+
+test('main guard runs through a linked directory', t => {
+  const directory = mkdtempSync(join(tmpdir(), 'main-guard-directory-'));
+  t.after(() => rmSync(directory, {recursive: true, force: true}));
+  const linked = join(directory, 'checkout');
+  symlinkSync(repository, linked, 'junction');
+  assertLinkedMain(join(linked, 'scripts', 'check-docs.mjs'), directory);
+});
+
+test('main guard runs through a linked file', {
+  skip: process.platform === 'win32' ? 'file symbolic links need privilege on Windows' : false,
+}, t => {
+  const directory = mkdtempSync(join(tmpdir(), 'main-guard-file-'));
+  t.after(() => rmSync(directory, {recursive: true, force: true}));
+  const linked = join(directory, 'renamed-tool.mjs');
+  symlinkSync(script, linked);
+  assertLinkedMain(linked, directory);
+});
+
+test('main guard keeps imports inert with absent, nonexistent, or another entry file', t => {
+  const directory = mkdtempSync(join(tmpdir(), 'main-guard-import-'));
+  t.after(() => rmSync(directory, {recursive: true, force: true}));
+  for (const entry of [undefined, join(directory, 'missing.mjs'), fileURLToPath(import.meta.url)]) {
+    const source = `process.argv[1] = ${JSON.stringify(entry)};
+      process.argv[2] = '--invalid';
+      await import(${JSON.stringify(pathToFileURL(script).href)});
+      console.log('imported');`;
+    const result = spawnSync(process.execPath, ['--input-type=module', '--eval', source], {
+      cwd: directory, encoding: 'utf8', timeout: 10000,
+    });
+    assert.ifError(result.error);
+    assert.equal(result.signal, null);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, 'imported\n');
+    assert.equal(result.stderr, '');
+  }
 });

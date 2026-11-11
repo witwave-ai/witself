@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // A successful native command and a complete JSON stream are both required by
 // the workflow. Only source-approved diagnostic text may leave the JSON stream.
-import {createReadStream, readFileSync, readdirSync} from 'node:fs';
-import {pathToFileURL} from 'node:url';
+import {createReadStream, readFileSync, readdirSync, realpathSync} from 'node:fs';
+import {fileURLToPath} from 'node:url';
 
 export const expectedPackages = Object.freeze([
   'github.com/witwave-ai/witself/internal/localcell',
@@ -464,7 +464,15 @@ export async function checkGoTestJSON(input, requiredTests = [], {diagnose = fal
   return {valid: reason === null, lines, reason};
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+function invokedAsMain() {
+  try {
+    return Boolean(process.argv[1]) && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+
+if (invokedAsMain()) {
   const args = process.argv.slice(2);
   const options = {};
   let argumentsValid = true;

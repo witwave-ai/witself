@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
-import {mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync} from 'node:fs';
+import {mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
-import {join} from 'node:path';
+import {dirname, join} from 'node:path';
 import test from 'node:test';
 import {fileURLToPath} from 'node:url';
 import {checkGoTestJSON} from './ci-go-test-json-check.mjs';
@@ -42,6 +42,68 @@ function summary(counts = {}) {
 }
 
 const passing = packages.flatMap(name => packageEvents(name));
+
+function mainGuardProbe(entry) {
+  const result = spawnSync(process.execPath, [entry, '--invalid-mainguard-probe'], {encoding: 'utf8', input: '', timeout: 10000});
+  assert.ifError(result.error);
+  return {status: result.status, stdout: result.stdout, stderr: result.stderr};
+}
+
+function assertMainGuardProbe(entry) {
+  const expected = mainGuardProbe(script);
+  assert.deepEqual(expected, {status: 1, stdout: '', stderr: 'FAIL: invalid Go test checker arguments\n'});
+  const actual = mainGuardProbe(entry);
+  assert.deepEqual(actual, expected);
+  assert.notDeepEqual(actual, {status: 0, stdout: '', stderr: ''});
+}
+
+test('main guard runs through a linked directory', t => {
+  const directory = mkdtempSync(join(tmpdir(), 'witself-go-json-main-'));
+  t.after(() => rmSync(directory, {recursive: true, force: true}));
+  symlinkSync(dirname(dirname(script)), join(directory, 'checkout'), 'junction');
+  assertMainGuardProbe(join(directory, 'checkout', 'scripts', 'ci-go-test-json-check.mjs'));
+});
+
+test('main guard runs through a linked file',
+  process.platform === 'win32' ? {skip: 'file symbolic links need privilege on Windows'} : {}, t => {
+    const directory = mkdtempSync(join(tmpdir(), 'witself-go-json-main-'));
+    t.after(() => rmSync(directory, {recursive: true, force: true}));
+    symlinkSync(script, join(directory, 'renamed-checker.mjs'));
+    assertMainGuardProbe(join(directory, 'renamed-checker.mjs'));
+  });
+
+test('main guard keeps imports inert with absent, nonexistent, or another entry file', t => {
+  const directory = mkdtempSync(join(tmpdir(), 'witself-go-json-import-'));
+  t.after(() => rmSync(directory, {recursive: true, force: true}));
+  const other = join(directory, 'other.mjs');
+  writeFileSync(other, '');
+  for (const entry of [undefined, join(directory, 'nonexistent.mjs'), other]) {
+    const setup = entry === undefined ? 'delete process.argv[1];' : `process.argv[1] = ${JSON.stringify(entry)};`;
+    const code = `${setup} await import(${JSON.stringify(new URL('./ci-go-test-json-check.mjs', import.meta.url).href)});`;
+    const result = spawnSync(process.execPath, ['--input-type=module', '--eval', code], {encoding: 'utf8', input: '', timeout: 10000});
+    assert.ifError(result.error);
+    assert.deepEqual({status: result.status, stdout: result.stdout, stderr: result.stderr},
+      {status: 0, stdout: '', stderr: ''}, `import with entry ${entry}`);
+  }
+});
+
+test('main guard source contract covers every scripts module without URL equality', () => {
+  const directory = dirname(script);
+  const files = readdirSync(directory).filter(file => file.endsWith('.mjs') && !file.endsWith('.test.mjs'));
+  // Pin coverage as well as discovering future tools: silently excluding any
+  // current gate from the scan must fail even when its guard is healthy.
+  for (const name of ['check-docs', 'check-local-roll', 'check-local', 'ci-go-test-json-check',
+    'ci-product-gate', 'ci-product-scope', 'local-roll-scope', 'run-docs-check']) {
+    assert(files.includes(`${name}.mjs`), `source contract omitted ${name}.mjs`);
+  }
+  // Reject either orientation, including wrapped/aliased argv expressions.
+  // A direct URL equality cannot establish filesystem entry-point identity.
+  const urlEquality = /\bimport\s*\.\s*meta\s*\.\s*url\s*===|===\s*import\s*\.\s*meta\s*\.\s*url\b/;
+  for (const file of files) {
+    const source = readFileSync(join(directory, file), 'utf8').replace(/\r\n/g, '\n');
+    assert.doesNotMatch(source, urlEquality, `${file}: compare real paths instead of module URLs`);
+  }
+});
 
 test('native service capability results stay explicit and require the selected persistence proof', async () => {
   const name = 'TestNativeServiceLifecycle';

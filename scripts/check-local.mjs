@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // Local pre-push selection. Research documentation shares its gate with CI.
 import {spawnSync} from 'node:child_process';
-import {pathToFileURL} from 'node:url';
+import {realpathSync} from 'node:fs';
+import {fileURLToPath} from 'node:url';
 import {classifyLocal as classifyProduct} from './ci-product-scope.mjs';
 import {classifyLocal as classifyRoll, checkLocalIntegrity, checkLocalContext} from './local-roll-scope.mjs';
 import {checkLocalRoll, GateFailure, RollIneligible} from './check-local-roll.mjs';
@@ -82,7 +83,15 @@ export async function main(args = process.argv.slice(2)) {
   return runLocalChecks();
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+function invokedAsMain() {
+  try {
+    return Boolean(process.argv[1]) && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+
+if (invokedAsMain()) {
   main().catch(error => {
     // GateFailure contains only a fixed reason code, never provider output.
     if (error instanceof GateFailure) console.error(error.message);
