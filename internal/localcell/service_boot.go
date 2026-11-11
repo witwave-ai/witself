@@ -37,6 +37,9 @@ func (c *Cell) reconcileServiceBoot() error {
 	if err == nil && (previous.InstallationID != d.InstallationID || previous.BootID == "") {
 		return ErrServiceOwnershipConflict
 	}
+	if err := c.maintenanceFenceAllows(0); err != nil {
+		return err
+	}
 	if previous.BootID != "" && previous.BootID != boot {
 		if err := c.reconcileOldBoot(previous.BootID, boot); err != nil {
 			return err

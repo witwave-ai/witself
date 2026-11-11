@@ -174,7 +174,7 @@ func updateFoundationViolations(sourceText map[string]string) []string {
 								if !ok || fn.Name.Name != owner {
 									continue
 								}
-								invariant := maintenanceAdmissionOwner(name, fn)
+								invariant := ordinaryMaintenanceAdmissionOwner(name, fn)
 								if invariant == "" {
 									invariant = "literal_zero_direct_error_return"
 								}
@@ -256,8 +256,8 @@ func isUpdateFilePresent(sources map[string]*ast.File) bool {
 	return false
 }
 
-// Keep update execution unreachable. Only four ordinary maintenance admissions
-// are permitted; their exact lock position is checked by the admission contract.
+// Keep update execution unreachable. Four lifecycle and two bounded service
+// admissions are permitted; the admission contracts pin their existing locks.
 func TestUpdateFoundationsRemainUnwired(t *testing.T) {
 	sources := admissionReadSources(t)
 	if failures := maintenanceAdmissionOwnerInventory(sources); len(failures) != 0 {
@@ -338,9 +338,9 @@ func (c *Cell) maintenanceFenceAllows(generation int) error { return nil }
 }
 
 // updateOrdinaryAdmissions exempts only one direct, literal-zero admission in
-// each explicitly owned lifecycle body. It never exempts the body itself.
+// each explicitly owned lifecycle or service body. It never exempts the body itself.
 func updateOrdinaryAdmissions(file string, fn *ast.FuncDecl) map[*ast.SelectorExpr]bool {
-	if maintenanceAdmissionOwner(file, fn) != "" {
+	if ordinaryMaintenanceAdmissionOwner(file, fn) != "" {
 		return nil
 	}
 	receiver := fn.Recv.List[0]

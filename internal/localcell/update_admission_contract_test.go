@@ -725,3 +725,84 @@ func (c *Cell) readUpdateJournal() error { return nil }
 }
 
 func admissionIndent(source string) string { return "\t" + strings.ReplaceAll(source, "\n", "\n\t") }
+
+// Appendix C independently closes the two holes a composite contract could
+// conceal: accepting every admitted selector, and losing a sole owner's file.
+func TestMaintenanceFenceAdmissionAppendixC(t *testing.T) {
+	approved := admissionApprovedOwners(t)
+	const foundation = `package localcell
+func (c *Cell) maintenanceFenceAllows(generation int) error { return nil }
+`
+	control := "package localcell\n"
+	for _, owner := range []string{"Install", "Start", "Repair", "Remove"} {
+		control += approved[owner] + "\n"
+	}
+	if failures := maintenanceAdmissionOwnerInventory(map[string]string{"lifecycle.go": control}); len(failures) != 0 {
+		t.Fatalf("appendix C inventory control: %v", failures)
+	}
+	if failures := updateFoundationViolations(map[string]string{"lifecycle.go": control, "update_fence.go": foundation}); len(failures) != 0 {
+		t.Fatalf("appendix C foundation control: %v", failures)
+	}
+	for _, owner := range []string{"Install", "Start", "Repair", "Remove"} {
+		t.Run(owner, func(t *testing.T) {
+			t.Run("LateLiteralZeroGate", func(t *testing.T) {
+				changed := admissionEditStatements(approved[owner], func(statements []ast.Stmt) []ast.Stmt {
+					gateFile, err := parser.ParseFile(token.NewFileSet(), "gate.go", "package localcell; func fixture() {"+maintenanceAdmissionStatement+"}", 0)
+					if err != nil {
+						t.Fatal("gate fixture parse failure")
+					}
+					gate := gateFile.Decls[0].(*ast.FuncDecl).Body.List[0]
+					// Approved includes the full prefix and first effect, then return nil.
+					result := append([]ast.Stmt{}, statements[:len(statements)-1]...)
+					result = append(result, gate)
+					return append(result, statements[len(statements)-1])
+				})
+				for _, ending := range []string{"LF", "CRLF"} {
+					t.Run(ending, func(t *testing.T) {
+						source := "package localcell\n" + changed
+						if ending == "CRLF" {
+							source = strings.ReplaceAll(source, "\n", "\r\n")
+						}
+						file, err := parser.ParseFile(token.NewFileSet(), "lifecycle.go", source, 0)
+						if err != nil {
+							t.Fatal("appendix C parse failure is not a mutation kill")
+						}
+						fn := file.Decls[0].(*ast.FuncDecl)
+						if got := maintenanceAdmissionOwner("lifecycle.go", fn); got != "" {
+							t.Fatalf("appendix C changed approved prefix: %s", got)
+						}
+						failures := updateFoundationViolations(map[string]string{"lifecycle.go": source, "update_fence.go": foundation})
+						if !containsAdmissionFailure(failures, owner+"_literal_zero_direct_error_return") {
+							t.Fatalf("appendix C foundation accepted late literal-zero gate: %v", failures)
+						}
+					})
+				}
+			})
+			t.Run("SoleOwnerWrongFile", func(t *testing.T) {
+				// Move the real complete declaration, preserving its exact bytes.
+				var moved string
+				remaining := admissionMutateFunction(t, admissionReadLifecycle(t), owner, func(body string) string {
+					moved = body
+					return ""
+				})
+				for _, ending := range []string{"LF", "CRLF"} {
+					t.Run(ending, func(t *testing.T) {
+						sources := map[string]string{"lifecycle.go": remaining, "other.go": "package localcell\n" + moved}
+						if ending == "CRLF" {
+							for name, source := range sources {
+								sources[name] = strings.ReplaceAll(source, "\n", "\r\n")
+							}
+						}
+						failures := maintenanceAdmissionOwnerInventory(sources)
+						if !containsAdmissionFailure(failures, owner+"_signature") {
+							t.Fatalf("appendix C inventory lost wrong-file signature: %v", failures)
+						}
+						if containsAdmissionFailure(failures, owner+"_owner_count") {
+							t.Fatal("appendix C must retain exactly one declaration")
+						}
+					})
+				}
+			})
+		})
+	}
+}
