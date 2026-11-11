@@ -159,6 +159,9 @@ func (c *Cell) PrepareService(ctx context.Context, d ServiceDescriptor) error {
 	if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
+	if err := c.maintenanceFenceAllows(0); err != nil {
+		return err
+	}
 	if err := privateDir(c.path("service"), true); err != nil {
 		return err
 	}

@@ -8,7 +8,9 @@ import (
 
 // maintenanceFence is separate from desired service state and the derived
 // update record. Install, Start, Repair, and Remove check it under their
-// operation lock; other entry points do not yet enforce maintenance admission.
+// operation lock. PrepareService checks new publication, and reconcileServiceBoot
+// checks boot publication and stale-record cleanup under their existing locks.
+// Other service entry points do not yet enforce maintenance admission.
 type maintenanceFence struct {
 	Generation  int       `json:"generation"`
 	OperationID string    `json:"operation_id"`
@@ -56,8 +58,9 @@ func (c *Cell) readMaintenanceFenceWith(read func(string, any) error) (*maintena
 	return &fence, nil
 }
 
-// maintenanceFenceAllows admits the four core lifecycle operations above.
-// It is not an independent boundary for lower-level launch or service helpers.
+// maintenanceFenceAllows admits the four core lifecycle operations and the two
+// bounded service owners above. It is not a service-wide maintenance policy or
+// an independent boundary for lower-level launch helpers.
 // Zero denotes an ordinary caller; a positive generation requires an exact
 // durable fence match, including when no fence exists anymore.
 func (c *Cell) maintenanceFenceAllows(generation int) error {
