@@ -64,7 +64,7 @@ the selected release, use Ubuntu 24.04. The system cluster stays disabled; the
 driver creates its own PostgreSQL data directory and runs it as `ubuntu`.
 
 Install the toolchain named in the merged [`go.mod`](../../../go.mod): this
-revision requires **Go 1.27.3**, with `go 1.27.0` as the language version. These
+revision requires **Go 1.27.4**, with `go 1.27.0` as the language version. These
 commands download the matching Linux tarball from the
 [official Go distribution](https://go.dev/dl/), verify its published checksum
 without printing it, and install into the fresh guest:
@@ -77,13 +77,13 @@ case "$(uname -m)" in
   *) printf '%s\n' 'Unsupported guest architecture'; exit 1 ;;
 esac
 curl --fail --silent --show-error --location \
-  "https://go.dev/dl/go1.27.3.linux-${receipt_go_arch}.tar.gz" -o receipt-go.tar.gz
+  "https://go.dev/dl/go1.27.4.linux-${receipt_go_arch}.tar.gz" -o receipt-go.tar.gz
 curl --fail --silent --show-error --location \
   'https://go.dev/dl/?mode=json&include=all' -o receipt-go-downloads.json
 python3 - "$receipt_go_arch" <<'PY' || exit 1
 import hashlib, json, pathlib, sys
 catalog = json.loads(pathlib.Path('receipt-go-downloads.json').read_text())
-filename = 'go1.27.3.linux-' + sys.argv[1] + '.tar.gz'
+filename = 'go1.27.4.linux-' + sys.argv[1] + '.tar.gz'
 matches = [item for release in catalog for item in release['files']
            if item['filename'] == filename]
 archive = pathlib.Path('receipt-go.tar.gz').read_bytes()
