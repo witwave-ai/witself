@@ -139,8 +139,9 @@ func (c *Cell) readMaintenanceFenceWith(read func(string, any) error) (*maintena
 	return &fence, nil
 }
 
-// maintenanceFenceAllows admits the four core lifecycle operations and the two
-// bounded service owners above. It is not a service-wide maintenance policy or
+// maintenanceFenceAllows admits Install, Start, Repair, Remove, PrepareService,
+// reconcileServiceBoot, setServiceDesiredStateLocked (running), and RepairService.
+// It is not a service-wide maintenance policy or
 // an independent boundary for lower-level launch helpers.
 // Zero denotes an ordinary caller; a positive generation requires an exact
 // durable fence match, including when no fence exists anymore.

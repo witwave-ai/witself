@@ -264,6 +264,9 @@ func (c *Cell) setServiceDesiredStateLocked(state string) error {
 		if _, err := os.Lstat(c.path("service", "transition.json")); !errors.Is(err, os.ErrNotExist) {
 			return ErrServiceDesiredState
 		}
+		if err := c.maintenanceFenceAllows(0); err != nil {
+			return err
+		}
 	}
 	d.DesiredState, d.Revision = state, d.Revision+1
 	return c.writeServiceDescriptor(d)
@@ -305,6 +308,9 @@ func (c *Cell) RepairService(ctx context.Context) error {
 	defer func() { _ = lock.Close() }()
 	d, err := c.ServiceDescriptor()
 	if err != nil {
+		return err
+	}
+	if err := c.maintenanceFenceAllows(0); err != nil {
 		return err
 	}
 	d.Faulted, d.Revision, d.RepairRevision = false, d.Revision+1, d.RepairRevision+1
