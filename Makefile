@@ -130,7 +130,7 @@ MEMORY_RELEVANCE_COMMIT   ?= $(shell git rev-parse HEAD)
 MEMORY_RELEVANCE_PROVIDER ?= local
 MEMORY_RELEVANCE_HARDWARE ?= unspecified
 
-.PHONY: help db-up db-down db-reset serve login test test-integration test-memory-cloud-conformance test-memory-load-quality test-memory-curation-load test-memory-recall-load test-memory-archive-load test-memory-concurrency-load test-memory-relevance dashboard-acceptance rehearse-migrations feature-status plan-contract gitops-cell-values build check check-local check-static check-go-mod-tidy govulncheck security-scan check-infra check-cell-secrets check-postgres-backup-image check-postgres-image-mirror check-product-site check-docs
+.PHONY: help db-up db-down db-reset serve login test test-integration test-memory-cloud-conformance test-memory-load-quality test-memory-curation-load test-memory-recall-load test-memory-archive-load test-memory-concurrency-load test-memory-relevance dashboard-acceptance rehearse-migrations feature-status plan-contract gitops-cell-values build check check-local check-localcell-stream check-static check-go-mod-tidy govulncheck security-scan check-infra check-cell-secrets check-postgres-backup-image check-postgres-image-mirror check-product-site check-docs
 
 help: ## List targets
 	@grep -hE '^[a-z-]+:.*##' $(MAKEFILE_LIST) | sed -E 's/:[^#]*## /\t/' | sort
@@ -392,6 +392,10 @@ check-postgres-image-mirror: ## Verify digest-preserving local copies; Skopeo is
 check-local: ## Fetch and select the required local pre-push checks
 	node scripts/check-local.mjs
 
+check-localcell-stream: ## Check Local Cell test results with the CI JSON checker and regressions
+	bash scripts/check-localcell-stream.sh
+	bash scripts/test-check-localcell-stream.sh
+
 check-static: ## Run local ShellCheck/actionlint and their hermetic regression checks
 	bash scripts/check-static-local.sh
 	bash scripts/test-check-static-local.sh
@@ -419,6 +423,7 @@ check: ## Run the full application gate set (see CLAUDE.md for brochure-only sco
 	go vet ./...
 	go vet -tags signup_b2_acceptance ./cmd/witself/
 	go build ./...
+	$(MAKE) check-localcell-stream
 	go test ./... -race -shuffle=on -timeout=$(STORE_TEST_TIMEOUT)
 	WITSELF_TEST_REQUIRE_PEAK_MEMORY=1 go test ./internal/store -run '^TestImportPeakMemory$$' -count=1 -v -timeout=15m
 	WITSELF_TEST_REQUIRE_PEAK_MEMORY=1 go test ./internal/export -run '^TestReadPeakMemory$$' -count=1 -v -timeout=15m

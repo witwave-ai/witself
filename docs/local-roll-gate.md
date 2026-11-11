@@ -17,6 +17,10 @@ coverage.
 `WITSELF_TEST_REQUIRE_STATIC=1` to fail when either local tool is missing instead
 of accepting a `NOT RUN` result.
 
+Before the full race suite, `make check` runs `check-localcell-stream` to require
+CI's complete Local Cell Go test JSON results; missing Node reports `NOT RUN`
+unless `WITSELF_TEST_REQUIRE_NODE=1` makes it fail.
+
 ## What qualifies
 
 The first version deliberately accepts only one existing catalog cell at a
