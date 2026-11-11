@@ -104,6 +104,7 @@ func updateFoundationViolations(sourceText map[string]string) []string {
 	if !isUpdateFilePresent(sources) {
 		violations = append(violations, "update helper inventory is empty")
 	}
+	transitionClosureValid := len(maintenanceTransitionContract(sourceText)) == 0
 	for name, file := range sources {
 		// The parser resolves lexical bindings even for snippets without imports
 		// or complete package types. Register declarations inside functions only;
@@ -207,7 +208,11 @@ func updateFoundationViolations(sourceText map[string]string) []string {
 					violations = append(violations, name+": non-inventoried declaration reuses update helper "+declaration.Name.Name)
 				}
 				if declaration.Body != nil {
-					inspect(declaration.Body, declaration.Name.Name, updateOrdinaryAdmissions(name, declaration))
+					admissions := updateOrdinaryAdmissions(name, declaration)
+					if declaration.Name.Name == "setServiceDesiredStateLocked" && !transitionClosureValid {
+						admissions = nil
+					}
+					inspect(declaration.Body, declaration.Name.Name, admissions)
 				}
 			case *ast.GenDecl:
 				if isUpdateFile(name) {
@@ -256,7 +261,7 @@ func isUpdateFilePresent(sources map[string]*ast.File) bool {
 	return false
 }
 
-// Keep update execution unreachable. Four lifecycle and two bounded service
+// Keep update execution unreachable. Four lifecycle and four bounded service
 // admissions are permitted; the admission contracts pin their existing locks.
 func TestUpdateFoundationsRemainUnwired(t *testing.T) {
 	sources := admissionReadSources(t)
@@ -345,7 +350,12 @@ func updateOrdinaryAdmissions(file string, fn *ast.FuncDecl) map[*ast.SelectorEx
 	}
 	receiver := fn.Recv.List[0]
 	var admitted []*ast.SelectorExpr
-	for _, statement := range fn.Body.List {
+	statements := fn.Body.List
+	if fn.Name.Name == "setServiceDesiredStateLocked" {
+		// Only the exact six-statement setter predicate permits this one nested path.
+		statements = fn.Body.List[3].(*ast.IfStmt).Body.List
+	}
+	for _, statement := range statements {
 		conditional, ok := statement.(*ast.IfStmt)
 		if !ok || conditional.Else != nil || len(conditional.Body.List) != 1 {
 			continue

@@ -40,6 +40,16 @@ if err == nil {
 if !errors.Is(err, os.ErrNotExist) { return err }
 ` + maintenanceAdmissionStatement + `
 if err := privateDir(c.path("service"), true); err != nil { return err }`,
+	"RepairService": `if err := c.SetServiceDesiredState(ctx, "stopped"); err != nil { return err }
+if err := c.Repair(ctx); err != nil { return err }
+if err := c.stopServiceChildren(ctx); err != nil { return err }
+lock, err := c.own(false)
+if err != nil { return err }
+defer func() { _ = lock.Close() }()
+d, err := c.ServiceDescriptor()
+if err != nil { return err }
+` + maintenanceAdmissionStatement + `
+d.Faulted, d.Revision, d.RepairRevision = false, d.Revision+1, d.RepairRevision+1`,
 	"reconcileServiceBoot": `lock, err := c.own(false)
 if err != nil { return err }
 defer func() { _ = lock.Close() }()
@@ -59,16 +69,21 @@ if previous.BootID != "" && previous.BootID != boot {
 
 var maintenanceServiceAdmissionFiles = map[string]string{
 	"PrepareService":       "service_descriptor.go",
+	"RepairService":        "service_descriptor.go",
 	"reconcileServiceBoot": "service_boot.go",
 }
 
 var maintenanceServiceAdmissionParameters = map[string]string{
 	"PrepareService":       "ctx context.Context, d ServiceDescriptor",
+	"RepairService":        "ctx context.Context",
 	"reconcileServiceBoot": "",
 }
 
 // Keep the old four-owner predicate and its independent counts unchanged.
 func ordinaryMaintenanceAdmissionOwner(file string, fn *ast.FuncDecl) string {
+	if fn.Name.Name == "setServiceDesiredStateLocked" {
+		return maintenanceTransitionSetterOwner(file, fn)
+	}
 	if _, service := maintenanceServiceAdmissionFiles[fn.Name.Name]; service {
 		return maintenanceServiceAdmissionOwner(file, fn)
 	}
@@ -230,6 +245,7 @@ func maintenanceServiceAdmissionOwnerInventory(sources map[string]string) []stri
 
 func maintenanceServiceAdmissionContract(sources map[string]string) []string {
 	failures := maintenanceServiceAdmissionOwnerInventory(sources)
+	failures = append(failures, maintenanceTransitionContract(sources)...)
 	totalReferences := 0
 	for name, source := range sources {
 		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
@@ -252,7 +268,9 @@ func maintenanceServiceAdmissionContract(sources map[string]string) []string {
 		switch name {
 		case "lifecycle.go":
 			expectedReferences = 4
-		case "service_descriptor.go", "service_boot.go":
+		case "service_descriptor.go":
+			expectedReferences = 3
+		case "service_boot.go":
 			expectedReferences = 1
 		}
 		if fileReferences != expectedReferences {
@@ -287,7 +305,7 @@ func maintenanceServiceAdmissionContract(sources map[string]string) []string {
 			}
 		}
 	}
-	if totalReferences != 6 {
+	if totalReferences != 8 {
 		failures = append(failures, "global_count")
 	}
 	sort.Strings(failures)
@@ -397,6 +415,9 @@ func serviceAdmissionMutations(owner string) []admissionSourceMutation {
 	if owner == "PrepareService" {
 		ownIndex, manifestIndex = 2, 5
 	}
+	if owner == "RepairService" {
+		ownIndex, manifestIndex = 3, 6
+	}
 	mutations := []admissionSourceMutation{
 		{"DeleteGate", "reference_count", replaceGate("")},
 		{"MatchPositiveGeneration", "position", replaceGate(strings.ReplaceAll(maintenanceAdmissionStatement, "Allows(0)", "Allows(7)"))},
@@ -458,7 +479,7 @@ func TestServiceMaintenanceAdmissionSourceContractMutations(t *testing.T) {
 	if failures := maintenanceServiceAdmissionContract(sources); len(failures) != 0 {
 		t.Fatalf("unchanged control: %v", failures)
 	}
-	for _, owner := range []string{"PrepareService", "reconcileServiceBoot"} {
+	for _, owner := range []string{"PrepareService", "reconcileServiceBoot", "RepairService"} {
 		filename := maintenanceServiceAdmissionFiles[owner]
 		original := admissionNodeText(serviceAdmissionFunction(t, filename, sources[filename], owner))
 		t.Run(owner, func(t *testing.T) {
@@ -523,23 +544,16 @@ func (c *Cell) readUpdateJournal() error { return nil }
 // rejection cannot conceal a weakened parameter, file, receiver or prefix pin.
 func TestServiceMaintenanceAdmissionGuardFixtures(t *testing.T) {
 	approved := serviceAdmissionApprovedOwners(t)
-	lifecycle := admissionApprovedOwners(t)
-	t.Run("SixExactAdmissions", func(t *testing.T) {
-		sources := map[string]string{"update_fence.go": serviceAdmissionFoundation, "lifecycle.go": "package localcell\n"}
-		for _, owner := range []string{"Install", "Start", "Repair", "Remove"} {
-			sources["lifecycle.go"] += lifecycle[owner] + "\n"
-		}
-		for owner, source := range approved {
-			sources[maintenanceServiceAdmissionFiles[owner]] = "package localcell\n" + source
-		}
+	t.Run("EightExactAdmissions", func(t *testing.T) {
+		sources := admissionReadSources(t)
 		if failures := updateFoundationViolations(sources); len(failures) != 0 {
-			t.Fatalf("six exact admissions refused: %v", failures)
+			t.Fatalf("eight exact admissions refused: %v", failures)
 		}
 		if failures := maintenanceServiceAdmissionContract(sources); len(failures) != 0 {
-			t.Fatalf("six exact admission counts: %v", failures)
+			t.Fatalf("eight exact admission counts: %v", failures)
 		}
 	})
-	for _, owner := range []string{"PrepareService", "reconcileServiceBoot"} {
+	for _, owner := range []string{"PrepareService", "reconcileServiceBoot", "RepairService"} {
 		t.Run(owner, func(t *testing.T) {
 			original := approved[owner]
 			filename := maintenanceServiceAdmissionFiles[owner]
@@ -641,7 +655,7 @@ func TestServiceMaintenanceAdmissionGuardFixtures(t *testing.T) {
 			}
 		})
 	}
-	serviceAdmissionInventoryFixtures(t, approved, lifecycle)
+	serviceAdmissionInventoryFixtures(t, approved)
 	for _, fixture := range []struct{ name, shipped, foundation, invariant string }{
 		{"AddFenceToOtherProductionOwner", `func (c *Cell) Stop(ctx context.Context) error { ` + maintenanceAdmissionStatement + `; return nil }`, "", "selects update helper maintenanceFenceAllows"},
 		{"PackageInitializerDirect", `var result = (&Cell{}).maintenanceFenceAllows(0)`, "", "package initializer selects update helper"},
@@ -657,19 +671,13 @@ func TestServiceMaintenanceAdmissionGuardFixtures(t *testing.T) {
 	}
 }
 
-func serviceAdmissionInventoryFixtures(t *testing.T, approved, lifecycle map[string]string) {
+func serviceAdmissionInventoryFixtures(t *testing.T, approved map[string]string) {
 	t.Helper()
-	control := map[string]string{"lifecycle.go": "package localcell\n"}
-	for _, owner := range []string{"Install", "Start", "Repair", "Remove"} {
-		control["lifecycle.go"] += lifecycle[owner] + "\n"
-	}
-	for owner, source := range approved {
-		control[maintenanceServiceAdmissionFiles[owner]] = "package localcell\n" + source
-	}
+	control := admissionReadSources(t)
 	if failures := maintenanceServiceAdmissionContract(control); len(failures) != 0 {
 		t.Fatalf("inventory unchanged control: %v", failures)
 	}
-	for _, owner := range []string{"PrepareService", "reconcileServiceBoot"} {
+	for _, owner := range []string{"PrepareService", "reconcileServiceBoot", "RepairService"} {
 		t.Run(owner+"_Inventory", func(t *testing.T) {
 			filename := maintenanceServiceAdmissionFiles[owner]
 			for _, fixture := range []struct {
@@ -707,7 +715,9 @@ func serviceAdmissionInventoryFixtures(t *testing.T, approved, lifecycle map[str
 			} {
 				t.Run(witness.name, func(t *testing.T) {
 					sources := serviceAdmissionClone(control)
-					sources[filename] = "package localcell\n" + serviceAdmissionInsert(approved[owner], len(admissionStatements(maintenanceServiceAdmissionBoundaries[owner])), maintenanceAdmissionStatement)
+					sources[filename] = admissionMutateFunction(t, sources[filename], owner, func(source string) string {
+						return serviceAdmissionInsert(source, len(admissionStatements(maintenanceServiceAdmissionBoundaries[owner])), maintenanceAdmissionStatement)
+					})
 					// The complete original prefix and first effect are still approved. Each
 					// count assertion stands alone even if another contract also rejects it.
 					fn := serviceAdmissionFunction(t, filename, sources[filename], owner)
