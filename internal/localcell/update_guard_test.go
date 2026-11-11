@@ -5,8 +5,6 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
@@ -21,14 +19,23 @@ func updateReceiverName(fn *ast.FuncDecl) string {
 		return ""
 	}
 	receiver := fn.Recv.List[0].Type
-	if pointer, ok := receiver.(*ast.StarExpr); ok {
-		receiver = pointer.X
+	for {
+		switch node := receiver.(type) {
+		case *ast.StarExpr:
+			receiver = node.X
+		case *ast.ParenExpr:
+			receiver = node.X
+		case *ast.IndexExpr:
+			receiver = node.X
+		case *ast.IndexListExpr:
+			receiver = node.X
+		case *ast.Ident:
+			return node.Name
+		default:
+			return "<unknown>"
+		}
 	}
-	if name, ok := receiver.(*ast.Ident); ok {
-		return name.Name
-	}
-	// An unsupported receiver form cannot match an explicitly allowed method.
-	return "<unknown>"
+
 }
 
 // updateFoundationViolations reads source, not the build-selected package: dark
@@ -152,12 +159,28 @@ func updateFoundationViolations(sourceText map[string]string) []string {
 			}
 			return true
 		})
-		inspect := func(node ast.Node, owner string) {
+		inspect := func(node ast.Node, owner string, admissions map[*ast.SelectorExpr]bool) {
 			ast.Inspect(node, func(child ast.Node) bool {
 				switch child := child.(type) {
 				case *ast.SelectorExpr:
+					if admissions[child] {
+						return false
+					}
 					if helpers[child.Sel.Name] {
 						violations = append(violations, fmt.Sprintf("%s: %s selects update helper %s", name, owner, child.Sel.Name))
+						if child.Sel.Name == "maintenanceFenceAllows" {
+							for _, declaration := range file.Decls {
+								fn, ok := declaration.(*ast.FuncDecl)
+								if !ok || fn.Name.Name != owner {
+									continue
+								}
+								invariant := maintenanceAdmissionOwner(name, fn)
+								if invariant == "" {
+									invariant = "literal_zero_direct_error_return"
+								}
+								violations = append(violations, owner+"_"+invariant)
+							}
+						}
 					}
 				case *ast.Ident:
 					var declaration ast.Node
@@ -184,7 +207,7 @@ func updateFoundationViolations(sourceText map[string]string) []string {
 					violations = append(violations, name+": non-inventoried declaration reuses update helper "+declaration.Name.Name)
 				}
 				if declaration.Body != nil {
-					inspect(declaration.Body, declaration.Name.Name)
+					inspect(declaration.Body, declaration.Name.Name, updateOrdinaryAdmissions(name, declaration))
 				}
 			case *ast.GenDecl:
 				if isUpdateFile(name) {
@@ -213,7 +236,7 @@ func updateFoundationViolations(sourceText map[string]string) []string {
 				for _, spec := range declaration.Specs {
 					if value, ok := spec.(*ast.ValueSpec); ok {
 						for _, initializer := range value.Values {
-							inspect(initializer, "package initializer")
+							inspect(initializer, "package initializer", nil)
 						}
 					}
 				}
@@ -233,23 +256,12 @@ func isUpdateFilePresent(sources map[string]*ast.File) bool {
 	return false
 }
 
-// Keep the future update protocol unreachable until its own integration slice
-// proves legacy parity, custody and recovery at each public boundary.
+// Keep update execution unreachable. Only four ordinary maintenance admissions
+// are permitted; their exact lock position is checked by the admission contract.
 func TestUpdateFoundationsRemainUnwired(t *testing.T) {
-	files, err := filepath.Glob("*.go")
-	if err != nil {
-		t.Fatal("cannot inventory local cell sources")
-	}
-	sources := make(map[string]string)
-	for _, name := range files {
-		if strings.HasSuffix(name, "_test.go") {
-			continue
-		}
-		data, err := os.ReadFile(name)
-		if err != nil {
-			t.Fatal("cannot read local cell source")
-		}
-		sources[name] = string(data)
+	sources := admissionReadSources(t)
+	if failures := maintenanceAdmissionOwnerInventory(sources); len(failures) != 0 {
+		t.Fatalf("update foundations are wired: %s", strings.Join(failures, "; "))
 	}
 	for _, ending := range []string{"LF", "CRLF"} {
 		t.Run(ending, func(t *testing.T) {
@@ -323,4 +335,63 @@ func (c *Cell) maintenanceFenceAllows(generation int) error { return nil }
 			}
 		})
 	}
+}
+
+// updateOrdinaryAdmissions exempts only one direct, literal-zero admission in
+// each explicitly owned lifecycle body. It never exempts the body itself.
+func updateOrdinaryAdmissions(file string, fn *ast.FuncDecl) map[*ast.SelectorExpr]bool {
+	if maintenanceAdmissionOwner(file, fn) != "" {
+		return nil
+	}
+	receiver := fn.Recv.List[0]
+	var admitted []*ast.SelectorExpr
+	for _, statement := range fn.Body.List {
+		conditional, ok := statement.(*ast.IfStmt)
+		if !ok || conditional.Else != nil || len(conditional.Body.List) != 1 {
+			continue
+		}
+		assignment, ok := conditional.Init.(*ast.AssignStmt)
+		if !ok || assignment.Tok != token.DEFINE || len(assignment.Lhs) != 1 || len(assignment.Rhs) != 1 {
+			continue
+		}
+		errIdent, ok := assignment.Lhs[0].(*ast.Ident)
+		if !ok || errIdent.Name != "err" || errIdent.Obj == nil {
+			continue
+		}
+		call, ok := assignment.Rhs[0].(*ast.CallExpr)
+		if !ok || len(call.Args) != 1 || call.Ellipsis.IsValid() {
+			continue
+		}
+		selector, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || selector.Sel.Name != "maintenanceFenceAllows" {
+			continue
+		}
+		owner, ok := selector.X.(*ast.Ident)
+		if !ok || owner.Obj == nil || owner.Obj != receiver.Names[0].Obj {
+			continue
+		}
+		generation, ok := call.Args[0].(*ast.BasicLit)
+		if !ok || generation.Kind != token.INT || generation.Value != "0" {
+			continue
+		}
+		condition, ok := conditional.Cond.(*ast.BinaryExpr)
+		if !ok || condition.Op != token.NEQ {
+			continue
+		}
+		left, leftOK := condition.X.(*ast.Ident)
+		right, rightOK := condition.Y.(*ast.Ident)
+		returned, returnOK := conditional.Body.List[0].(*ast.ReturnStmt)
+		if !leftOK || !rightOK || left.Obj != errIdent.Obj || right.Name != "nil" || right.Obj != nil || !returnOK || len(returned.Results) != 1 {
+			continue
+		}
+		result, ok := returned.Results[0].(*ast.Ident)
+		if !ok || result.Obj != errIdent.Obj {
+			continue
+		}
+		admitted = append(admitted, selector)
+	}
+	if len(admitted) != 1 {
+		return nil
+	}
+	return map[*ast.SelectorExpr]bool{admitted[0]: true}
 }

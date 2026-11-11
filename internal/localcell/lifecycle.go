@@ -98,6 +98,9 @@ func (c *Cell) Install(ctx context.Context, options InstallOptions) error {
 	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return errors.New("cannot inspect PostgreSQL data")
 	}
+	if err := c.maintenanceFenceAllows(0); err != nil {
+		return err
+	}
 	if err := c.layout(); err != nil {
 		return err
 	}
@@ -245,6 +248,9 @@ func (c *Cell) Start(ctx context.Context) error {
 		return errors.New("local cell installation is incomplete")
 	}
 	if err := c.serviceStartFence(); err != nil {
+		return err
+	}
+	if err := c.maintenanceFenceAllows(0); err != nil {
 		return err
 	}
 	m.MigrationWait, m.JobRestartPolicy = c.runtimeSettings(m)
@@ -428,6 +434,9 @@ func (c *Cell) Repair(ctx context.Context) error {
 		defer selectedCancel()
 		ctx = selected
 	}
+	if err := c.maintenanceFenceAllows(0); err != nil {
+		return err
+	}
 	progress, err := c.readJournal()
 	if err != nil {
 		return err
@@ -516,6 +525,9 @@ func (c *Cell) Remove(ctx context.Context, options RemoveOptions) error {
 		return err
 	}
 	defer func() { _ = lock.Close() }()
+	if err := c.maintenanceFenceAllows(0); err != nil {
+		return err
+	}
 	if err := c.setServiceDesiredStateLocked("stopped"); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
