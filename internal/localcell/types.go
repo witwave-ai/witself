@@ -73,6 +73,62 @@ type Manifest struct {
 	JobRestartPolicy          string        `json:"job_restart_policy,omitempty"`
 }
 
+// updateState names a durable boundary, not proof that the action completed.
+type updateState string
+
+// update protocol states are journaled before their associated actions.
+const (
+	updatePrepared             updateState = "prepared"
+	updateMaintenanceRequested updateState = "maintenance_requested"
+	updateAcknowledged         updateState = "acknowledged"
+	updateQuiesced             updateState = "quiesced"
+	updateRecoveryVerified     updateState = "recovery_verified"
+	updateMigrating            updateState = "migrating"
+	updateActivated            updateState = "activated"
+	updateHealthVerified       updateState = "health_verified"
+	updateCommitted            updateState = "committed"
+)
+
+// valid accepts exactly the nine journal steps in the update protocol.
+func (s updateState) valid() bool {
+	switch s {
+	case updatePrepared, updateMaintenanceRequested, updateAcknowledged, updateQuiesced,
+		updateRecoveryVerified, updateMigrating, updateActivated, updateHealthVerified, updateCommitted:
+		return true
+	default:
+		return false
+	}
+}
+
+// updateComponentSetIdentity preserves the private trust receipt wire shape
+// without enrolling the offline trust package in server/worker dependencies.
+type updateComponentSetIdentity struct {
+	ManifestDigest string `json:"manifest_digest"`
+	Channel        string `json:"channel"`
+	Sequence       uint64 `json:"sequence"`
+	Tag            string `json:"tag"`
+}
+
+// updateRecord is private durable metadata. Its state is derived from the journal;
+// the identities must never be copied into diagnostic evidence.
+type updateRecord struct {
+	OperationID           string                     `json:"operation_id"`
+	InstallationID        string                     `json:"installation_id"`
+	MaintenanceGeneration int                        `json:"maintenance_generation"`
+	Source                updateComponentSetIdentity `json:"source"`
+	Target                updateComponentSetIdentity `json:"target"`
+	Channel               string                     `json:"channel"`
+	ChannelAction         string                     `json:"channel_action,omitempty"`
+	SchemaFrom            int                        `json:"schema_from"`
+	SchemaTo              int                        `json:"schema_to"`
+	LayoutVersion         int                        `json:"layout_version"`
+	PGMajor               int                        `json:"pg_major"`
+	RecoveryPoint         string                     `json:"recovery_point"`
+	State                 updateState                `json:"state"`
+	AckedGeneration       int                        `json:"acked_generation"`
+	RetainedGenerations   int                        `json:"retained_generations"`
+}
+
 // InstallOptions controls whether PostgreSQL stays running after installation.
 type InstallOptions struct {
 	LeaveRunning      bool

@@ -19,3 +19,6 @@ var errPrincipalRepair = fixedCause("local_principal_repair_required")
 
 // ErrLocalPrincipalCredentialsRefused refuses incomplete or unsafe private credentials.
 var ErrLocalPrincipalCredentialsRefused = fixedCause("local_principal_credentials_refused")
+
+var errMaintenanceFenceActive = fixedCause("local_maintenance_fence_active")
+var errUpdatePartialState = fixedCause("local_update_partial_state")
