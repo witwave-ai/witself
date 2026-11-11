@@ -48,6 +48,9 @@ func decodeMaintenanceFence(r io.Reader, dst any) error {
 	if len(data) > maintenanceFenceMaxBytes {
 		return errors.New("local cell record exceeds size limit")
 	}
+	if err := checkMaintenanceFenceShape(data); err != nil {
+		return err
+	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(dst); err != nil {
@@ -55,6 +58,50 @@ func decodeMaintenanceFence(r io.Reader, dst any) error {
 	}
 	if decoder.Decode(new(any)) != io.EOF {
 		return errors.New("invalid trailing local cell record")
+	}
+	return nil
+}
+
+func checkMaintenanceFenceShape(data []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	token, err := decoder.Token()
+	if err != nil || token != json.Delim('{') {
+		return errors.New("invalid local cell record")
+	}
+	seen := make(map[string]bool, 3)
+	for decoder.More() {
+		token, err := decoder.Token()
+		if err != nil {
+			return errors.New("invalid local cell record")
+		}
+		key, ok := token.(string)
+		if !ok {
+			return errors.New("invalid local cell record")
+		}
+		switch key {
+		case "generation", "operation_id", "since":
+		default:
+			return errors.New("invalid local cell record")
+		}
+		if seen[key] {
+			return errors.New("invalid local cell record")
+		}
+		seen[key] = true
+		value, err := decoder.Token()
+		if err != nil || value == nil {
+			return errors.New("invalid local cell record")
+		}
+		if _, nested := value.(json.Delim); nested {
+			return errors.New("invalid local cell record")
+		}
+	}
+	token, err = decoder.Token()
+	if err != nil || token != json.Delim('}') || len(seen) < 3 {
+		return errors.New("invalid local cell record")
+	}
+	if _, err := decoder.Token(); err != io.EOF {
+		return errors.New("invalid local cell record")
 	}
 	return nil
 }
