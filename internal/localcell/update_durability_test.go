@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -258,5 +259,28 @@ func TestUpdateJournalReplacementBeforeOpenPreservesBothFiles(t *testing.T) {
 		if err != nil || !bytes.Equal(got, want) {
 			t.Fatal("refused append changed inspected or replacement journal bytes")
 		}
+	}
+}
+
+// The replacement test above proves the refusal only where a pathname FileInfo
+// resolves its file ID lazily (Windows). This keeps the pin in place, and ahead
+// of the open, on platforms where dropping it would change nothing observable.
+func TestUpdateJournalIdentityPinnedBeforeOpen(t *testing.T) {
+	source, err := os.ReadFile("update_record.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, body, found := strings.Cut(string(source), "\nfunc (c *Cell) appendUpdateJournalEntry(")
+	if !found {
+		t.Fatal("journal append function was not found")
+	}
+	body, _, _ = strings.Cut(body, "\nfunc ")
+	lstat := strings.Index(body, "info, err := os.Lstat(path)")
+	pin := strings.Index(body, "!os.SameFile(info, info)")
+	open := strings.Index(body, "openUpdateJournalFile(path")
+	check := strings.Index(body, "!os.SameFile(info, opened)")
+	if lstat < 0 || pin < lstat || open < pin || check < open ||
+		strings.Count(body, "os.Lstat(") != 1 || strings.Count(body, "openUpdateJournalFile(") != 1 {
+		t.Fatal("journal identity is not pinned between the pathname inspection and the open")
 	}
 }

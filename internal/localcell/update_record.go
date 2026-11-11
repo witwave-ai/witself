@@ -164,7 +164,10 @@ func (c *Cell) appendUpdateJournalEntry(record *updateRecord, entry updateJourna
 	flags := os.O_WRONLY | os.O_APPEND
 	if errors.Is(err, os.ErrNotExist) {
 		flags |= os.O_CREATE | os.O_EXCL
-	} else if err != nil || servicePrivateRecord(path) != nil {
+	} else if err != nil || !os.SameFile(info, info) || servicePrivateRecord(path) != nil {
+		// Windows FileInfo resolves its file ID lazily from the pathname. The
+		// self-comparison pins it before the open, so a replacement that takes
+		// the pathname afterwards fails the identity check below.
 		return errUpdatePartialState
 	}
 	f, err := openUpdateJournalFile(path, flags, 0o600)
