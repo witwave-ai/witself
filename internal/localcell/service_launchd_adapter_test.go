@@ -215,7 +215,7 @@ func launchdFixture(t *testing.T) (*launchdAgentAdapter, ServiceDescriptor, *lau
 	t.Setenv("WITSELF_HOME", home)
 	t.Setenv("DSH_HOME", home)
 	d := ServiceDescriptor{Version: 1, InstallationID: "fixture-install", UID: "1001", Root: filepath.Join(home, "cell's 日本 space"), Adapter: "launchd-agent", Scope: "user", Payload: ServicePayload{Generation: "generation-1", Host: filepath.Join(home, "host's 日本 space"), Args: []string{"run", "--root", filepath.Join(home, "cell's 日本 space")}}, Runtime: "local", DesiredState: "running"}
-	a := &launchdAgentAdapter{uid: d.UID, home: home, agentDir: filepath.Join(home, "Library", "LaunchAgents"), launchctl: "/bin/launchctl", owned: func(string, os.FileInfo) bool { return true }, removalTimeout: 128 * time.Millisecond}
+	a := &launchdAgentAdapter{uid: d.UID, home: home, agentDir: filepath.Join(home, "Library", "LaunchAgents"), launchctl: "/bin/launchctl", owned: func(string, os.FileInfo) bool { return true }, removalTimeout: launchdFixtureRemovalTimeout}
 	// Windows executes the adapter's command/lifecycle model with synthetic
 	// Unix permissions. Native Unix mode and symlink assertions live separately.
 	if runtime.GOOS == "windows" {
@@ -560,7 +560,8 @@ func TestLaunchdBootoutObservedRemovalAndDefensiveFailures(t *testing.T) {
 			elapsed := time.Since(started)
 			if mode == "observed_immediate" || mode == "unobserved_errno36_progress" {
 				if err != nil {
-					t.Fatal(err)
+					t.Logf("launchd removal refusal class: %s", launchdRemovalRefusalClass(err))
+					t.Fatal("completed removal returned a refusal")
 				}
 				if _, err := os.Lstat(a.plistPath(d)); !errors.Is(err, os.ErrNotExist) {
 					t.Fatal("completed bootout retained plist")
@@ -583,6 +584,7 @@ func TestLaunchdBootoutObservedRemovalAndDefensiveFailures(t *testing.T) {
 					sentinel = ErrServiceOwnershipConflict
 				}
 				if !errors.Is(err, sentinel) {
+					t.Logf("launchd removal refusal class: %s", launchdRemovalRefusalClass(err))
 					t.Fatalf("wrong sanitized removal refusal: %v", err)
 				}
 				if _, err := os.Lstat(a.plistPath(d)); err != nil {
