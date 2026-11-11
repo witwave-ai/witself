@@ -41,6 +41,28 @@ func classifyForegroundExit(commandErr, parentErr, exitErr error) foregroundExit
 	}
 }
 
+// The install refusal accepts any non-nil run error with the expected cause.
+// Empty means that passing case; all failures use closed, value-free words.
+// Observe budgets before exit status, with the command's parent budget first.
+func classifyServiceInstallFailure(parentErr, spawnErr, runErr error, hasCause bool) string {
+	switch {
+	case parentErr != nil:
+		return "parent_budget"
+	case spawnErr != nil:
+		return "deadline"
+	case runErr == nil:
+		return "exit_zero"
+	case hasCause:
+		return ""
+	default:
+		var exitErr *exec.ExitError
+		if errors.As(runErr, &exitErr) {
+			return "exit_without_cause"
+		}
+		return "start_failed"
+	}
+}
+
 // Preserve only the first closed host failure site, never arbitrary stderr or
 // a guessed OS cause. Existing guarded detail lines retain every joined site
 // and lease-publication class. Every return is a literal so the portable raw-

@@ -378,31 +378,35 @@ func TestWindowsForegroundCapturedOutputContract(t *testing.T) {
 	if err != nil {
 		t.Fatal("cannot parse foreground failure classifier")
 	}
-	fixedClasses := false
-	for _, declaration := range classifier.Decls {
-		function, ok := declaration.(*ast.FuncDecl)
-		if !ok || function.Name.Name != "foregroundFailureClass" {
-			continue
-		}
-		fixedClasses = true
-		returns := 0
-		ast.Inspect(function.Body, func(node ast.Node) bool {
-			if statement, ok := node.(*ast.ReturnStmt); ok {
-				returns++
-				if len(statement.Results) != 1 {
-					fixedClasses = false
-				} else if literal, ok := statement.Results[0].(*ast.BasicLit); !ok || literal.Kind != token.STRING {
-					fixedClasses = false
-				} else if value, err := strconv.Unquote(literal.Value); err != nil || !regexp.MustCompile(`^[a-z_]{1,48}$`).MatchString(value) {
-					fixedClasses = false
-				}
+	// Each classifier returns only fixed value-free classes. The install
+	// classifier's one empty literal is its refusal-preserved result.
+	for name, pattern := range map[string]string{"foregroundFailureClass": `^[a-z_]{1,48}$`, "classifyServiceInstallFailure": `^[a-z_]{0,48}$`} {
+		fixedClasses := false
+		for _, declaration := range classifier.Decls {
+			function, ok := declaration.(*ast.FuncDecl)
+			if !ok || function.Name.Name != name {
+				continue
 			}
-			return true
-		})
-		fixedClasses = fixedClasses && returns > 0
-	}
-	if !fixedClasses {
-		t.Fatal("foreground failure classifier no longer returns only fixed value-free classes")
+			fixedClasses = true
+			returns := 0
+			ast.Inspect(function.Body, func(node ast.Node) bool {
+				if statement, ok := node.(*ast.ReturnStmt); ok {
+					returns++
+					if len(statement.Results) != 1 {
+						fixedClasses = false
+					} else if literal, ok := statement.Results[0].(*ast.BasicLit); !ok || literal.Kind != token.STRING {
+						fixedClasses = false
+					} else if value, err := strconv.Unquote(literal.Value); err != nil || !regexp.MustCompile(pattern).MatchString(value) {
+						fixedClasses = false
+					}
+				}
+				return true
+			})
+			fixedClasses = fixedClasses && returns > 0
+		}
+		if !fixedClasses {
+			t.Fatal("foreground failure classifier no longer returns only fixed value-free classes")
+		}
 	}
 	for _, violation := range windowsForegroundCapturedOutputViolations(file, guarded) {
 		t.Error(violation)
@@ -526,7 +530,7 @@ func foregroundCapturedExpression(expression ast.Expr, tainted map[string]bool) 
 	found := false
 	ast.Inspect(expression, func(node ast.Node) bool {
 		if call, ok := node.(*ast.CallExpr); ok {
-			if identifier, ok := call.Fun.(*ast.Ident); ok && identifier.Obj == nil && slices.Contains([]string{"len", "cap", "foregroundShutdownFailure", "foregroundFailureClass"}, identifier.Name) {
+			if identifier, ok := call.Fun.(*ast.Ident); ok && identifier.Obj == nil && slices.Contains([]string{"len", "cap", "foregroundShutdownFailure", "foregroundFailureClass", "classifyServiceInstallFailure"}, identifier.Name) {
 				return false // Numeric counts or independently pinned fixed messages.
 			}
 			if selector, ok := call.Fun.(*ast.SelectorExpr); ok && (selector.Sel.Name == "CombinedOutput" || selector.Sel.Name == "Output") {
@@ -559,11 +563,14 @@ func TestWindowsForegroundCapturedOutputFlow(t *testing.T) {
 		{"shadowed_count", `len := func(raw []byte) []byte { return raw }; t.Log(len(captured))`, true},
 		{"shadowed_validator", `foregroundShutdownFailure := func(raw []byte) string { return string(raw) }; t.Log(foregroundShutdownFailure(captured))`, true},
 		{"shadowed_classifier", `foregroundFailureClass := func(raw []byte) string { return string(raw) }; t.Log(foregroundFailureClass(captured))`, true},
+		{"shadowed_install_classifier", `classifyServiceInstallFailure := func(raw []byte) string { return string(raw) }; t.Log(classifyServiceInstallFailure(captured))`, true},
+		{"unclassified_install", `output, err := command.CombinedOutput(); class := string(output); t.Logf("service_install class=%s", class)`, true},
 		{"count", `t.Logf("%d", len(captured))`, false},
 		{"count_alias", `count := len(strings.Split(string(captured), "\n")); t.Log(count)`, false},
 		{"range_index", `for index, line := range foregroundOutputLines(captured) { t.Log(index) }`, false},
 		{"fixed_failure", `failure := foregroundShutdownFailure(captured); t.Fatal(failure)`, false},
 		{"fixed_class", `t.Logf("foreground_exit class=%s", foregroundFailureClass(captured))`, false},
+		{"fixed_install_class", `output, err := command.CombinedOutput(); class := classifyServiceInstallFailure(nil, nil, err, strings.Contains(string(output), "cause")); t.Logf("service_install class=%s", class)`, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			file, err := parser.ParseFile(token.NewFileSet(), "flow", "package main; func capture(captured []byte) {"+test.body+"}", 0)

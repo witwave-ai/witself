@@ -74,7 +74,23 @@ func TestWindowsServiceForegroundSubprocessCommands(t *testing.T) {
 		t.Fatal("cannot prepare synthetic foreground service")
 	}
 	environment := windowsForegroundHarnessEnvironment(t)
-	allowance := 5 * time.Second
+	// The cold spawn uses the command budget; WaitDelay retains the cleanup reserve.
+	// Only subsequent commands use an allowance calibrated from this spawn.
+	baseline := time.Now()
+	command := exec.CommandContext(commandCtx, host, "service", "install", "--root", root)
+	command.Env = environment
+	command.WaitDelay = windowsSyntheticTestBudget / 90
+	output, err := command.CombinedOutput()
+	allowance := max(5*time.Second, 10*time.Since(baseline))
+	if err == nil || !strings.Contains(string(output), "service_manager_unavailable") {
+		// There is no separate per-spawn context on the cold invocation.
+		class := classifyServiceInstallFailure(commandCtx.Err(), nil, err, strings.Contains(string(output), "service_manager_unavailable"))
+		if class == "exit_without_cause" {
+			t.Logf("foreground_exit class=%s", foregroundFailureClass(output))
+		}
+		t.Logf("service_install class=%s", class)
+		t.Fatal("Windows service install did not preserve adapter refusal")
+	}
 	invoke := func(args ...string) ([]byte, error) {
 		ctx, cancel := context.WithTimeout(commandCtx, allowance)
 		defer cancel()
@@ -82,12 +98,6 @@ func TestWindowsServiceForegroundSubprocessCommands(t *testing.T) {
 		command.Env = environment
 		command.WaitDelay = windowsSyntheticTestBudget / 90
 		return command.CombinedOutput()
-	}
-	baseline := time.Now()
-	output, err := invoke("service", "install", "--root", root)
-	allowance = max(5*time.Second, 10*time.Since(baseline))
-	if err == nil || !strings.Contains(string(output), "service_manager_unavailable") {
-		t.Fatal("Windows service install did not preserve adapter refusal")
 	}
 	var oldStart, oldBoot string
 	for iteration := 0; iteration < 2; iteration++ {
