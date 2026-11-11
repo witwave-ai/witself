@@ -129,6 +129,11 @@ func disposableCellWithCleanup(t *testing.T, binaries localcell.Binaries, failpo
 			t.Error("cannot construct cleanup cell")
 			return
 		}
+		// Stop first so clearing the planted fixture cannot release held work.
+		if err := clearMaintenanceFixture(ctx, root, cleanupCell.Stop, t.Logf); err != nil {
+			t.Error("cannot clear planted maintenance fixture")
+			return
+		}
 		// Recovery uses the durable fence, so even a test interrupted by
 		// its own failure point cannot strand child processes.
 		if repairErr := cleanupCell.Repair(ctx); repairErr != nil {
