@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -360,6 +361,8 @@ func TestUpdateLegacyJournalReaderParity(t *testing.T) {
 		absent     bool
 		directory  bool
 		cleanup    bool
+		nonPrivate bool
+		symlink    bool
 	}
 	cases := []fixture{
 		{name: "absent", absent: true},
@@ -425,6 +428,11 @@ func TestUpdateLegacyJournalReaderParity(t *testing.T) {
 	cases = append(cases,
 		fixture{name: "open_operation", data: start},
 		fixture{name: "pending_done_and_failed_steps", data: pending},
+		fixture{name: "identical_duplicate_step_lines", data: start + line("start", "ports", "done") + line("start", "ports", "done")},
+		fixture{name: "crlf_line_endings", data: strings.ReplaceAll(pending, "\n", "\r\n")},
+		fixture{name: "oversize_line_without_nul", data: pending + strings.Repeat(" ", 2*64*1024+7) + start},
+		fixture{name: "non_private_mode", data: pending, nonPrivate: true},
+		fixture{name: "symlink", data: pending, symlink: true},
 		fixture{name: "json_prefix_tail", data: pending + `{"operation":`},
 		fixture{name: "nul_tail", data: pending + strings.Repeat("\x00", 7)},
 		fixture{name: "oversize_nul_tail", data: pending + oversizeNUL},
@@ -458,6 +466,25 @@ func TestUpdateLegacyJournalReaderParity(t *testing.T) {
 				}
 			} else if !tc.absent {
 				if err := testWriteFile(path, []byte(tc.data), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// Windows custody is by ACL and the mode change is a no-op there, so
+			// the row still runs natively as a plain parity row instead of skipping.
+			if tc.nonPrivate {
+				if err := os.Chmod(path, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.symlink {
+				target := path + ".retained"
+				if err := os.Rename(path, target); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(target, path); err != nil {
+					if runtime.GOOS == "windows" {
+						t.Skip("LC-S2-PW3: Windows symlink fixture privileges unavailable")
+					}
 					t.Fatal(err)
 				}
 			}

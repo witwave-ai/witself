@@ -11,6 +11,9 @@ import (
 	"time"
 )
 
+var syncUpdateJournalDirectory = syncDirectory
+var openUpdateJournalFile = openPrivateFile
+
 func validUpdateOperationID(value string) bool {
 	if value == "" || len(value) > 128 {
 		return false
@@ -38,7 +41,7 @@ func updateStateIndex(state updateState) int {
 
 func validUpdateJournalTransition(from, to updateState) bool {
 	// A lost acknowledgement must be requested again; it cannot authorize a drain.
-	return to.valid() && (to == from || updateStateIndex(to) == updateStateIndex(from)+1 ||
+	return (from == "" || from.valid()) && to.valid() && (to == from || updateStateIndex(to) == updateStateIndex(from)+1 ||
 		from == updateAcknowledged && to == updateMaintenanceRequested)
 }
 
@@ -164,7 +167,7 @@ func (c *Cell) appendUpdateJournalEntry(record *updateRecord, entry updateJourna
 	} else if err != nil || servicePrivateRecord(path) != nil {
 		return errUpdatePartialState
 	}
-	f, err := openPrivateFile(path, flags, 0o600)
+	f, err := openUpdateJournalFile(path, flags, 0o600)
 	if err != nil {
 		return errUpdatePartialState
 	}
@@ -182,6 +185,9 @@ func (c *Cell) appendUpdateJournalEntry(record *updateRecord, entry updateJourna
 	data = append(data, '\n')
 	n, err := f.Write(data)
 	if err != nil || n != len(data) || syncFile(f) != nil {
+		return errUpdatePartialState
+	}
+	if syncUpdateJournalDirectory(c.path("journal")) != nil {
 		return errUpdatePartialState
 	}
 	return nil
