@@ -257,7 +257,7 @@ func windowsNoConsoleFixtureSourceContract(source string) bool {
 	helperSource := source[fset.Position(helper.Pos()).Offset:fset.Position(helper.End()).Offset]
 	// Require the proof immediately before publication so a window check alone
 	// cannot authorize the marker. Neither query depends on redirected stdio.
-	return strings.Contains(helperSource, windowsNoConsoleFixtureProof+"\n\tif writeAtomicBytes(filepath.Join(root, \"tmp\", \"console-absent\"), []byte(\"absent\"), nil) != nil {")
+	return strings.Contains(helperSource, windowsNoConsoleFixtureProof+"\n\tif _, err := shutdownFixturePublishMarker(filepath.Join(root, \"tmp\", \"console-absent\"), []byte(\"absent\")); err != nil {")
 }
 
 // Linux cannot execute AttachConsole. This contract guards the native oracle's
@@ -334,7 +334,7 @@ func windowsNoConsoleProbeSourceContract(source string) bool {
 		`exec.CommandContext(probeCtx, os.Args[0], "-test.run=^TestWindowsShutdownChildHelper$", "--", "probe")`,
 		`probe.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.DETACHED_PROCESS}`,
 		`code = exit.ExitCode()`,
-		`writeAtomicBytes(filepath.Join(root, "tmp", "console-probe-result"), []byte(strconv.Itoa(code)), nil)`,
+		`shutdownFixturePublishMarker(filepath.Join(root, "tmp", "console-probe-result"), []byte(strconv.Itoa(code)))`,
 	} {
 		if !strings.Contains(helperSource, required) {
 			return false
