@@ -131,6 +131,9 @@ func TestWindowsForegroundShutdownOutputContract(t *testing.T) {
 			windowsLogForegroundExit(t, command, receipt)
 		}
 		if failure := foregroundShutdownFailure(receipt); failure != "" {
+			if len(foregroundOutputLines(receipt)) <= 1 {
+				windowsLogForegroundExit(t, command, receipt)
+			}
 			t.Fatal(failure)
 		}
 	}`, 0)

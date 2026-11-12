@@ -170,9 +170,13 @@ func assertWindowsServiceInstallFailureContract(t *testing.T, source string) {
 		t.Fatal("Windows service install lost the pure classifier with observed command context")
 	}
 	cause, ok := statements[1].(*ast.IfStmt)
-	if !ok || cause.Init != nil || cause.Else != nil || foregroundSource(t, cause.Cond) != `class == "exit_without_cause"` ||
+	if !ok || cause.Init != nil || foregroundSource(t, cause.Cond) != `class == "exit_without_cause"` ||
 		len(cause.Body.List) != 1 || foregroundSource(t, cause.Body.List[0]) != `t.Logf("foreground_exit class=%s", foregroundFailureClass(output))` {
 		t.Fatal("Windows service install missing cause path lost its fixed foreground failure class")
+	}
+	other, ok := cause.Else.(*ast.BlockStmt)
+	if !ok || len(other.List) != 1 || foregroundSource(t, other.List[0]) != `t.Logf("foreground_exit class=%s", class)` {
+		t.Fatal("Windows service install budget or spawn failure lost its foreground class")
 	}
 	spawns := 0
 	ast.Inspect(body, func(node ast.Node) bool {
