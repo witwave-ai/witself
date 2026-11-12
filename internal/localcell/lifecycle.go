@@ -12,11 +12,11 @@ import (
 
 func (c *Cell) own(create bool) (*operationLock, error) {
 	if err := c.validateRoot(create); err != nil {
-		return nil, err
+		return nil, classifyOwnershipFailure(c.cfg.Root, err)
 	}
 	lock, err := acquireLock(c.cfg.Root, true)
 	if err != nil {
-		return nil, err
+		return nil, classifyOwnershipFailure(c.cfg.Root, err)
 	}
 	// Validate again after taking the stable lock, before following layout paths.
 	if err := c.validateRoot(false); err != nil {
@@ -28,11 +28,11 @@ func (c *Cell) own(create bool) (*operationLock, error) {
 
 func (c *Cell) ownExisting() (*operationLock, error) {
 	if err := c.validateRoot(false); err != nil {
-		return nil, err
+		return nil, classifyOwnershipFailure(c.cfg.Root, err)
 	}
 	lock, err := acquireLock(c.cfg.Root, false)
 	if err != nil {
-		return nil, err
+		return nil, classifyOwnershipFailure(c.cfg.Root, err)
 	}
 	if lock == nil {
 		return c.own(false)
