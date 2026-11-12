@@ -19,15 +19,14 @@ func serviceControlMaintenanceExchange(t *testing.T, action string, answer func(
 	cell, commands := serviceHealthControlFixture(t, time.Second)
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
+	done := StartJoinedTestRunForTest(t, cancel, serviceControlBudget(cell.cfg.Timeout, 4), func() error {
 		select {
 		case command := <-commands:
 			command.reply <- answer(command)
 		case <-ctx.Done():
 		}
-	}()
+		return nil
+	})
 	status, err := cell.Control(ctx, action)
 	cancel()
 	<-done

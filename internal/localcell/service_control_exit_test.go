@@ -43,7 +43,11 @@ func TestServiceHostExitDrainDoesNotCancelBeforeStop(t *testing.T) {
 	}
 	delivered := make(chan struct{})
 	finished := make(chan bool, 1)
-	go func() { finished <- s.finishHostExit(t.Context(), delivered) }()
+	ctx, cancel := context.WithCancel(t.Context())
+	StartJoinedTestRunForTest(t, cancel, serviceControlBudget(c.cfg.Timeout, 4), func() error {
+		finished <- s.finishHostExit(ctx, delivered)
+		return nil
+	})
 	select {
 	case <-entered:
 		t.Fatal("drain preceded response delivery")

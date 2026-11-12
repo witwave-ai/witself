@@ -40,9 +40,11 @@ func TestServiceSupervisorControlHealthCancellation(t *testing.T) {
 			}
 			previous := os.Stderr
 			os.Stderr = stderr
-			defer func() { os.Stderr = previous; _ = stderr.Close() }()
-			done := make(chan error, 1)
-			go func() { _, err := s.command(ctx, action); done <- err }()
+			t.Cleanup(func() { os.Stderr = previous; _ = stderr.Close() })
+			done := StartJoinedTestRunForTest(t, cancel, serviceControlBudget(c.cfg.Timeout, 4), func() error {
+				_, err := s.command(ctx, action)
+				return err
+			})
 			<-entered
 			cancel()
 			err = <-done
@@ -228,8 +230,9 @@ func TestServiceControlSlowHealthVerdictActualHost(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 8*cell.cfg.Timeout)
 	defer cancel()
-	done := make(chan error, 1)
-	go func() { done <- cell.Run(ctx, SupervisorPolicy{hooks: &hooks, ShutdownTimeout: hostBound}) }()
+	done := StartJoinedTestRunForTest(t, cancel, serviceControlBudget(hostBound, 8), func() error {
+		return cell.Run(ctx, SupervisorPolicy{hooks: &hooks, ShutdownTimeout: hostBound})
+	})
 	select {
 	case <-entered:
 	case <-ctx.Done():
@@ -312,18 +315,17 @@ func serviceHealthMeasuredBound(t *testing.T, floor time.Duration) time.Duration
 	}
 	healthCalls := 0
 	s.hooks.health = func(context.Context) error { healthCalls++; return nil }
-	done := make(chan struct{})
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	go func() {
-		defer close(done)
+	done := StartJoinedTestRunForTest(t, cancel, serviceControlBudget(floor, 4), func() error {
 		select {
 		case command := <-commands:
 			status, commandErr := s.command(command.ctx, command.action)
 			command.reply <- serviceReply{status: status, err: commandErr}
 		case <-ctx.Done():
 		}
-	}()
+		return nil
+	})
 	start := time.Now()
 	_, err = cell.Control(ctx, "health")
 	measured := time.Since(start)
@@ -395,12 +397,10 @@ func TestServiceControlCallerBoundYieldsActualHost(t *testing.T) {
 			}
 			previous := os.Stderr
 			os.Stderr = stderr
-			defer func() { os.Stderr = previous; _ = stderr.Close() }()
+			t.Cleanup(func() { os.Stderr = previous; _ = stderr.Close() })
 			ctx, cancel := context.WithTimeout(t.Context(), 8*max(hostBound, callerBound))
 			defer cancel()
-			done := make(chan struct{})
-			go func() {
-				defer close(done)
+			done := StartJoinedTestRunForTest(t, cancel, serviceControlBudget(max(hostBound, callerBound), 8), func() error {
 				select {
 				case command := <-commands:
 					status, commandErr := s.command(command.ctx, command.action)
@@ -408,8 +408,8 @@ func TestServiceControlCallerBoundYieldsActualHost(t *testing.T) {
 					command.reply <- serviceReply{status: status, err: commandErr}
 				case <-ctx.Done():
 				}
-			}()
-			defer func() { cancel(); <-done }()
+				return nil
+			})
 			_, verdict := client.Control(ctx, "health")
 			select {
 			case <-done:
@@ -525,16 +525,15 @@ func TestServiceControlBusyHealthIsDeferred(t *testing.T) {
 	s.hooks.health = func(context.Context) error { return ErrLocked }
 	ctx, cancel := context.WithTimeout(t.Context(), 8*hostBound)
 	defer cancel()
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
+	done := StartJoinedTestRunForTest(t, cancel, serviceControlBudget(hostBound, 4), func() error {
 		select {
 		case command := <-commands:
 			status, commandErr := s.command(command.ctx, command.action)
 			command.reply <- serviceReply{status: status, err: commandErr}
 		case <-ctx.Done():
 		}
-	}()
+		return nil
+	})
 	_, verdict := cell.Control(ctx, "health")
 	cancel()
 	<-done
