@@ -73,7 +73,11 @@ func TestProcessRetryChild(_ *testing.T) {
 		_, _ = io.WriteString(os.Stdout, "witself-server: listen tcp bind: address already in use\n")
 	}
 	<-stopped
-	_ = server.Close()
+	// Shutdown, unlike Close, waits for the in-flight stop reply to finish, so
+	// the parent always reads a complete response before this process exits.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	_ = server.Shutdown(ctx)
+	cancel()
 	os.Exit(0)
 }
 
@@ -422,5 +426,34 @@ func TestProcessStartRetrySourceContract(t *testing.T) {
 		if err != nil || !strings.Contains(string(raw), contract.text) {
 			t.Fatal("capturemix retry lines no longer reach the matrix log")
 		}
+	}
+	// The helper child drains its stop reply with Shutdown before it exits;
+	// Close would race the parent's read of that reply.
+	helper, err := parser.ParseFile(token.NewFileSet(), "process_retry_test.go", nil, 0)
+	if err != nil {
+		t.Fatal("capturemix retry helper source unavailable")
+	}
+	drains, closes := 0, 0
+	for _, declaration := range helper.Decls {
+		function, ok := declaration.(*ast.FuncDecl)
+		if !ok || function.Name.Name != "TestProcessRetryChild" {
+			continue
+		}
+		ast.Inspect(function.Body, func(node ast.Node) bool {
+			if selector, ok := node.(*ast.SelectorExpr); ok {
+				if name, ok := selector.X.(*ast.Ident); ok && name.Name == "server" {
+					switch selector.Sel.Name {
+					case "Shutdown":
+						drains++
+					case "Close":
+						closes++
+					}
+				}
+			}
+			return true
+		})
+	}
+	if drains != 1 || closes != 0 {
+		t.Fatal("capturemix retry helper no longer drains its stop reply")
 	}
 }
