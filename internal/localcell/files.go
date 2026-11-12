@@ -19,16 +19,22 @@ var syncFile = func(f *os.File) error { return f.Sync() }
 // operations.jsonl. Tests replace it; production always uses syncDirectory.
 var syncJournalDirectory = syncDirectory
 
+// syncPrivateDirParent persists a newly created directory's parent entry after
+// privacy checks pass. Tests replace it; production always uses syncDirectory.
+var syncPrivateDirParent = syncDirectory
+
 // beforePasswordWrite observes the opened password temporary immediately before
 // its first data write. It is nil outside tests.
 var beforePasswordWrite func(f *os.File)
 
 func privateDir(path string, create bool) error {
+	created := false
 	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) && create {
 		if err = makePrivateDir(path); err != nil {
 			return errors.New("cannot create private local cell directory")
 		}
+		created = true
 		info, err = os.Lstat(path)
 	}
 	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
@@ -36,6 +42,11 @@ func privateDir(path string, create bool) error {
 	}
 	if !privateOwnedDir(path, info) {
 		return errors.New("local cell directory must be private and owned by the current user")
+	}
+	if created {
+		if err := syncPrivateDirParent(filepath.Dir(path)); err != nil {
+			return errors.New("cannot sync local cell parent directory")
+		}
 	}
 	return nil
 }
