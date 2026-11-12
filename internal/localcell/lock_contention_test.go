@@ -99,7 +99,9 @@ func TestOwnershipFailureProbe(t *testing.T) {
 				t.Fatal("ownership probe dependency order or count changed")
 			}
 			if opened {
-				if _, err := file.Stat(); !errors.Is(err, os.ErrClosed) {
+				// A second Close reports os.ErrClosed on every platform; Stat on a
+				// closed file does not on Windows, where it reads the raw handle.
+				if err := file.Close(); !errors.Is(err, os.ErrClosed) {
 					t.Fatal("ownership probe left its opened file unclosed")
 				}
 			}
