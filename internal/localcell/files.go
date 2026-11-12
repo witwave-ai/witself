@@ -15,6 +15,10 @@ import (
 
 var syncFile = func(f *os.File) error { return f.Sync() }
 
+// syncJournalDirectory syncs journal/ after an ordinary journal append creates
+// operations.jsonl. Tests replace it; production always uses syncDirectory.
+var syncJournalDirectory = syncDirectory
+
 // beforePasswordWrite observes the opened password temporary immediately before
 // its first data write. It is nil outside tests.
 var beforePasswordWrite func(f *os.File)
@@ -212,11 +216,21 @@ func (c *Cell) journal(operation, step, state string) error {
 	return c.journalCause(operation, step, state, "")
 }
 
+// journalCause is journal with an optional fixed cause. When the append creates
+// operations.jsonl, journal/ is synced after the record so the new file's
+// directory entry is durable before success; appends to an existing file sync
+// only the file. A failed directory sync leaves the complete, file-synced record
+// in place for Repair, as if the process had stopped right after the append.
 func (c *Cell) journalCause(operation, step, state, cause string) error {
 	path := c.path("journal", "operations.jsonl")
-	if info, err := os.Lstat(path); err == nil && !info.Mode().IsRegular() {
+	info, err := os.Lstat(path)
+	if err == nil && !info.Mode().IsRegular() {
 		return errors.New("local cell journal must be a regular file")
 	}
+	// Only an absent pathname can be created by the open below; an existing one
+	// never reports not-exist. Journal writers hold the root operation lock, so
+	// nothing else creates or unlinks the file between this Lstat and the open.
+	created := errors.Is(err, os.ErrNotExist)
 	f, err := openPrivateFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
 	if err != nil {
 		return errors.New("cannot open local cell journal")
@@ -232,6 +246,11 @@ func (c *Cell) journalCause(operation, step, state, cause string) error {
 	}
 	if err := syncFile(f); err != nil {
 		return errors.New("cannot sync local cell journal")
+	}
+	if created {
+		if err := syncJournalDirectory(c.path("journal")); err != nil {
+			return errors.New("cannot sync local cell journal directory")
+		}
 	}
 	return nil
 }
