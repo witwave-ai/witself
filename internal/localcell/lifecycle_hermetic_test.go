@@ -500,14 +500,51 @@ func testEarlyExitCause(t *testing.T, binaries localcell.Binaries) {
 	assertStopped(t, cell)
 }
 
+// Keep only successful executable bytes, never a caller's temporary path.
+// Return copies so neither the builder nor a caller can change the memoized image.
+type lifecycleFixtureMemoizer struct {
+	mu    sync.Mutex
+	data  []byte
+	ready bool
+}
+
+func (m *lifecycleFixtureMemoizer) image(build func() ([]byte, error)) ([]byte, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.ready {
+		data, err := build()
+		if err != nil {
+			return nil, err
+		}
+		m.data = append([]byte(nil), data...)
+		m.ready = true
+	}
+	return append([]byte(nil), m.data...), nil
+}
+
+var lifecycleFixtureImage lifecycleFixtureMemoizer
+
 func buildLifecycleFixture(t *testing.T) localcell.Binaries {
 	t.Helper()
 	buildDir := t.TempDir()
 	fixture := filepath.Join(buildDir, lifecycleExecutableName("fixture"))
-	cmd := offlineBuildCommand(t.Context(), "build", "-o", fixture, "./testdata/lifecyclefixture")
-	cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
-	if err := cmd.Run(); err != nil {
+	buildFailure := errors.New("cannot build synthetic lifecycle fixture")
+	data, err := lifecycleFixtureImage.image(func() ([]byte, error) {
+		cmd := offlineBuildCommand(t.Context(), "build", "-o", fixture, "./testdata/lifecyclefixture")
+		cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
+		if err := cmd.Run(); err != nil {
+			return nil, buildFailure
+		}
+		return os.ReadFile(fixture)
+	})
+	if errors.Is(err, buildFailure) {
 		t.Fatal("cannot build synthetic lifecycle fixture")
+	}
+	if err != nil {
+		t.Fatal("cannot read synthetic lifecycle fixture")
+	}
+	if err := os.WriteFile(fixture, data, 0o755); err != nil {
+		t.Fatal("cannot copy synthetic lifecycle fixture")
 	}
 	for _, name := range []string{"postgres", "initdb", "pg_ctl", "createdb", "psql", "witself-server", "witself-worker"} {
 		if err := os.Link(fixture, filepath.Join(buildDir, lifecycleExecutableName(name))); err != nil {
