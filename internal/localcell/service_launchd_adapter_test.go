@@ -233,6 +233,10 @@ func launchdFixture(t *testing.T) (*launchdAgentAdapter, ServiceDescriptor, *lau
 	// as an explicit override. Absent-state proofs delete this entry.
 	m.enabled[a.target(d)] = false
 	a.command = m.command
+	a.drain = func(context.Context, ServiceDescriptor) error {
+		serviceRemovalStopped(t, cell, d)
+		return nil
+	}
 	return a, d, m
 }
 
@@ -415,7 +419,6 @@ func TestLaunchdUnloadedPlistIsNotOwnedAndCanRecover(t *testing.T) {
 	if !obs.Registered || obs.Owned {
 		t.Fatal("unloaded file claimed as owned registration")
 	}
-	launchdRequireError(t, a.Remove(t.Context(), d), ErrServiceOwnershipConflict, "remove:ownership")
 	plan, err := a.Plan(t.Context(), d)
 	if err != nil || !plan.Observation.Registered || plan.Observation.Owned {
 		t.Fatal("explicit install cannot plan recovery of exact unloaded plist")
@@ -426,6 +429,13 @@ func TestLaunchdUnloadedPlistIsNotOwnedAndCanRecover(t *testing.T) {
 	after, err := os.Lstat(a.plistPath(d))
 	if err != nil || !os.SameFile(before, after) {
 		t.Fatal("recovery did not reuse original exact plist")
+	}
+	m.loaded = false
+	if a.Remove(t.Context(), d) != nil {
+		t.Fatal("Exact unloaded recovery removal failed")
+	}
+	if _, err := os.Lstat(a.plistPath(d)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("Exact unloaded recovery retained its plist")
 	}
 }
 

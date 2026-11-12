@@ -49,17 +49,17 @@ type windowsTaskFailure struct {
 // require fixed arguments at every production raising site.
 func validWindowsTaskDiagnostic(kind error, step, reason string) bool {
 	switch kind {
-	case ErrServiceOwnershipConflict, ErrServiceManagerUnavailable, ErrServiceRegistrationFailed, ErrServiceDesiredState, ErrServiceRemovalFailed:
+	case ErrServiceOwnershipConflict, ErrServiceManagerUnavailable, ErrServiceRegistrationFailed, ErrServiceDesiredState, ErrServiceRemovalFailed, ErrServiceHostActive:
 	default:
 		return false
 	}
 	switch step {
-	case "capability:session", "query:result", "inspect:principal", "inspect:trigger", "inspect:action", "inspect:settings", "inspect:host_owner", "create", "post_create", "remove:host_exit", "remove:ownership", "delete", "remove:absence":
+	case "capability:session", "query:result", "inspect:principal", "inspect:trigger", "inspect:action", "inspect:settings", "inspect:host_owner", "create", "post_create", "remove:host_exit", "remove:host_lease", "remove:ownership", "delete", "remove:absence":
 	default:
 		return false
 	}
 	switch reason {
-	case "diagnostic_argument_refused", "invalid", "unavailable", "interactive_token_unavailable", "mismatch", "query_result_untyped", "access_denied", "rpc_unavailable", "directory_unavailable", "private_pair_required", "missing", "not_user", "stale_plan", "private_create_failed", "appeared", "create_failed", "not_owned", "stopped", "run_failed", "host_exit_failed", "changed", "delete_failed", "still_present", "remove_failed", "too_large", "template_invalid", "xml_invalid", "task_value_percent_reference", "owner_token_refused", "system_directory_unavailable", "system_command_unavailable", "output_limit", "command_timeout", "command_failed", "verification_failed":
+	case "diagnostic_argument_refused", "invalid", "unavailable", "active", "interactive_token_unavailable", "mismatch", "query_result_untyped", "access_denied", "rpc_unavailable", "directory_unavailable", "private_pair_required", "missing", "not_user", "stale_plan", "private_create_failed", "appeared", "create_failed", "not_owned", "stopped", "run_failed", "host_exit_failed", "changed", "delete_failed", "still_present", "remove_failed", "too_large", "template_invalid", "xml_invalid", "task_value_percent_reference", "owner_token_refused", "system_directory_unavailable", "system_command_unavailable", "output_limit", "command_timeout", "command_failed", "verification_failed":
 		return true
 	default:
 		return false
@@ -430,7 +430,7 @@ func (a *windowsLogonTaskAdapter) Remove(ctx context.Context, d ServiceIdentity)
 		}
 	}
 	// The drain itself needs this operation lock, so acquire it only afterwards.
-	_, unlock, err := a.mutationLock(d)
+	cell, unlock, err := a.mutationLock(d)
 	if err != nil {
 		return err
 	}
@@ -438,6 +438,17 @@ func (a *windowsLogonTaskAdapter) Remove(ctx context.Context, d ServiceIdentity)
 	currentDescriptor, err := a.current(d)
 	if err != nil || !reflect.DeepEqual(windowsTaskImmutable(currentDescriptor), windowsTaskImmutable(d)) || currentDescriptor.DesiredState != "stopped" {
 		return windowsTaskError(ErrServiceOwnershipConflict, "remove:ownership", 0, "changed")
+	}
+	releaseHost, err := serviceAdapterRemovalHostLock(cell)
+	if err != nil {
+		if errors.Is(err, ErrLocked) {
+			return windowsTaskError(ErrServiceHostActive, "remove:host_lease", 0, "active")
+		}
+		return windowsTaskError(ErrServiceRemovalFailed, "remove:host_lease", 0, "unavailable")
+	}
+	defer releaseHost()
+	if err := cell.maintenanceFenceAllows(0); err != nil {
+		return err
 	}
 	records, err := a.records(d)
 	if err != nil {

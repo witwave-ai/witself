@@ -165,6 +165,10 @@ func maintenanceAdapterAdmissionContract(source string) []string {
 			if references != 1 || len(updateOrdinaryAdmissions("service_windows_task.go", fn)) != 1 {
 				failures = append(failures, fn.Name.Name+"_reference_count")
 			}
+		} else if fn.Name.Name == "Remove" {
+			if invariant := maintenanceRemovalAdmissionOwner("service_windows_task.go", fn); invariant != "" {
+				failures = append(failures, "Remove_"+invariant)
+			}
 		} else if references != 0 {
 			failures = append(failures, fn.Name.Name+"_unexpected_reference")
 		}
@@ -189,7 +193,7 @@ func maintenanceAdapterAdmissionContract(source string) []string {
 				if selector, ok := node.(*ast.SelectorExpr); ok && selector.Sel.Name == "mutationLock" {
 					calls++
 				}
-				if statement, ok := node.(*ast.AssignStmt); ok && admissionNodeText(statement) == "_, unlock, err := a.mutationLock(d)" {
+				if statement, ok := node.(*ast.AssignStmt); ok && admissionNodeText(statement) == "cell, unlock, err := a.mutationLock(d)" {
 					bindings++
 				}
 				return true
@@ -252,9 +256,14 @@ func (a *windowsLogonTaskAdapter) mutationLock(d ServiceDescriptor) (*Cell, func
  return cell, func() { _ = lock.Close() }, nil
 }
 func (a *windowsLogonTaskAdapter) Remove(ctx context.Context, d ServiceIdentity) error {
- _, unlock, err := a.mutationLock(d)
+ if a.drain != nil { if err := a.drain(ctx, d); err != nil { return err } } else { cell, err := a.cellForRemoval(d); if err != nil || cell.exitServiceHostForRemoval(ctx) != nil { return err } }
+ cell, unlock, err := a.mutationLock(d)
  if err != nil { return err }
  defer unlock()
+ releaseHost, err := serviceAdapterRemovalHostLock(cell)
+ if err != nil { return err }
+ defer releaseHost()
+ if err := cell.maintenanceFenceAllows(0); err != nil { return err }
  return nil
 }
 `

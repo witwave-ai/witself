@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"time"
 )
 
 // Resolve the same config search path as a user manager. HOME is optional: a
@@ -60,6 +61,7 @@ func systemdUserDirectories(userHome, passwdHome func() (string, error), configH
 }
 
 type systemdUserAdapter struct {
+	drain                                             func(context.Context, ServiceDescriptor) error
 	uid, home, runtimeDir, unitDir, systemctl, busctl string
 	unitBase                                          string
 	command                                           serviceManagerCommand
@@ -582,6 +584,43 @@ func (a *systemdUserAdapter) Remove(ctx context.Context, d ServiceIdentity) erro
 	}
 	if !observation.Registered {
 		return nil
+	}
+	if !observation.Owned {
+		return serviceSystemdError(ErrServiceOwnershipConflict, "remove:ownership", "not_owned")
+	}
+	// Draining needs the operation lock and must finish before either lock.
+	if a.drain != nil {
+		if err := a.drain(ctx, d); err != nil {
+			return serviceSystemdError(ErrServiceRemovalFailed, "remove:host_exit", "host_exit_failed")
+		}
+	} else {
+		cell, err := New(Config{Root: d.Root, Timeout: 60 * time.Second})
+		if err != nil || cell.exitServiceHostForRemoval(ctx) != nil {
+			return serviceSystemdError(ErrServiceRemovalFailed, "remove:host_exit", "host_exit_failed")
+		}
+	}
+	cell, fresh, unlock, err := serviceAdapterRemovalAdmission(a.uid, d, a.unitDir)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if fresh.DesiredState != "stopped" {
+		return serviceSystemdError(ErrServiceOwnershipConflict, "remove:descriptor", "not_stopped")
+	}
+	releaseHost, err := serviceAdapterRemovalHostLock(cell)
+	if err != nil {
+		if errors.Is(err, ErrLocked) {
+			return serviceSystemdError(ErrServiceHostActive, "remove:host_lease", "active")
+		}
+		return serviceSystemdError(ErrServiceRemovalFailed, "remove:host_lease", "unavailable")
+	}
+	defer releaseHost()
+	if err := cell.maintenanceFenceAllows(0); err != nil {
+		return err
+	}
+	observation, err = a.Inspect(ctx, d)
+	if err != nil {
+		return err
 	}
 	if !observation.Owned {
 		return serviceSystemdError(ErrServiceOwnershipConflict, "remove:ownership", "not_owned")

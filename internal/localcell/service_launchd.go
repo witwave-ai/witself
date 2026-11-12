@@ -68,6 +68,7 @@ func RenderLaunchdAgentPlist(d ServiceDescriptor) ([]byte, error) {
 }
 
 type launchdAgentAdapter struct {
+	drain                          func(context.Context, ServiceDescriptor) error
 	uid, home, agentDir, launchctl string
 	command                        serviceManagerCommand
 	owned                          func(string, os.FileInfo) bool
@@ -673,7 +674,8 @@ func (a *launchdAgentAdapter) bootout(ctx context.Context, d ServiceDescriptor) 
 
 func (a *launchdAgentAdapter) Remove(ctx context.Context, d ServiceIdentity) error {
 	obs, err := a.Inspect(ctx, d)
-	if err != nil {
+	recovery := errors.Is(err, ErrServiceRegistrationFailed) && obs.Reason == "service_registration_failed"
+	if err != nil && !recovery {
 		if errors.Is(err, ErrServiceOwnershipConflict) || errors.Is(err, ErrServiceRegistrationFailed) {
 			return fmt.Errorf("%w: remove:ownership: %w", ErrServiceOwnershipConflict, err)
 		}
@@ -682,7 +684,48 @@ func (a *launchdAgentAdapter) Remove(ctx context.Context, d ServiceIdentity) err
 	if !obs.Registered {
 		return nil
 	}
-	if !obs.Owned {
+	if !obs.Owned && !recovery {
+		return serviceSystemdError(ErrServiceOwnershipConflict, "remove:ownership", "not_owned")
+	}
+	// Draining needs the operation lock and must finish before either lock.
+	if a.drain != nil {
+		if err := a.drain(ctx, d); err != nil {
+			return serviceSystemdError(ErrServiceRemovalFailed, "remove:host_exit", "host_exit_failed")
+		}
+	} else {
+		cell, err := New(Config{Root: d.Root, Timeout: 60 * time.Second})
+		if err != nil || cell.exitServiceHostForRemoval(ctx) != nil {
+			return serviceSystemdError(ErrServiceRemovalFailed, "remove:host_exit", "host_exit_failed")
+		}
+	}
+	cell, fresh, unlock, err := serviceAdapterRemovalAdmission(a.uid, d, a.agentDir)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if fresh.DesiredState != "stopped" {
+		return serviceSystemdError(ErrServiceOwnershipConflict, "remove:descriptor", "not_stopped")
+	}
+	releaseHost, err := serviceAdapterRemovalHostLock(cell)
+	if err != nil {
+		if errors.Is(err, ErrLocked) {
+			return serviceSystemdError(ErrServiceHostActive, "remove:host_lease", "active")
+		}
+		return serviceSystemdError(ErrServiceRemovalFailed, "remove:host_lease", "unavailable")
+	}
+	defer releaseHost()
+	if err := cell.maintenanceFenceAllows(0); err != nil {
+		return err
+	}
+	obs, err = a.Inspect(ctx, d)
+	recovery = errors.Is(err, ErrServiceRegistrationFailed) && obs.Reason == "service_registration_failed"
+	if err != nil && !recovery {
+		if errors.Is(err, ErrServiceOwnershipConflict) || errors.Is(err, ErrServiceRegistrationFailed) {
+			return fmt.Errorf("%w: remove:ownership: %w", ErrServiceOwnershipConflict, err)
+		}
+		return err
+	}
+	if !obs.Owned && !recovery {
 		return serviceSystemdError(ErrServiceOwnershipConflict, "remove:ownership", "not_owned")
 	}
 	want, err := RenderLaunchdAgentPlist(d)
@@ -693,8 +736,10 @@ func (a *launchdAgentAdapter) Remove(ctx context.Context, d ServiceIdentity) err
 	if err != nil || identity == nil {
 		return serviceSystemdError(ErrServiceOwnershipConflict, "remove:ownership", "plist_changed")
 	}
-	if err := a.bootout(ctx, d); err != nil {
-		return err
+	if !recovery {
+		if err := a.bootout(ctx, d); err != nil {
+			return err
+		}
 	}
 	return a.removePlistIdentity(d, identity)
 }
