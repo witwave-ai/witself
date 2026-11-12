@@ -15,7 +15,7 @@ import (
 
 // The child and host paths share this closed, value-free log boundary. The
 // classifier line is logged on its own so CI's why retains the exact cause.
-var serviceControlChildDiagnosticLine = regexp.MustCompile(`^(localcell: [a-z_]{1,48}|localcell: service_control_unavailable: transport:(dial|deadline|eof|response)|localcell: service_control_refused: (pipe|peer|endpoint):[a-z_]{1,24}|service_control accept=rejected step=(peer:pid|peer:identity|peer:sid|duplicate|conn)|service_control action=stop response=unflushed)$`)
+var serviceControlChildDiagnosticLine = regexp.MustCompile(`^(localcell: [a-z_]{1,48}|localcell: service_control_unavailable: transport:(dial|deadline|eof|response)|localcell: service_control_refused: (pipe|peer|endpoint):[a-z_]{1,24}|service_control accept=rejected step=(peer:pid|peer:identity|peer:sid|duplicate|conn)|service_control action=stop response=unflushed|service_control stop=handlers_unjoined)$`)
 
 func TestServiceControlChildDiagnosticGuard(t *testing.T) {
 	for _, line := range []string{
@@ -25,6 +25,7 @@ func TestServiceControlChildDiagnosticGuard(t *testing.T) {
 		"service_control accept=rejected step=peer:identity", "service_control accept=rejected step=peer:sid",
 		"service_control accept=rejected step=duplicate", "service_control accept=rejected step=conn",
 		"service_control action=stop response=unflushed",
+		"service_control stop=handlers_unjoined",
 		"localcell: " + strings.Repeat("a", 48),
 		"localcell: service_control_refused: pipe:" + strings.Repeat("a", 24),
 	} {
@@ -38,6 +39,7 @@ func TestServiceControlChildDiagnosticGuard(t *testing.T) {
 		"localcell: service_control_unavailable: transport:unknown", "localcell: service_control_unavailable: transport:eof /private/path",
 		"service_control accept=rejected step=peer:sid value=private", "service_control accept=rejected step=" + strings.Repeat("a", 64),
 		"service_control action=stop response=written", "service_control action=stop response=unflushed password=private", "service_control accept=rejected step=private",
+		"service_control stop=unknown", "service_control stop=handlers_unjoined password=private",
 	} {
 		if serviceControlChildDiagnosticLine.MatchString(line) {
 			t.Fatal("child diagnostic guard accepted a private or unknown value")
