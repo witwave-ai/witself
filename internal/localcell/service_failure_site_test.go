@@ -272,6 +272,11 @@ func TestServiceFailureSiteSourceContract(t *testing.T) {
 			`status, err := s.command(commandCtx, command.action)
 			cancel()
 			WriteServiceHostFailure(os.Stderr, err, "supervisor_command")
+			// A completed ordinary command is idle before its caller can react
+			// to the reply. Keep interrupted commands and exit-host in control.
+			if command.action != "exit-host" && ctx.Err() == nil {
+				s.phase, s.operation = "idle", "none"
+			}
 			command.reply <- serviceReply{status: status, err: err}`,
 		},
 		"service_maintenance.go": {

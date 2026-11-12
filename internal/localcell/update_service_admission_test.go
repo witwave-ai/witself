@@ -1168,6 +1168,7 @@ func TestServiceMaintenanceRunStartupBoundary(t *testing.T) {
 				t.Fatal("fenced Run changed startup refusal or protective shutdown order")
 			}
 			if string(receipt) != "native service host site=supervisor_reconcile\nservice_shutdown phase=idle operation=none journal_pending=false journal_read_ok=true\n" {
+				t.Logf("fenced shutdown receipt class=%s", serviceMaintenanceReceiptClass(receipt))
 				t.Fatal("Fenced Run changed held shutdown receipt or failure site")
 			}
 			serviceMaintenanceParityFile(t, c, "service/lease.json", leaseBytes)
