@@ -456,7 +456,7 @@ func TestServiceMaintenanceHostHealthRefusalHolds(t *testing.T) {
 				f.s.hooks.health = func(ctx context.Context) error {
 					healths++
 					serviceMaintenanceHostPlant(t, f.cell, kind)
-					return serviceFailureAt(f.cell.serviceMaintenanceObservation(ctx), "health_tree")
+					return serviceFailureAt(f.cell.serviceMaintenanceObservation(ctx, nil), "health_tree")
 				}
 				status, err := f.s.command(t.Context(), "health")
 				if !errors.Is(err, errServiceUnhealthy) || status.Healthy || status.State != "maintenance" {
@@ -755,7 +755,7 @@ func TestServiceMaintenanceHostClassificationContention(t *testing.T) {
 			if outcome == "descriptor_error" && os.Remove(f.cell.path("service", "descriptor.json")) != nil {
 				t.Fatal("Classifier release could not remove descriptor")
 			}
-			err := f.cell.serviceMaintenanceObservation(t.Context())
+			err := f.cell.serviceMaintenanceObservation(t.Context(), nil)
 			if outcome == "absent" && err != nil || outcome == "maintenance" && !errors.Is(err, errMaintenanceFenceActive) || outcome == "descriptor_error" && (err == nil || errors.Is(err, errMaintenanceFenceActive)) {
 				t.Fatal("Classifier release changed its legacy result identity")
 			}
@@ -912,7 +912,7 @@ func serviceMaintenanceHostRunBound(t *testing.T, c *Cell) time.Duration {
 		if _, err := c.ServiceDescriptor(); err != nil {
 			t.Fatal("Host bound could not sample descriptor admission")
 		}
-		if err := c.serviceMaintenanceObservation(t.Context()); err != nil && !errors.Is(err, errMaintenanceFenceActive) {
+		if err := c.serviceMaintenanceObservation(t.Context(), nil); err != nil && !errors.Is(err, errMaintenanceFenceActive) {
 			t.Fatal("Host bound could not sample maintenance observation")
 		}
 		measured = max(measured, time.Since(start))
@@ -1325,5 +1325,146 @@ func TestServiceMaintenanceHostShutdownRepairRefusal(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestServiceMaintenanceDescriptorContention(t *testing.T) {
+	t.Run("remember_current", func(t *testing.T) {
+		f := newServiceMaintenanceHostFixture(t)
+		known := ProcessRecord{PID: 23, StartTime: "current_descriptor_process", Root: f.d.Root, Component: "server"}
+		if writeAtomic(f.cell.path("run", "server.json"), known, nil) != nil {
+			t.Fatal("Contended descriptor could not seed current process")
+		}
+		f.s.status.Processes = []ServiceProcessIdentity{{Component: "worker", PID: 24, StartTime: "stale_process"}}
+		lock, err := f.cell.own(false)
+		if err != nil {
+			t.Fatal("Contended descriptor could not acquire operation lock")
+		}
+		defer func() { _ = lock.Close() }()
+		if f.s.step(t.Context()) != nil || f.s.status.State != "busy" || f.s.status.Reason != "service_operation_in_progress" {
+			t.Fatal("Contended descriptor did not preserve busy completion")
+		}
+		want := []ServiceProcessIdentity{{Component: "server", PID: known.PID, StartTime: known.StartTime}}
+		if !reflect.DeepEqual(f.s.status.Processes, want) {
+			t.Fatal("Contended descriptor did not remember current processes")
+		}
+		if *f.starts != 0 || *f.stops != 0 || *f.healths != 0 {
+			t.Fatal("Contended descriptor invoked a lifecycle hook")
+		}
+	})
+	t.Run("missing_wins", func(t *testing.T) {
+		f := newServiceMaintenanceHostFixture(t)
+		if os.Remove(f.cell.path("service", "descriptor.json")) != nil {
+			t.Fatal("Contended missing descriptor could not remove record")
+		}
+		lock, err := f.cell.own(false)
+		if err != nil {
+			t.Fatal("Contended missing descriptor could not acquire operation lock")
+		}
+		defer func() { _ = lock.Close() }()
+		err = f.s.step(t.Context())
+		var located *serviceFailure
+		if !errors.As(err, &located) || located.site != "supervisor_traversal" || !errors.Is(err, os.ErrNotExist) {
+			t.Fatal("Contended missing descriptor lost traversal failure and cause")
+		}
+		if f.s.status.State == "busy" || f.s.status.LastStepOutcome != "failed" {
+			t.Fatal("Contended missing descriptor reported busy completion")
+		}
+	})
+}
+
+func TestServiceMaintenanceDescriptorFailures(t *testing.T) {
+	t.Run("missing", func(t *testing.T) {
+		f := newServiceMaintenanceHostFixture(t)
+		if os.Remove(f.cell.path("service", "descriptor.json")) != nil {
+			t.Fatal("Missing descriptor fixture could not remove record")
+		}
+		err := f.s.step(t.Context())
+		var located *serviceFailure
+		if !errors.As(err, &located) || located.site != "supervisor_traversal" || !errors.Is(err, os.ErrNotExist) {
+			t.Fatal("Missing descriptor changed traversal site or cause")
+		}
+	})
+	t.Run("ownership_conflict", func(t *testing.T) {
+		f := newServiceMaintenanceHostFixture(t)
+		f.d.InstallationID = "foreign_installation"
+		if writeAtomic(f.cell.path("service", "descriptor.json"), f.d, nil) != nil {
+			t.Fatal("Foreign descriptor fixture could not replace record")
+		}
+		err := f.s.step(t.Context())
+		var located *serviceFailure
+		if !errors.As(err, &located) || located.site != "supervisor_traversal" || !errors.Is(err, ErrServiceOwnershipConflict) {
+			t.Fatal("Foreign descriptor changed traversal site or cause")
+		}
+	})
+	t.Run("non_private_record", func(t *testing.T) {
+		f := newServiceMaintenanceHostFixture(t)
+		path := f.cell.path("service", "descriptor.json")
+		if os.Remove(path) != nil {
+			t.Fatal("Nonprivate descriptor fixture could not remove record")
+		}
+		if testMkdir(path, 0o700) != nil {
+			t.Fatal("Nonprivate descriptor fixture could not plant directory")
+		}
+		err := f.s.step(t.Context())
+		var located *serviceFailure
+		if !errors.As(err, &located) || located.site != "supervisor_traversal" || err.Error() != "service_record_not_private" {
+			t.Fatal("Nonprivate descriptor changed traversal site or cause")
+		}
+	})
+}
+
+func TestServiceMaintenanceDescriptorHeldProjection(t *testing.T) {
+	f := newServiceMaintenanceHostFixture(t)
+	serviceMaintenanceHostPlant(t, f.cell, "Valid")
+	if f.s.step(t.Context()) != nil {
+		t.Fatal("Held descriptor could not complete initial step")
+	}
+	initial := f.s.projectedStatus()
+	if initial.State != "maintenance" || initial.DesiredState != f.d.DesiredState || initial.Generation != f.d.Payload.Generation {
+		t.Fatal("Held descriptor lost initial desired state or generation")
+	}
+	f.d.DesiredState, f.d.Payload.Generation = "stopped", "replacement_generation"
+	f.d.Revision++
+	if f.cell.writeServiceDescriptor(f.d) != nil {
+		t.Fatal("Held descriptor could not publish replacement")
+	}
+	if f.s.step(t.Context()) != nil {
+		t.Fatal("Held descriptor could not complete replacement step")
+	}
+	after := f.s.projectedStatus()
+	if after.State != "maintenance" || after.DesiredState != "stopped" || after.Generation != "replacement_generation" || after.Reason != "local_maintenance_fence_active" {
+		t.Fatal("Held descriptor did not follow replacement state and generation")
+	}
+	if *f.starts != 0 || *f.stops != 0 || *f.healths != 0 {
+		t.Fatal("Held descriptor replacement invoked a lifecycle hook")
+	}
+}
+
+func TestServiceMaintenanceDescriptorCompletingStop(t *testing.T) {
+	f := newServiceMaintenanceHostFixture(t)
+	f.d.DesiredState = "stopped"
+	if f.cell.writeServiceDescriptor(f.d) != nil {
+		t.Fatal("Completing stop could not publish stopped descriptor")
+	}
+	known := ProcessRecord{PID: 23, StartTime: "completing_stop_process", Root: f.d.Root, Component: "server"}
+	if writeAtomic(f.cell.path("run", "server.json"), known, nil) != nil {
+		t.Fatal("Completing stop could not seed current process")
+	}
+	f.s.running, f.s.completingStop = true, true
+	lock, err := f.cell.own(false)
+	if err != nil {
+		t.Fatal("Completing stop could not acquire operation lock")
+	}
+	defer func() { _ = lock.Close() }()
+	if f.s.step(t.Context()) != nil || f.s.status.State != "stopped" || f.s.status.LastStepOutcome != "ok" || f.s.running {
+		t.Fatal("Completing stop changed stopped completion under contention")
+	}
+	want := []ServiceProcessIdentity{{Component: "server", PID: known.PID, StartTime: known.StartTime}}
+	if !reflect.DeepEqual(f.s.status.Processes, want) {
+		t.Fatal("Completing stop did not remember current processes")
+	}
+	if *f.stops != 1 || *f.starts != 0 || *f.healths != 0 {
+		t.Fatal("Completing stop changed expected lifecycle hook calls")
 	}
 }

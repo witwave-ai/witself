@@ -40,7 +40,9 @@ role, password, err := c.healthPrincipal(m)`,
 lock, err := c.own(false)
 if err != nil { return err }
 defer func() { _ = lock.Close() }()
-if _, err := c.ServiceDescriptor(); err != nil { return err }
+d, err := c.readServiceDescriptor()
+if err != nil { return err }
+if observed != nil { *observed = d }
 ` + maintenanceAdmissionStatement + `
 return nil`,
 }
@@ -51,7 +53,10 @@ return nil`,
 // enabling owner and includes production files excluded by the current GOOS.
 var maintenanceHostSchedulerPins = map[string]string{
 	"observeServiceMaintenance": `func (s *supervisor) observeServiceMaintenance(ctx context.Context) (bool, error) {
-err := s.cell.serviceMaintenanceObservation(ctx)
+return s.observeServiceMaintenanceInto(ctx, nil)
+}`,
+	"observeServiceMaintenanceInto": `func (s *supervisor) observeServiceMaintenanceInto(ctx context.Context, observed *ServiceDescriptor) (bool, error) {
+err := s.cell.serviceMaintenanceObservation(ctx, observed)
 if cancellation := serviceControlCancellation(ctx); cancellation != nil { return false, cancellation }
 if ctx.Err() != nil { return false, ctx.Err() }
 if errors.Is(err, errMaintenanceFenceActive) { s.maintenanceHeld = true; return true, nil }
@@ -117,19 +122,20 @@ err = failure.cause
 }
 
 var maintenanceHostSchedulerCallers = map[string]int{
-	"service_maintenance.go/observeServiceMaintenance/serviceMaintenanceObservation":   1,
-	"service_maintenance.go/resumeServiceStartup/holdMaintenance":                      2,
-	"service_maintenance.go/failAfterMaintenanceObservation/observeServiceMaintenance": 1,
-	"service_maintenance.go/failAfterMaintenanceObservation/holdMaintenance":           1,
-	"service_supervisor.go/Run/serviceMaintenanceOnly":                                 1,
-	"service_supervisor.go/Run/resumeServiceStartup":                                   1,
-	"service_supervisor.go/tick/observeServiceMaintenance":                             1,
-	"service_supervisor.go/tick/resumeServiceStartup":                                  1,
-	"service_supervisor.go/step/observeServiceMaintenance":                             1,
-	"service_supervisor.go/step/holdMaintenance":                                       5,
-	"service_supervisor.go/step/failAfterMaintenanceObservation":                       3,
-	"service_supervisor.go/command/projectedStatus":                                    3,
-	"service_supervisor.go/command/observeServiceMaintenance":                          1,
+	"service_maintenance.go/observeServiceMaintenance/observeServiceMaintenanceInto":     1,
+	"service_maintenance.go/observeServiceMaintenanceInto/serviceMaintenanceObservation": 1,
+	"service_maintenance.go/resumeServiceStartup/holdMaintenance":                        2,
+	"service_maintenance.go/failAfterMaintenanceObservation/observeServiceMaintenance":   1,
+	"service_maintenance.go/failAfterMaintenanceObservation/holdMaintenance":             1,
+	"service_supervisor.go/Run/serviceMaintenanceOnly":                                   1,
+	"service_supervisor.go/Run/resumeServiceStartup":                                     1,
+	"service_supervisor.go/tick/observeServiceMaintenance":                               1,
+	"service_supervisor.go/tick/resumeServiceStartup":                                    1,
+	"service_supervisor.go/step/observeServiceMaintenanceInto":                           1,
+	"service_supervisor.go/step/holdMaintenance":                                         5,
+	"service_supervisor.go/step/failAfterMaintenanceObservation":                         3,
+	"service_supervisor.go/command/projectedStatus":                                      3,
+	"service_supervisor.go/command/observeServiceMaintenance":                            1,
 }
 
 var maintenanceHostShapePins = map[string]string{
@@ -289,7 +295,11 @@ func maintenanceHostAdmissionOwner(filename string, fn *ast.FuncDecl) string {
 		return "signature"
 	}
 	typ, typeOK := pointer.X.(*ast.Ident)
-	if !typeOK || typ.Name != "Cell" || admissionNodeText(&ast.FuncType{Params: fn.Type.Params}) != "func(ctx context.Context)" {
+	parameters := "func(ctx context.Context)"
+	if fn.Name.Name == "serviceMaintenanceObservation" {
+		parameters = "func(ctx context.Context, observed *ServiceDescriptor)"
+	}
+	if !typeOK || typ.Name != "Cell" || admissionNodeText(&ast.FuncType{Params: fn.Type.Params}) != parameters {
 		return "signature"
 	}
 	if fn.Type.Results == nil || len(fn.Type.Results.List) != 1 {
@@ -649,9 +659,9 @@ func maintenanceHostDecisionMutationFixtures(t *testing.T, sources map[string]st
 		name, owner, file, condition string
 		occurrence                   int
 	}{
-		{"ObserverCancellation", "observeServiceMaintenance", "service_maintenance.go", "cancellation != nil", 0},
-		{"ObserverHostCancellation", "observeServiceMaintenance", "service_maintenance.go", "ctx.Err() != nil", 0},
-		{"ObserverMaintenance", "observeServiceMaintenance", "service_maintenance.go", "errors.Is(err, errMaintenanceFenceActive)", 0},
+		{"ObserverCancellation", "observeServiceMaintenanceInto", "service_maintenance.go", "cancellation != nil", 0},
+		{"ObserverHostCancellation", "observeServiceMaintenanceInto", "service_maintenance.go", "ctx.Err() != nil", 0},
+		{"ObserverMaintenance", "observeServiceMaintenanceInto", "service_maintenance.go", "errors.Is(err, errMaintenanceFenceActive)", 0},
 		{"HoldRawStartupFault", "holdMaintenance", "service_maintenance.go", "s.pendingStartup != serviceStartupNone && s.startupFaulted", 0},
 		{"ProjectionBusy", "projectedStatus", "service_maintenance.go", "s.maintenanceBusy", 0},
 		{"ProjectionMaintenance", "projectedStatus", "service_maintenance.go", "s.maintenanceDisplay", 0},
@@ -665,7 +675,7 @@ func maintenanceHostDecisionMutationFixtures(t *testing.T, sources map[string]st
 		{"ShutdownWrapperType", "serviceMaintenanceOnly", "service_maintenance.go", "!ok", 0},
 		{"TickPendingPhase", "tick", "service_supervisor.go", "s.pendingStartup != serviceStartupNone", 0},
 		{"TickResumeOnlyAbsentOrStop", "tick", "service_supervisor.go", "!held || s.pendingStartup == serviceStartupStop", 0},
-		{"StepStopCompletionException", "step", "service_supervisor.go", "!s.completingStop", 0},
+		{"StepStopCompletionException", "step", "service_supervisor.go", "s.completingStop", 0},
 		{"StepRepairFreeze", "step", "service_supervisor.go", "!frozen && s.record.RepairRevision != d.RepairRevision", 0},
 		{"StepClockFreeze", "step", "service_supervisor.go", "!frozen && s.record.NextStart.After(latest)", 0},
 		{"StepProtectiveLatch", "step", "service_supervisor.go", "s.blockedServiceShutdown(ctx)", 0},
@@ -828,7 +838,7 @@ func maintenanceHostMutateDecision(t *testing.T, original, condition string, occ
 func maintenanceHostSchedulerMutationFixtures(t *testing.T, sources map[string]string) {
 	t.Helper()
 	filename := "service_maintenance.go"
-	for _, owner := range []string{"observeServiceMaintenance", "holdMaintenance", "projectedStatus", "resumeServiceStartup", "failAfterMaintenanceObservation", "serviceMaintenanceOnly"} {
+	for _, owner := range []string{"observeServiceMaintenance", "observeServiceMaintenanceInto", "holdMaintenance", "projectedStatus", "resumeServiceStartup", "failAfterMaintenanceObservation", "serviceMaintenanceOnly"} {
 		t.Run(owner, func(t *testing.T) {
 			original := admissionNodeText(serviceAdmissionFunction(t, filename, sources[filename], owner))
 			mutations := []admissionSourceMutation{
@@ -909,14 +919,24 @@ func maintenanceHostSchedulerMutationFixtures(t *testing.T, sources map[string]s
 
 func maintenanceHostPredicateFixtures(t *testing.T, owner, filename, original string) {
 	t.Helper()
-	for _, fixture := range []struct{ name, file, source, invariant string }{
+	type predicateFixture struct{ name, file, source, invariant string }
+	fixtures := []predicateFixture{
 		{"PredicateAtAnyIndex", filename, serviceAdmissionInsert(original, 0, "return nil"), "position"},
 		{"DropFilenameCheck", "other.go", original, "signature"},
 		{"DropReceiverCheck", filename, strings.Replace(original, "*Cell", "*Other", 1), "signature"},
 		{"DropBindingCheck", filename, strings.Replace(original, "(c *Cell)", "(other *Cell)", 1), "signature"},
 		{"DropParameterCheck", filename, strings.Replace(original, "ctx context.Context", "ctx context.Context, extra int", 1), "signature"},
 		{"ValueReceiver", filename, strings.Replace(original, "*Cell", "Cell", 1), "signature"},
-	} {
+	}
+	if owner == "serviceMaintenanceObservation" {
+		fixtures = append(fixtures,
+			predicateFixture{"BaseObservationParameters", filename, strings.Replace(original, ", observed *ServiceDescriptor", "", 1), "signature"},
+			predicateFixture{"ValueObservationParameter", filename, strings.Replace(original, "observed *ServiceDescriptor", "observed ServiceDescriptor", 1), "signature"},
+		)
+	} else {
+		fixtures = append(fixtures, predicateFixture{"HealthObservationParameters", filename, strings.Replace(original, "ctx context.Context", "ctx context.Context, observed *ServiceDescriptor", 1), "signature"})
+	}
+	for _, fixture := range fixtures {
 		t.Run("Guard_"+fixture.name, func(t *testing.T) {
 			for _, ending := range []string{"LF", "CRLF"} {
 				t.Run(ending, func(t *testing.T) {
@@ -1215,24 +1235,38 @@ var maintenanceHostSupervisorPins = map[string]string{
 			s.status.HostExit = previousStatus.HostExit
 		}
 	}()
-	d, err := s.cell.ServiceDescriptor()
-	if cancellation := serviceControlCancellation(ctx); cancellation != nil {
-		return cancellation
-	}
-	if err != nil {
-		return serviceFailureAt(err, "supervisor_traversal")
-	}
-	defer s.rememberProcesses(d)
+	var d ServiceDescriptor
+	var err error
 	held := false
-	if !s.completingStop {
-		held, err = s.observeServiceMaintenance(ctx)
+	if s.completingStop {
+		d, err = s.cell.ServiceDescriptor()
+		if cancellation := serviceControlCancellation(ctx); cancellation != nil {
+			return cancellation
+		}
+		if err != nil {
+			return serviceFailureAt(err, "supervisor_traversal")
+		}
+	} else {
+		held, err = s.observeServiceMaintenanceInto(ctx, &d)
+		if cancellation := serviceControlCancellation(ctx); cancellation != nil {
+			return cancellation
+		}
 		if errors.Is(err, ErrLocked) {
+			d, err = s.cell.ServiceDescriptor()
+			if cancellation := serviceControlCancellation(ctx); cancellation != nil {
+				return cancellation
+			}
+			if err != nil {
+				return serviceFailureAt(err, "supervisor_traversal")
+			}
+			defer s.rememberProcesses(d)
 			return s.busy()
 		}
 		if err != nil {
 			return serviceFailureAt(err, "supervisor_traversal")
 		}
 	}
+	defer s.rememberProcesses(d)
 	frozen := held || s.pendingStartup != serviceStartupNone
 	if !frozen && s.record.RepairRevision != d.RepairRevision {
 		s.record = supervisorRecord{Version: 1, RepairRevision: d.RepairRevision}
@@ -1388,7 +1422,8 @@ var maintenanceHostSupervisorPins = map[string]string{
 	s.running, s.status.Healthy = true, true
 	s.status.State, s.status.Restarts = "running", max(0, s.record.Attempts-1)
 	return nil
-}`,
+}
+`,
 	"busy": `func (s *supervisor) busy() error {
 	if s.status.State == "faulted" && (s.maintenanceHeld || s.pendingStartup != serviceStartupNone) {
 		s.maintenanceBusy = true
@@ -1487,4 +1522,123 @@ var maintenanceHostSupervisorPins = map[string]string{
 	}
 	return status, serviceFailureFallback(err, "supervisor_command")
 }`,
+}
+
+// These read-cost contracts cover every platform without preparing a cell.
+func TestServiceMaintenanceDescriptorObservationContract(t *testing.T) {
+	sources := admissionReadSources(t)
+	fn := serviceAdmissionFunction(t, "service_maintenance.go", strings.ReplaceAll(sources["service_maintenance.go"], "\r\n", "\n"), "serviceMaintenanceObservation")
+	if invariant := maintenanceHostAdmissionOwner("service_maintenance.go", fn); invariant != "" {
+		t.Fatalf("Descriptor observation invariant failed %s", invariant)
+	}
+	ast.Inspect(fn.Body, func(node ast.Node) bool {
+		if selector, ok := node.(*ast.SelectorExpr); ok && selector.Sel.Name == "ServiceDescriptor" {
+			t.Error("Descriptor observation repeats root validation")
+		}
+		return true
+	})
+}
+
+func TestServiceMaintenanceDescriptorReaderContract(t *testing.T) {
+	sources := admissionReadSources(t)
+	source := strings.ReplaceAll(sources["service_descriptor.go"], "\r\n", "\n")
+	fn := serviceAdmissionFunction(t, "service_descriptor.go", source, "ServiceDescriptor")
+	const wrapper = `package localcell
+func (c *Cell) ServiceDescriptor() (ServiceDescriptor, error) {
+var d ServiceDescriptor
+if err := c.validateRoot(false); err != nil { return d, err }
+return c.readServiceDescriptor()
+}`
+	want := serviceAdmissionFunction(t, "wrapper.go", wrapper, "ServiceDescriptor")
+	if admissionNodeText(fn) != admissionNodeText(want) {
+		t.Fatal("Descriptor public reader validation changed")
+	}
+	reader := serviceAdmissionFunction(t, "service_descriptor.go", source, "readServiceDescriptor")
+	ast.Inspect(reader.Body, func(node ast.Node) bool {
+		name := ""
+		switch node := node.(type) {
+		case *ast.SelectorExpr:
+			name = node.Sel.Name
+		case *ast.Ident:
+			name = node.Name
+		}
+		switch name {
+		case "validateRoot":
+			t.Error("Descriptor private reader repeats root validation")
+		case "own":
+			t.Error("Descriptor private reader acquires the operation lock")
+		case "ownExisting":
+			t.Error("Descriptor private reader reacquires an existing operation lock")
+		case "acquireLock":
+			t.Error("Descriptor private reader acquires a raw lock")
+		}
+		return true
+	})
+}
+
+func TestServiceMaintenanceDescriptorReaderInventory(t *testing.T) {
+	sources := admissionReadSources(t)
+	callers := map[string]int{}
+	for filename, source := range sources {
+		file, err := parser.ParseFile(token.NewFileSet(), filename, strings.ReplaceAll(source, "\r\n", "\n"), 0)
+		if err != nil {
+			t.Fatal("Descriptor caller inventory source did not parse")
+		}
+		for _, declaration := range file.Decls {
+			owner := "initializer"
+			if fn, ok := declaration.(*ast.FuncDecl); ok {
+				owner = fn.Name.Name
+			}
+			ast.Inspect(declaration, func(node ast.Node) bool {
+				if selector, ok := node.(*ast.SelectorExpr); ok && selector.Sel.Name == "readServiceDescriptor" {
+					callers[filename+"/"+owner]++
+				}
+				return true
+			})
+		}
+	}
+	if len(callers) != 2 || callers["service_descriptor.go/ServiceDescriptor"] != 1 || callers["service_maintenance.go/serviceMaintenanceObservation"] != 1 {
+		t.Fatal("Descriptor private reader caller inventory changed")
+	}
+	fn := serviceAdmissionFunction(t, "service_maintenance.go", strings.ReplaceAll(sources["service_maintenance.go"], "\r\n", "\n"), "serviceMaintenanceObservation")
+	want := admissionStatements(`if err := ctx.Err(); err != nil { return err }
+lock, err := c.own(false)
+if err != nil { return err }
+defer func() { _ = lock.Close() }()
+d, err := c.readServiceDescriptor()`)
+	if len(fn.Body.List) < len(want) {
+		t.Fatal("Descriptor observation lock prelude is incomplete")
+	}
+	for index, statement := range want {
+		if admissionNodeText(fn.Body.List[index]) != statement {
+			t.Fatal("Descriptor observation reads outside its lock prelude")
+		}
+	}
+	if !maintenanceServiceContinuousHold(fn) {
+		t.Fatal("Descriptor observation releases its continuous lock")
+	}
+}
+
+func TestServiceMaintenanceDescriptorStepContract(t *testing.T) {
+	sources := admissionReadSources(t)
+	fn := serviceAdmissionFunction(t, "service_supervisor.go", strings.ReplaceAll(sources["service_supervisor.go"], "\r\n", "\n"), "step")
+	want := serviceAdmissionFunction(t, "step_pin.go", "package localcell\n"+maintenanceHostSupervisorPins["step"], "step")
+	if admissionNodeText(fn) != admissionNodeText(want) {
+		t.Fatal("Descriptor step read ordering changed")
+	}
+	reads, observations := 0, 0
+	ast.Inspect(fn.Body, func(node ast.Node) bool {
+		if selector, ok := node.(*ast.SelectorExpr); ok {
+			switch selector.Sel.Name {
+			case "ServiceDescriptor":
+				reads++
+			case "observeServiceMaintenanceInto":
+				observations++
+			}
+		}
+		return true
+	})
+	if reads != 2 || observations != 1 {
+		t.Fatal("Descriptor step read inventory changed")
+	}
 }

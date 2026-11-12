@@ -414,24 +414,38 @@ func (s *supervisor) step(ctx context.Context) (result error) {
 			s.status.HostExit = previousStatus.HostExit
 		}
 	}()
-	d, err := s.cell.ServiceDescriptor()
-	if cancellation := serviceControlCancellation(ctx); cancellation != nil {
-		return cancellation
-	}
-	if err != nil {
-		return serviceFailureAt(err, "supervisor_traversal")
-	}
-	defer s.rememberProcesses(d)
+	var d ServiceDescriptor
+	var err error
 	held := false
-	if !s.completingStop {
-		held, err = s.observeServiceMaintenance(ctx)
+	if s.completingStop {
+		d, err = s.cell.ServiceDescriptor()
+		if cancellation := serviceControlCancellation(ctx); cancellation != nil {
+			return cancellation
+		}
+		if err != nil {
+			return serviceFailureAt(err, "supervisor_traversal")
+		}
+	} else {
+		held, err = s.observeServiceMaintenanceInto(ctx, &d)
+		if cancellation := serviceControlCancellation(ctx); cancellation != nil {
+			return cancellation
+		}
 		if errors.Is(err, ErrLocked) {
+			d, err = s.cell.ServiceDescriptor()
+			if cancellation := serviceControlCancellation(ctx); cancellation != nil {
+				return cancellation
+			}
+			if err != nil {
+				return serviceFailureAt(err, "supervisor_traversal")
+			}
+			defer s.rememberProcesses(d)
 			return s.busy()
 		}
 		if err != nil {
 			return serviceFailureAt(err, "supervisor_traversal")
 		}
 	}
+	defer s.rememberProcesses(d)
 	frozen := held || s.pendingStartup != serviceStartupNone
 	if !frozen && s.record.RepairRevision != d.RepairRevision {
 		s.record = supervisorRecord{Version: 1, RepairRevision: d.RepairRevision}

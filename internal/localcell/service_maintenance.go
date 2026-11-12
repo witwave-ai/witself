@@ -17,7 +17,7 @@ const (
 
 // This observation can suppress scheduling, never authorize a later effect.
 // Each enabling owner must still admit the effect under its own continuous lock.
-func (c *Cell) serviceMaintenanceObservation(ctx context.Context) error {
+func (c *Cell) serviceMaintenanceObservation(ctx context.Context, observed *ServiceDescriptor) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -26,8 +26,12 @@ func (c *Cell) serviceMaintenanceObservation(ctx context.Context) error {
 		return err
 	}
 	defer func() { _ = lock.Close() }()
-	if _, err := c.ServiceDescriptor(); err != nil {
+	d, err := c.readServiceDescriptor()
+	if err != nil {
 		return err
+	}
+	if observed != nil {
+		*observed = d
 	}
 	if err := c.maintenanceFenceAllows(0); err != nil {
 		return err
@@ -36,7 +40,11 @@ func (c *Cell) serviceMaintenanceObservation(ctx context.Context) error {
 }
 
 func (s *supervisor) observeServiceMaintenance(ctx context.Context) (bool, error) {
-	err := s.cell.serviceMaintenanceObservation(ctx)
+	return s.observeServiceMaintenanceInto(ctx, nil)
+}
+
+func (s *supervisor) observeServiceMaintenanceInto(ctx context.Context, observed *ServiceDescriptor) (bool, error) {
+	err := s.cell.serviceMaintenanceObservation(ctx, observed)
 	if cancellation := serviceControlCancellation(ctx); cancellation != nil {
 		return false, cancellation
 	}
