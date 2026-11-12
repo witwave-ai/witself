@@ -2,7 +2,6 @@ package localcell
 
 import (
 	"go/ast"
-	"go/parser"
 	"go/token"
 	"sort"
 	"strings"
@@ -166,7 +165,7 @@ func maintenanceTransitionContract(sources map[string]string) []string {
 		if !strings.HasSuffix(filename, ".go") || strings.HasSuffix(filename, "_test.go") {
 			continue
 		}
-		file, err := parser.ParseFile(token.NewFileSet(), filename, strings.ReplaceAll(source, "\r\n", "\n"), 0)
+		file, err := admissionReadOnlyParse(filename, strings.ReplaceAll(source, "\r\n", "\n"))
 		if err != nil {
 			failures = append(failures, filename+"_parse")
 			continue

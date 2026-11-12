@@ -163,7 +163,7 @@ func maintenanceAdmissionOwnerInventory(sources map[string]string) []string {
 				}
 			}
 		}
-		file, err := parser.ParseFile(token.NewFileSet(), name, source, 0)
+		file, err := admissionReadOnlyParse(name, source)
 		if err != nil {
 			failures = append(failures, name+"_parse")
 			continue
@@ -213,7 +213,7 @@ func admissionReadSources(t *testing.T) map[string]string {
 
 func maintenanceAdmissionContract(source string) []string {
 	source = strings.ReplaceAll(source, "\r\n", "\n")
-	file, err := parser.ParseFile(token.NewFileSet(), "lifecycle.go", source, 0)
+	file, err := admissionReadOnlyParse("lifecycle.go", source)
 	if err != nil {
 		return []string{"parse"}
 	}

@@ -3,7 +3,6 @@ package localcell
 import (
 	"fmt"
 	"go/ast"
-	"go/parser"
 	"go/token"
 	"sort"
 	"strings"
@@ -61,7 +60,7 @@ func updateFoundationViolations(sourceText map[string]string) []string {
 		}
 		// Windows checkouts use CRLF. Normalize before any source contracts run.
 		source = strings.ReplaceAll(source, "\r\n", "\n")
-		file, err := parser.ParseFile(token.NewFileSet(), name, source, 0)
+		file, err := admissionReadOnlyParse(name, source)
 		if err != nil {
 			violations = append(violations, name+": cannot parse local cell source")
 			continue

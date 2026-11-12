@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/witwave-ai/witself/internal/localcell"
@@ -52,6 +53,10 @@ func (d *nativeServiceFailureDiagnostic) logProofBudget() {
 // ten-second limit. A detached parent deliberately tests the budget's absolute
 // deadline independently of context's automatic parent-deadline inheritance.
 func TestNativeServiceProofBudgetExhaustion(t *testing.T) {
+	synctest.Test(t, testNativeServiceProofBudgetExhaustion)
+}
+
+func testNativeServiceProofBudgetExhaustion(t *testing.T) {
 	const bound = time.Second
 	proofCtx, cancel := context.WithTimeout(t.Context(), bound)
 	defer cancel()

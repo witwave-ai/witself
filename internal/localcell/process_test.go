@@ -20,7 +20,12 @@ func init() {
 }
 
 func TestMain(m *testing.M) {
-	os.Exit(m.Run())
+	code := m.Run()
+	if !admissionParseCache.verify() {
+		fmt.Fprintln(os.Stderr, "admission parse cache entry mutated")
+		code = 1
+	}
+	os.Exit(code)
 }
 
 func TestProcessIdentityHelperProcess(_ *testing.T) {

@@ -223,7 +223,7 @@ func maintenanceServiceAdmissionOwnerInventory(sources map[string]string) []stri
 				}
 			}
 		}
-		file, err := parser.ParseFile(token.NewFileSet(), name, source, 0)
+		file, err := admissionReadOnlyParse(name, source)
 		if err != nil {
 			failures = append(failures, name+"_parse")
 			continue
@@ -263,7 +263,7 @@ func maintenanceServiceAdmissionContract(sources map[string]string) []string {
 		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
 			continue
 		}
-		file, err := parser.ParseFile(token.NewFileSet(), name, strings.ReplaceAll(source, "\r\n", "\n"), 0)
+		file, err := admissionReadOnlyParse(name, strings.ReplaceAll(source, "\r\n", "\n"))
 		if err != nil {
 			failures = append(failures, name+"_parse")
 			continue

@@ -132,7 +132,7 @@ if err != nil { return nil, nil, windowsTaskError(ErrServiceOwnershipConflict, "
 return cell, func() { _ = lock.Close() }, nil`
 
 func maintenanceAdapterAdmissionContract(source string) []string {
-	file, err := parser.ParseFile(token.NewFileSet(), "service_windows_task.go", strings.ReplaceAll(source, "\r\n", "\n"), 0)
+	file, err := admissionReadOnlyParse("service_windows_task.go", strings.ReplaceAll(source, "\r\n", "\n"))
 	if err != nil {
 		return []string{"adapter_parse"}
 	}
