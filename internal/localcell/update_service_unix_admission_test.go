@@ -503,6 +503,13 @@ func TestServiceAdapterDescriptorOwnerContract(t *testing.T) {
 				if servicePrivateRecord(path) == nil {
 					t.Fatal("Owner reader unsafe fixture remained private")
 				}
+				// Windows validates the whole private tree before it takes the
+				// operation lock, so drop the unsafe record before the release check.
+				defer func() {
+					if os.Remove(path) != nil {
+						t.Error("Owner reader unsafe record cleanup failed")
+					}
+				}()
 			case "unknown_field":
 				value := struct {
 					ServiceDescriptor
