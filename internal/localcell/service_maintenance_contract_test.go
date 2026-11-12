@@ -1132,6 +1132,9 @@ var maintenanceHostSupervisorPins = map[string]string{
 			status, err := s.command(commandCtx, command.action)
 			cancel()
 			WriteServiceHostFailure(os.Stderr, err, "supervisor_command")
+			if command.action != "exit-host" && ctx.Err() == nil {
+				s.phase, s.operation = "idle", "none"
+			}
 			command.reply <- serviceReply{status: status, err: err}
 			if command.action == "exit-host" && err == nil {
 				exited := s.finishHostExitCommand(ctx, command)
@@ -1154,7 +1157,7 @@ var maintenanceHostSupervisorPins = map[string]string{
 					return s.exitDrainResult
 				}
 			}
-			if ctx.Err() == nil {
+			if command.action == "exit-host" && ctx.Err() == nil {
 				s.phase, s.operation = "idle", "none"
 			}
 		}
