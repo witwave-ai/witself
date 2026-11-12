@@ -47,6 +47,7 @@ func TestWindowsServiceForegroundSubprocessCommands(t *testing.T) {
 	root := privateHarnessRoot(t)
 	for _, name := range []string{"spool", "run", "journal", "logs", "tmp", "home"} {
 		if runtimeconfig.WindowsPrivateMkdir(filepath.Join(root, name)) != nil {
+			t.Logf("foreground_exit class=%s", "fixture_layout")
 			t.Fatal("cannot create synthetic installation layout")
 		}
 	}
@@ -54,11 +55,13 @@ func TestWindowsServiceForegroundSubprocessCommands(t *testing.T) {
 		t.Helper()
 		file, err := runtimeconfig.WindowsPrivateOpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC)
 		if err != nil {
+			t.Logf("foreground_exit class=%s", "fixture_record_open")
 			t.Fatal("cannot create synthetic private record")
 		}
 		encodeErr := json.NewEncoder(file).Encode(value)
 		closeErr := file.Close()
 		if encodeErr != nil || closeErr != nil {
+			t.Logf("foreground_exit class=%s", "fixture_record_write")
 			t.Fatal("cannot publish synthetic private record")
 		}
 	}
@@ -66,11 +69,13 @@ func TestWindowsServiceForegroundSubprocessCommands(t *testing.T) {
 	write(filepath.Join(root, "manifest.json"), manifest)
 	cell, err := localcell.New(localcell.Config{Root: root, Timeout: time.Second})
 	if err != nil {
+		t.Logf("foreground_exit class=%s", "fixture_cell")
 		t.Fatal("cannot open synthetic installation")
 	}
 	args := serviceFlags{root: root, timeout: time.Second}.hostArgs()
 	descriptor := localcell.ServiceDescriptor{Adapter: "foreground", DesiredState: "stopped", Payload: localcell.ServicePayload{Host: host, Args: args}}
 	if cell.PrepareService(ctx, descriptor) != nil {
+		t.Logf("foreground_exit class=%s", "fixture_prepare")
 		t.Fatal("cannot prepare synthetic foreground service")
 	}
 	environment := windowsForegroundHarnessEnvironment(t)
@@ -87,6 +92,8 @@ func TestWindowsServiceForegroundSubprocessCommands(t *testing.T) {
 		class := classifyServiceInstallFailure(commandCtx.Err(), nil, err, strings.Contains(string(output), "service_manager_unavailable"))
 		if class == "exit_without_cause" {
 			t.Logf("foreground_exit class=%s", foregroundFailureClass(output))
+		} else {
+			t.Logf("foreground_exit class=%s", class)
 		}
 		t.Logf("service_install class=%s", class)
 		t.Fatal("Windows service install did not preserve adapter refusal")
@@ -108,6 +115,7 @@ func TestWindowsServiceForegroundSubprocessCommands(t *testing.T) {
 		var captured bytes.Buffer
 		command.Stdout, command.Stderr = &captured, &captured
 		if command.Start() != nil {
+			t.Logf("foreground_exit class=%s", "host_spawn")
 			t.Fatal("cannot start synthetic foreground host")
 		}
 		done := make(chan error, 1)
@@ -119,6 +127,7 @@ func TestWindowsServiceForegroundSubprocessCommands(t *testing.T) {
 				select {
 				case <-done:
 				case <-ctx.Done():
+					t.Logf("foreground_exit class=%s", "cleanup_budget")
 					t.Error("foreground cleanup exceeded synthetic budget")
 				}
 			}
@@ -161,11 +170,15 @@ func TestWindowsServiceForegroundSubprocessCommands(t *testing.T) {
 					t.Fatal("foreground host exited cleanly before authenticated status after restart")
 				}
 			case <-ctx.Done():
+				// Wait has not joined the output copiers; log only a fixed
+				// stage here, never read captured while the child is live.
+				t.Logf("foreground_exit class=%s", "readiness_budget")
 				if iteration == 0 {
 					t.Fatal("foreground readiness exceeded synthetic budget on first start")
 				}
 				t.Fatal("foreground readiness exceeded synthetic budget after restart")
 			case <-deadline.C:
+				t.Logf("foreground_exit class=%s", "readiness_allowance")
 				if iteration == 0 {
 					t.Fatal("foreground host did not expose authenticated status within allowance on first start")
 				}
@@ -183,9 +196,11 @@ func TestWindowsServiceForegroundSubprocessCommands(t *testing.T) {
 			BootID            string `json:"boot_id"`
 		}
 		if err != nil || json.Unmarshal(endpointData, &endpoint) != nil || endpoint.HostPID != command.Process.Pid || endpoint.HostStartIdentity == oldStart || endpoint.HostStartIdentity == "" || endpoint.PipeName == "" {
+			t.Logf("foreground_exit class=%s", "endpoint_binding")
 			t.Fatal("foreground endpoint lost fresh process binding")
 		}
 		if endpoint.BootID == "" || (oldBoot != "" && endpoint.BootID != oldBoot) {
+			t.Logf("foreground_exit class=%s", "boot_binding_check")
 			t.Fatal("foreground restart lost independent boot binding")
 		}
 		oldStart, oldBoot = endpoint.HostStartIdentity, endpoint.BootID
@@ -193,10 +208,12 @@ func TestWindowsServiceForegroundSubprocessCommands(t *testing.T) {
 			output, err := invoke("service", action, "--root", root)
 			var status localcell.ServiceStatus
 			if err != nil || json.Unmarshal(output, &status) != nil || status.DesiredState != "stopped" || status.State != "stopped" || status.Healthy || status.Generation == "" {
+				t.Logf("foreground_exit class=%s", "command_state")
 				t.Fatal("foreground command did not preserve durable stopped state")
 			}
 		}
 		if windows.GenerateConsoleCtrlEvent(windows.CTRL_BREAK_EVENT, uint32(command.Process.Pid)) != nil {
+			t.Logf("foreground_exit class=%s", "console_dispatch")
 			t.Fatal("foreground CTRL_BREAK console dispatch unavailable")
 		}
 		select {
@@ -225,33 +242,40 @@ func TestWindowsServiceForegroundSubprocessCommands(t *testing.T) {
 				// A clean exit is the expected shutdown result.
 			}
 		case <-ctx.Done():
+			t.Logf("foreground_exit class=%s", "shutdown_budget")
 			if iteration == 0 {
 				t.Fatal("foreground shutdown exceeded synthetic budget on first start")
 			}
 			t.Fatal("foreground shutdown exceeded synthetic budget after restart")
 		case <-time.After(allowance):
+			t.Logf("foreground_exit class=%s", "shutdown_allowance")
 			if iteration == 0 {
 				t.Fatal("foreground console shutdown exceeded allowance on first start")
 			}
 			t.Fatal("foreground console shutdown exceeded allowance after restart")
 		}
 		if _, err := os.Lstat(filepath.Join(root, "service", "control-endpoint.json")); !errors.Is(err, os.ErrNotExist) {
+			t.Logf("foreground_exit class=%s", "endpoint_retained")
 			t.Fatal("foreground shutdown retained endpoint record")
 		}
 		pipeName, err := windows.UTF16PtrFromString(endpoint.PipeName)
 		if err != nil {
+			t.Logf("foreground_exit class=%s", "pipe_name")
 			t.Fatal("invalid synthetic pipe name")
 		}
 		handle, err := windows.CreateFile(pipeName, windows.GENERIC_READ|windows.GENERIC_WRITE, 0, nil, windows.OPEN_EXISTING, windows.FILE_FLAG_OVERLAPPED|windows.SECURITY_SQOS_PRESENT|windows.SECURITY_IDENTIFICATION, 0)
 		if err == nil {
 			_ = windows.CloseHandle(handle)
+			t.Logf("foreground_exit class=%s", "pipe_retained")
 			t.Fatal("foreground shutdown retained a pipe instance")
 		}
 		if !errors.Is(err, windows.ERROR_FILE_NOT_FOUND) {
+			t.Logf("foreground_exit class=%s", "pipe_absence")
 			t.Fatal("foreground closed pipe could not be classified absent")
 		}
 		file, err := runtimeconfig.WindowsPrivateOpenFile(filepath.Join(root, ".service-host.lock"), os.O_RDWR)
 		if err != nil {
+			t.Logf("foreground_exit class=%s", "lease_open")
 			t.Fatal("cannot open stable foreground lease")
 		}
 		var overlapped windows.Overlapped
@@ -261,6 +285,7 @@ func TestWindowsServiceForegroundSubprocessCommands(t *testing.T) {
 		}
 		_ = file.Close()
 		if lockErr != nil {
+			t.Logf("foreground_exit class=%s", "lease_retained")
 			t.Fatal("foreground shutdown retained its lease")
 		}
 		receipt := captured.Bytes()
@@ -268,6 +293,11 @@ func TestWindowsServiceForegroundSubprocessCommands(t *testing.T) {
 			windowsLogForegroundExit(t, command, receipt)
 		}
 		if failure := foregroundShutdownFailure(receipt); failure != "" {
+			// Missing and single-line invalid receipts previously reached the
+			// dynamic fatal without any CI-visible class. Wait has joined here.
+			if len(foregroundOutputLines(receipt)) <= 1 {
+				windowsLogForegroundExit(t, command, receipt)
+			}
 			t.Fatal(failure)
 		}
 	}
@@ -319,10 +349,12 @@ func buildWindowsForegroundHarness(t *testing.T) string {
 	defer cancel()
 	source, err := filepath.Abs("../../..")
 	if err != nil {
+		t.Logf("foreground_exit class=%s", "build_source")
 		t.Fatal("cannot locate harness source")
 	}
 	goTool, err := exec.LookPath("go")
 	if err != nil {
+		t.Logf("foreground_exit class=%s", "build_tool")
 		t.Fatal("cannot locate Go tool")
 	}
 	query := exec.CommandContext(ctx, goTool, "env", "-json", "GOCACHE", "GOMODCACHE")
@@ -330,6 +362,7 @@ func buildWindowsForegroundHarness(t *testing.T) string {
 	data, err := query.Output()
 	var caches struct{ GOCACHE, GOMODCACHE string }
 	if err != nil || json.Unmarshal(data, &caches) != nil || !filepath.IsAbs(caches.GOCACHE) || !filepath.IsAbs(caches.GOMODCACHE) {
+		t.Logf("foreground_exit class=%s", "build_cache")
 		t.Fatal("cannot locate build caches")
 	}
 	host := filepath.Join(t.TempDir(), "localcellharness.exe")
@@ -338,6 +371,7 @@ func buildWindowsForegroundHarness(t *testing.T) string {
 	command.Dir = source
 	command.Env = append(windowsForegroundHarnessEnvironment(t), "PATH="+filepath.Dir(goTool), "GOCACHE="+caches.GOCACHE, "GOMODCACHE="+caches.GOMODCACHE, "GOTOOLCHAIN=local", "GOPROXY=off", "GOSUMDB=off", "CGO_ENABLED=0")
 	if err := command.Run(); err != nil {
+		t.Logf("foreground_exit class=%s", "build_harness")
 		t.Fatal("cannot build synthetic foreground harness")
 	}
 	return host
