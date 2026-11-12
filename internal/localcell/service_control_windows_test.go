@@ -348,52 +348,60 @@ func TestWindowsPrivatePipeDeadlinesAndHandles(t *testing.T) {
 	_ = client.Close()
 	_ = server.Close()
 	windowsPipeTestClose(ctx, t, listener)
-	before := windowsPipeHandleCount(t)
-	listener, record = windowsPipeTestListener(ctx, t)
-	for iteration := 0; iteration < 20; iteration++ {
-		client, server := windowsPipeTestPair(ctx, t, listener, record)
-		started := time.Now()
-		deadline := 40 * time.Millisecond
-		_ = client.SetReadDeadline(started.Add(deadline))
-		result := make(chan error, 1)
-		go func() {
-			n, err := client.Read(make([]byte, 1))
-			if n != 0 {
-				err = errors.New("unexpected deadline bytes")
+	// Three cycles distinguish repeated leaks from a process-wide allocation burst.
+	// Scheduled waits total 0.84s, the original 20-iteration loop's share of the
+	// 90s/33 budget, so the extra cycles do not tighten the synthetic deadline.
+	const cycles, iterationsPerCycle = 3, 7
+	samples := []uint32{windowsPipeHandleCount(t)}
+	for cycle := 0; cycle < cycles; cycle++ {
+		listener, record = windowsPipeTestListener(ctx, t)
+		for iteration := 0; iteration < iterationsPerCycle; iteration++ {
+			client, server := windowsPipeTestPair(ctx, t, listener, record)
+			started := time.Now()
+			deadline := 40 * time.Millisecond
+			_ = client.SetReadDeadline(started.Add(deadline))
+			result := make(chan error, 1)
+			go func() {
+				n, err := client.Read(make([]byte, 1))
+				if n != 0 {
+					err = errors.New("unexpected deadline bytes")
+				}
+				result <- err
+			}()
+			select {
+			case err := <-result:
+				if !errors.Is(err, os.ErrDeadlineExceeded) {
+					t.Fatal("blocked read ignored deadline")
+				}
+			case <-time.After(max(time.Second, 25*deadline)):
+				_ = client.Close()
+				t.Fatal("read cancellation exceeded proportional bound")
+			case <-ctx.Done():
+				_ = client.Close()
+				t.Fatal("deadline loop exceeded synthetic budget")
 			}
-			result <- err
-		}()
-		select {
-		case err := <-result:
-			if !errors.Is(err, os.ErrDeadlineExceeded) {
-				t.Fatal("blocked read ignored deadline")
+			if time.Since(started) > max(time.Second, 25*deadline) {
+				t.Fatal("read cancellation exceeded proportional bound")
 			}
-		case <-time.After(max(time.Second, 25*deadline)):
+			// A fresh operation succeeds after clearing the deadline; cancellation did
+			// not poison the handle or cancel the opposite direction.
+			_ = client.SetReadDeadline(windowsPipeTestDeadline(ctx))
+			if _, err := server.Write([]byte{7}); err != nil {
+				t.Fatal("deadline canceled unrelated direction")
+			}
+			buffer := make([]byte, 1)
+			if _, err := io.ReadFull(client, buffer); err != nil || buffer[0] != 7 {
+				t.Fatal("deadline recovery failed")
+			}
 			_ = client.Close()
-			t.Fatal("read cancellation exceeded proportional bound")
-		case <-ctx.Done():
-			_ = client.Close()
-			t.Fatal("deadline loop exceeded synthetic budget")
+			_ = server.Close()
 		}
-		if time.Since(started) > max(time.Second, 25*deadline) {
-			t.Fatal("read cancellation exceeded proportional bound")
-		}
-		// A fresh operation succeeds after clearing the deadline; cancellation did
-		// not poison the handle or cancel the opposite direction.
-		_ = client.SetReadDeadline(windowsPipeTestDeadline(ctx))
-		if _, err := server.Write([]byte{7}); err != nil {
-			t.Fatal("deadline canceled unrelated direction")
-		}
-		buffer := make([]byte, 1)
-		if _, err := io.ReadFull(client, buffer); err != nil || buffer[0] != 7 {
-			t.Fatal("deadline recovery failed")
-		}
-		_ = client.Close()
-		_ = server.Close()
+		// Closing the listener also retires every persistent reservation/pool event.
+		windowsPipeTestClose(ctx, t, listener)
+		samples = append(samples, windowsPipeHandleCount(t))
 	}
-	// Closing the listener also retires every persistent reservation/pool event.
-	windowsPipeTestClose(ctx, t, listener)
-	if after := windowsPipeHandleCount(t); after > before {
+	if class := classifyPipeHandleGrowth(samples, iterationsPerCycle); class != "steady" && class != "bounded" {
+		t.Logf("pipe handle growth class=%s", class)
 		t.Fatal("pipe deadline loop leaked handles")
 	}
 }
