@@ -11,43 +11,51 @@ import (
 )
 
 func serviceAdapterAdmission(owner string, d ServiceDescriptor, artifactDir string) (*Cell, ServiceDescriptor, func(), error) {
+	return serviceAdapterAdmissionForStep(owner, d, artifactDir, "apply")
+}
+
+func serviceAdapterRemovalAdmission(owner string, d ServiceDescriptor, artifactDir string) (*Cell, ServiceDescriptor, func(), error) {
+	return serviceAdapterAdmissionForStep(owner, d, artifactDir, "remove")
+}
+
+func serviceAdapterAdmissionForStep(owner string, d ServiceDescriptor, artifactDir, step string) (*Cell, ServiceDescriptor, func(), error) {
 	if owner == "" {
-		return nil, ServiceDescriptor{}, nil, serviceSystemdError(ErrServiceOwnershipConflict, "apply:descriptor", "owner")
+		return nil, ServiceDescriptor{}, nil, serviceSystemdError(ErrServiceOwnershipConflict, step+":descriptor", "owner")
 	}
-	if err := serviceAdapterConfinement(d.Root, artifactDir); err != nil {
+	if err := serviceAdapterConfinementForStep(d.Root, artifactDir, step); err != nil {
 		return nil, ServiceDescriptor{}, nil, err
 	}
 	cell, err := New(Config{Root: d.Root, Timeout: 60 * time.Second})
 	if err != nil {
-		return nil, ServiceDescriptor{}, nil, serviceSystemdError(ErrServiceOwnershipConflict, "apply:root", "unavailable")
+		return nil, ServiceDescriptor{}, nil, serviceSystemdError(ErrServiceOwnershipConflict, step+":root", "unavailable")
 	}
 	lock, err := cell.own(false)
 	if err != nil {
 		if errors.Is(err, ErrLocked) {
 			return nil, ServiceDescriptor{}, nil, err
 		}
-		return nil, ServiceDescriptor{}, nil, serviceSystemdError(ErrServiceOwnershipConflict, "apply:root", "unavailable")
+		return nil, ServiceDescriptor{}, nil, serviceSystemdError(ErrServiceOwnershipConflict, step+":root", "unavailable")
 	}
 	fresh, err := cell.serviceDescriptorForOwner(owner)
 	if err != nil {
 		_ = lock.Close()
-		return nil, ServiceDescriptor{}, nil, serviceSystemdError(ErrServiceOwnershipConflict, "apply:descriptor", "unavailable")
+		return nil, ServiceDescriptor{}, nil, serviceSystemdError(ErrServiceOwnershipConflict, step+":descriptor", "unavailable")
 	}
 	if !reflect.DeepEqual(windowsTaskImmutable(fresh), windowsTaskImmutable(d)) {
 		_ = lock.Close()
-		return nil, ServiceDescriptor{}, nil, serviceSystemdError(ErrServiceOwnershipConflict, "apply:descriptor", "stale_identity")
+		return nil, ServiceDescriptor{}, nil, serviceSystemdError(ErrServiceOwnershipConflict, step+":descriptor", "stale_identity")
 	}
 	return cell, fresh, func() { _ = lock.Close() }, nil
 }
 
-func serviceAdapterConfinement(root, artifactDir string) error {
+func serviceAdapterConfinementForStep(root, artifactDir, step string) error {
 	root, err := serviceAdapterCanonicalPath(root)
 	if err != nil {
-		return serviceSystemdError(ErrServiceOwnershipConflict, "apply:confinement", "unresolved")
+		return serviceSystemdError(ErrServiceOwnershipConflict, step+":confinement", "unresolved")
 	}
 	artifactDir, err = serviceAdapterCanonicalPath(artifactDir)
 	if err != nil {
-		return serviceSystemdError(ErrServiceOwnershipConflict, "apply:confinement", "unresolved")
+		return serviceSystemdError(ErrServiceOwnershipConflict, step+":confinement", "unresolved")
 	}
 	if runtime.GOOS == "darwin" || runtime.GOOS == "windows" {
 		root, artifactDir = strings.ToLower(root), strings.ToLower(artifactDir)
@@ -55,7 +63,7 @@ func serviceAdapterConfinement(root, artifactDir string) error {
 	separator := string(filepath.Separator)
 	if root == artifactDir || strings.HasPrefix(root, strings.TrimSuffix(artifactDir, separator)+separator) ||
 		strings.HasPrefix(artifactDir, strings.TrimSuffix(root, separator)+separator) {
-		return serviceSystemdError(ErrServiceOwnershipConflict, "apply:confinement", "overlap")
+		return serviceSystemdError(ErrServiceOwnershipConflict, step+":confinement", "overlap")
 	}
 	return nil
 }
@@ -86,4 +94,21 @@ func serviceAdapterCanonicalPath(path string) (string, error) {
 		tail = append(tail, filepath.Base(path))
 		path = parent
 	}
+}
+
+// The caller holds the operation lock. Keep the stable host lock until all
+// registration effects and absence proofs finish; never publish a host lease.
+func serviceAdapterRemovalHostLock(c *Cell) (func(), error) {
+	if err := servicePrivateRecord(c.path(".service-host.lock")); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+	file, err := openLockFile(c.path(".service-host.lock"), true)
+	if err != nil {
+		return nil, err
+	}
+	if err := lockFile(file); err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	return func() { _ = file.Close() }, nil
 }

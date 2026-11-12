@@ -106,7 +106,7 @@ func TestWindowsTaskXMLFieldEqualityRaisingSites(t *testing.T) {
 }
 
 var windowsTaskExpectedSites = []string{
-	"capability:session", "query:result", "inspect:principal", "inspect:trigger", "inspect:action", "inspect:settings", "inspect:host_owner", "create", "post_create", "remove:host_exit", "remove:ownership", "delete", "remove:absence",
+	"capability:session", "query:result", "inspect:principal", "inspect:trigger", "inspect:action", "inspect:settings", "inspect:host_owner", "create", "post_create", "remove:host_exit", "remove:host_lease", "remove:ownership", "delete", "remove:absence",
 }
 
 func TestWindowsTaskDiagnosticVocabularyClosed(t *testing.T) {
@@ -218,7 +218,7 @@ func TestWindowsTaskDiagnosticSourceContract(t *testing.T) {
 			}
 			stepValue, stepErr := strconv.Unquote(step.Value)
 			reasonValue, reasonErr := strconv.Unquote(reason.Value)
-			if stepErr != nil || reasonErr != nil || !slices.Contains([]string{"ErrServiceOwnershipConflict", "ErrServiceManagerUnavailable", "ErrServiceRegistrationFailed", "ErrServiceDesiredState", "ErrServiceRemovalFailed"}, kind.Name) || !slices.Contains(windowsTaskExpectedSites, stepValue) || !validWindowsTaskDiagnostic(ErrServiceOwnershipConflict, stepValue, reasonValue) {
+			if stepErr != nil || reasonErr != nil || !slices.Contains([]string{"ErrServiceOwnershipConflict", "ErrServiceManagerUnavailable", "ErrServiceRegistrationFailed", "ErrServiceDesiredState", "ErrServiceRemovalFailed", "ErrServiceHostActive"}, kind.Name) || !slices.Contains(windowsTaskExpectedSites, stepValue) || !validWindowsTaskDiagnostic(ErrServiceOwnershipConflict, stepValue, reasonValue) {
 				t.Fatal("diagnostic raising site escaped the closed vocabulary")
 			}
 			seen[stepValue] = true

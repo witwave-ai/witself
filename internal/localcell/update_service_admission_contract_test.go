@@ -81,6 +81,9 @@ var maintenanceServiceAdmissionParameters = map[string]string{
 
 // Keep the old four-owner predicate and its independent counts unchanged.
 func ordinaryMaintenanceAdmissionOwner(file string, fn *ast.FuncDecl) string {
+	if fn.Name.Name == "Remove" && maintenanceRemovalFiles[updateReceiverName(fn)] == file {
+		return maintenanceRemovalAdmissionOwner(file, fn)
+	}
 	if receiver := updateReceiverName(fn); receiver == "systemdUserAdapter" || receiver == "launchdAgentAdapter" {
 		return maintenanceUnixAdapterAdmissionOwner(file, fn)
 	}
@@ -283,8 +286,10 @@ func maintenanceServiceAdmissionContract(sources map[string]string) []string {
 		case "service_descriptor.go":
 			expectedReferences = 3
 		case "service_windows_task.go":
+			expectedReferences = 3
+		case "service_systemd_adapter.go", "service_launchd.go":
 			expectedReferences = 2
-		case "service_boot.go", "service_health.go", "service_maintenance.go", "service_systemd_adapter.go", "service_launchd.go":
+		case "service_boot.go", "service_health.go", "service_maintenance.go":
 			expectedReferences = 1
 		}
 		if fileReferences != expectedReferences {
@@ -319,7 +324,7 @@ func maintenanceServiceAdmissionContract(sources map[string]string) []string {
 			}
 		}
 	}
-	if totalReferences != 14 {
+	if totalReferences != 17 {
 		failures = append(failures, "global_count")
 	}
 	sort.Strings(failures)
