@@ -699,7 +699,7 @@ func TestDashboardServeOpenFlagLaunchesBrowser(t *testing.T) {
 			t.Errorf("encode self digest: %v", err)
 		}
 	}))
-	defer cell.Close()
+	t.Cleanup(cell.Close)
 
 	launched := make(chan string, 1)
 	previousLaunch := launchBrowser
@@ -725,9 +725,11 @@ func TestDashboardServeOpenFlagLaunchesBrowser(t *testing.T) {
 	defer cancel()
 	done := make(chan int, 1)
 	go func() {
+		defer close(done)
 		done <- dashboardServe(ctx, []string{
 			"--endpoint", cell.URL, "--token-file", tokenFile, "--agent", "dash", "--open"})
 	}()
+	registerSenderCleanup(t, cancel, done)
 
 	var openedURL string
 	select {

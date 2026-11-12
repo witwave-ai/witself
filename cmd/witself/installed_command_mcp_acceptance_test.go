@@ -128,6 +128,9 @@ func TestProviderIntegrationContractCodexInstalledCommandMCPStdio(t *testing.T) 
 	if err := command.Start(); err != nil {
 		t.Fatalf("launch exact registered MCP command: %v", err)
 	}
+	wait := make(chan error, 1)
+	go func() { defer close(wait); wait <- command.Wait() }()
+	stop := registerSenderCleanup(t, func() { cancel(); _ = command.Process.Kill() }, wait)
 	reader := bufio.NewReader(stdout)
 	writeInstalledCommandMCPMessage(t, stdin, map[string]any{
 		"jsonrpc": "2.0",
@@ -141,7 +144,7 @@ func TestProviderIntegrationContractCodexInstalledCommandMCPStdio(t *testing.T) 
 			},
 		},
 	})
-	initialize := readInstalledCommandMCPResponse(t, reader, 1, &stderr)
+	initialize := readInstalledCommandMCPResponse(t, reader, 1, &stderr, stop)
 	var initialized struct {
 		ProtocolVersion string `json:"protocolVersion"`
 		ServerInfo      struct {
@@ -160,7 +163,7 @@ func TestProviderIntegrationContractCodexInstalledCommandMCPStdio(t *testing.T) 
 	writeInstalledCommandMCPMessage(t, stdin, map[string]any{
 		"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": map[string]any{},
 	})
-	list := readInstalledCommandMCPResponse(t, reader, 2, &stderr)
+	list := readInstalledCommandMCPResponse(t, reader, 2, &stderr, stop)
 	var tools struct {
 		Tools []struct {
 			Name string `json:"name"`
@@ -187,7 +190,7 @@ func TestProviderIntegrationContractCodexInstalledCommandMCPStdio(t *testing.T) 
 			"name": "witself.self.show", "arguments": map[string]any{},
 		},
 	})
-	selfCall := readInstalledCommandMCPResponse(t, reader, 3, &stderr)
+	selfCall := readInstalledCommandMCPResponse(t, reader, 3, &stderr, stop)
 	var selfResult struct {
 		IsError           bool            `json:"isError"`
 		StructuredContent json.RawMessage `json:"structuredContent"`
@@ -215,7 +218,7 @@ func TestProviderIntegrationContractCodexInstalledCommandMCPStdio(t *testing.T) 
 	if err := stdin.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := command.Wait(); err != nil {
+	if err := <-wait; err != nil {
 		t.Fatalf("registered MCP command shutdown: %v\nstderr:\n%s", err, stderr.String())
 	}
 	if ctx.Err() != nil {
@@ -289,6 +292,7 @@ func readInstalledCommandMCPResponse(
 	reader *bufio.Reader,
 	wantID int,
 	stderr *installedCommandSafeBuffer,
+	stop func(),
 ) installedCommandMCPResponse {
 	t.Helper()
 	type readResult struct {
@@ -298,9 +302,11 @@ func readInstalledCommandMCPResponse(
 	for {
 		result := make(chan readResult, 1)
 		go func() {
+			defer close(result)
 			line, err := reader.ReadBytes('\n')
 			result <- readResult{line: line, err: err}
 		}()
+		registerSenderCleanup(t, stop, result)
 		select {
 		case read := <-result:
 			if read.err != nil {

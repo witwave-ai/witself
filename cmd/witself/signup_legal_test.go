@@ -134,7 +134,12 @@ func TestAccountCreateLegalManifestFailuresDoNotCreateJournalOrSignup(t *testing
 		t.Run(tc.name, func(t *testing.T) {
 			privateAccountCreateTestHome(t)
 			var signupCalls atomic.Int32
+			admission := &httpAdmission{}
+			t.Cleanup(func() { admission.check(t) })
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if !admission.admit(w, r, "GET /legal/versions.json", "POST /v1/accounts") {
+					return
+				}
 				if r.URL.Path != "/legal/versions.json" {
 					signupCalls.Add(1)
 					w.WriteHeader(http.StatusBadRequest)
@@ -148,7 +153,9 @@ func TestAccountCreateLegalManifestFailuresDoNotCreateJournalOrSignup(t *testing
 			}))
 			defer server.Close()
 			args := append(accountCreateTestArgs(server.URL, "invite-private"), "--accept-terms")
-			if code := accountCreate(args); code != 1 || signupCalls.Load() != 0 {
+			code := accountCreate(args)
+			admission.check(t)
+			if code != 1 || signupCalls.Load() != 0 {
 				t.Fatalf("invalid manifest created signup: exit=%d calls=%d", code, signupCalls.Load())
 			}
 			assertNoSignupJournal(t)
@@ -180,8 +187,13 @@ func TestAccountCreateLegalReadDeadlineCoversHeadersAndBody(t *testing.T) {
 		t.Run(fmt.Sprintf("body-started-%t", bodyStarted), func(t *testing.T) {
 			privateAccountCreateTestHome(t)
 			var signupCalls atomic.Int32
+			admission := &httpAdmission{}
+			t.Cleanup(func() { admission.check(t) })
 			started := make(chan struct{})
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if !admission.admit(w, r, "GET /legal/versions.json", "POST /v1/accounts") {
+					return
+				}
 				if r.URL.Path != "/legal/versions.json" {
 					signupCalls.Add(1)
 					w.WriteHeader(http.StatusBadRequest)
@@ -198,7 +210,9 @@ func TestAccountCreateLegalReadDeadlineCoversHeadersAndBody(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 			defer cancel()
 			args := append(accountCreateTestArgs(server.URL, "invite-private"), "--accept-terms")
-			if code := accountCreateWithContext(ctx, args); code != 1 || signupCalls.Load() != 0 || !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			code := accountCreateWithContext(ctx, args)
+			admission.check(t)
+			if code != 1 || signupCalls.Load() != 0 || !errors.Is(ctx.Err(), context.DeadlineExceeded) {
 				t.Fatalf("deadline did not stop consent: exit=%d calls=%d context=%v", code, signupCalls.Load(), ctx.Err())
 			}
 			select {
@@ -214,12 +228,17 @@ func TestAccountCreateLegalReadDeadlineCoversHeadersAndBody(t *testing.T) {
 func TestAccountCreateLegalRedirectCannotChangeAuthority(t *testing.T) {
 	privateAccountCreateTestHome(t)
 	var foreignCalls, signupCalls atomic.Int32
+	admission := &httpAdmission{}
+	t.Cleanup(func() { admission.check(t) })
 	foreign := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		foreignCalls.Add(1)
 		writeSignupLegalTestManifest(w, "foreign-terms", "foreign-privacy")
 	}))
 	defer foreign.Close()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !admission.admit(w, r, "GET /legal/versions.json", "POST /v1/accounts") {
+			return
+		}
 		if r.URL.Path != "/legal/versions.json" {
 			signupCalls.Add(1)
 			w.WriteHeader(http.StatusBadRequest)
@@ -229,7 +248,9 @@ func TestAccountCreateLegalRedirectCannotChangeAuthority(t *testing.T) {
 	}))
 	defer server.Close()
 	args := append(accountCreateTestArgs(server.URL, "invite-private"), "--accept-terms")
-	if code := accountCreate(args); code != 1 || foreignCalls.Load() != 0 || signupCalls.Load() != 0 {
+	code := accountCreate(args)
+	admission.check(t)
+	if code != 1 || foreignCalls.Load() != 0 || signupCalls.Load() != 0 {
 		t.Fatalf("redirect crossed authority: exit=%d foreign=%d signup=%d", code, foreignCalls.Load(), signupCalls.Load())
 	}
 	assertNoSignupJournal(t)
@@ -237,7 +258,12 @@ func TestAccountCreateLegalRedirectCannotChangeAuthority(t *testing.T) {
 
 func TestSignupLegalReadAllowsBoundedSameAuthorityRedirect(t *testing.T) {
 	var calls atomic.Int32
+	admission := &httpAdmission{}
+	t.Cleanup(func() { admission.check(t) })
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !admission.admit(w, r, "GET /legal/versions.json", "GET /manifest") {
+			return
+		}
 		calls.Add(1)
 		if r.URL.Path == "/legal/versions.json" {
 			http.Redirect(w, r, "/manifest", http.StatusFound)
@@ -247,6 +273,7 @@ func TestSignupLegalReadAllowsBoundedSameAuthorityRedirect(t *testing.T) {
 	}))
 	defer server.Close()
 	terms, privacy, err := signupLegalVersions(context.Background(), server.URL+"/legal")
+	admission.check(t)
 	if err != nil || terms != "v1" || privacy != "v2" || calls.Load() != 2 {
 		t.Fatalf("same-authority redirect failed: %q/%q calls=%d err=%v", terms, privacy, calls.Load(), err)
 	}
@@ -348,10 +375,15 @@ func TestAccountCreateConsentfulCredentialRecoveryDoesNotReadManifest(t *testing
 func TestAccountCreateLegalReadPreservesConcurrentJournalWinner(t *testing.T) {
 	privateAccountCreateTestHome(t)
 	var signupCalls atomic.Int32
+	admission := &httpAdmission{}
+	t.Cleanup(func() { admission.check(t) })
 	var winner local.AccountProvisionJournal
 	var mu sync.Mutex
 	var server *httptest.Server
 	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !admission.admit(w, r, "GET /legal/versions.json", "POST /v1/accounts") {
+			return
+		}
 		if r.URL.Path != "/legal/versions.json" {
 			signupCalls.Add(1)
 			w.WriteHeader(http.StatusBadRequest)
@@ -377,7 +409,9 @@ func TestAccountCreateLegalReadPreservesConcurrentJournalWinner(t *testing.T) {
 	}))
 	defer server.Close()
 	args := append(accountCreateTestArgs(server.URL, "invite-private"), "--accept-terms")
-	if code := accountCreate(args); code != 1 || signupCalls.Load() != 0 {
+	code := accountCreate(args)
+	admission.check(t)
+	if code != 1 || signupCalls.Load() != 0 {
 		t.Fatalf("concurrent winner was not fenced: exit=%d calls=%d", code, signupCalls.Load())
 	}
 	retained, err := local.ReadAccountProvisionJournal("default")

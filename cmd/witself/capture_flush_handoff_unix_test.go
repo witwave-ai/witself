@@ -71,6 +71,7 @@ func runCaptureFlushHandoff(t *testing.T, mode string) {
 	var childMu sync.Mutex
 	var children []*os.Process
 	previousStarter := startCaptureFlushProcess
+	t.Cleanup(func() { startCaptureFlushProcess = previousStarter })
 	startCaptureFlushProcess = func(cmd *exec.Cmd) error {
 		if err := cmd.Start(); err != nil {
 			return err
@@ -78,26 +79,15 @@ func runCaptureFlushHandoff(t *testing.T, mode string) {
 		childMu.Lock()
 		children = append(children, cmd.Process)
 		childMu.Unlock()
+		wait := make(chan error, 1)
+		go func() { defer close(wait); wait <- cmd.Wait() }()
+		registerSenderCleanup(t, func() { _ = cmd.Process.Kill() }, wait)
 		return nil
 	}
-	t.Cleanup(func() {
-		startCaptureFlushProcess = previousStarter
-		childMu.Lock()
-		defer childMu.Unlock()
-		for _, child := range children {
-			if err := child.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
-				t.Error(err)
-			}
-			if _, err := child.Wait(); err != nil {
-				t.Error(err)
-			}
-		}
-	})
 
 	started := make(chan struct{})
 	resume := make(chan struct{})
 	var release sync.Once
-	defer release.Do(func() { close(resume) })
 	var first sync.Once
 	var requests atomic.Int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -128,10 +118,7 @@ func runCaptureFlushHandoff(t *testing.T, mode string) {
 			http.NotFound(w, r)
 		}
 	}))
-	defer func() {
-		release.Do(func() { close(resume) })
-		srv.Close()
-	}()
+	t.Cleanup(srv.Close)
 	token := filepath.Join(dir, "synthetic.token")
 	if err := os.WriteFile(token, []byte("synthetic-fixture-token"), 0o600); err != nil {
 		t.Fatal(err)
@@ -157,17 +144,11 @@ func runCaptureFlushHandoff(t *testing.T, mode string) {
 	}
 	enqueue("first")
 	done := make(chan int, 1)
-	go func() { done <- transcriptFlush([]string{"--runtime", transcriptcapture.RuntimeClaudeCode}) }()
-	ownerFinished := false
-	t.Cleanup(func() {
-		if !ownerFinished {
-			select {
-			case <-done:
-			case <-time.After(10 * time.Second):
-				t.Error("owner cleanup incomplete")
-			}
-		}
-	})
+	go func() {
+		defer close(done)
+		done <- transcriptFlush([]string{"--runtime", transcriptcapture.RuntimeClaudeCode})
+	}()
+	registerSenderCleanup(t, func() { release.Do(func() { close(resume) }) }, done, "owner cleanup incomplete")
 	select {
 	case <-started:
 	case <-time.After(10 * time.Second):
@@ -201,7 +182,6 @@ func runCaptureFlushHandoff(t *testing.T, mode string) {
 	release.Do(func() { close(resume) })
 	select {
 	case code := <-done:
-		ownerFinished = true
 		if code != 1 {
 			t.Fatalf("failed owner returned %d", code)
 		}

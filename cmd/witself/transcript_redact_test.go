@@ -95,7 +95,12 @@ func TestTranscriptRedactCLIUsageBeforeNetwork(t *testing.T) {
 func TestTranscriptRedactCLIUpperBound100(t *testing.T) {
 	tokenFile := transcriptRedactTestHome(t)
 	requests := 0
+	admission := &httpAdmission{}
+	t.Cleanup(func() { admission.check(t) })
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !admission.admit(w, r, "POST /v1/transcripts/trn_test/entries:redact") {
+			return
+		}
 		requests++
 		var body struct {
 			FromSequence  int64 `json:"from_sequence"`
@@ -110,6 +115,7 @@ func TestTranscriptRedactCLIUpperBound100(t *testing.T) {
 	_, stderr, code := captureFactDeleteCLI(t, func() int {
 		return run([]string{"transcript", "redact", "trn_test", "--from-sequence", "1", "--until-sequence", "100", "--dry-run", "--endpoint", srv.URL, "--token-file", tokenFile})
 	})
+	admission.check(t)
 	if code != 0 || stderr != "" || requests != 1 {
 		t.Fatalf("100-entry preview code=%d requests=%d; want 0 and exactly one request", code, requests)
 	}
