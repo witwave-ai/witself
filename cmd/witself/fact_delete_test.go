@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -299,7 +300,12 @@ func TestFactDeleteUsageIncludesExactReplay(t *testing.T) {
 func TestFactSetCLIForwardsRecreateDeleted(t *testing.T) {
 	var in client.SetFactInput
 	var retryKey string
+	admission := &httpAdmission{}
+	t.Cleanup(func() { admission.check(t) })
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !admission.admit(w, r, "POST /v1/facts") {
+			return
+		}
 		retryKey = r.Header.Get("Idempotency-Key")
 		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 			t.Fatal(err)
@@ -312,6 +318,7 @@ func TestFactSetCLIForwardsRecreateDeleted(t *testing.T) {
 	_, _, code := captureFactDeleteCLI(t, func() int {
 		return run([]string{"fact", "set", "--endpoint", srv.URL, "--token-file", factDeleteTokenFile(t), "--recreate-deleted", "preferences/editor", "zed"})
 	})
+	admission.check(t)
 	if code != 0 || !in.RecreateDeleted || !strings.HasPrefix(retryKey, "fact_recreate_") {
 		t.Fatalf("code/input/key = %d/%#v/%q", code, in, retryKey)
 	}
@@ -397,6 +404,21 @@ func factDeleteTokenFile(t *testing.T) string {
 	return path
 }
 
+func TestCaptureFactDeleteCLIRestoresOutputWhenCallbackExitsEarly(t *testing.T) {
+	oldOut, oldErr := os.Stdout, os.Stderr
+	exited := make(chan struct{})
+	go func() {
+		defer close(exited)
+		// Goexit is how t.Fatal leaves the callback.
+		captureFactDeleteCLI(t, func() int { runtime.Goexit(); return 0 })
+	}()
+	<-exited
+	if os.Stdout != oldOut || os.Stderr != oldErr {
+		os.Stdout, os.Stderr = oldOut, oldErr
+		t.Fatal("captured output was not restored after the callback exited early")
+	}
+}
+
 func captureFactDeleteCLI(t *testing.T, fn func() int) (stdout, stderr string, code int) {
 	t.Helper()
 	outR, outW, err := os.Pipe()
@@ -411,7 +433,19 @@ func captureFactDeleteCLI(t *testing.T, fn func() int) (stdout, stderr string, c
 	}
 	oldOut, oldErr := os.Stdout, os.Stderr
 	os.Stdout, os.Stderr = outW, errW
+	returned := false
+	defer func() {
+		// A Fatal inside fn must not leave later tests writing into these pipes.
+		if !returned {
+			os.Stdout, os.Stderr = oldOut, oldErr
+			_ = outW.Close()
+			_ = errW.Close()
+			_ = outR.Close()
+			_ = errR.Close()
+		}
+	}()
 	code = fn()
+	returned = true
 	os.Stdout, os.Stderr = oldOut, oldErr
 	_ = outW.Close()
 	_ = errW.Close()

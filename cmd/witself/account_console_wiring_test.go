@@ -65,9 +65,9 @@ func TestAccountConsoleAllScannerConstructors(t *testing.T) {
 					t.Fatal("parent did not normalize provider roots")
 				}
 				oldConnect, oldLocate, oldScan, oldLaunch := accountConsoleConnect, accountConsoleLocate, accountConsoleScan, launchBrowser
-				defer func() {
+				t.Cleanup(func() {
 					accountConsoleConnect, accountConsoleLocate, accountConsoleScan, launchBrowser = oldConnect, oldLocate, oldScan, oldLaunch
-				}()
+				})
 				accountConsoleConnect = func(context.Context, string, string, string, string, string) (agentConnection, error) {
 					return conn, nil
 				}
@@ -117,8 +117,10 @@ func TestAccountConsoleAllScannerConstructors(t *testing.T) {
 					opened := make(chan string, 1)
 					launchBrowser = func(url string) error { opened <- url; return nil }
 					go func() {
+						defer close(done)
 						done <- dashboardServe(ctx, []string{"--account", "selected", "--agent", "synthetic", "--open"})
 					}()
+					registerSenderCleanup(t, cancel, done)
 					select {
 					case <-opened:
 					case <-time.After(5 * time.Second):
@@ -135,12 +137,14 @@ func TestAccountConsoleAllScannerConstructors(t *testing.T) {
 					defer func() { _ = writer.Close(); _ = input.Close(); _ = output.Close(); _ = ready.Close() }()
 					bootstrap := tuiConsoleBootstrap{Connection: conn, Identity: consoleTestIdentity(), Manager: consoleManagerBootstrap(manager), ScannerRoots: roots, AccessToken: strings.Repeat("cd", 16), Poll: time.Second}
 					raw, _ := json.Marshal(bootstrap)
-					go func() { done <- runTUIConsoleChild(input, ready) }()
+					go func() { defer close(done); done <- runTUIConsoleChild(input, ready) }()
+					registerSenderCleanup(t, func() { _ = writer.Close(); _ = input.Close(); _ = output.Close(); _ = ready.Close() }, done)
 					if _, err := writer.Write(append(raw, '\n')); err != nil {
 						t.Fatal(err)
 					}
 					got := make(chan string, 1)
-					go func() { var b [6]byte; _, _ = io.ReadFull(output, b[:]); got <- string(b[:]) }()
+					go func() { defer close(got); var b [6]byte; _, _ = io.ReadFull(output, b[:]); got <- string(b[:]) }()
+					registerSenderCleanup(t, func() { _ = output.Close() }, got)
 					select {
 					case value := <-got:
 						if value != "ready\n" {

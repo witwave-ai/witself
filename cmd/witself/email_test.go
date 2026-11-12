@@ -498,7 +498,12 @@ func TestPrintAgentEmailCodeCandidatesIsSafeAndExplicit(t *testing.T) {
 func TestEmailCLIClaimSendsFenceInputs(t *testing.T) {
 	var body map[string]any
 	var key string
+	admission := &httpAdmission{}
+	t.Cleanup(func() { admission.check(t) })
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !admission.admit(w, r, "POST /v1/email/emsg_aaaaaaaaaaaaaaaa:claim") {
+			return
+		}
 		key = r.Header.Get("Idempotency-Key")
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Fatal(err)
@@ -510,10 +515,12 @@ func TestEmailCLIClaimSendsFenceInputs(t *testing.T) {
 	if err := os.WriteFile(tokenFile, []byte("witself_agt_test\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if code := run([]string{
+	code := run([]string{
 		"email", "claim", "emsg_aaaaaaaaaaaaaaaa", "--endpoint", srv.URL,
 		"--token-file", tokenFile, "--lease", "2m", "--idempotency-key", "claim-1", "--json",
-	}); code != 0 {
+	})
+	admission.check(t)
+	if code != 0 {
 		t.Fatalf("run = %d", code)
 	}
 	if key != "claim-1" || body["lease_seconds"] != float64(120) {

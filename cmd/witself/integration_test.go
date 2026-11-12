@@ -2368,7 +2368,7 @@ func TestGrokCaptureFlushFinalizesResponseAfterStopHookReturns(t *testing.T) {
 			http.NotFound(w, r)
 		}
 	}))
-	defer srv.Close()
+	t.Cleanup(srv.Close)
 
 	tokenPath := filepath.Join(t.TempDir(), "agent.token")
 	if err := os.WriteFile(tokenPath, []byte("agent-token\n"), 0o600); err != nil {
@@ -2422,16 +2422,22 @@ func TestGrokCaptureFlushFinalizesResponseAfterStopHookReturns(t *testing.T) {
 	}
 	flushLockPath := filepath.Join(filepath.Dir(pendingBeforeFlush[0].Path), ".flush.lock")
 
-	done := make(chan int, 1)
-	go func() {
-		done <- transcriptFlush([]string{"--runtime", transcriptcapture.RuntimeGrokBuild})
-	}()
-	waitForCaptureFlushLock(t, flushLockPath, done, foregroundFlushLockPollPeriod)
 	updates := strings.Join([]string{
 		`{"method":"_x.ai/session/update","params":{"update":{"sessionUpdate":"hook_execution","event_name":"stop","prompt_id":"prompt-1"}}}`,
 		`{"method":"session/update","params":{"_meta":{"promptId":"prompt-1"},"update":{"sessionUpdate":"agent_message_chunk","content":{"text":"delayed final response"}}}}`,
 		`{"method":"_x.ai/session/update","params":{"update":{"sessionUpdate":"turn_completed","prompt_id":"prompt-1"}}}`,
 	}, "\n") + "\n"
+	done := make(chan int, 1)
+	go func() {
+		defer close(done)
+		done <- transcriptFlush([]string{"--runtime", transcriptcapture.RuntimeGrokBuild})
+	}()
+	registerSenderCleanup(t, func() {
+		if err := os.WriteFile(transcriptPath, []byte(updates), 0o600); err != nil {
+			t.Error("flush cleanup fence unavailable")
+		}
+	}, done)
+	waitForCaptureFlushLock(t, flushLockPath, done, foregroundFlushLockPollPeriod)
 	if err := os.WriteFile(transcriptPath, []byte(updates), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -2785,6 +2791,8 @@ func TestCaptureFlushDrainsEventsQueuedWhileRunning(t *testing.T) {
 	t.Setenv("WITSELF_HOME", home)
 	started := make(chan struct{})
 	resume := make(chan struct{})
+	var release sync.Once
+	stop := func() { release.Do(func() { close(resume) }) }
 	var once sync.Once
 	var mu sync.Mutex
 	appended := 0
@@ -2815,7 +2823,7 @@ func TestCaptureFlushDrainsEventsQueuedWhileRunning(t *testing.T) {
 			http.NotFound(w, r)
 		}
 	}))
-	defer srv.Close()
+	t.Cleanup(srv.Close)
 
 	tokenPath := filepath.Join(t.TempDir(), "agent.token")
 	if err := os.WriteFile(tokenPath, []byte("agent-token\n"), 0o600); err != nil {
@@ -2837,7 +2845,11 @@ func TestCaptureFlushDrainsEventsQueuedWhileRunning(t *testing.T) {
 		t.Fatal(err)
 	}
 	done := make(chan int, 1)
-	go func() { done <- transcriptFlush([]string{"--runtime", transcriptcapture.RuntimeCodex}) }()
+	go func() {
+		defer close(done)
+		done <- transcriptFlush([]string{"--runtime", transcriptcapture.RuntimeCodex})
+	}()
+	registerSenderCleanup(t, stop, done)
 	select {
 	case <-started:
 	case <-time.After(5 * time.Second):
@@ -2854,7 +2866,7 @@ func TestCaptureFlushDrainsEventsQueuedWhileRunning(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	close(resume)
+	stop()
 	select {
 	case code := <-done:
 		if code != 0 {

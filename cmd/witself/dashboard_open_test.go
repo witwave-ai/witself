@@ -48,7 +48,8 @@ func TestDashboardManagerManualOpeningRecovery(t *testing.T) {
 			var entry dashboard.RegistryEntry
 			out, errout, code := captureFactDeleteCLI(t, func() int {
 				done := make(chan int, 1)
-				go func() { done <- dashboardServe(ctx, args) }()
+				go func() { defer close(done); done <- dashboardServe(ctx, args) }()
+				defer registerSenderCleanup(t, cancel, done)()
 				deadline := time.Now().Add(5 * time.Second)
 				for time.Now().Before(deadline) {
 					var err error

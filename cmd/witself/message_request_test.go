@@ -254,7 +254,12 @@ func TestMessageRequestDurationValidationBoundaries(t *testing.T) {
 
 func TestMessageRequestSelectCSVAgentFlag(t *testing.T) {
 	var got []string
+	admission := &httpAdmission{}
+	t.Cleanup(func() { admission.check(t) })
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !admission.admit(w, r, "POST /v1/message-requests/mrq_1:select") {
+			return
+		}
 		var body struct {
 			Selected []string `json:"selected_agent_ids"`
 		}
@@ -273,7 +278,9 @@ func TestMessageRequestSelectCSVAgentFlag(t *testing.T) {
 		"message", "request", "select", "mrq_1", "--selected-agent", "agent_a, agent_b", "--selected-agent", "agent_c",
 		"--idempotency-key", "select-key", "--endpoint", srv.URL, "--token-file", tokenFile, "--json",
 	}
-	if code := run(args); code != 0 {
+	code := run(args)
+	admission.check(t)
+	if code != 0 {
 		t.Fatalf("run code = %d", code)
 	}
 	want := []string{"agent_a", "agent_b", "agent_c"}

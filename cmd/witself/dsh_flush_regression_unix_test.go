@@ -4,6 +4,7 @@ package main
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"testing"
@@ -95,6 +96,18 @@ func TestDSHDetachedFlushRetriesSlowFollowingStopHook(t *testing.T) {
 		t.Fatal(err)
 	}
 	enqueueDSHFlushHook(t, map[string]any{"session_id": session, "hook_event_name": "Stop", "cwd": cwd})
+	previousStarter := startCaptureFlushProcess
+	t.Cleanup(func() { startCaptureFlushProcess = previousStarter })
+	var join func()
+	startCaptureFlushProcess = func(cmd *exec.Cmd) error {
+		if err := cmd.Start(); err != nil {
+			return err
+		}
+		done := make(chan error, 1)
+		go func() { defer close(done); done <- cmd.Wait() }()
+		join = registerSenderCleanup(t, func() { _ = cmd.Process.Kill() }, done)
+		return nil
+	}
 	started := time.Now()
 	if err := startBackgroundFlush(transcriptcapture.RuntimeDSH); err != nil {
 		t.Fatal(err)
@@ -116,6 +129,7 @@ func TestDSHDetachedFlushRetriesSlowFollowingStopHook(t *testing.T) {
 	if got := string(readCaptureFlushTestFile(t, filepath.Join(directory, "finished"), time.Since(started))); got != "0" {
 		t.Fatal("detached flush stopped before the delayed native completion")
 	}
+	join()
 	srv.Close()
 	pending, err := transcriptcapture.Pending(transcriptcapture.RuntimeDSH)
 	if err != nil || len(pending) != 0 {

@@ -562,16 +562,22 @@ func TestTUIConsolePrivateBootstrapAndReadiness(t *testing.T) {
 	if err := command.Start(); err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = command.Process.Kill() }()
+	done := make(chan error, 1)
+	go func() { defer close(done); done <- command.Wait() }()
+	registerSenderCleanup(t, func() { _ = command.Process.Kill() }, done)
 	_ = reader.Close()
 	_ = outputWriter.Close()
-	done := make(chan error, 1)
-	go func() { done <- command.Wait() }()
 	if _, err := writer.Write(append(raw, '\n')); err != nil {
 		t.Fatal(err)
 	}
 	ready := make(chan []byte, 1)
-	go func() { var data [6]byte; _, _ = io.ReadFull(outputReader, data[:]); ready <- data[:] }()
+	go func() {
+		defer close(ready)
+		var data [6]byte
+		_, _ = io.ReadFull(outputReader, data[:])
+		ready <- data[:]
+	}()
+	registerSenderCleanup(t, func() { _ = outputReader.Close() }, ready)
 	select {
 	case data := <-ready:
 		if string(data) != "ready\n" {

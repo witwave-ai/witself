@@ -68,7 +68,12 @@ func TestMessageSendDefaultsToActionableRequest(t *testing.T) {
 	var got struct {
 		Kind string `json:"kind"`
 	}
+	admission := &httpAdmission{}
+	t.Cleanup(func() { admission.check(t) })
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !admission.admit(w, r, "POST /v1/messages") {
+			return
+		}
 		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
 			t.Fatal(err)
 		}
@@ -80,10 +85,12 @@ func TestMessageSendDefaultsToActionableRequest(t *testing.T) {
 	if err := os.WriteFile(tokenFile, []byte("witself_agt_scott\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if code := run([]string{
+	code := run([]string{
 		"message", "send", "--endpoint", srv.URL, "--token-file", tokenFile,
 		"--to", "peer", "--body", "please do the work", "--json",
-	}); code != 0 {
+	})
+	admission.check(t)
+	if code != 0 {
 		t.Fatalf("run code = %d", code)
 	}
 	if got.Kind != "request" {
@@ -116,7 +123,12 @@ func TestMessageSendSupportsExplicitAndRealmAudiences(t *testing.T) {
 					IDs  []string `json:"ids"`
 				} `json:"to"`
 			}
+			admission := &httpAdmission{}
+			t.Cleanup(func() { admission.check(t) })
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if !admission.admit(w, r, "POST /v1/messages") {
+					return
+				}
 				if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
 					t.Fatal(err)
 				}
@@ -132,7 +144,9 @@ func TestMessageSendSupportsExplicitAndRealmAudiences(t *testing.T) {
 			}
 			args := []string{"message", "send", "--endpoint", srv.URL, "--token-file", tokenFile, "--body", "hello", "--json"}
 			args = append(args, tt.args...)
-			if code := run(args); code != 0 {
+			code := run(args)
+			admission.check(t)
+			if code != 0 {
 				t.Fatalf("run code = %d", code)
 			}
 			if got.To.Kind != tt.wantKind || !reflect.DeepEqual(got.To.IDs, tt.wantIDs) {
