@@ -170,7 +170,8 @@ func TestNativeServiceLifecycle(t *testing.T) {
 				return nil
 			}
 			// Remove the exact registration; reapplying it is a fresh host on
-			// this boot, with the same durable running fence and private data.
+			// this boot with the same private data. The restart restores
+			// running intent itself, so removal need not preserve it.
 			err := stopWithReceipt(func() error {
 				if err := adapter.Remove(stopCtx, descriptor); err != nil {
 					return err
@@ -264,6 +265,13 @@ func TestNativeServiceLifecycle(t *testing.T) {
 	diagnostics.enter("endpoint_closure")
 	endpointClosed()
 	diagnostics.enter("restart")
+	if manager {
+		// Removal may leave the durable intent stopped; reapplying the
+		// registration is a deliberate restart, so restore running intent.
+		if err := cell.SetServiceDesiredState(proofPhase(nativeServiceHostBound), "running"); err != nil {
+			t.Fatal("native service restart could not restore running intent")
+		}
+	}
 	restartStarted := time.Now()
 	start()
 	waitServiceReadyAfter(proofCtx, t, cell, restartStarted, firstReady, &diagnostics)
