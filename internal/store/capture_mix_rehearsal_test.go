@@ -80,6 +80,9 @@ func TestCaptureMixMatrix(t *testing.T) {
 	for _, notRun := range result.NotRun {
 		t.Log(notRun)
 	}
+	for _, line := range result.StartRetries {
+		t.Log(line)
+	}
 	for _, row := range result.Rows {
 		t.Logf("capturemix row server=%s worker=%s completion=%s checks=%d", row.Server, row.Worker, row.Completion, len(row.Checks))
 		for _, evidence := range row.JobEvidence {

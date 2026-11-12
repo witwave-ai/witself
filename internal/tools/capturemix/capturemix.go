@@ -35,6 +35,8 @@ type Options struct {
 	OwnerDSN, SuperuserDSN, ArtifactDir, StubEmailURL         string
 	DisposableCluster                                         bool
 	Activate                                                  func(context.Context, *store.Store, string) error
+	// Each fixture owns its copy; retain retry diagnostics through cleanup.
+	startRetries []string
 }
 
 // RowResult contains only fixed, value-free assertion names.
@@ -51,6 +53,7 @@ type RowResult struct {
 type Result struct {
 	Rows             []RowResult                       `json:"rows"`
 	NotRun           []string                          `json:"not_run,omitempty"`
+	StartRetries     []string                          `json:"start_retries,omitempty"`
 	Identity         syncharness.MixedBuildIdentity    `json:"build_identity"`
 	RuntimeResults   []syncharness.RuntimeResultRecord `json:"runtime_results"`
 	RuntimeArtifacts []syncharness.RuntimeArtifact     `json:"runtime_artifacts,omitempty"`
@@ -111,6 +114,7 @@ func Run(ctx context.Context, options Options) (result Result, resultErr error) 
 					return result, err
 				}
 				checks, runErr := executeRowWithCleanup(ctx, fixture, completion, fixture.close)
+				result.StartRetries = append(result.StartRetries, fixture.options.startRetries...)
 				row.Checks = append(row.Checks, checks...)
 				if runErr != nil {
 					return result, runErr

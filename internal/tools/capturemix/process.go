@@ -248,6 +248,29 @@ func (f *fixture) startWorker(ctx context.Context) error {
 	return err
 }
 func (f *fixture) startProcess(ctx context.Context, kind, version string) (*childProcess, error) {
+	for attempt := 1; ; attempt++ {
+		p, err := f.startProcessAttempt(ctx, kind, version)
+		if err == nil {
+			return p, nil
+		}
+		// Only readiness failures return a child. A closed done channel means
+		// cmd.Wait has joined, including its output-copy goroutines.
+		if p == nil || attempt == 3 || p.logs.startupFailure() != "listener_failed" || p.alive() || ctx.Err() != nil {
+			return nil, err
+		}
+		if os.RemoveAll(p.directory) != nil {
+			return nil, err
+		}
+		f.processes = f.processes[:len(f.processes)-1]
+		f.options.startRetries = append(f.options.startRetries, "capturemix process start retried: kind="+kind+" version="+version+" attempt="+strconv.Itoa(attempt)+" cause=listener_failed")
+	}
+}
+
+// processCommand substitutes only the child executable in hermetic tests.
+// A nil hook preserves the production command and private environment.
+var processCommand func(context.Context, *childProcess) *exec.Cmd
+
+func (f *fixture) startProcessAttempt(ctx context.Context, kind, version string) (*childProcess, error) {
 	directory, err := newProcessDirectory()
 	if err != nil {
 		return nil, errors.New("capturemix process directory failed")
@@ -316,6 +339,9 @@ func (f *fixture) startProcess(ctx context.Context, kind, version string) (*chil
 		}
 	}
 	p.cmd = exec.CommandContext(ctx, filepath.Join(binDir, "witself-"+kind), "serve")
+	if processCommand != nil {
+		p.cmd = processCommand(ctx, p)
+	}
 	p.cmd.Env = privateEnv
 	p.cmd.Dir = directory
 	p.cmd.Stdout = p.logs
@@ -336,7 +362,7 @@ func (f *fixture) startProcess(ctx context.Context, kind, version string) (*chil
 		return err == nil && status == http.StatusOK, nil
 	})
 	if err != nil {
-		return nil, errors.New("capturemix process readiness failed: kind=" + kind + " version=" + version + " cause=" + p.logs.startupFailure())
+		return p, errors.New("capturemix process readiness failed: kind=" + kind + " version=" + version + " cause=" + p.logs.startupFailure())
 	}
 	if kind == "worker" {
 		_, metrics, metricsErr := httpRequest(ctx, "GET", "http://"+p.metrics+"/metrics", "", "")
