@@ -1470,7 +1470,9 @@ test('autobuild lifecycle failures classify each formatted assertion without ope
   }
   for (const fixed of ['cannot build lifecycle fixture', 'cannot prepare fixture tool', 'cannot repair harness fixture during cleanup',
     'cannot purge harness fixture during cleanup', 'autobuilt component disappeared after command return',
-    'non-purge removal retained runtime records', 'purge retained autobuilt components', 'cannot retain harness process cleanup identity',
+    'cannot witness synthetic bootstrap custody', 'non-purge removal changed synthetic bootstrap custody',
+    'cannot inspect retained harness cell', 'non-purge removal did not retain installation identity and close the journal',
+    'purge retained autobuilt components', 'cannot retain harness process cleanup identity',
     'invalid harness process cleanup identity', 'cannot prepare harness cleanup witness', 'cannot create harness cleanup witness',
     'cannot retain harness cleanup witness', 'cannot construct harness cleanup witness', 'cannot verify harness cleanup identity',
     'harness cleanup witness lost its process identity']) {
