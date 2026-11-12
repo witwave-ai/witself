@@ -21,6 +21,7 @@ import (
 // lifecycle source as well as the candidate. Only generated identity, creation
 // time, allocated ports and the at field of journal records are substituted.
 // This proves serialization and execution parity, not identical random draws.
+// LC-S7D2A replaces only ordinary removal's destructive cleanup expectations.
 func TestMaintenanceFenceAbsentLifecycleParity(t *testing.T) {
 	binaries := buildLifecycleFixture(t)
 	t.Setenv("WITSELF_HOME", t.TempDir())
@@ -125,18 +126,24 @@ func TestMaintenanceFenceAbsentLifecycleParity(t *testing.T) {
 			if err := cell.Remove(t.Context(), localcell.RemoveOptions{}); err != nil {
 				t.Fatal("absent retain removal failed")
 			}
-			admissionAssertTrace(t, trace, admissionTrace("remove", []string{"stop", "spool", "tmp", "logs", "cleanup_run", "cleanup_journal"}))
+			admissionAssertTrace(t, trace, admissionTrace("remove", []string{"stop", "removal_retained", "cleanup_checkpoint", "cleanup_run", "cleanup_journal", "runtime_cleanup", "operation_done", "before_cleanup_clear", "cleanup_clear"}))
 			admissionAssertRemovalJournal(t, removalJournal, false)
 			admissionAssertManifest(t, root, manifest, "remove", true, true)
-			admissionAssertRemoved(t, root, "run", "spool", "tmp", "logs", "journal")
+			admissionAssertJournal(t, root, admissionJournal("remove", []string{"stop", "runtime_cleanup"}))
+			for _, name := range []string{"run", "spool", "tmp", "logs", "journal"} {
+				if _, err := os.Stat(filepath.Join(root, name)); err != nil {
+					t.Fatal("ordinary removal deleted retained runtime material")
+				}
+			}
 			if data := admissionRead(t, root, "pg", "PG_VERSION"); string(data) != "16\n" {
 				t.Fatal("retain removal changed PostgreSQL data")
 			}
 			trace = nil
+			admissionResetJournal(t, root, true)
 			if err := cell.Remove(t.Context(), localcell.RemoveOptions{Purge: true}); err != nil {
 				t.Fatal("absent purge removal failed")
 			}
-			admissionAssertTrace(t, trace, admissionTrace("remove", []string{"stop", "spool", "tmp", "logs", "purge", "cleanup_run", "cleanup_journal"}))
+			admissionAssertTrace(t, trace, admissionTrace("remove", []string{"stop", "spool", "tmp", "logs", "purge", "cleanup_checkpoint", "cleanup_run", "cleanup_journal"}))
 			admissionAssertRemovalJournal(t, removalJournal, true)
 			admissionAssertRemoved(t, root, "manifest.json", "pg", "journal", "run")
 		})
@@ -366,6 +373,9 @@ func admissionAssertManifest(t *testing.T, root string, generated localcell.Mani
 	id, _ := json.Marshal(generated.InstallationID)
 	created, _ := json.Marshal(generated.CreatedAt)
 	want := fmt.Sprintf("{\n  \"layout_version\": 1,\n  \"installation_id\": %s,\n  \"created_at\": %s,\n  \"postgresql_version\": \"postgres (PostgreSQL) 16.1\",\n  \"server_version\": \"localcell synthetic lifecycle fixture\",\n  \"worker_version\": \"localcell synthetic lifecycle fixture\",\n  \"ports\": {\n    \"postgres\": %d,\n    \"server_api\": %d,\n    \"server_health\": %d,\n    \"server_metrics\": %d,\n    \"worker_health\": %d,\n    \"worker_metrics\": %d\n  },\n  \"database\": \"witself\",\n  \"role\": \"localcell\"%s,\n  \"last_verified_schema_version\": %d,\n  \"last_operation\": %q,\n  \"installed\": %t,\n  \"migration_wait\": 120000000000,\n  \"job_restart_policy\": \"never\"\n}\n", id, created, generated.Ports.Postgres, generated.Ports.ServerAPI, generated.Ports.ServerHealth, generated.Ports.ServerMetrics, generated.Ports.WorkerHealth, generated.Ports.WorkerMetrics, account, schema, operation, installed)
+	if operation == "remove" {
+		want = strings.Replace(want, `"installed": true,`, `"installed": true,`+"\n  "+`"removal_retained": true,`, 1)
+	}
 	if !bytes.Equal(admissionRead(t, root, "manifest.json"), []byte(want)) {
 		t.Fatal("manifest serialization differs from saved BASE fixture")
 	}
@@ -393,9 +403,9 @@ func admissionAssertJournal(t *testing.T, root, want string) {
 
 func admissionAssertRemovalJournal(t *testing.T, data []byte, purge bool) {
 	t.Helper()
-	steps := []string{"stop", "spool", "tmp", "logs"}
+	steps := []string{"stop"}
 	if purge {
-		steps = append(steps, "purge")
+		steps = append(steps, "spool", "tmp", "logs", "purge")
 	}
 	want := strings.TrimSuffix(admissionJournal("remove", steps), admissionJournalLine("remove", "operation", "done", ""))
 	want += admissionJournalLine("remove", "runtime_cleanup", "started", "")

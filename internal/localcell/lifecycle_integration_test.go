@@ -190,15 +190,15 @@ func testInstallStartRestartRemove(t *testing.T, binaries localcell.Binaries) {
 	if err := cell.Remove(ctx, localcell.RemoveOptions{}); err != nil {
 		t.Fatalf("remove retaining data: %v", err)
 	}
-	for _, name := range []string{"pg", "manifest.json"} {
+	for _, name := range []string{"pg", "manifest.json", "run", "spool", "journal", "tmp", "logs"} {
 		if _, err := os.Stat(filepath.Join(root, name)); err != nil {
 			t.Fatalf("non-purge removal deleted retained %s", name)
 		}
 	}
-	for _, name := range []string{"run", "spool", "journal", "tmp", "logs"} {
-		if _, err := os.Stat(filepath.Join(root, name)); !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("removal retained disposable %s", name)
-		}
+	assertStopped(t, cell)
+	inspection, err := cell.Inspect(ctx)
+	if err != nil || inspection.Interrupted != nil || inspection.Manifest == nil || !inspection.Manifest.RemovalRetained || !inspection.Manifest.Installed {
+		t.Fatal("retained removal did not preserve its stopped installation and close the journal")
 	}
 	if err := cell.Remove(ctx, localcell.RemoveOptions{Purge: true}); err != nil {
 		t.Fatalf("purge: %v", err)

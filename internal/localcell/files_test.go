@@ -234,8 +234,8 @@ func TestRemoveCleanupInterruptionRepairsFromManifest(t *testing.T) {
 				t.Fatal("second cleanup Repair changed the retained manifest")
 			}
 			for _, name := range []string{"run", "spool", "journal", "tmp", "logs"} {
-				if _, err := os.Lstat(c.path(name)); !errors.Is(err, os.ErrNotExist) {
-					t.Fatalf("cleanup Repair left or recreated runtime directory %s", name)
+				if _, err := os.Lstat(c.path(name)); err != nil {
+					t.Fatalf("cleanup Repair deleted retained directory %s", name)
 				}
 			}
 			data, err := os.ReadFile(c.path("pg", "retained-data"))
@@ -243,7 +243,7 @@ func TestRemoveCleanupInterruptionRepairsFromManifest(t *testing.T) {
 				t.Fatal("cleanup Repair deleted or modified PostgreSQL data")
 			}
 			inspection, err = c.Inspect(t.Context())
-			if err != nil || inspection.Interrupted != nil || inspection.Manifest.Cleanup != nil {
+			if err != nil || inspection.Interrupted != nil || inspection.Manifest.Cleanup != nil || !inspection.Manifest.RemovalRetained || !inspection.Manifest.Installed {
 				t.Fatal("cleanup Repair did not settle its durable checkpoint")
 			}
 		})

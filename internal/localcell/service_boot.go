@@ -148,6 +148,9 @@ func (c *Cell) bindServiceProcessBootWithReader(component string, readBoot func(
 }
 
 func (c *Cell) startServicePostgres(ctx context.Context, m *Manifest) error {
+	if m.RemovalRetained {
+		return errors.New("local cell installation is incomplete")
+	}
 	if err := c.startPostgres(ctx, m); err != nil {
 		return err
 	}

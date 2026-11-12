@@ -254,6 +254,9 @@ func (c *Cell) Start(ctx context.Context) error {
 		return err
 	}
 	m.MigrationWait, m.JobRestartPolicy = c.runtimeSettings(m)
+	if m.RemovalRetained {
+		return errors.New("local cell installation is incomplete")
+	}
 	if err := c.layout(); err != nil {
 		return err
 	}
@@ -441,6 +444,9 @@ func (c *Cell) Repair(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if m != nil && m.Cleanup != nil && progress.pending != nil && progress.pending.Operation != "remove" {
+		return errors.New("mismatched local cell journal operation")
+	}
 	if err := c.discardJournalTail(progress); err != nil {
 		return err
 	}
@@ -456,8 +462,11 @@ func (c *Cell) Repair(ctx context.Context) error {
 	if err := c.verifyAll(); err != nil {
 		return err
 	}
-	if m != nil && m.Cleanup != nil {
+	if m != nil && pending.Operation == "remove" {
 		if err := c.stopAll(ctx); err != nil {
+			return err
+		}
+		if err := c.retainRemoval(m); err != nil {
 			return err
 		}
 		return c.finishRemoval(m, false)
@@ -512,8 +521,8 @@ func (c *Cell) Repair(ctx context.Context) error {
 	return c.journal(pending.Operation, "operation", "done")
 }
 
-// Remove stops the cell and removes disposable runtime directories. Only Purge
-// authorizes deletion of PGDATA and the manifest. The stable owner lock remains.
+// Remove stops the cell and retains its custody and recovery history. Only a
+// current Purge call deletes owned data/runtime paths. The root lock remains.
 func (c *Cell) Remove(ctx context.Context, options RemoveOptions) error {
 	ctx, cancel := c.serviceShutdownDeadline(ctx)
 	defer cancel()
@@ -553,12 +562,18 @@ func (c *Cell) Remove(ctx context.Context, options RemoveOptions) error {
 	if err := c.step("remove", "stop", func() error { return c.stopAll(ctx) }); err != nil {
 		return err
 	}
-	for _, name := range []string{"spool", "tmp", "logs"} {
-		if err := c.step("remove", name, func() error { return os.RemoveAll(c.path(name)) }); err != nil {
+	if !options.Purge {
+		if err := c.retainRemoval(m); err != nil {
 			return err
 		}
+		return c.finishRemoval(m, false)
 	}
 	if options.Purge {
+		for _, name := range []string{"spool", "tmp", "logs"} {
+			if err := c.step("remove", name, func() error { return os.RemoveAll(c.path(name)) }); err != nil {
+				return err
+			}
+		}
 		// Disable startup durably before the only destructive data step. Repair
 		// retains any remaining data after an interrupted purge.
 		m.Installed = false
@@ -576,6 +591,9 @@ func (c *Cell) Remove(ctx context.Context, options RemoveOptions) error {
 	if err := writeAtomic(c.path("manifest.json"), m, nil); err != nil {
 		return err
 	}
+	if err := c.removalBoundary("cleanup_checkpoint"); err != nil {
+		return err
+	}
 	if err := c.journal("remove", "runtime_cleanup", "started"); err != nil {
 		return err
 	}
@@ -583,6 +601,9 @@ func (c *Cell) Remove(ctx context.Context, options RemoveOptions) error {
 }
 
 func (c *Cell) finishRemoval(m *Manifest, purge bool) error {
+	if !purge {
+		return c.finishRetainedRemoval(m)
+	}
 	// The stable root lock remains held while the subordinate lock inode and
 	// journal are removed. Runtime cleanup is repeatable after interruption.
 	for _, name := range []string{"run", "journal"} {
@@ -593,15 +614,8 @@ func (c *Cell) finishRemoval(m *Manifest, purge bool) error {
 			return errInterrupted
 		}
 	}
-	if purge {
-		if err := os.Remove(c.path("manifest.json")); err != nil {
-			return errors.New("cannot remove local cell manifest")
-		}
-	} else {
-		m.Cleanup = nil
-		if err := writeAtomic(c.path("manifest.json"), m, nil); err != nil {
-			return err
-		}
+	if err := os.Remove(c.path("manifest.json")); err != nil {
+		return errors.New("cannot remove local cell manifest")
 	}
 	return syncDirectory(c.cfg.Root)
 }
@@ -646,6 +660,9 @@ func (c *Cell) Inspect(_ context.Context) (Inspection, error) {
 		if result.Interrupted != nil && !result.Manifest.Installed {
 			result.InstallState = "selected install incomplete; run repair"
 		}
+	}
+	if result.Manifest != nil && result.Manifest.RemovalRetained {
+		result.InstallState = "removed; data retained; reinstall unsupported"
 	}
 	for _, component := range []string{"postgres", "server", "worker"} {
 		state, err := c.processState(component)

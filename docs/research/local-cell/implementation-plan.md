@@ -1218,6 +1218,20 @@ pending. D2 still owns recovery points, rollback, restore and retained-data
 reinstall; D9 remains pending. These foundations do not claim M4/M5 completion
 or a supported offering.
 
+LC-S7D2A bounds ordinary removal to a verified stop and durable launch refusal.
+It preserves the initialized installation identity, PGDATA, private run custody,
+the entire journal, payload/trust/service recovery material and temporary
+spool/tmp/log files. The omitted-when-false `removal_retained` marker prevents
+direct and service PostgreSQL starts; retained roots are not adopted by Install,
+and reinstall remains unsupported. Current journals close runtime cleanup and
+the remove operation before the manifest checkpoint clears. Repair settles only
+the surviving obligation, without inventing missing credentials or history,
+replaying purge intent, or duplicating completion after a crash. Only a current
+explicit purge authorizes deletion of the existing owned cleanup targets; no
+extra trust or payload roots are added. Temporary-file retention makes no durable
+pending-work guarantee. Reinstall, executable update, restore, D9 and native
+five-platform acceptance remain pending; this is no M4/M5 completion claim.
+
 LC-S7B1 supplies the frozen component-set format, offline Go verification,
 fixture vectors and manifest tooling. LC-S7B2 adds explicitly selected shell and
 PowerShell bootstrap verification and a dormant Homebrew helper, with parity
