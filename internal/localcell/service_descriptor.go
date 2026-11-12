@@ -46,7 +46,11 @@ func validateServiceDescriptor(d ServiceDescriptor) error {
 	if err != nil {
 		return err
 	}
-	if d.Version != 1 || d.InstallationID == "" || d.UID != uid || !filepath.IsAbs(d.Root) || filepath.Clean(d.Root) != d.Root ||
+	return validateServiceDescriptorOwner(d, uid)
+}
+
+func validateServiceDescriptorOwner(d ServiceDescriptor, owner string) error {
+	if d.Version != 1 || d.InstallationID == "" || d.UID != owner || !filepath.IsAbs(d.Root) || filepath.Clean(d.Root) != d.Root ||
 		d.Scope != "user" || d.Runtime != "local" || d.Revision == 0 || d.Payload.Generation == "" || !filepath.IsAbs(d.Payload.Host) ||
 		(d.Adapter != "foreground" && d.Adapter != "systemd-user" && d.Adapter != "launchd-agent" && d.Adapter != "windows-logon-task") || !validServiceDesiredState(d.DesiredState) || d.ResourceProfile != "unconfigured" {
 		return ErrServiceOwnershipConflict
@@ -83,9 +87,21 @@ func (c *Cell) ServiceDescriptor() (ServiceDescriptor, error) {
 	return c.readServiceDescriptor()
 }
 
+func (c *Cell) serviceDescriptorForOwner(owner string) (ServiceDescriptor, error) {
+	var d ServiceDescriptor
+	if err := c.validateRoot(false); err != nil {
+		return d, err
+	}
+	return c.readServiceDescriptorForOwner(owner)
+}
+
 // readServiceDescriptor requires a root validated under an operation lock
 // that the caller still holds.
 func (c *Cell) readServiceDescriptor() (ServiceDescriptor, error) {
+	return c.readServiceDescriptorForOwner("")
+}
+
+func (c *Cell) readServiceDescriptorForOwner(owner string) (ServiceDescriptor, error) {
 	var d ServiceDescriptor
 	if _, err := os.Lstat(c.path("service")); errors.Is(err, os.ErrNotExist) {
 		return d, os.ErrNotExist
@@ -100,7 +116,11 @@ func (c *Cell) readServiceDescriptor() (ServiceDescriptor, error) {
 	if err := readJSON(path, &d); err != nil {
 		return d, err
 	}
-	if err := validateServiceDescriptor(d); err != nil {
+	if owner == "" {
+		if err := validateServiceDescriptor(d); err != nil {
+			return d, err
+		}
+	} else if err := validateServiceDescriptorOwner(d, owner); err != nil {
 		return d, err
 	}
 	m, err := readManifest(c.cfg.Root)
