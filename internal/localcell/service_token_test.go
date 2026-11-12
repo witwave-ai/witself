@@ -49,6 +49,7 @@ func TestServiceRenderedUnitAndOutputsExcludeControlToken(t *testing.T) {
 	// Keep the fake manager's portable numeric UID while binding rendering to
 	// the actual prepared installation and its present control.secret file.
 	d.Root, d.InstallationID, d.Payload = descriptor.Root, descriptor.InstallationID, descriptor.Payload
+	unixServicePersistDescriptor(t, c, d)
 	manager.descriptor = d
 	unit, err := RenderSystemdUserUnit(d)
 	if err != nil {
@@ -72,6 +73,9 @@ func TestServiceRenderedUnitAndOutputsExcludeControlToken(t *testing.T) {
 		t.Fatal("cannot serialize observed manager arguments")
 	}
 	assertServiceOutputExcludesToken(t, "manager arguments", arguments, token)
+	// The registration phase persisted the fake manager's portable UID; the
+	// supervisor reads the record as the process owner, so restore that one.
+	unixServicePersistDescriptor(t, c, descriptor)
 	// Inspect the supervisor's actual status and durable restart receipt, not
 	// a hand-built sample of their schemas. The Unix sibling checks wire bytes.
 	hooks, _, _, _, _ := supervisorTestHooks()
@@ -123,6 +127,7 @@ func testServiceLoadedUnitWithControlTokenEnvironmentRefused(t *testing.T, place
 			// Bind the manager to the installation with the known token while
 			// retaining its portable numeric fixture UID.
 			d.Root, d.InstallationID, d.Payload = descriptor.Root, descriptor.InstallationID, descriptor.Payload
+			unixServicePersistDescriptor(t, c, d)
 			manager.descriptor = d
 			plan, err := a.Plan(t.Context(), d)
 			if err != nil {

@@ -349,6 +349,12 @@ func updateOrdinaryAdmissions(file string, fn *ast.FuncDecl) map[*ast.SelectorEx
 		return nil
 	}
 	ownerBinding := fn.Recv.List[0].Names[0]
+	if receiver := updateReceiverName(fn); receiver == "systemdUserAdapter" || receiver == "launchdAgentAdapter" {
+		ownerBinding = maintenanceUnixAdapterCellBinding(fn)
+		if ownerBinding == nil {
+			return nil
+		}
+	}
 	if updateReceiverName(fn) == "windowsLogonTaskAdapter" {
 		ownerBinding = maintenanceAdapterCellBinding(fn)
 		if ownerBinding == nil {

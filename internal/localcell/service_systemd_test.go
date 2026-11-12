@@ -21,9 +21,10 @@ func systemdFixture(t *testing.T) (*systemdUserAdapter, ServiceDescriptor, *syst
 	if err := os.Mkdir(runtimeDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	d := ServiceDescriptor{Version: 1, InstallationID: "fixture-install", UID: "1001", Root: filepath.Join(home, "cell's 日本 space"), Adapter: "systemd-user", Scope: "user", Payload: ServicePayload{Generation: "generation-1", Host: filepath.Join(home, "host's 日本 space"), Args: []string{"run", "--root", filepath.Join(home, "cell's 日本 space")}}, Runtime: "local", DesiredState: "running"}
+	d := ServiceDescriptor{Revision: 1, ResourceProfile: "unconfigured", Version: 1, InstallationID: "fixture-install", UID: "1001", Root: filepath.Join(home, "cell's 日本 space"), Adapter: "systemd-user", Scope: "user", Payload: ServicePayload{Generation: "generation-1", Host: filepath.Join(home, "host's 日本 space"), Args: []string{"run", "--root", filepath.Join(home, "cell's 日本 space")}}, Runtime: "local", DesiredState: "running"}
+	c, d := unixServiceFixtureCell(t, "cell's 日本 space", d)
 	a := &systemdUserAdapter{uid: d.UID, home: home, runtimeDir: runtimeDir, unitDir: filepath.Join(home, ".config", "systemd", "user"), systemctl: "/fixture/systemctl", busctl: "/fixture/busctl", owned: func(_ string, _ os.FileInfo) bool { return true }}
-	m := &systemdFixtureManager{t: t, adapter: a, descriptor: d}
+	m := &systemdFixtureManager{t: t, adapter: a, descriptor: d, cell: c}
 	a.command = m.command
 	return a, d, m
 }
@@ -51,6 +52,7 @@ func systemdFixtureMode(t *testing.T, a *systemdUserAdapter, target string, mode
 }
 
 type systemdFixtureManager struct {
+	cell                *Cell
 	t                   *testing.T
 	adapter             *systemdUserAdapter
 	descriptor          ServiceDescriptor
@@ -733,9 +735,6 @@ func TestServiceSystemdDiagnosticTailBound(t *testing.T) {
 
 func TestServiceSystemdExactRegistrationAndRemovalRetainsData(t *testing.T) {
 	a, d, m := systemdFixture(t)
-	if err := os.Mkdir(d.Root, 0o700); err != nil {
-		t.Fatal(err)
-	}
 	dataPath := filepath.Join(d.Root, "retained-data")
 	if err := os.WriteFile(dataPath, []byte("persistent fixture"), 0o600); err != nil {
 		t.Fatal(err)
@@ -835,7 +834,7 @@ func TestServiceSystemdForeignFileRefusedBeforeManagerMutation(t *testing.T) {
 	}
 }
 
-func TestServiceSystemdFailedRegistrationCleansOnlyOwnedUnit(t *testing.T) {
+func TestServiceSystemdFailedRegistrationRetainsOwnedUnit(t *testing.T) {
 	a, d, m := systemdFixture(t)
 	m.failEnable = true
 	plan, err := a.Plan(context.Background(), d)
@@ -845,11 +844,11 @@ func TestServiceSystemdFailedRegistrationCleansOnlyOwnedUnit(t *testing.T) {
 	if err := a.Apply(context.Background(), plan); !errors.Is(err, ErrServiceRegistrationFailed) || !strings.Contains(err.Error(), "enable_now") {
 		t.Fatal("enable failure did not retain its fixed registration reason")
 	}
-	if _, err := os.Stat(a.unitPath(d)); !errors.Is(err, os.ErrNotExist) {
-		t.Fatal("owned partial registration retained")
+	if _, err := os.Stat(a.unitPath(d)); err != nil {
+		t.Fatal("owned partial registration removed")
 	}
-	if !m.disabled {
-		t.Fatal("partial enabled state not disabled")
+	if m.disabled {
+		t.Fatal("partial enabled state disabled")
 	}
 }
 

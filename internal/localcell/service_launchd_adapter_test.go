@@ -51,9 +51,10 @@ func launchdFixtureError(t *testing.T, code int, detail string) error {
 }
 
 type launchdFixtureManager struct {
-	t *testing.T
-	a *launchdAgentAdapter
-	d ServiceDescriptor
+	t    *testing.T
+	a    *launchdAgentAdapter
+	d    ServiceDescriptor
+	cell *Cell
 	// calls preserves the existing print/mutation history used by legacy
 	// lifecycle assertions; allCalls also records the new read-only query.
 	calls    [][]string
@@ -215,6 +216,7 @@ func launchdFixture(t *testing.T) (*launchdAgentAdapter, ServiceDescriptor, *lau
 	t.Setenv("WITSELF_HOME", home)
 	t.Setenv("DSH_HOME", home)
 	d := ServiceDescriptor{Version: 1, InstallationID: "fixture-install", UID: "1001", Root: filepath.Join(home, "cell's 日本 space"), Adapter: "launchd-agent", Scope: "user", Payload: ServicePayload{Generation: "generation-1", Host: filepath.Join(home, "host's 日本 space"), Args: []string{"run", "--root", filepath.Join(home, "cell's 日本 space")}}, Runtime: "local", DesiredState: "running"}
+	cell, d := unixServiceFixtureCell(t, "cell's 日本 space", d)
 	a := &launchdAgentAdapter{uid: d.UID, home: home, agentDir: filepath.Join(home, "Library", "LaunchAgents"), launchctl: "/bin/launchctl", owned: func(string, os.FileInfo) bool { return true }, removalTimeout: launchdFixtureRemovalTimeout}
 	// Windows executes the adapter's command/lifecycle model with synthetic
 	// Unix permissions. Native Unix mode and symlink assertions live separately.
@@ -226,7 +228,7 @@ func launchdFixture(t *testing.T) (*launchdAgentAdapter, ServiceDescriptor, *lau
 			return info.Mode()&^os.ModePerm | 0o600
 		}
 	}
-	m := &launchdFixtureManager{t: t, a: a, d: d, enabled: make(map[string]bool)}
+	m := &launchdFixtureManager{t: t, a: a, d: d, cell: cell, enabled: make(map[string]bool)}
 	// Preserve the legacy lifecycle fixture's enable-before-bootstrap baseline
 	// as an explicit override. Absent-state proofs delete this entry.
 	m.enabled[a.target(d)] = false
@@ -480,14 +482,18 @@ func TestLaunchdApplyFailureCleansOnlyCreatedIdentity(t *testing.T) {
 				if b, err := os.ReadFile(a.plistPath(d)); err != nil || string(b) != "replacement" {
 					t.Fatal("cleanup removed replacement identity")
 				}
+			} else if failure == "bootstrap" || failure == "enable" || failure == "foreign_print" {
+				if _, err := os.Lstat(a.plistPath(d)); err != nil {
+					t.Fatal("Enabling attempt lost its recovery plist")
+				}
 			} else if _, err := os.Lstat(a.plistPath(d)); !errors.Is(err, os.ErrNotExist) {
 				t.Fatal("created plist survived cleanup")
 			}
 			if failure != "replacement" && syncs == 0 {
 				t.Fatal("cleanup did not sync directory")
 			}
-			if failure == "bootstrap" && syncs < 2 {
-				t.Fatal("failed bootstrap cleanup did not sync deletion")
+			if failure == "bootstrap" && syncs != 1 {
+				t.Fatal("Failed bootstrap changed its persisted plist")
 			}
 			if failure == "foreign_print" {
 				for _, call := range m.calls {
@@ -670,28 +676,22 @@ func TestLaunchdPartialBootstrapCleanupPreservesRecovery(t *testing.T) {
 					bootouts++
 				}
 			}
-			wantBootouts := 1
-			if mode == "canceled_inspection" {
-				wantBootouts = 0
+			if bootouts != 0 {
+				t.Fatal("Partial registration was stopped during Apply")
 			}
-			if bootouts != wantBootouts {
-				t.Fatal("partial owned registration cleanup did not attempt exact bootout")
+			obs, err := a.Inspect(t.Context(), d)
+			if err != nil || !obs.Registered || !obs.Owned {
+				t.Fatal("Partial registration lost recoverable ownership record")
 			}
-			if mode != "success" {
-				obs, err := a.Inspect(t.Context(), d)
-				if err != nil || !obs.Registered || !obs.Owned {
-					t.Fatal("failed cleanup lost recoverable ownership record")
-				}
-				m.failBootout = false
-				if err := a.Remove(t.Context(), d); err != nil {
-					t.Fatal("explicit removal could not recover partial registration")
-				}
+			m.failBootout = false
+			if err := a.Remove(t.Context(), d); err != nil {
+				t.Fatal("Explicit removal could not recover partial registration")
 			}
 			if _, err := os.Lstat(a.plistPath(d)); !errors.Is(err, os.ErrNotExist) {
-				t.Fatal("successful cleanup retained created plist")
+				t.Fatal("Explicit removal retained created plist")
 			}
 			if m.loaded {
-				t.Fatal("successful cleanup retained registration")
+				t.Fatal("Explicit removal retained registration")
 			}
 		})
 	}

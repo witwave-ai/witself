@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"time"
@@ -465,7 +466,19 @@ func (a *launchdAgentAdapter) Apply(ctx context.Context, plan ServicePlan) error
 	if err != nil && (!errors.Is(err, ErrServiceRegistrationFailed) || obs.Reason != "service_registration_failed") {
 		return err
 	}
-	if err == nil && obs.Registered && obs.Owned {
+	owned := err == nil && obs.Registered && obs.Owned
+	cell, fresh, unlock, err := serviceAdapterAdmission(a.uid, d, a.agentDir)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if err := cell.maintenanceFenceAllows(0); err != nil {
+		return err
+	}
+	if !reflect.DeepEqual(fresh, d) {
+		return serviceSystemdError(ErrServiceOwnershipConflict, "apply:descriptor", "stale_plan")
+	}
+	if owned {
 		return nil
 	}
 	want, err := RenderLaunchdAgentPlist(d)
@@ -512,10 +525,10 @@ func (a *launchdAgentAdapter) Apply(ctx context.Context, plan ServicePlan) error
 		}
 		identity = created
 	}
-	bootstrapAttempted := false
+	enableAttempted := false
 	fail := func(step string, err error) error {
-		if created != nil {
-			a.cleanupPartial(ctx, d, created, bootstrapAttempted)
+		if created != nil && !enableAttempted {
+			a.cleanupPartial(ctx, d, created)
 		}
 		return fmt.Errorf("%w: %s: %w", ErrServiceRegistrationFailed, step, err)
 	}
@@ -554,6 +567,7 @@ func (a *launchdAgentAdapter) Apply(ctx context.Context, plan ServicePlan) error
 	// launchctl(1), enable/disable: a disabled service cannot load until enabled;
 	// overrides persist across boots. Clear only an explicitly disabled target.
 	if disabled == launchdOverrideDisabled {
+		enableAttempted = true
 		if _, err := a.command(ctx, a.launchctl, "enable", a.target(d)); err != nil {
 			return fail("enable", a.commandError(ErrServiceRegistrationFailed, "enable", err, d.Root))
 		}
@@ -561,7 +575,7 @@ func (a *launchdAgentAdapter) Apply(ctx context.Context, plan ServicePlan) error
 	if err := checkIdentity("pre_bootstrap"); err != nil {
 		return err
 	}
-	bootstrapAttempted = true
+	enableAttempted = true
 	if _, err := a.command(ctx, a.launchctl, "bootstrap", a.domain(), a.plistPath(d)); err != nil {
 		return fail("bootstrap", a.commandError(ErrServiceRegistrationFailed, "bootstrap", err, d.Root))
 	}
@@ -594,9 +608,9 @@ func (a *launchdAgentAdapter) removePlistIdentity(d ServiceDescriptor, identity 
 	return nil
 }
 
-func (a *launchdAgentAdapter) cleanupPartial(ctx context.Context, d ServiceDescriptor, created os.FileInfo, bootstrapAttempted bool) {
-	// A foreign print result never authorizes bootout. Only the original file
-	// identity can be removed, including when bootstrap exposed a foreign label.
+func (a *launchdAgentAdapter) cleanupPartial(ctx context.Context, d ServiceDescriptor, created os.FileInfo) {
+	// Before any enabling attempt, remove only the original file identity when
+	// the manager can establish that no owned registration needs its record.
 	obs, err := a.Inspect(ctx, d)
 	if errors.Is(err, ErrServiceManagerUnavailable) {
 		// Cancellation or a lost manager cannot establish absence. Keep the
@@ -604,17 +618,7 @@ func (a *launchdAgentAdapter) cleanupPartial(ctx context.Context, d ServiceDescr
 		return
 	}
 	if err == nil && obs.Registered && obs.Owned {
-		// Before this Apply attempts bootstrap, a failed read or identity check
-		// cannot authorize a bootout of a concurrently loaded registration.
-		// Retain its private recovery record instead.
-		if !bootstrapAttempted {
-			return
-		}
-		if err := a.bootout(ctx, d); err != nil {
-			// Retain the exact ownership record if the verified registration
-			// could not be removed; a later explicit Remove must remain usable.
-			return
-		}
+		return
 	}
 	_ = a.removePlistIdentity(d, created)
 }

@@ -371,8 +371,8 @@ func TestLaunchdDisabledEnableFailure(t *testing.T) {
 			}
 			if preexisting {
 				launchdDisabledRequirePlist(t, a, d, before, data)
-			} else if _, statErr := os.Lstat(a.plistPath(d)); !errors.Is(statErr, os.ErrNotExist) {
-				t.Fatal("failed disabled enable retained its newly created plist")
+			} else if _, statErr := os.Lstat(a.plistPath(d)); statErr != nil {
+				t.Fatal("Failed disabled enable lost its recovery plist")
 			}
 		})
 	}

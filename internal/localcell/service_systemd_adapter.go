@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 )
 
@@ -452,6 +453,17 @@ func (a *systemdUserAdapter) Apply(ctx context.Context, plan ServicePlan) error 
 		return err
 	}
 	d := plan.Spec
+	cell, fresh, unlock, err := serviceAdapterAdmission(a.uid, d, a.unitDir)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if err := cell.maintenanceFenceAllows(0); err != nil {
+		return err
+	}
+	if !reflect.DeepEqual(fresh, d) {
+		return serviceSystemdError(ErrServiceOwnershipConflict, "apply:descriptor", "stale_plan")
+	}
 	want, err := RenderSystemdUserUnit(d)
 	if err != nil {
 		return err
@@ -463,7 +475,7 @@ func (a *systemdUserAdapter) Apply(ctx context.Context, plan ServicePlan) error 
 	if err != nil {
 		return err
 	}
-	created := false
+	var created os.FileInfo
 	if !exists {
 		// Exclusive creation cannot overwrite a registration that appeared after Plan.
 		file, err := os.OpenFile(a.unitPath(d), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
@@ -495,29 +507,30 @@ func (a *systemdUserAdapter) Apply(ctx context.Context, plan ServicePlan) error 
 			}
 			return a.commandError(ErrServiceRegistrationFailed, step, writeErr, d.Root)
 		}
-		created = true
+		created = identity
 		if err := syncDirectory(a.unitDir); err != nil {
 			a.removeCreatedUnit(d, identity)
 			return a.commandError(ErrServiceRegistrationFailed, "unit_dir:sync_created", err, d.Root)
 		}
 	}
-	if _, err := a.command(ctx, a.systemctl, "--user", "daemon-reload"); err != nil {
-		if created {
-			a.cleanupPartial(ctx, d, want)
+	enableAttempted := false
+	cleanup := func() {
+		if created != nil && !enableAttempted {
+			a.cleanupPartial(ctx, d, created)
 		}
+	}
+	if _, err := a.command(ctx, a.systemctl, "--user", "daemon-reload"); err != nil {
+		cleanup()
 		return a.commandError(ErrServiceRegistrationFailed, "daemon_reload", err, d.Root)
 	}
 	// Loading may expose a conflicting registration/drop-in; never enable it.
 	if observation, err := a.Inspect(ctx, d); err != nil || !observation.Owned {
-		if created {
-			a.cleanupPartial(ctx, d, want)
-		}
+		cleanup()
 		return serviceRegistrationError("post_reload", err)
 	}
+	enableAttempted = true
 	if _, err := a.command(ctx, a.systemctl, "--user", "enable", "--now", serviceUnitLabel(d)); err != nil {
-		if created {
-			a.cleanupPartial(ctx, d, want)
-		}
+		cleanup()
 		return a.commandError(ErrServiceRegistrationFailed, "enable_now", err, d.Root)
 	}
 	if observation, err := a.Inspect(ctx, d); err != nil || !observation.Owned {
@@ -551,22 +564,15 @@ func (a *systemdUserAdapter) removeCreatedUnit(d ServiceDescriptor, identity os.
 	}
 }
 
-func (a *systemdUserAdapter) cleanupPartial(ctx context.Context, d ServiceDescriptor, want []byte) {
-	// Cleanup never disables a foreign loaded service. A failed ownership check
+func (a *systemdUserAdapter) cleanupPartial(ctx context.Context, d ServiceDescriptor, identity os.FileInfo) {
+	// Cleanup never removes an unverified registration. A failed ownership check
 	// leaves the partial registration for diagnostics rather than guessing.
 	observation, err := a.Inspect(ctx, d)
 	if err != nil || !observation.Owned {
 		return
 	}
-	if _, err := a.command(ctx, a.systemctl, "--user", "disable", "--now", serviceUnitLabel(d)); err != nil {
-		return
-	}
-	if exists, err := a.ownedUnit(d, want); err != nil || !exists {
-		return
-	}
-	if os.Remove(a.unitPath(d)) == nil {
-		_, _ = a.command(ctx, a.systemctl, "--user", "daemon-reload")
-	}
+	a.removeCreatedUnit(d, identity)
+	_, _ = a.command(ctx, a.systemctl, "--user", "daemon-reload")
 }
 
 func (a *systemdUserAdapter) Remove(ctx context.Context, d ServiceIdentity) error {

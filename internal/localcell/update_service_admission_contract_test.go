@@ -81,6 +81,9 @@ var maintenanceServiceAdmissionParameters = map[string]string{
 
 // Keep the old four-owner predicate and its independent counts unchanged.
 func ordinaryMaintenanceAdmissionOwner(file string, fn *ast.FuncDecl) string {
+	if receiver := updateReceiverName(fn); receiver == "systemdUserAdapter" || receiver == "launchdAgentAdapter" {
+		return maintenanceUnixAdapterAdmissionOwner(file, fn)
+	}
 	if updateReceiverName(fn) == "windowsLogonTaskAdapter" {
 		return maintenanceAdapterAdmissionOwner(file, fn)
 	}
@@ -254,6 +257,7 @@ func maintenanceServiceAdmissionContract(sources map[string]string) []string {
 	failures = append(failures, maintenanceTransitionContract(sources)...)
 	failures = append(failures, maintenanceHostAdmissionContract(sources)...)
 	failures = append(failures, maintenanceAdapterAdmissionContract(sources["service_windows_task.go"])...)
+	failures = append(failures, maintenanceUnixAdapterAdmissionContract(sources)...)
 	totalReferences := 0
 	for name, source := range sources {
 		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
@@ -280,7 +284,7 @@ func maintenanceServiceAdmissionContract(sources map[string]string) []string {
 			expectedReferences = 3
 		case "service_windows_task.go":
 			expectedReferences = 2
-		case "service_boot.go", "service_health.go", "service_maintenance.go":
+		case "service_boot.go", "service_health.go", "service_maintenance.go", "service_systemd_adapter.go", "service_launchd.go":
 			expectedReferences = 1
 		}
 		if fileReferences != expectedReferences {
@@ -315,7 +319,7 @@ func maintenanceServiceAdmissionContract(sources map[string]string) []string {
 			}
 		}
 	}
-	if totalReferences != 12 {
+	if totalReferences != 14 {
 		failures = append(failures, "global_count")
 	}
 	sort.Strings(failures)
