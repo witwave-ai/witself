@@ -280,24 +280,8 @@ func TestSignupLegalBaseRejectsCredentialsAndNonAuthorityURLs(t *testing.T) {
 
 func TestAccountCreatePreservesConsentlessJournalWhenFlagAdded(t *testing.T) {
 	privateAccountCreateTestHome(t)
-	var manifestCalls, signupCalls atomic.Int32
-	var posted map[string]string
-	var mu sync.Mutex
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/legal/versions.json" {
-			manifestCalls.Add(1)
-			writeSignupLegalTestManifest(w, "new-terms", "new-privacy")
-			return
-		}
-		signupCalls.Add(1)
-		mu.Lock()
-		if err := json.NewDecoder(r.Body).Decode(&posted); err != nil {
-			t.Error(err)
-		}
-		mu.Unlock()
-		w.WriteHeader(http.StatusBadRequest)
-		_, _ = fmt.Fprint(w, `{"error":"stop before provisioning"}`)
-	}))
+	requests := &consentlessSignupRequests{}
+	server := httptest.NewServer(requests)
 	defer server.Close()
 	fingerprint, err := client.AccountCreateRequestFingerprint(server.URL, "default", "owner@example.com", "invite-private", "Owner Display", "", "")
 	if err != nil {
@@ -308,12 +292,13 @@ func TestAccountCreatePreservesConsentlessJournalWhenFlagAdded(t *testing.T) {
 		t.Fatal(err)
 	}
 	args := append(accountCreateTestArgs(server.URL, "invite-private"), "--accept-terms")
-	if code := accountCreate(args); code != 1 || manifestCalls.Load() != 0 || signupCalls.Load() != 1 {
-		t.Fatalf("legacy journal was upgraded: exit=%d manifest=%d signup=%d", code, manifestCalls.Load(), signupCalls.Load())
-	}
+	code := accountCreate(args)
+	// Join all handlers before inspecting their evidence, including a foreign
+	// request that may have arrived while the command was running.
+	server.Close()
+	requests.assertCounts(t, code)
 	after, err := local.ReadAccountProvisionJournal("default")
-	mu.Lock()
-	defer mu.Unlock()
+	posted := requests.posted
 	if err != nil || before != after || posted["provision_id"] != before.ProvisionID {
 		t.Fatal("legacy journal or provision id changed")
 	}
