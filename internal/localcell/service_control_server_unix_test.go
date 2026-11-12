@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -30,14 +31,26 @@ func TestServiceControlStopResponseSilentAndCompleteUnix(t *testing.T) {
 	}
 	var diagnostic bytes.Buffer
 	responseWritten, release := make(chan struct{}), make(chan struct{})
-	server := &http.Server{ReadHeaderTimeout: time.Second, Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	var connections sync.WaitGroup
+	server := &http.Server{ReadHeaderTimeout: time.Second, ConnState: func(_ net.Conn, state http.ConnState) {
+		switch state {
+		case http.StateNew:
+			connections.Add(1)
+		case http.StateClosed:
+			connections.Done()
+		}
+	}, Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		writeServiceControlResponse(w, "stop", ServiceStatus{DesiredState: "stopped"}, &diagnostic)
 		close(responseWritten)
 		<-release
 	})}
-	done := make(chan struct{})
-	go func() { defer close(done); _ = server.Serve(listener) }()
-	defer func() { close(release); _ = server.Close(); <-done }()
+	StartJoinedTestRunForTest(t, func() { close(release); _ = server.Close() },
+		serviceControlBudget(server.ReadHeaderTimeout, 4), func() error {
+			err := server.Serve(listener)
+			// Serve returning fences new connections; Closed follows handler exit.
+			connections.Wait()
+			return err
+		})
 	transport := &http.Transport{DisableKeepAlives: true, DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 		return (&net.Dialer{}).DialContext(ctx, "unix", path)
 	}}

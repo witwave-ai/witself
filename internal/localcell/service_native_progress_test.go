@@ -492,6 +492,9 @@ func TestNativeServiceForegroundProcessDiagnostics(t *testing.T) {
 		if err != nil {
 			t.Fatal("cannot start hermetic foreground diagnostic helper")
 		}
+		wait := exited
+		exited = localcell.StartJoinedTestRunForTest(t, func() { _ = command.Process.Kill() },
+			localcell.NativeServiceReadinessBudgetForTest(command.WaitDelay, 0), func() error { return <-wait })
 		if err := <-exited; err == nil {
 			t.Fatal("foreground diagnostic helper did not fail")
 		}

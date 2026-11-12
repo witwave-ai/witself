@@ -85,11 +85,18 @@ func TestServiceControlStopResponseWriteAndFlush(t *testing.T) {
 				writer.flushError = errors.New("fixture flush failure")
 			}
 			var diagnostic bytes.Buffer
-			done := make(chan struct{})
-			go func() {
-				defer close(done)
+			cell, _ := unitCell(t)
+			release := func() {
+				select {
+				case <-writer.release:
+				default:
+					close(writer.release)
+				}
+			}
+			done := StartJoinedTestRunForTest(t, release, serviceControlBudget(cell.cfg.Timeout, 4), func() error {
 				writeServiceControlResponse(writer, "stop", ServiceStatus{DesiredState: "stopped"}, &diagnostic)
-			}()
+				return nil
+			})
 			select {
 			case <-writer.entered:
 			case <-t.Context().Done():
@@ -102,7 +109,7 @@ func TestServiceControlStopResponseWriteAndFlush(t *testing.T) {
 			if writer.header.Get("Content-Length") != strconv.Itoa(writer.body.Len()) {
 				t.Error("stop response flush left HTTP framing incomplete until handler return")
 			}
-			close(writer.release)
+			release()
 			<-done
 			want := ""
 			if failFlush {

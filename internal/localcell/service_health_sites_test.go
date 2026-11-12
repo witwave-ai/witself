@@ -194,16 +194,11 @@ func TestServiceHealthControlShutdownSubstep(t *testing.T) {
 	t.Cleanup(func() { os.Stderr = previous; _ = stderr.Close() })
 	done := make(chan struct{})
 	var hostErr error
-	t.Cleanup(func() {
-		cancel()
-		// Join before restoring stderr or removing the fixture, including
-		// failure paths before the initial tick or command response.
-		<-done
-	})
-	go func() {
+	StartJoinedTestRunForTest(t, cancel, serviceControlBudget(hostBound, 8), func() error {
 		hostErr = c.Run(ctx, SupervisorPolicy{hooks: &hooks, ShutdownTimeout: hostBound})
 		close(done)
-	}()
+		return hostErr
+	})
 	select {
 	case <-ready:
 	case <-done:

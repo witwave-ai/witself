@@ -189,8 +189,9 @@ func hostExitRunFixture(t *testing.T, stop func(context.Context) error) (*Cell, 
 		return nil
 	}
 	ctx, cancel := context.WithCancel(t.Context())
-	done := make(chan error, 1)
-	go func() { done <- c.Run(ctx, SupervisorPolicy{hooks: &h}) }()
+	done := StartJoinedTestRunForTest(t, cancel, serviceControlBudget(c.cfg.Timeout, 4), func() error {
+		return c.Run(ctx, SupervisorPolicy{hooks: &h, ShutdownTimeout: c.cfg.Timeout})
+	})
 	readyCtx, readyCancel := context.WithTimeout(t.Context(), serviceControlBudget(c.cfg.Timeout, 3))
 	defer readyCancel()
 	for {
@@ -278,8 +279,9 @@ func TestServiceHostExitAcceptedThenExitedUnix(t *testing.T) {
 	h, _, _, _, _ := supervisorTestHooks()
 	h.ticks = make(chan time.Time)
 	restartCtx, restartCancel := context.WithCancel(t.Context())
-	restartDone := make(chan error, 1)
-	go func() { restartDone <- c.Run(restartCtx, SupervisorPolicy{hooks: &h}) }()
+	restartDone := StartJoinedTestRunForTest(t, restartCancel, serviceControlBudget(c.cfg.Timeout, 4), func() error {
+		return c.Run(restartCtx, SupervisorPolicy{hooks: &h, ShutdownTimeout: c.cfg.Timeout})
+	})
 	for {
 		status, err := c.Control(t.Context(), "observe")
 		if err == nil && status.State == "running" {
@@ -299,7 +301,7 @@ func TestServiceHostExitAcceptedThenExitedUnix(t *testing.T) {
 
 func TestServiceHostExitRefusedDrainRetainsRecordsUnix(t *testing.T) {
 	c, done, cancel := hostExitRunFixture(t, func(context.Context) error { return errors.New("synthetic unknown stop") })
-	defer func() { cancel(); <-done }()
+	defer cancel()
 	before, err := os.ReadFile(c.path("manifest.json"))
 	if err != nil {
 		t.Fatal("cannot snapshot manifest")
@@ -383,14 +385,7 @@ func TestServiceHostExitCallerCancellationAfterACKUnix(t *testing.T) {
 			return context.Canceled
 		}
 	})
-	hostExited := false
-	defer func() {
-		close(release)
-		stopHost()
-		if !hostExited {
-			<-done
-		}
-	}()
+	defer func() { close(release); stopHost() }()
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	status, err := c.Control(ctx, "exit-host")
@@ -411,7 +406,6 @@ func TestServiceHostExitCallerCancellationAfterACKUnix(t *testing.T) {
 	}
 	select {
 	case <-done:
-		hostExited = true
 		t.Fatal("caller cancellation authorized host exit")
 	default:
 	}
@@ -443,7 +437,7 @@ func TestServiceHostExitForcedObservedUnix(t *testing.T) {
 
 func TestServiceRemoveForcedDrainRetainsRecordsUnix(t *testing.T) {
 	c, done, cancel := hostExitRunFixture(t, func(context.Context) error { return ErrServiceShutdownForced })
-	defer func() { cancel(); <-done }()
+	defer cancel()
 	marker := c.path("logs", "retain")
 	if os.WriteFile(marker, []byte("fixture"), 0o600) != nil {
 		t.Fatal("cannot create retained fixture")
@@ -494,8 +488,9 @@ func TestServiceSupervisorWindowsStopFaultSuppressesDeferredDrain(t *testing.T) 
 			}
 			hostCtx, stopHost := context.WithCancel(t.Context())
 			defer stopHost()
-			done := make(chan error, 1)
-			go func() { done <- c.Run(hostCtx, SupervisorPolicy{hooks: &h}) }()
+			done := StartJoinedTestRunForTest(t, stopHost, serviceControlBudget(c.cfg.Timeout, 4), func() error {
+				return c.Run(hostCtx, SupervisorPolicy{hooks: &h, ShutdownTimeout: c.cfg.Timeout})
+			})
 			for {
 				status, err := c.Control(t.Context(), "observe")
 				if err == nil && status.State == "running" {

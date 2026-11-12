@@ -87,17 +87,14 @@ func TestServiceControlCancellationReceiptActualHost(t *testing.T) {
 			}
 			previous := os.Stderr
 			os.Stderr = stderr
-			defer func() { os.Stderr = previous; _ = stderr.Close() }()
+			t.Cleanup(func() { os.Stderr = previous; _ = stderr.Close() })
 			done := make(chan struct{})
 			var hostErr error
-			go func() {
+			StartJoinedTestRunForTest(t, hostCancel, serviceControlBudget(cell.cfg.Timeout, 4), func() error {
 				hostErr = cell.Run(hostCtx, SupervisorPolicy{hooks: &hooks, ShutdownTimeout: time.Second})
 				close(done)
-			}()
-			defer func() {
-				hostCancel()
-				<-done // Join every emitter before restoring stderr.
-			}()
+				return hostErr
+			})
 			select {
 			case <-ready:
 			case <-done:
