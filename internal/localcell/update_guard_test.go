@@ -348,7 +348,13 @@ func updateOrdinaryAdmissions(file string, fn *ast.FuncDecl) map[*ast.SelectorEx
 	if ordinaryMaintenanceAdmissionOwner(file, fn) != "" {
 		return nil
 	}
-	receiver := fn.Recv.List[0]
+	ownerBinding := fn.Recv.List[0].Names[0]
+	if updateReceiverName(fn) == "windowsLogonTaskAdapter" {
+		ownerBinding = maintenanceAdapterCellBinding(fn)
+		if ownerBinding == nil {
+			return nil
+		}
+	}
 	var admitted []*ast.SelectorExpr
 	statements := fn.Body.List
 	if fn.Name.Name == "setServiceDesiredStateLocked" {
@@ -377,7 +383,7 @@ func updateOrdinaryAdmissions(file string, fn *ast.FuncDecl) map[*ast.SelectorEx
 			continue
 		}
 		owner, ok := selector.X.(*ast.Ident)
-		if !ok || owner.Obj == nil || owner.Obj != receiver.Names[0].Obj {
+		if !ok || owner.Obj == nil || owner.Obj != ownerBinding.Obj {
 			continue
 		}
 		generation, ok := call.Args[0].(*ast.BasicLit)

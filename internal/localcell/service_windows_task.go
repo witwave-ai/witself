@@ -31,7 +31,7 @@ type windowsLogonTaskAdapter struct {
 	drain          func(context.Context, ServiceDescriptor) error
 	// Tests can inject construction, never the production host-exit transaction.
 	removalCell func(ServiceDescriptor) (*Cell, error)
-	lock        func(ServiceDescriptor) (func(), error)
+	lock        func(ServiceDescriptor) (*Cell, func(), error)
 	// The hermetic fake uses a temporary native directory while modelling a
 	// drive-qualified Windows descriptor. Production always derives it from Root.
 	recordDirectory func(ServiceDescriptor) string
@@ -110,19 +110,19 @@ func (a *windowsLogonTaskAdapter) current(d ServiceDescriptor) (ServiceDescripto
 	return c.ServiceDescriptor()
 }
 
-func (a *windowsLogonTaskAdapter) mutationLock(d ServiceDescriptor) (func(), error) {
+func (a *windowsLogonTaskAdapter) mutationLock(d ServiceDescriptor) (*Cell, func(), error) {
 	if a.lock != nil {
 		return a.lock(d)
 	}
 	cell, err := New(Config{Root: d.Root, Timeout: 60 * time.Second})
 	if err != nil {
-		return nil, windowsTaskError(ErrServiceOwnershipConflict, "inspect:host_owner", 0, "unavailable")
+		return nil, nil, windowsTaskError(ErrServiceOwnershipConflict, "inspect:host_owner", 0, "unavailable")
 	}
 	lock, err := cell.own(false)
 	if err != nil {
-		return nil, windowsTaskError(ErrServiceOwnershipConflict, "inspect:host_owner", 0, "unavailable")
+		return nil, nil, windowsTaskError(ErrServiceOwnershipConflict, "inspect:host_owner", 0, "unavailable")
 	}
-	return func() { _ = lock.Close() }, nil
+	return cell, func() { _ = lock.Close() }, nil
 }
 
 func (a *windowsLogonTaskAdapter) preflight(ctx context.Context, d ServiceDescriptor) error {
@@ -305,7 +305,7 @@ func (a *windowsLogonTaskAdapter) Apply(ctx context.Context, plan ServicePlan) e
 	if err := a.preflight(ctx, d); err != nil {
 		return err
 	}
-	unlock, err := a.mutationLock(d)
+	cell, unlock, err := a.mutationLock(d)
 	if err != nil {
 		return err
 	}
@@ -315,7 +315,13 @@ func (a *windowsLogonTaskAdapter) Apply(ctx context.Context, plan ServicePlan) e
 		return err
 	}
 	current, err := a.current(d)
-	if err != nil || !reflect.DeepEqual(current, d) || d.DesiredState != "running" || d.Faulted {
+	if err != nil || !reflect.DeepEqual(windowsTaskImmutable(current), windowsTaskImmutable(d)) {
+		return windowsTaskError(ErrServiceOwnershipConflict, "create", 0, "stale_plan")
+	}
+	if err := cell.maintenanceFenceAllows(0); err != nil {
+		return err
+	}
+	if !reflect.DeepEqual(current, d) || d.DesiredState != "running" || d.Faulted {
 		return windowsTaskError(ErrServiceOwnershipConflict, "create", 0, "stale_plan")
 	}
 	if observation.Owned {
@@ -373,7 +379,7 @@ func (a *windowsLogonTaskAdapter) Start(ctx context.Context, d ServiceIdentity) 
 	if err := a.preflight(ctx, d); err != nil {
 		return err
 	}
-	unlock, err := a.mutationLock(d)
+	cell, unlock, err := a.mutationLock(d)
 	if err != nil {
 		return err
 	}
@@ -388,6 +394,9 @@ func (a *windowsLogonTaskAdapter) Start(ctx context.Context, d ServiceIdentity) 
 	}
 	if !observation.Owned {
 		return windowsTaskError(ErrServiceOwnershipConflict, "inspect:host_owner", 0, "not_owned")
+	}
+	if err := cell.maintenanceFenceAllows(0); err != nil {
+		return err
 	}
 	name, _ := WindowsLogonTaskName(d)
 	result, err := a.command(ctx, "/Run", "/TN", name)
@@ -421,7 +430,7 @@ func (a *windowsLogonTaskAdapter) Remove(ctx context.Context, d ServiceIdentity)
 		}
 	}
 	// The drain itself needs this operation lock, so acquire it only afterwards.
-	unlock, err := a.mutationLock(d)
+	_, unlock, err := a.mutationLock(d)
 	if err != nil {
 		return err
 	}

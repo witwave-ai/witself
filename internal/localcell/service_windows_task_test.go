@@ -128,6 +128,7 @@ func TestWindowsTaskArgumentQuoting(t *testing.T) {
 type windowsTaskFake struct {
 	t                                                              *testing.T
 	a                                                              *windowsLogonTaskAdapter
+	cell                                                           *Cell
 	d                                                              ServiceDescriptor
 	current                                                        ServiceDescriptor
 	xml                                                            []byte
@@ -149,7 +150,15 @@ func newWindowsTaskFake(t *testing.T) *windowsTaskFake {
 	if makePrivateDir(dir) != nil {
 		t.Fatal("private task fixture failed")
 	}
-	f := &windowsTaskFake{t: t, d: windowsTaskTestDescriptor()}
+	cell, _ := unitCell(t)
+	lock, err := cell.own(false)
+	if err != nil {
+		t.Fatal("task fixture lock unavailable")
+	}
+	if err := lock.Close(); err != nil {
+		t.Fatal("task fixture lock did not release")
+	}
+	f := &windowsTaskFake{t: t, cell: cell, d: windowsTaskTestDescriptor()}
 	f.current = f.d
 	f.a = &windowsLogonTaskAdapter{uid: f.d.UID, capability: func(context.Context) error { return nil }, readDescriptor: func(ServiceDescriptor) (ServiceDescriptor, error) { return f.current, nil }, recordDirectory: func(ServiceDescriptor) string { return dir }, drain: func(context.Context, ServiceDescriptor) error {
 		f.drained = true
@@ -160,7 +169,13 @@ func newWindowsTaskFake(t *testing.T) *windowsTaskFake {
 		}
 		return nil
 	}}
-	f.a.lock = func(ServiceDescriptor) (func(), error) { return func() {}, nil }
+	f.a.lock = func(ServiceDescriptor) (*Cell, func(), error) {
+		lock, err := cell.own(false)
+		if err != nil {
+			return nil, nil, windowsTaskError(ErrServiceOwnershipConflict, "inspect:host_owner", 0, "unavailable")
+		}
+		return cell, func() { _ = lock.Close() }, nil
+	}
 	f.a.command = f.command
 	return f
 }
@@ -480,12 +495,17 @@ func TestWindowsTaskAdapterPartialCreateAndRemovalFailures(t *testing.T) {
 func TestWindowsTaskAdapterMutationLockOrdering(t *testing.T) {
 	f := newWindowsTaskFake(t)
 	held := false
-	f.a.lock = func(ServiceDescriptor) (func(), error) {
+	lock := f.a.lock
+	f.a.lock = func(d ServiceDescriptor) (*Cell, func(), error) {
 		if held {
 			t.Fatal("task mutation lock nested")
 		}
+		cell, unlock, err := lock(d)
+		if err != nil {
+			return nil, nil, err
+		}
 		held = true
-		return func() { held = false }, nil
+		return cell, func() { unlock(); held = false }, nil
 	}
 	command := f.a.command
 	f.a.command = func(ctx context.Context, args ...string) (windowsTaskCommandResult, error) {
