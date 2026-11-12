@@ -261,8 +261,8 @@ func isUpdateFilePresent(sources map[string]*ast.File) bool {
 	return false
 }
 
-// Keep update execution unreachable. Four lifecycle and four bounded service
-// admissions are permitted; the admission contracts pin their existing locks.
+// Keep update execution unreachable. The eight existing admissions, health and
+// the negative scheduling observation have individually pinned owner holds.
 func TestUpdateFoundationsRemainUnwired(t *testing.T) {
 	sources := admissionReadSources(t)
 	if failures := maintenanceAdmissionOwnerInventory(sources); len(failures) != 0 {

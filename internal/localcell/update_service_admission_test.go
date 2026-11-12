@@ -734,7 +734,13 @@ func TestServiceMaintenanceProtectivePathsRemainUsable(t *testing.T) {
 			}
 			before := serviceMaintenanceSnapshot(t, c)
 			status, err := s.command(t.Context(), "status")
-			if err != nil || !status.Healthy || *starts != 1 || *stops != 0 || s.record.Attempts != 1 || len(s.record.Failures) != 0 || !s.record.NextStart.IsZero() || !reflect.DeepEqual(trace, []string{"start", "health"}) {
+			if fence != "Absent" {
+				// The service host holds while a fence is present: status stays
+				// usable and reports the hold, and schedules no start or probe.
+				if err != nil || status.State != "maintenance" || status.Reason != errMaintenanceFenceActive.Error() || status.Healthy || *starts != 0 || *stops != 0 || s.record.Attempts != 0 || len(s.record.Failures) != 0 || !s.record.NextStart.IsZero() || len(trace) != 0 {
+					t.Fatal("fenced status scheduled work or lost its maintenance hold projection")
+				}
+			} else if err != nil || !status.Healthy || *starts != 1 || *stops != 0 || s.record.Attempts != 1 || len(s.record.Failures) != 0 || !s.record.NextStart.IsZero() || !reflect.DeepEqual(trace, []string{"start", "health"}) {
 				t.Fatal("maintenance evidence changed status starting or healthy bookkeeping")
 			}
 			if serviceMaintenanceSnapshot(t, c)["journal/maintenance.json"] != before["journal/maintenance.json"] {
@@ -1123,32 +1129,46 @@ func TestServiceMaintenanceRunStartupBoundary(t *testing.T) {
 			serviceMaintenanceFence(t, c, kind)
 			before := serviceMaintenanceSnapshot(t, c)
 			h, _, _, _, _ := supervisorTestHooks()
+			h.ticks = make(chan time.Time)
 			var events []string
 			var leaseBytes []byte
+			ready := make(chan struct{})
 			h.reconcile = func() error {
 				events = append(events, "reconcile")
 				leaseBytes = serviceMaintenancePublishedHost(t, c, d)
+				close(ready)
 				return c.reconcileServiceBoot()
 			}
 			h.repair = func(ctx context.Context) error { events = append(events, "repair"); return c.Repair(ctx) }
 			h.stop = func(context.Context) error { events = append(events, "stop"); return nil }
 			h.start = func(context.Context) error { events = append(events, "start"); return nil }
 			h.health = func(context.Context) error { events = append(events, "health"); return nil }
-			ctx, cancel := context.WithTimeout(t.Context(), 8*c.cfg.Timeout)
+			ctx, cancel := context.WithTimeout(t.Context(), serviceMaintenanceHostRunBound(t, c))
 			defer cancel()
+			observed := make(chan serviceReply, 1)
+			go func() {
+				defer cancel()
+				select {
+				case <-ready:
+					status, err := c.Control(ctx, "observe")
+					observed <- serviceReply{status: status, err: err}
+				case <-ctx.Done():
+					observed <- serviceReply{err: ctx.Err()}
+				}
+			}()
 			receipt, err := serviceMaintenanceCaptureReceipt(t, func() error { return c.Run(ctx, SupervisorPolicy{hooks: &h, ShutdownTimeout: c.cfg.Timeout}) })
-			if !errors.Is(err, errMaintenanceFenceActive) || err.Error() != errMaintenanceFenceActive.Error()+"\n"+errMaintenanceFenceActive.Error() {
-				t.Fatal("fenced Run did not retain reconcile and deferred Repair causes")
+			if err != nil {
+				t.Fatal("Fenced Run did not finish protective cancellation cleanly")
+			}
+			observation := <-observed
+			if observation.err != nil || observation.status.State != "maintenance" || observation.status.Reason != errMaintenanceFenceActive.Error() || observation.status.Healthy || observation.status.LastStepOutcome != "ok" {
+				t.Fatal("Fenced Run did not retain its held control endpoint")
 			}
 			if !reflect.DeepEqual(events, []string{"reconcile", "repair", "stop"}) {
 				t.Fatal("fenced Run changed startup refusal or protective shutdown order")
 			}
-			if string(receipt) != "native service host site=supervisor_reconcile\n" {
-				t.Fatal("fenced Run did not report reconcile failure site")
-			}
-			var located *serviceFailure
-			if !errors.As(err, &located) || located.site != "startup_reconcile" {
-				t.Fatal("fenced Run did not retain startup_reconcile boundary")
+			if string(receipt) != "native service host site=supervisor_reconcile\nservice_shutdown phase=idle operation=none journal_pending=false journal_read_ok=true\n" {
+				t.Fatal("Fenced Run changed held shutdown receipt or failure site")
 			}
 			serviceMaintenanceParityFile(t, c, "service/lease.json", leaseBytes)
 			serviceMaintenanceParityFile(t, c, ".service-host.lock", nil)

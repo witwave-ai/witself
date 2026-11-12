@@ -81,6 +81,9 @@ var maintenanceServiceAdmissionParameters = map[string]string{
 
 // Keep the old four-owner predicate and its independent counts unchanged.
 func ordinaryMaintenanceAdmissionOwner(file string, fn *ast.FuncDecl) string {
+	if _, host := maintenanceHostAdmissionFiles[fn.Name.Name]; host {
+		return maintenanceHostAdmissionOwner(file, fn)
+	}
 	if fn.Name.Name == "setServiceDesiredStateLocked" {
 		return maintenanceTransitionSetterOwner(file, fn)
 	}
@@ -246,6 +249,7 @@ func maintenanceServiceAdmissionOwnerInventory(sources map[string]string) []stri
 func maintenanceServiceAdmissionContract(sources map[string]string) []string {
 	failures := maintenanceServiceAdmissionOwnerInventory(sources)
 	failures = append(failures, maintenanceTransitionContract(sources)...)
+	failures = append(failures, maintenanceHostAdmissionContract(sources)...)
 	totalReferences := 0
 	for name, source := range sources {
 		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
@@ -270,7 +274,7 @@ func maintenanceServiceAdmissionContract(sources map[string]string) []string {
 			expectedReferences = 4
 		case "service_descriptor.go":
 			expectedReferences = 3
-		case "service_boot.go":
+		case "service_boot.go", "service_health.go", "service_maintenance.go":
 			expectedReferences = 1
 		}
 		if fileReferences != expectedReferences {
@@ -305,7 +309,7 @@ func maintenanceServiceAdmissionContract(sources map[string]string) []string {
 			}
 		}
 	}
-	if totalReferences != 8 {
+	if totalReferences != 10 {
 		failures = append(failures, "global_count")
 	}
 	sort.Strings(failures)

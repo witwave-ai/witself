@@ -80,6 +80,13 @@ func (c *Cell) ServiceDescriptor() (ServiceDescriptor, error) {
 	if err := c.validateRoot(false); err != nil {
 		return d, err
 	}
+	return c.readServiceDescriptor()
+}
+
+// readServiceDescriptor requires a root validated under an operation lock
+// that the caller still holds.
+func (c *Cell) readServiceDescriptor() (ServiceDescriptor, error) {
+	var d ServiceDescriptor
 	if _, err := os.Lstat(c.path("service")); errors.Is(err, os.ErrNotExist) {
 		return d, os.ErrNotExist
 	}
