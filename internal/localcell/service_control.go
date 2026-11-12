@@ -12,6 +12,7 @@ import (
 	"os"
 	"runtime"
 	"strconv"
+	"sync"
 	"time"
 )
 
@@ -309,17 +310,67 @@ func (c *Cell) serveServiceControlForPlatform(commands chan<- serviceCommand, pl
 		case <-closed:
 		}
 	})
+	stop := startServiceControlServer(server, listener, closed, server.WriteTimeout)
+	return func() {
+		stop()
+		WriteServiceHostFailure(os.Stderr, c.removeServiceControlEndpoint(), "endpoint_remove")
+	}, nil
+}
+
+// startServiceControlServer owns the connection lifetime as well as Serve's.
+// Close alone does not join handlers that are still writing their response.
+func startServiceControlServer(server *http.Server, listener net.Listener, closed chan struct{}, joinBudget time.Duration) func() {
+	var mu sync.Mutex
+	connections := 0
+	accepting := true
+	joined := make(chan struct{})
+	server.ConnState = func(_ net.Conn, state http.ConnState) {
+		mu.Lock()
+		defer mu.Unlock()
+		switch state {
+		case http.StateNew:
+			connections++
+		case http.StateClosed, http.StateHijacked:
+			connections--
+			if !accepting && connections == 0 {
+				close(joined)
+			}
+		}
+	}
 	done := make(chan struct{})
 	go func() { defer close(done); _ = server.Serve(listener) }()
 	return func() {
 		close(closed)
 		_ = server.Close()
 		<-done
-		WriteServiceHostFailure(os.Stderr, c.removeServiceControlEndpoint(), "endpoint_remove")
-	}, nil
+		// StateNew runs synchronously in Serve before it starts a connection
+		// goroutine. Serve's return fences all increments, including accepts
+		// concurrent with Close. Terminal states release after handler cleanup
+		// (or ownership transfer on hijack); no waiter goroutine can leak when
+		// a handler outlives the join budget.
+		mu.Lock()
+		accepting = false
+		if connections == 0 {
+			close(joined)
+		}
+		mu.Unlock()
+		timer := time.NewTimer(joinBudget)
+		defer timer.Stop()
+		select {
+		case <-joined:
+		case <-timer.C:
+			// A completed join wins even if both channels became ready while
+			// this goroutine was descheduled.
+			select {
+			case <-joined:
+			default:
+				writeServiceControlDiagnostic(os.Stderr, "service_control stop=handlers_unjoined")
+			}
+		}
+	}
 }
 
-// This closed vocabulary is shared by accept and stop-response failures.
+// This closed vocabulary is shared by accept, stop-response and shutdown failures.
 // Never forward error text, process identities or paths to stderr.
 func writeServiceControlDiagnostic(output io.Writer, line string) {
 	switch line {
@@ -328,7 +379,8 @@ func writeServiceControlDiagnostic(output io.Writer, line string) {
 		"service_control accept=rejected step=peer:sid",
 		"service_control accept=rejected step=duplicate",
 		"service_control accept=rejected step=conn",
-		"service_control action=stop response=unflushed":
+		"service_control action=stop response=unflushed",
+		"service_control stop=handlers_unjoined":
 		_, _ = fmt.Fprintln(output, line)
 	}
 }
