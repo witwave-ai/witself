@@ -19,7 +19,8 @@
 // afterward and rolls back the created object by handle. This is detection with
 // rollback, not prevention; handle-relative creation remains deferred.
 //
-// Install, Start, Stop, Repair, Remove, and Reinstall require exclusive OS advisory locks;
+// Install, Start, Stop, Repair, Remove, Reinstall, Checkpoint, and DeleteCheckpoint
+// require exclusive OS advisory locks;
 // a competing operation fails promptly. Inspect reads the manifest, process
 // identities, data presence, lock state, and interrupted journal operation
 // without changing them. Status adds bounded live readiness checks. Mutations
@@ -47,6 +48,30 @@
 // Only a current explicit purge deletes the established owned cleanup targets.
 // Repair never inherits purge authority or regenerates missing custody/history.
 // Retained temporary files do not establish a durable pending-work guarantee.
+//
+// Checkpoint and DeleteCheckpoint are dark: no released command calls them.
+// Checkpoint copies the PGDATA, manifest.json and retained custody of the cold
+// installation named by its exact identity into a new recovery/<id>/, re-reads
+// the copy, writes inventory.json, and writes witness.json last; only a
+// witnessed checkpoint is complete. Before any write it proves the cell cold: no
+// live component, no pg/postmaster.pid, and a pg_controldata state of shut down;
+// before the witness it proves that again, with an equal second reading and an
+// unchanged pg_control. pg_controldata runs from Binaries.PostgresDir, so a
+// bundle without it refuses every checkpoint. At most two complete checkpoints
+// are kept; a new one needs free space of at least 2·S + 1 GiB for a copy of
+// estimated size S. Only DeleteCheckpoint naming one exact identifier deletes
+// one: purge, removal, Reinstall and Repair keep them. Checkpoints hold all data
+// and every password, survive purge, and stay unverified until the D2.1-b2
+// drill: complete means the writer finished, not that the data was verified.
+// The witness detects accidental corruption and truncation, not a same-user
+// rewrite. Ordinary operations validate only the recovery/ directory itself;
+// Checkpoint, DeleteCheckpoint and Inspect validate all of recovery/** and
+// refuse a tree that fails, which must then be repaired by hand. An unknown
+// entry there (for example .DS_Store) blocks new checkpoints until it is
+// removed by hand, and a new installation in a purged root inherits the old
+// checkpoints, with their passwords, which count toward the limit. Drill,
+// restore, rollback, update wiring and D9 remain pending; this is no M4/M5 or
+// supported-offering claim.
 //
 // Component binaries are supplied by the caller. PostgreSQL and all service
 // listeners bind to loopback, and server/worker environments are constructed

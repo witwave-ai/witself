@@ -33,6 +33,7 @@ func TestRealLifecycle(t *testing.T) {
 	t.Run("WaitsForReadiness", func(t *testing.T) { testWaitsForReadiness(t, binaries, assertPostgresEncodingAndUnicode) })
 	t.Run("InstallerPrincipals", func(t *testing.T) { testInstallerPrincipalsNative(t, binaries) })
 	t.Run("RetainedReinstall", func(t *testing.T) { testRetainedReinstallNative(t, binaries) })
+	t.Run("Checkpoint", func(t *testing.T) { testCheckpointNative(t, binaries) })
 }
 
 func postgresBinariesPresent(directory string) bool {

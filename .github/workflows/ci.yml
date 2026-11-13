@@ -226,7 +226,7 @@ jobs:
           $proofJSON = Join-Path $env:RUNNER_TEMP 'lc-pg16\proof.json'
           go test -json ./internal/localcell -run '^TestRealLifecycle$' -count=1 -timeout=15m > $proofJSON 2>&1
           $goExit = $LASTEXITCODE
-          node scripts/ci-go-test-json-check.mjs --input $proofJSON --diagnose --require TestRealLifecycle,TestRealLifecycle/InstallStartRestartRemove,TestRealLifecycle/TwoCellsAreIndependent,TestRealLifecycle/InterruptedStartRepair,TestRealLifecycle/WaitsForReadiness,TestRealLifecycle/InstallerPrincipals,TestRealLifecycle/RetainedReinstall
+          node scripts/ci-go-test-json-check.mjs --input $proofJSON --diagnose --require TestRealLifecycle,TestRealLifecycle/InstallStartRestartRemove,TestRealLifecycle/TwoCellsAreIndependent,TestRealLifecycle/InterruptedStartRepair,TestRealLifecycle/WaitsForReadiness,TestRealLifecycle/InstallerPrincipals,TestRealLifecycle/RetainedReinstall,TestRealLifecycle/Checkpoint
           $parserExit = $LASTEXITCODE
           if ($goExit -ne 0 -or $parserExit -ne 0) { exit 1 }
       - name: Prove native service restart or record adapter capability
@@ -318,7 +318,7 @@ jobs:
           go_exit=0
           go test -json ./internal/localcell -run '^TestRealLifecycle$' -count=1 -timeout=15m > "$proof_json" 2>&1 || go_exit=$?
           parser_exit=0
-          node scripts/ci-go-test-json-check.mjs --input "$proof_json" --diagnose --require TestRealLifecycle,TestRealLifecycle/InstallStartRestartRemove,TestRealLifecycle/TwoCellsAreIndependent,TestRealLifecycle/InterruptedStartRepair,TestRealLifecycle/WaitsForReadiness,TestRealLifecycle/InstallerPrincipals,TestRealLifecycle/RetainedReinstall || parser_exit=$?
+          node scripts/ci-go-test-json-check.mjs --input "$proof_json" --diagnose --require TestRealLifecycle,TestRealLifecycle/InstallStartRestartRemove,TestRealLifecycle/TwoCellsAreIndependent,TestRealLifecycle/InterruptedStartRepair,TestRealLifecycle/WaitsForReadiness,TestRealLifecycle/InstallerPrincipals,TestRealLifecycle/RetainedReinstall,TestRealLifecycle/Checkpoint || parser_exit=$?
           if (( go_exit != 0 || parser_exit != 0 )); then exit 1; fi
       - name: Prove native service restart or record adapter capability
         shell: bash
