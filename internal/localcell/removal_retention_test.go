@@ -195,6 +195,74 @@ func retainedAssertSettled(t *testing.T, c *Cell) {
 	}
 }
 
+// The records one non-purge removal appends after the fixture prefix. When the
+// removal is cut inside its stop step, Repair stops the tree again without
+// journaling that stop, so the stop step stays open in the record.
+var (
+	retainedRemoveRecords = []string{"remove/operation/started", "remove/stop/started", "remove/stop/done",
+		"remove/runtime_cleanup/started", "remove/runtime_cleanup/done", "remove/operation/done"}
+	retainedStopCutRecords = []string{"remove/operation/started", "remove/stop/started",
+		"remove/runtime_cleanup/started", "remove/runtime_cleanup/done", "remove/operation/done"}
+)
+
+// retainedCrashAt fails one remove boundary the way a crash there would.
+func retainedCrashAt(cut string, fired *bool) func(string, string) error {
+	return func(operation, step string) error {
+		if operation == "remove" && step == cut {
+			if fired != nil {
+				*fired = true
+			}
+			return errors.New("synthetic crash")
+		}
+		return nil
+	}
+}
+
+// retainedAssertRecords compares every record appended after the fixture's
+// committed prefix. A duplicated or missing completion line fails here, where
+// a prefix check and a no-change second Repair both accept it.
+func retainedAssertRecords(t *testing.T, f *retainedFixture, want []string) {
+	t.Helper()
+	data := retainedRead(t, f.cell, "journal/operations.jsonl")
+	if !bytes.HasPrefix(data, f.prefix) {
+		t.Fatal("prior journal prefix lost")
+	}
+	var got []string
+	for _, line := range bytes.SplitAfter(data[len(f.prefix):], []byte("\n")) {
+		if len(line) == 0 {
+			continue
+		}
+		var entry journalEntry
+		if !bytes.HasSuffix(line, []byte("\n")) || json.Unmarshal(line, &entry) != nil {
+			t.Fatal("appended journal record is incomplete or unreadable")
+		}
+		got = append(got, entry.Operation+"/"+entry.Step+"/"+entry.State)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("removal journal records differ: %v", got)
+	}
+}
+
+// retainedAssertStartRefused proves the marker refuses Start before any journal
+// record, credential read or launch: Start returns the fixed refusal, launches
+// nothing and changes no byte. Only its operation lock may create run/ and the
+// lock file, when a predecessor cleanup removed them. It applies to a cell with
+// no service descriptor; a stopped service fence would refuse Start first.
+func retainedAssertStartRefused(t *testing.T, f *retainedFixture) {
+	t.Helper()
+	before := retainedSnapshot(t, f.cell)
+	err := f.cell.Start(t.Context())
+	after := retainedSnapshot(t, f.cell)
+	for _, name := range []string{"run", "run/operation.lock"} {
+		if _, existed := before[name]; !existed {
+			delete(after, name)
+		}
+	}
+	if err == nil || err.Error() != "local cell installation is incomplete" || len(f.launches) != 0 || !reflect.DeepEqual(before, after) {
+		t.Fatal("marked cell Start was not refused before journal, credential or launch effects")
+	}
+}
+
 func TestRemovalRetainsDurableMaterial(t *testing.T) {
 	for _, layout := range []string{"legacy", "selected"} {
 		for _, service := range []bool{false, true} {
@@ -299,7 +367,10 @@ func TestRetainedRemovalMarkerSurvivesOperations(t *testing.T) {
 }
 
 func TestRetainedRemovalCrashRepair(t *testing.T) {
-	for _, cut := range []string{"stop", "removal_retained", "cleanup_checkpoint", "runtime_cleanup", "operation_done", "before_cleanup_clear", "cleanup_clear"} {
+	// cleanup_run and cleanup_journal are the only cuts that leave runtime_cleanup
+	// open in state started (review LC-S7D2A-XR1 F3, mutant M2); runtime_cleanup
+	// leaves it done with the operation still open (mutant M1).
+	for _, cut := range []string{"stop", "removal_retained", "cleanup_checkpoint", "cleanup_run", "cleanup_journal", "runtime_cleanup", "operation_done", "before_cleanup_clear", "cleanup_clear"} {
 		t.Run(cut, func(t *testing.T) {
 			f := retainedRemovalFixture(t, "selected", false)
 			c := f.cell
@@ -328,8 +399,14 @@ func TestRetainedRemovalCrashRepair(t *testing.T) {
 			if !bytes.HasPrefix(retainedRead(t, c, "journal/operations.jsonl"), prefix) {
 				t.Fatal("repair lost acknowledged journal prefix")
 			}
+			want := retainedRemoveRecords
+			if cut == "stop" {
+				want = retainedStopCutRecords
+			}
+			retainedAssertRecords(t, f, want)
 			retainedAssertMaterial(t, f)
 			retainedAssertSettled(t, c)
+			retainedAssertStartRefused(t, f)
 		})
 	}
 	for _, boundary := range []string{"cleanup_checkpoint", "runtime_cleanup"} {
@@ -373,7 +450,137 @@ func TestRetainedRemovalCrashRepair(t *testing.T) {
 			if c.Repair(t.Context()) != nil {
 				t.Fatal("sync interruption could not settle")
 			}
+			// The unsynced line is physically complete; Repair must not repeat it.
+			retainedAssertRecords(t, f, retainedRemoveRecords)
 			retainedAssertSettled(t, c)
+		})
+	}
+}
+
+// Repair's remove branch publishes the marker before it writes any settlement
+// record. A Repair cut at any later boundary therefore leaves the durable launch
+// refusal, never only an open operation that a later step could close without
+// marking (review LC-S7D2A-XR1 F1, mutant M3). The removal itself is cut inside
+// its stop step, so the marker is absent when Repair begins.
+func TestRetainedRemovalInterruptedRepairKeepsLaunchRefusal(t *testing.T) {
+	for _, layout := range []string{"legacy", "selected"} {
+		for _, cut := range []string{"removal_retained", "cleanup_checkpoint", "cleanup_run", "cleanup_journal", "runtime_cleanup", "operation_done", "before_cleanup_clear", "cleanup_clear"} {
+			t.Run(layout+"/"+cut, func(t *testing.T) {
+				f := retainedRemovalFixture(t, layout, false)
+				c := f.cell
+				c.cfg.Failpoint = retainedCrashAt("stop", nil)
+				if !errors.Is(c.Remove(t.Context(), RemoveOptions{}), errInterrupted) {
+					t.Fatal("removal stop boundary was not exercised")
+				}
+				if m, err := readManifest(c.cfg.Root); err != nil || m.RemovalRetained {
+					t.Fatal("removal cut inside its stop already carried the retained marker")
+				}
+				fired := false
+				c.cfg.Failpoint = retainedCrashAt(cut, &fired)
+				if err := c.Repair(t.Context()); !fired || !errors.Is(err, errInterrupted) {
+					t.Fatal("Repair crash boundary was not exercised")
+				}
+				c.cfg.Failpoint = nil
+				if m, err := readManifest(c.cfg.Root); err != nil || !m.RemovalRetained {
+					t.Fatal("interrupted Repair left no durable retained marker")
+				}
+				retainedAssertStartRefused(t, f)
+				if err := c.Repair(t.Context()); err != nil {
+					t.Fatal(err)
+				}
+				retainedAssertRecords(t, f, retainedStopCutRecords)
+				retainedAssertMaterial(t, f)
+				retainedAssertSettled(t, c)
+				retainedAssertStartRefused(t, f)
+			})
+		}
+	}
+}
+
+// Repair rolls a failed ordinary removal forward to the retained state, exactly
+// as it rolls an interrupted one, and never reverts it to a startable cell
+// (review LC-S7D2A-XR1 F5, kept by design). The real Remove fails at its stop
+// step: an unowned live identity appears once begin is durable, so stopAll
+// refuses to signal and the step journals an ordinary failure.
+func TestRetainedRemovalRepairRollsFailedRemovalForward(t *testing.T) {
+	f := retainedRemovalFixture(t, "legacy", false)
+	c := f.cell
+	foreign := ProcessRecord{PID: os.Getpid(), StartTime: "foreign-incarnation", Root: c.cfg.Root, Component: "server"}
+	original := syncFile
+	t.Cleanup(func() { syncFile = original })
+	injected := false
+	var injectErr error
+	syncFile = func(file *os.File) error {
+		err := original(file)
+		if !injected && filepath.Base(file.Name()) == "operations.jsonl" {
+			injected = true
+			injectErr = writeAtomic(c.path("run", "server.json"), foreign, nil)
+		}
+		return err
+	}
+	err := c.Remove(t.Context(), RemoveOptions{})
+	syncFile = original
+	if !injected || injectErr != nil || err == nil || err.Error() != "local cell remove: stop failed" {
+		t.Fatal("removal did not fail at its stop step")
+	}
+	if m, err := readManifest(c.cfg.Root); err != nil || m.RemovalRetained || m.Cleanup != nil {
+		t.Fatal("failed removal published the marker or the cleanup checkpoint")
+	}
+	failed := []string{"remove/operation/started", "remove/stop/started", "remove/stop/failed"}
+	retainedAssertRecords(t, f, failed)
+	// The transient condition clears, and Repair completes the recorded intent.
+	if removePrivateFile(c.path("run", "server.json")) != nil {
+		t.Fatal("cannot clear the transient stop failure")
+	}
+	if err := c.Repair(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	retainedAssertRecords(t, f, append(failed, "remove/runtime_cleanup/started", "remove/runtime_cleanup/done", "remove/operation/done"))
+	retainedAssertMaterial(t, f)
+	retainedAssertSettled(t, c)
+	retainedAssertStartRefused(t, f)
+}
+
+// Inspect keeps the retained-removal state, but claims retained data only while
+// PGDATA exists (review LC-S7D2A-XR1 F4). The purge step's failpoint fires after
+// pg/ is deleted; Repair then marks and settles without purge consent.
+func TestRetainedRemovalInspectReportsPGDataPresence(t *testing.T) {
+	for _, state := range []string{"retained", "missing", "purged"} {
+		t.Run(state, func(t *testing.T) {
+			f := retainedRemovalFixture(t, "legacy", false)
+			c := f.cell
+			want := "removed; data purged or missing; reinstall unsupported"
+			switch state {
+			case "retained":
+				want = "removed; data retained; reinstall unsupported"
+				if c.Remove(t.Context(), RemoveOptions{}) != nil {
+					t.Fatal("cannot prepare ordinary removal")
+				}
+			case "missing":
+				if os.RemoveAll(c.path("pg")) != nil || c.Remove(t.Context(), RemoveOptions{}) != nil {
+					t.Fatal("cannot prepare removal without PGDATA")
+				}
+			case "purged":
+				c.cfg.Failpoint = retainedCrashAt("purge", nil)
+				if !errors.Is(c.Remove(t.Context(), RemoveOptions{Purge: true}), errInterrupted) {
+					t.Fatal("purge interruption not reached")
+				}
+				c.cfg.Failpoint = nil
+				if c.Repair(t.Context()) != nil {
+					t.Fatal("cannot settle the interrupted purge")
+				}
+			}
+			before := retainedSnapshot(t, c)
+			inspection, err := c.Inspect(t.Context())
+			if err != nil || inspection.Manifest == nil || !inspection.Manifest.RemovalRetained || inspection.PGDataPresent != (state == "retained") {
+				t.Fatal("inspection lost the retained marker or PGDATA presence")
+			}
+			if inspection.InstallState != want {
+				t.Fatal("inspection misreported retained PGDATA")
+			}
+			if !reflect.DeepEqual(before, retainedSnapshot(t, c)) {
+				t.Fatal("inspection wrote retained material")
+			}
 		})
 	}
 }
@@ -423,9 +630,9 @@ func TestRetainedRemovalLegacyCleanup(t *testing.T) {
 				t.Fatal("predecessor repair invented custody/history or changed surviving bytes")
 			}
 			retainedAssertSettled(t, c)
-			if c.Start(t.Context()) == nil {
-				t.Fatal("missing/partial predecessor custody became startable")
-			}
+			// Missing or partial predecessor custody stays unstartable, and the
+			// refusal precedes layout: no journal/ is recreated (review F7, M5).
+			retainedAssertStartRefused(t, f)
 		})
 	}
 	t.Run("foreign_pending_with_torn_tail", func(t *testing.T) {

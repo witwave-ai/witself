@@ -1221,8 +1221,10 @@ or a supported offering.
 LC-S7D2A bounds ordinary removal to a verified stop and durable launch refusal.
 It preserves the initialized installation identity, PGDATA, private run custody,
 the entire journal, payload/trust/service recovery material and temporary
-spool/tmp/log files. The omitted-when-false `removal_retained` marker prevents
-direct and service PostgreSQL starts; retained roots are not adopted by Install,
+spool/tmp/log files. The omitted-when-false `removal_retained` marker makes Start
+refuse before any journal record, credential read or launch (only its operation
+lock may be created first) and independently refuses service PostgreSQL boot;
+retained roots are not adopted by Install,
 and reinstall remains unsupported. Current journals close runtime cleanup and
 the remove operation before the manifest checkpoint clears. Repair settles only
 the surviving obligation, without inventing missing credentials or history,

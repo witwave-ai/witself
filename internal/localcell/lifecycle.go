@@ -662,7 +662,12 @@ func (c *Cell) Inspect(_ context.Context) (Inspection, error) {
 		}
 	}
 	if result.Manifest != nil && result.Manifest.RemovalRetained {
+		// The marker refuses startup either way; claim retained data only while
+		// PGDATA exists (an interrupted purge may already have deleted it).
 		result.InstallState = "removed; data retained; reinstall unsupported"
+		if !result.PGDataPresent {
+			result.InstallState = "removed; data purged or missing; reinstall unsupported"
+		}
 	}
 	for _, component := range []string{"postgres", "server", "worker"} {
 		state, err := c.processState(component)

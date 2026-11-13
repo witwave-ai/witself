@@ -148,7 +148,7 @@ func (c *Cell) PrepareService(ctx context.Context, d ServiceDescriptor) error {
 	}
 	defer func() { _ = lock.Close() }()
 	m, err := readManifest(c.cfg.Root)
-	if err != nil || !m.Installed {
+	if err != nil || !m.Installed || m.RemovalRetained {
 		return errors.New("service_installation_required")
 	}
 	uid, err := serviceOwner()
