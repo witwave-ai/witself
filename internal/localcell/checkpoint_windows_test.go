@@ -223,9 +223,10 @@ func TestWindowsCheckpointPrivateCopy(t *testing.T) {
 	if os.Remove(junction) != nil || !maps.Equal(listed, windowsCheckpointListed(t, c)) {
 		t.Fatal("a refused checkpoint changed Inspect's checkpoints")
 	}
-	// Row 7: a 207-unit root puts recovery/<id>/run/postgres.password at exactly
-	// 260 units (root + 53), while every live path stays below 260 (the longest
-	// transient, a run/ temporary, is root + 38).
+	// Row 7: the directory rule decides the refusal for this tree. The 207-unit
+	// root's 260-unit file arithmetic (root + 53) is asserted as a property of
+	// the root, not the deciding rule. Every live path stays below 260 (the
+	// longest transient, a run/ temporary, is root + 38).
 	units := func(path string) int { return len(utf16.Encode([]rune(path))) }
 	parent, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil || units(parent) > 205 {

@@ -1275,9 +1275,10 @@ selected layout) of the installation named by its exact identity from
 against its copy-time digest, writes `inventory.json`, and writes `witness.json`
 last; only a witnessed checkpoint is complete. Before any write it proves the
 cell cold: no live recorded component, no `pg/postmaster.pid`, and a
-`pg_controldata` cluster state of `shut down`. Before the witness it proves that
-again, with an equal second control reading and an unchanged
-`pg/global/pg_control`. `pg_controldata` runs from `Binaries.PostgresDir`, so a
+`pg_controldata` cluster state of `shut down`. Before the witness it requires an
+equal second control reading, no `pg/postmaster.pid` and an unchanged
+`pg/global/pg_control`; process liveness is not re-checked then. `pg_controldata`
+runs from `Binaries.PostgresDir`, so a
 bundle without it refuses every checkpoint; both CI bundles now preflight it. At
 most two complete checkpoints are kept, and a new one starts only when free space
 is at least 2·S + 1 GiB, where S is the estimated size of the copy and the second
@@ -1285,16 +1286,21 @@ S reserves the drill's space. Only `DeleteCheckpoint` naming one exact identifie
 deletes a checkpoint; purge, removal, `Reinstall` and Repair keep checkpoints. A
 checkpoint holds all data and every password, survives purge, and stays
 unverified until the D2.1-b2 drill: complete means that the writer finished, not
-that the data was verified. The witness detects accidental corruption and
-truncation, not a rewrite by a process of the same user. Ordinary operations
+that the data was verified. The inventory and witness record digests that a
+later check can use to detect accidental corruption or truncation, not a
+same-user rewrite. Nothing verifies a kept checkpoint yet, and `Inspect` lists
+a damaged one as complete. Ordinary operations
 validate only the `recovery/` directory itself; `Checkpoint`, `DeleteCheckpoint`
 and `Inspect` validate all of `recovery/**` and refuse a tree that fails, which
-must then be repaired by hand. An unknown entry in `recovery/`, for example
-`.DS_Store`, blocks new checkpoints until it is removed by hand, and a new
-installation in a purged root inherits the old checkpoints, with their
-passwords, which count toward the limit. LC-S7D2E2 proves the Windows copy of
-real inherited-ACL PGDATA files and requires the native PostgreSQL 16 proof
-`TestRealLifecycle/Checkpoint` on all five CI rows. Drill, restore, rollback,
+must then be repaired by hand. A private unknown entry in `recovery/` (for
+example a 0600 `.DS_Store` on Unix) blocks `Checkpoint` but permits `Inspect`
+and exact-id `DeleteCheckpoint`; a non-private entry (for example 0644 on Unix)
+makes all three refuse until repaired by hand. A new installation in a purged
+root inherits the old checkpoints, with their passwords, which count toward
+the limit. W1 uses synthetic files written by a restricted-token child with
+real inherited ACLs; real PostgreSQL files are copied on Windows only by the
+native proof. LC-S7D2E2 requires that PostgreSQL 16 proof,
+`TestRealLifecycle/Checkpoint`, on all five CI rows. Drill, restore, rollback,
 update wiring and D9 remain pending; this is no M4/M5 completion or
 supported-offering claim.
 

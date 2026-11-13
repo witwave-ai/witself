@@ -6,11 +6,14 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"io/fs"
 	"maps"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -102,24 +105,66 @@ func checkpointNativeInventory(t *testing.T, checkpointID string, data []byte) m
 	return entries
 }
 
+type checkpointNativeControl struct {
+	ControlVersion   string `json:"control_version"`
+	CatalogVersion   string `json:"catalog_version"`
+	SystemIdentifier string `json:"system_identifier"`
+	State            string `json:"state"`
+	CheckpointLSN    string `json:"checkpoint_lsn"`
+}
+
+// checkpointNativeReadControl independently reads the stopped cluster once;
+// neither command output nor parsed values may appear in diagnostics.
+func checkpointNativeReadControl(t *testing.T, binaries localcell.Binaries, root string) checkpointNativeControl {
+	t.Helper()
+	cmd := exec.CommandContext(t.Context(), filepath.Join(binaries.PostgresDir, lifecycleExecutableName("pg_controldata")), "-D", filepath.Join(root, "pg"))
+	cmd.Dir, cmd.Env = root, []string{"LC_ALL=C", "LC_MESSAGES=C", "LANG=C"}
+	var output bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &output, io.Discard
+	defer func() { clear(output.Bytes()) }()
+	if cmd.Run() != nil {
+		t.Fatal("cannot independently read native checkpoint control data")
+	}
+	var control checkpointNativeControl
+	fields := map[string]*string{
+		"pg_control version number": &control.ControlVersion, "Catalog version number": &control.CatalogVersion,
+		"Database system identifier": &control.SystemIdentifier, "Database cluster state": &control.State,
+		"Latest checkpoint location": &control.CheckpointLSN,
+	}
+	for _, line := range strings.Split(strings.ReplaceAll(output.String(), "\r\n", "\n"), "\n") {
+		key, value, found := strings.Cut(line, ":")
+		if field := fields[strings.TrimSpace(key)]; found && field != nil {
+			if *field != "" {
+				t.Fatal("independent native checkpoint control data repeats a field")
+			}
+			*field = strings.TrimSpace(value)
+		}
+	}
+	for _, field := range fields {
+		if *field == "" {
+			t.Fatal("independent native checkpoint control data lacks a field")
+		}
+	}
+	if control.State != "shut down" {
+		t.Fatal("independent native checkpoint control data is not shut down")
+	}
+	return control
+}
+
 // checkpointNativeWitness checks witness.json against its inventory bytes and
-// the live copy set, and returns the system identifier and checkpoint location.
-func checkpointNativeWitness(t *testing.T, dir, checkpointID, installationID string, inventory []byte, live map[string]checkpointNativeEntry) [2]string {
+// the live copy set, and returns all five control fields.
+func checkpointNativeWitness(t *testing.T, checkpointID, installationID string, inventory, record []byte, live map[string]checkpointNativeEntry) checkpointNativeControl {
 	t.Helper()
 	var witness struct {
-		Format         int    `json:"format"`
-		CheckpointID   string `json:"checkpoint_id"`
-		InstallationID string `json:"installation_id"`
-		PostgresMajor  string `json:"postgres_major"`
-		Control        struct {
-			SystemIdentifier string `json:"system_identifier"`
-			State            string `json:"state"`
-			CheckpointLSN    string `json:"checkpoint_lsn"`
-		} `json:"control"`
-		Files           int    `json:"files"`
-		Directories     int    `json:"directories"`
-		Bytes           int64  `json:"bytes"`
-		InventorySHA256 string `json:"inventory_sha256"`
+		Format          int                     `json:"format"`
+		CheckpointID    string                  `json:"checkpoint_id"`
+		InstallationID  string                  `json:"installation_id"`
+		PostgresMajor   string                  `json:"postgres_major"`
+		Control         checkpointNativeControl `json:"control"`
+		Files           int                     `json:"files"`
+		Directories     int                     `json:"directories"`
+		Bytes           int64                   `json:"bytes"`
+		InventorySHA256 string                  `json:"inventory_sha256"`
 	}
 	files, directories, total := 0, 0, int64(0)
 	for _, entry := range live {
@@ -130,13 +175,13 @@ func checkpointNativeWitness(t *testing.T, dir, checkpointID, installationID str
 		}
 	}
 	sum := sha256.Sum256(inventory)
-	if json.Unmarshal(checkpointNativeRead(t, filepath.Join(dir, "witness.json")), &witness) != nil || witness.Format != 1 ||
+	if json.Unmarshal(record, &witness) != nil || witness.Format != 1 ||
 		witness.CheckpointID != checkpointID || witness.InstallationID != installationID || witness.PostgresMajor != "16" ||
 		witness.Control.State != "shut down" || witness.Control.SystemIdentifier == "" || witness.Control.CheckpointLSN == "" ||
 		witness.Files != files || witness.Directories != directories || witness.Bytes != total || witness.InventorySHA256 != hex.EncodeToString(sum[:]) {
 		t.Fatal("a native checkpoint witness does not match its inventory and the live tree")
 	}
-	return [2]string{witness.Control.SystemIdentifier, witness.Control.CheckpointLSN}
+	return witness.Control
 }
 
 // checkpointNativeListed is Inspect's checkpoint view, identifier to
@@ -205,7 +250,8 @@ func testCheckpointNative(t *testing.T, binaries localcell.Binaries) {
 		t.Fatalf("stop: %v", err)
 	}
 	assertStopped(t, cell)
-	// Step 2: another identity is refused and changes nothing.
+	// Step 2: another identity is refused; recovery stays absent, Inspect's
+	// checkpoint listing stays empty, and journal bytes stay equal.
 	journal := filepath.Join(root, "journal", "operations.jsonl")
 	before, prefix := checkpointNativeListed(t, cell), checkpointNativeRead(t, journal)
 	err := cell.Checkpoint(ctx, localcell.CheckpointOptions{InstallationID: manifest.InstallationID + "-other"})
@@ -216,6 +262,9 @@ func testCheckpointNative(t *testing.T, binaries localcell.Binaries) {
 	}
 	// Step 3: one stop (one own() walk) with no checkpoint.
 	baseline := checkpointNativeStop(t, cell)
+	independent := checkpointNativeReadControl(t, binaries, root)
+	liveBefore := checkpointNativeTree(t, root, "pg", "manifest.json", "run/postgres.password")
+	liveBefore["run"] = checkpointNativeEntry{directory: true}
 	// Step 4: two checkpoints, each an exact copy of the stopped live tree.
 	options := localcell.CheckpointOptions{InstallationID: manifest.InstallationID}
 	var ids []string
@@ -230,10 +279,15 @@ func testCheckpointNative(t *testing.T, binaries localcell.Binaries) {
 	}
 	live := checkpointNativeTree(t, root, "pg", "manifest.json", "run/postgres.password")
 	live["run"] = checkpointNativeEntry{directory: true}
-	var control [2][2]string
+	if !reflect.DeepEqual(liveBefore, live) {
+		t.Fatal("checkpoints changed the stopped live copy set")
+	}
+	var control [2]checkpointNativeControl
+	var inventories, witnesses [2][]byte
 	for index, checkpointID := range ids {
 		dir := filepath.Join(root, "recovery", checkpointID)
 		inventory := checkpointNativeRead(t, filepath.Join(dir, "inventory.json"))
+		inventories[index], witnesses[index] = inventory, checkpointNativeRead(t, filepath.Join(dir, "witness.json"))
 		copied := checkpointNativeTree(t, dir, ".")
 		for _, name := range []string{".", "inventory.json", "witness.json"} {
 			delete(copied, name)
@@ -241,12 +295,17 @@ func testCheckpointNative(t *testing.T, binaries localcell.Binaries) {
 		if !reflect.DeepEqual(live, checkpointNativeInventory(t, checkpointID, inventory)) || !reflect.DeepEqual(live, copied) {
 			t.Fatal("a checkpoint is not an exact copy of the stopped live tree")
 		}
-		control[index] = checkpointNativeWitness(t, dir, checkpointID, manifest.InstallationID, inventory, live)
+		control[index] = checkpointNativeWitness(t, checkpointID, manifest.InstallationID, inventory, witnesses[index], live)
+		if control[index] != independent {
+			t.Fatal("a checkpoint witness differs from the independent cluster control reading")
+		}
 	}
 	if control[0] != control[1] {
 		t.Fatal("the two checkpoints witnessed different control data")
 	}
-	// Step 5 (A-02): two kept checkpoints must not inflate the ordinary walk.
+	// Step 5 (A-02): the bound detects a stalled walk, not mere inclusion of
+	// recovery descendants. TestWindowsPrivateTreeRecoveryBoundary's count row
+	// is E0's guard against including them in ordinary walks.
 	elapsed := checkpointNativeStop(t, cell)
 	t.Logf("checkpoint copy set: %d objects; stop: %d ms with none, %d ms with two", len(live), baseline.Milliseconds(), elapsed.Milliseconds())
 	if elapsed > timeout/5 {
@@ -254,8 +313,12 @@ func testCheckpointNative(t *testing.T, binaries localcell.Binaries) {
 	}
 	// Step 6: a third checkpoint is refused at the limit.
 	before = checkpointNativeListed(t, cell)
+	prefix = checkpointNativeRead(t, journal)
 	if err := cell.Checkpoint(ctx, options); !errors.Is(err, localcell.ErrCheckpointLimitReachedForTest) || !maps.Equal(before, checkpointNativeListed(t, cell)) {
 		t.Fatal("a third checkpoint was not refused at the limit")
+	}
+	if !bytes.Equal(prefix, checkpointNativeRead(t, journal)) {
+		t.Fatal("the checkpoint limit refusal changed the journal")
 	}
 	// Step 7: the live cell is unaffected.
 	if err := startLifecycle(t, cell, root); err != nil {
@@ -277,6 +340,18 @@ func testCheckpointNative(t *testing.T, binaries localcell.Binaries) {
 	listed := checkpointNativeListed(t, cell)
 	if _, err := os.Lstat(filepath.Join(root, "pg")); !errors.Is(err, fs.ErrNotExist) || len(listed) != 2 || !listed[ids[0]] || !listed[ids[1]] {
 		t.Fatal("purge did not remove PGDATA while keeping both complete checkpoints")
+	}
+	for index, checkpointID := range ids {
+		dir := filepath.Join(root, "recovery", checkpointID)
+		kept := checkpointNativeTree(t, dir, ".")
+		for _, name := range []string{".", "inventory.json", "witness.json"} {
+			delete(kept, name)
+		}
+		if !reflect.DeepEqual(live, kept) ||
+			!bytes.Equal(inventories[index], checkpointNativeRead(t, filepath.Join(dir, "inventory.json"))) ||
+			!bytes.Equal(witnesses[index], checkpointNativeRead(t, filepath.Join(dir, "witness.json"))) {
+			t.Fatal("removal or purge changed a kept checkpoint")
+		}
 	}
 	// Step 9: only the exact-identifier deletions empty recovery/.
 	for _, checkpointID := range ids {

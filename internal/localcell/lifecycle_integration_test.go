@@ -37,7 +37,7 @@ func TestRealLifecycle(t *testing.T) {
 }
 
 func postgresBinariesPresent(directory string) bool {
-	for _, name := range []string{"postgres", "initdb", "pg_ctl", "psql", "createdb"} {
+	for _, name := range []string{"postgres", "initdb", "pg_ctl", "psql", "createdb", "pg_controldata"} {
 		info, err := os.Stat(filepath.Join(directory, lifecycleExecutableName(name)))
 		if err != nil || info.IsDir() {
 			return false

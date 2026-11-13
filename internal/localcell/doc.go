@@ -55,21 +55,26 @@
 // the copy, writes inventory.json, and writes witness.json last; only a
 // witnessed checkpoint is complete. Before any write it proves the cell cold: no
 // live component, no pg/postmaster.pid, and a pg_controldata state of shut down;
-// before the witness it proves that again, with an equal second reading and an
-// unchanged pg_control. pg_controldata runs from Binaries.PostgresDir, so a
+// before the witness it requires an equal second control reading, no
+// pg/postmaster.pid and an unchanged pg_control; process liveness is not
+// re-checked then. pg_controldata runs from Binaries.PostgresDir, so a
 // bundle without it refuses every checkpoint. At most two complete checkpoints
 // are kept; a new one needs free space of at least 2·S + 1 GiB for a copy of
 // estimated size S. Only DeleteCheckpoint naming one exact identifier deletes
 // one: purge, removal, Reinstall and Repair keep them. Checkpoints hold all data
 // and every password, survive purge, and stay unverified until the D2.1-b2
 // drill: complete means the writer finished, not that the data was verified.
-// The witness detects accidental corruption and truncation, not a same-user
-// rewrite. Ordinary operations validate only the recovery/ directory itself;
+// The inventory and witness record digests that a later check can use to detect
+// accidental corruption or truncation, not a same-user rewrite. Nothing verifies
+// a kept checkpoint yet, and Inspect lists a damaged one as complete.
+// Ordinary operations validate only the recovery/ directory itself;
 // Checkpoint, DeleteCheckpoint and Inspect validate all of recovery/** and
-// refuse a tree that fails, which must then be repaired by hand. An unknown
-// entry there (for example .DS_Store) blocks new checkpoints until it is
-// removed by hand, and a new installation in a purged root inherits the old
-// checkpoints, with their passwords, which count toward the limit. Drill,
+// refuse a tree that fails, which must then be repaired by hand. A private
+// unknown entry there (for example a 0600 .DS_Store on Unix) blocks Checkpoint
+// but permits Inspect and exact-id DeleteCheckpoint; a non-private entry
+// (for example 0644 on Unix) makes all three refuse until repaired by hand.
+// A new installation in a purged root inherits the old checkpoints, with their
+// passwords, which count toward the limit. Drill,
 // restore, rollback, update wiring and D9 remain pending; this is no M4/M5 or
 // supported-offering claim.
 //
