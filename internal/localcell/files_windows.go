@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/witwave-ai/witself/internal/runtimeconfig"
 )
@@ -44,6 +43,9 @@ func createPrivateTemp(dir string) (*os.File, error) {
 
 // A pre-existing untrusted object anywhere in the layout must fail before the
 // operation creates a lock, appends a journal entry, or removes retained state.
+// The one exception is content below <root>/recovery: that directory is
+// validated as a single object and never descended, and what it holds is
+// validated only by the operations that use it.
 // WalkDir does not traverse symlinks; validation also rejects every reparse tag.
 func validatePrivateTree(root string) error {
 	if err := validateRootPath(root); err != nil {
@@ -53,11 +55,13 @@ func validatePrivateTree(root string) error {
 		return nil
 	}
 	return validatePrivateTreeSnapshot(root, filepath.WalkDir, func(path string, directory bool) error {
-		pg := filepath.Join(root, "pg")
-		if path == pg || strings.HasPrefix(path, pg+string(filepath.Separator)) {
+		// Only the real validators are wired here: privateTreeEntry chooses the
+		// rule and validates <root>/recovery as one object without descending.
+		return privateTreeEntry(root, path, directory, func() error {
+			return validatePrivate(path, directory)
+		}, func(pg string) error {
 			return runtimeconfig.WindowsPrivatePostgresValidate(pg, path, directory)
-		}
-		return validatePrivate(path, directory)
+		})
 	}, os.Lstat)
 }
 
