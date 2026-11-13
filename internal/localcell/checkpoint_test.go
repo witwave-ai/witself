@@ -284,7 +284,7 @@ func TestCheckpointAdmissionRefusals(t *testing.T) {
 			}
 		}
 	}
-	a, b := "ckpt_aaaaaaaaaaaaaaaa", "ckpt_bbbbbbbbbbbbbbbb"
+	a, b, cc := "ckpt_aaaaaaaaaaaaaaaa", "ckpt_bbbbbbbbbbbbbbbb", "ckpt_cccccccccccccccc"
 	both, legacy, selected := []string{"legacy", "selected"}, []string{"legacy"}, []string{"selected"}
 	// position is the R4 predicate a row violates alone: control runs at 15,
 	// free at 16 and identity allocation (17) follows both; 0 is the owner's fence.
@@ -324,6 +324,14 @@ func TestCheckpointAdmissionRefusals(t *testing.T) {
 		}, "local_checkpoint_state_unsupported"},
 		{"pg-version-15", legacy, 11, write("pg/PG_VERSION", "15\n"), "local_checkpoint_source_unsupported"},
 		{"tablespace", legacy, 14, write("pg/pg_tblspc/16384", "synthetic tablespace entry"), "local_checkpoint_source_unsupported"},
+		// A private temporary at any depth, the cell's own crash residue, is never copied (XR1-02).
+		{"pending-temporary", legacy, 14, write("pg/.pending-123456789", "synthetic temporary"), "local_checkpoint_source_unsupported"},
+		{"pending-temporary-nested", legacy, 14, write("pg/base/1/.pending-x", "synthetic temporary"), "local_checkpoint_source_unsupported"},
+		{"pending-directory", legacy, 14, func(k *checkpointCase) {
+			if privateDir(k.c.path("pg", "base", ".pending-d"), true) != nil {
+				k.t.Fatal("cannot prepare a pending directory")
+			}
+		}, "local_checkpoint_source_unsupported"},
 		{"recovery-invalid-deep", legacy, 12, func(k *checkpointCase) {
 			recoveryBoundaryNonPrivate(k.t, filepath.Join(checkpointPlant(k.t, k.c, a, a, "pg/base/1/1259"), "pg", "base", "1", "1259"), false)
 		}, "local_checkpoint_state_unsupported"},
@@ -331,6 +339,11 @@ func TestCheckpointAdmissionRefusals(t *testing.T) {
 		{"incomplete-present", legacy, 13, plant(a, "", "pg/PG_VERSION"), "local_checkpoint_incomplete"},
 		{"foreign-witness", legacy, 13, plant(a, b), "local_checkpoint_incomplete"},
 		{"two-complete", legacy, 13, func(k *checkpointCase) { plant(a, a)(k); plant(b, b)(k) }, "local_checkpoint_limit_reached"},
+		// R4.13's order: incomplete, then unknown, then the limit (MX13); an
+		// identifier-shaped regular file is unknown, not incomplete (MX18).
+		{"incomplete-before-limit", legacy, 13, func(k *checkpointCase) { plant(a, a)(k); plant(b, b)(k); plant(cc, "", "pg/PG_VERSION")(k) }, "local_checkpoint_incomplete"},
+		{"unknown-before-limit", legacy, 13, func(k *checkpointCase) { plant(a, a)(k); plant(b, b)(k); write("recovery/notes", "synthetic note")(k) }, "local_checkpoint_state_unsupported"},
+		{"id-shaped-file-unknown", legacy, 13, func(k *checkpointCase) { plant(b, b)(k); write("recovery/"+a, "synthetic file")(k) }, "local_checkpoint_state_unsupported"},
 		{"control-error", legacy, 15, control("shut down", "PostgreSQL command timed out"), "PostgreSQL command timed out"},
 		{"control-in-production", legacy, 15, control("in production", ""), "local_checkpoint_state_unsupported"},
 		// The production runner maps a missing pg_controldata to the fixed start text.
@@ -599,28 +612,47 @@ func TestCheckpointFailureCrashRepair(t *testing.T) {
 	plantFile := func(t *testing.T, f *retainedFixture, name func(string) string) func(string) {
 		return func(dir string) { checkpointWrite(t, f.cell, name(dir), "synthetic record\n") }
 	}
+	const mismatch = "local_checkpoint_witness_mismatch"
 	for _, row := range []struct {
-		name     string
-		arm      func(*testing.T, *retainedFixture, *checkpointRecorder)
-		complete bool
+		name string
+		arm  func(*testing.T, *retainedFixture, *checkpointRecorder)
+		want string // the fixed cause; empty when the checkpoint is complete
 	}{
 		{"byte-flip", func(t *testing.T, _ *retainedFixture, r *checkpointRecorder) {
 			r.after = func(dir string) { checkpointRewrite(t, filepath.Join(dir, "pg", "base", "1", "1259")) }
-		}, false},
+		}, mismatch},
 		{"extra-copied-entry", func(t *testing.T, f *retainedFixture, r *checkpointRecorder) {
 			r.after = plantFile(t, f, func(dir string) string { return path.Join("recovery", filepath.Base(dir), "pg", "recovery.signal") })
-		}, false},
+		}, mismatch},
+		// The exact-tree count: a planned empty directory missing from the copy (XR1-03, MX10).
+		{"missing-planned-directory", func(t *testing.T, _ *retainedFixture, r *checkpointRecorder) {
+			r.after = func(dir string) {
+				if os.Remove(filepath.Join(dir, "pg", "pg_notify")) != nil {
+					t.Fatal("cannot remove a copied empty directory")
+				}
+			}
+		}, mismatch},
 		{"postmaster-pid", func(t *testing.T, f *retainedFixture, r *checkpointRecorder) {
 			r.after = plantFile(t, f, func(string) string { return "pg/postmaster.pid" })
-		}, false},
+		}, mismatch},
 		{"pg-control-rewritten", func(t *testing.T, f *retainedFixture, r *checkpointRecorder) {
 			r.after = func(string) { checkpointRewrite(t, f.cell.path("pg", "global", "pg_control")) }
-		}, false},
+		}, mismatch},
 		{"control-lsn-moved", func(_ *testing.T, _ *retainedFixture, r *checkpointRecorder) {
 			moved := checkpointSyntheticControl
 			moved.CheckpointLSN = "0/1548FC0"
 			r.readings = []pgControlData{checkpointSyntheticControl, moved}
-		}, false},
+		}, mismatch},
+		// Every field of the second reading is compared, the state too (MX11).
+		{"control-state-differs", func(_ *testing.T, _ *retainedFixture, r *checkpointRecorder) {
+			moved := checkpointSyntheticControl
+			moved.State = "shut down in recovery"
+			r.readings = []pgControlData{checkpointSyntheticControl, moved}
+		}, mismatch},
+		// A second control run that itself fails read nothing: a copy failure (XR1-11).
+		{"second-control-fails", func(_ *testing.T, _ *retainedFixture, r *checkpointRecorder) {
+			r.after = func(string) { r.controlErr = fixedCause("PostgreSQL command could not start") }
+		}, "local_checkpoint_copy_failed"},
 		{"witness-done-sync-fails", func(t *testing.T, _ *retainedFixture, _ *checkpointRecorder) {
 			original, failed := syncFile, false
 			t.Cleanup(func() { syncFile = original })
@@ -633,19 +665,19 @@ func TestCheckpointFailureCrashRepair(t *testing.T) {
 				}
 				return original(file)
 			}
-		}, true},
+		}, ""},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			f, r := checkpointFixture(t, "legacy", false)
 			c := f.cell
 			row.arm(t, f, r)
 			err := c.Checkpoint(t.Context(), checkpointOptions(f))
-			if err == nil || errors.Is(err, errInterrupted) || (!row.complete && !checkpointSameError(err, "local_checkpoint_witness_mismatch")) {
+			if err == nil || errors.Is(err, errInterrupted) || (row.want != "" && !checkpointSameError(err, row.want)) {
 				t.Fatal("checkpoint failure was not reported with its cause")
 			}
 			p, err := c.readJournal()
-			if ids := checkpointIDs(t, c); err != nil || p.pending != nil || p.tornTail || len(ids) != map[bool]int{true: 1}[row.complete] ||
-				(row.complete && !checkpointSummaryOf(t, c, ids[0]).Complete) {
+			if ids := checkpointIDs(t, c); err != nil || p.pending != nil || p.tornTail || len(ids) != map[bool]int{true: 1}[row.want == ""] ||
+				(row.want == "" && !checkpointSummaryOf(t, c, ids[0]).Complete) {
 				t.Fatal("a failure left the operation open or its directory, or discarded a witnessed checkpoint")
 			}
 		})
@@ -655,6 +687,52 @@ func TestCheckpointFailureCrashRepair(t *testing.T) {
 		checkpointPlant(t, f.cell, "ckpt_aaaaaaaaaaaaaaaa", "ckpt_bbbbbbbbbbbbbbbb")
 		if summary := checkpointSummaryOf(t, f.cell, "ckpt_aaaaaaaaaaaaaaaa"); summary != (CheckpointSummary{ID: "ckpt_aaaaaaaaaaaaaaaa"}) {
 			t.Fatal("a witness naming another checkpoint was listed complete")
+		}
+	})
+	// A witness of another format names its own checkpoint and is not complete (MX6).
+	t.Run("other-format-witness-listed-incomplete", func(t *testing.T) {
+		f, _ := checkpointFixture(t, "legacy", false)
+		dir := checkpointPlant(t, f.cell, "ckpt_cccccccccccccccc", "")
+		if writeAtomic(filepath.Join(dir, checkpointWitnessName), checkpointWitness{Format: 2, CheckpointID: "ckpt_cccccccccccccccc"}, nil) != nil {
+			t.Fatal("cannot plant a witness of another format")
+		}
+		if summary := checkpointSummaryOf(t, f.cell, "ckpt_cccccccccccccccc"); summary != (CheckpointSummary{ID: "ckpt_cccccccccccccccc"}) {
+			t.Fatal("a witness of another format was listed complete")
+		}
+	})
+	// The copy step refuses an identifier that appeared after allocation: it
+	// neither writes into it nor removes it, witnessed or not (XR1-01: MX1, MX2).
+	for _, witness := range []string{"ckpt_cccccccccccccccc", ""} {
+		t.Run("copy-step-existing-id/witness="+strconv.FormatBool(witness != ""), func(t *testing.T) {
+			f, r := checkpointFixture(t, "legacy", false)
+			c, planted := f.cell, map[string]retainedEntry(nil)
+			tree := func() map[string]retainedEntry { return retainedSnapshot(t, &Cell{cfg: Config{Root: c.recoveryDir()}}) }
+			r.nextID = func() (string, error) { return "ckpt_cccccccccccccccc", nil }
+			c.cfg.Failpoint = func(operation, step string) error {
+				if operation == "checkpoint" && step == "operation_started" {
+					checkpointPlant(t, c, "ckpt_cccccccccccccccc", witness, "pg/PG_VERSION", "manifest.json")
+					planted = tree()
+				}
+				return nil
+			}
+			err := c.Checkpoint(t.Context(), checkpointOptions(f))
+			retainedAssertRecords(t, f, []string{"checkpoint/operation/started", "checkpoint/copy/started", "checkpoint/copy/failed", "checkpoint/operation/done"})
+			if !checkpointSameError(err, "local_checkpoint_copy_failed") || planted == nil || !reflect.DeepEqual(planted, tree()) {
+				t.Fatal("the copy step wrote into or removed an identifier that appeared after allocation")
+			}
+		})
+	}
+	// Cancellation after admission is a copy failure: the directory is
+	// discarded, the operation closed and nothing complete remains (MX7).
+	t.Run("cancelled-after-admission", func(t *testing.T) {
+		f, r := checkpointFixture(t, "legacy", false)
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		r.after = func(string) { cancel() }
+		err := f.cell.Checkpoint(ctx, checkpointOptions(f))
+		if p, journalErr := f.cell.readJournal(); !checkpointSameError(err, "local_checkpoint_copy_failed") || journalErr != nil || p.pending != nil ||
+			len(checkpointIDs(t, f.cell)) != 0 {
+			t.Fatal("a cancelled checkpoint was not discarded and closed as a copy failure")
 		}
 	})
 	for _, layout := range []string{"legacy", "selected"} {
@@ -734,6 +812,11 @@ func TestDeleteCheckpoint(t *testing.T) {
 		{"pending-operation", func(_ *testing.T, c *Cell, named string) string { _ = c.begin("stop"); return named }, "local_checkpoint_state_unsupported"},
 		{"valid-fence", func(t *testing.T, c *Cell, named string) string { updateTestFence(t, c); return named }, "local_maintenance_fence_active"},
 		{"live-record", func(t *testing.T, c *Cell, named string) string { checkpointRecord(t, c, own); return named }, "local_checkpoint_state_unsupported"},
+		// Another spelling a case-insensitive volume resolves is never deleted (XR1-06).
+		{"case-alias", func(t *testing.T, c *Cell, _ string) string {
+			checkpointPlant(t, c, "CKPT_AAAAAAAAAAAAAAAA", "ckpt_aaaaaaaaaaaaaaaa", "pg/base/1/1259")
+			return "ckpt_aaaaaaaaaaaaaaaa"
+		}, "local_checkpoint_identity_mismatch"},
 		{"recovery-invalid-inside", func(t *testing.T, c *Cell, named string) string {
 			recoveryBoundaryNonPrivate(t, c.path("recovery", named, "pg", "base", "1", "1259"), false)
 			return named
@@ -969,5 +1052,100 @@ func checkpointRefusedEverywhere(t *testing.T, f *retainedFixture) {
 	checkpointUnchanged(t, c, before)
 	if inspection, err := c.Inspect(t.Context()); !checkpointSameError(err, want) || len(inspection.Checkpoints) != 0 {
 		t.Fatal("inspection listed a bad recovery tree")
+	}
+}
+
+// The copy plan admits only a name the inventory spells exactly and no private
+// temporary at any depth (XR1-02, XR1-04). The decision is pure, so these rows
+// run on every OS; the non-UTF-8 file itself is a Linux row.
+func TestCheckpointNameSupported(t *testing.T) {
+	for name, want := range map[string]bool{"pg": true, "pg/base/1/1259": true, "pg/base/1/x.pending-1": true,
+		"pg/.pending-123456789": false, "pg/base/1/.pending-x": false, "pg/base/.pending-d": false, "pg/base/1/x\xff": false,
+		"pg/base/1/x\xed\xa0\x80": false} {
+		if checkpointNameSupported(name) != want {
+			t.Fatalf("checkpoint name row %q decided differently", name)
+		}
+	}
+}
+
+// The checkpoint directory syncs keep their durable order (XR1-09): the copy
+// syncs every planned directory deepest first, then its own, after its last
+// file and before its inventory (MX3); the discard syncs recovery/ once the
+// directory is gone (MX5); the unseal syncs the directory once the witness is
+// gone and before anything else is (MX4), and a failed unseal sync is returned.
+func TestCheckpointDirectorySyncOrder(t *testing.T) {
+	if reflect.ValueOf(syncCheckpointDirectory).Pointer() != reflect.ValueOf(syncDirectory).Pointer() {
+		t.Fatal("checkpoint directory sync no longer defaults to syncDirectory")
+	}
+	const target = "ckpt_cccccccccccccccc"
+	// fixture logs each sync as its slash path below recovery/ plus probe of the
+	// target directory, and fails the sync of *fail.
+	fixture := func(t *testing.T, fail *string, probe func(string) string) (*retainedFixture, *checkpointRecorder, *[]string) {
+		f, r := checkpointFixture(t, "legacy", false)
+		dir, synced, original := f.cell.path("recovery", target), &[]string{}, syncCheckpointDirectory
+		r.nextID = func() (string, error) { return target, nil }
+		t.Cleanup(func() { syncCheckpointDirectory = original })
+		syncCheckpointDirectory = func(name string) error {
+			rel, err := filepath.Rel(f.cell.recoveryDir(), name)
+			if *synced = append(*synced, filepath.ToSlash(rel)+probe(dir)); err != nil || filepath.ToSlash(rel) == *fail {
+				return errors.New("synthetic directory sync failure")
+			}
+			return original(name)
+		}
+		return f, r, synced
+	}
+	present := func(name string) string {
+		_, err := os.Lstat(name)
+		return map[bool]string{true: "+", false: "-"}[err == nil]
+	}
+	t.Run("copy", func(t *testing.T) {
+		f, _, synced := fixture(t, new(string), func(dir string) string {
+			return present(filepath.Join(dir, "run", "postgres.password")) + present(filepath.Join(dir, checkpointInventoryName))
+		})
+		var want []string
+		for _, name := range slices.Sorted(maps.Keys(checkpointCopySet(f))) {
+			if f.material[name].mode.IsDir() {
+				want = append([]string{path.Join(target, name) + "+-"}, want...)
+			}
+		}
+		if f.cell.Checkpoint(t.Context(), checkpointOptions(f)) != nil || !slices.Equal(*synced, append(want, target+"+-")) {
+			t.Fatal("the copy did not sync every planned directory deepest first, then its own, after its last file and before its inventory")
+		}
+	})
+	t.Run("discard", func(t *testing.T) {
+		f, r, synced := fixture(t, new(string), present)
+		r.after = func(dir string) { checkpointRewrite(t, filepath.Join(dir, "pg", "base", "1", "1259")) }
+		if err := f.cell.Checkpoint(t.Context(), checkpointOptions(f)); !checkpointSameError(err, "local_checkpoint_witness_mismatch") ||
+			!slices.Contains(*synced, ".-") || slices.Contains(*synced, ".+") {
+			t.Fatal("the discard did not sync recovery/ after removing its directory")
+		}
+	})
+	for _, fail := range []string{"", target} {
+		t.Run("unseal/sync-fails="+strconv.FormatBool(fail != ""), func(t *testing.T) {
+			var unsealed map[string]retainedEntry
+			armed := ""
+			tree := func(dir string) map[string]retainedEntry { return retainedSnapshot(t, &Cell{cfg: Config{Root: dir}}) }
+			f, _, synced := fixture(t, &armed, func(dir string) string {
+				if present(dir) == "-" {
+					return " gone"
+				}
+				return map[bool]string{true: " unsealed", false: " other"}[reflect.DeepEqual(unsealed, tree(dir))]
+			})
+			c, dir := f.cell, f.cell.path("recovery", target)
+			if c.Checkpoint(t.Context(), checkpointOptions(f)) != nil {
+				t.Fatal("cannot prepare the checkpoint")
+			}
+			unsealed, *synced, armed = tree(dir), nil, fail
+			delete(unsealed, checkpointWitnessName)
+			err := c.DeleteCheckpoint(t.Context(), DeleteCheckpointOptions{CheckpointID: target})
+			if fail == "" && (err != nil || !slices.Equal(*synced, []string{target + " unsealed", ". gone"})) {
+				t.Fatal("deletion did not sync its directory once the witness was gone and before anything else was, then recovery/ once it was removed")
+			}
+			// A failed unseal sync is returned, closes the operation and leaves the data in place without its witness.
+			if p, journalErr := c.readJournal(); fail != "" && (!checkpointSameError(err, "local cell checkpoint_delete: unseal failed") ||
+				journalErr != nil || p.pending != nil || !reflect.DeepEqual(unsealed, tree(dir))) {
+				t.Fatal("a failed unseal sync was not returned, or did not leave the data in place without its witness")
+			}
+		})
 	}
 }

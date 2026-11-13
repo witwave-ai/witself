@@ -145,3 +145,25 @@ func TestCheckpointFailureCrashRepairCleanupIncomplete(t *testing.T) {
 		t.Fatal("the leftover was not deleted by its exact identifier")
 	}
 }
+
+// The free-space probe counts the blocks available to this user, not the free
+// blocks a root reserve keeps (MX9). Two readings bracket each probe, so other
+// use of the volume retries the attempt instead of failing the row.
+func TestCheckpointFreeSpaceAvailableBlocks(t *testing.T) {
+	dir := t.TempDir()
+	for attempt := 0; attempt < 100; attempt++ {
+		var before, after syscall.Statfs_t
+		statErr := syscall.Statfs(dir, &before)
+		free, total, err := checkpointFreeSpace(dir)
+		if err != nil || statErr != nil || syscall.Statfs(dir, &after) != nil || before.Blocks == 0 {
+			t.Fatal("cannot read the volume statistics")
+		}
+		if attempt == 0 && before.Bfree == before.Bavail {
+			t.Log("free and available blocks are equal on this volume, so this row cannot tell them apart here")
+		}
+		if before.Bavail == after.Bavail && free == uint64(before.Bavail)*(total/uint64(before.Blocks)) {
+			return
+		}
+	}
+	t.Fatal("the free-space probe did not report the blocks available to this user")
+}

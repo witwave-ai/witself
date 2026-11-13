@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"maps"
 	"os"
+	"path"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -203,14 +204,14 @@ func checkpointSourceContract(sources map[string]string) []string {
 				// (b) each writer's path is rooted in a checkpointDir value, or is
 				// exactly recovery/ (create or sync) or journal/ (one create).
 				paths := map[string]int{"writeAtomic": 1, "writeAtomicBytes": 1, "createPrivateTemp": 1, "removePrivateFile": 1, "syncDirectory": 1,
-					"os.RemoveAll": 1, "publishPrivateFile": 2, "privateDir": 1}[function]
+					"syncCheckpointDirectory": 1, "os.RemoveAll": 1, "publishPrivateFile": 2, "privateDir": 1}[function]
 				if function == "privateDir" && types.ExprString(call.Args[1]) == "false" {
 					paths = 0
 				}
 				for _, argument := range call.Args[:min(paths, len(call.Args))] {
 					switch root, bare := checkpointRoot(values, argument, 0); {
 					case root == "checkpoint":
-					case root == "recovery" && bare && (function == "privateDir" || function == "syncDirectory"):
+					case root == "recovery" && bare && (function == "privateDir" || function == "syncDirectory" || function == "syncCheckpointDirectory"):
 					case root == "journal" && bare && function == "privateDir" && owner == "deleteCheckpointLocked":
 						journalCreates++
 					default:
@@ -266,7 +267,7 @@ func TestCheckpointSourceContract(t *testing.T) {
 		{"publish_into_pgdata", "checkpoint.go", "publishPrivateFile(temporary.Name(), filepath.Join(dir, ", "publishPrivateFile(temporary.Name(), filepath.Join(c.path(\"pg\"), ", "writer_root:checkpoint.go:publishPrivateFile"},
 		{"escape_by_literal", "checkpoint.go", "writeAtomic(filepath.Join(dir, checkpointWitnessName), witness, nil)", "writeAtomic(filepath.Join(dir, \"..\", \"..\", \"manifest.json\"), witness, nil)", "writer_root:checkpoint.go:writeAtomic"},
 		{"temporary_in_run", "checkpoint.go", "createPrivateTemp(filepath.Join(dir, filepath.FromSlash(path.Dir(entry.path))))", "createPrivateTemp(c.path(\"run\"))", "live_path_not_read:checkpoint.go:run"},
-		{"recovery_joined_sync", "checkpoint.go", "return syncDirectory(c.recoveryDir())\n}\n\n// failCheckpoint", "return syncDirectory(filepath.Join(c.recoveryDir(), checkpointID))\n}\n\n// failCheckpoint", "writer_root:checkpoint.go:syncDirectory"},
+		{"recovery_joined_sync", "checkpoint.go", "return syncCheckpointDirectory(c.recoveryDir())\n}\n\n// failCheckpoint", "return syncCheckpointDirectory(filepath.Join(c.recoveryDir(), checkpointID))\n}\n\n// failCheckpoint", "writer_root:checkpoint.go:syncCheckpointDirectory"},
 		{"second_journal_create", "checkpoint.go", "\tif err := c.begin(\"checkpoint\"); err != nil {", "\t_ = privateDir(c.path(\"journal\"), true)\n\tif err := c.begin(\"checkpoint\"); err != nil {", "writer_root:checkpoint.go:privateDir"},
 		{"manifest_opened_for_write", "checkpoint.go", "openPrivateFile(c.path(\"manifest.json\"), os.O_RDONLY, 0)", "openPrivateFile(c.path(\"manifest.json\"), os.O_RDWR, 0)", "live_path_not_read:checkpoint.go:manifest.json"},
 		{"root_open_for_write", "checkpoint_unix.go", "root.OpenFile(filepath.FromSlash(rel), os.O_RDONLY, 0)", "root.OpenFile(filepath.FromSlash(rel), os.O_RDWR, 0)", "root_open_not_read_only:checkpoint_unix.go"},
@@ -335,23 +336,35 @@ func checkpointJournalVocabulary(t *testing.T) {
 	}
 }
 
-// checkpointAPIWired names every source that imports the local cell package
-// and selects a checkpoint API name.
+// checkpointAPIWired names every source that reaches the checkpoint API: a
+// selector of one of its names in a package directory where any file imports
+// the local cell package, or, in any file, a two-argument call of a selector
+// named Checkpoint or DeleteCheckpoint.
 func checkpointAPIWired(sources map[string]string) []string {
 	var wired []string
+	files, importing := map[string]*ast.File{}, map[string]bool{}
 	for _, name := range slices.Sorted(maps.Keys(sources)) {
 		file, err := parser.ParseFile(token.NewFileSet(), name, sources[name], 0)
 		if err != nil {
 			wired = append(wired, "parse:"+name)
 			continue
 		}
-		imports := slices.ContainsFunc(file.Imports, func(spec *ast.ImportSpec) bool {
-			return spec.Path.Value == strconv.Quote("github.com/witwave-ai/witself/internal/localcell")
+		files[name] = file
+		importing[path.Dir(name)] = importing[path.Dir(name)] || slices.ContainsFunc(file.Imports, func(spec *ast.ImportSpec) bool {
+			return checkpointLiteral(spec.Path) == "github.com/witwave-ai/witself/internal/localcell"
 		})
-		ast.Inspect(file, func(node ast.Node) bool {
-			selector, ok := node.(*ast.SelectorExpr)
-			if ok && imports && slices.Contains([]string{"Checkpoint", "DeleteCheckpoint", "CheckpointOptions", "DeleteCheckpointOptions"}, selector.Sel.Name) {
-				wired = append(wired, name)
+	}
+	for _, name := range slices.Sorted(maps.Keys(files)) {
+		ast.Inspect(files[name], func(node ast.Node) bool {
+			switch node := node.(type) {
+			case *ast.SelectorExpr:
+				if importing[path.Dir(name)] && slices.Contains([]string{"Checkpoint", "DeleteCheckpoint", "CheckpointOptions", "DeleteCheckpointOptions"}, node.Sel.Name) {
+					wired = append(wired, name)
+				}
+			case *ast.CallExpr:
+				if selector, ok := node.Fun.(*ast.SelectorExpr); ok && len(node.Args) == 2 && (selector.Sel.Name == "Checkpoint" || selector.Sel.Name == "DeleteCheckpoint") {
+					wired = append(wired, name)
+				}
 			}
 			return true
 		})
@@ -359,47 +372,76 @@ func checkpointAPIWired(sources map[string]string) []string {
 	return slices.Compact(wired)
 }
 
-// Dark until E2: no production code outside this package reaches the
-// checkpoint API. Only a later, explicitly specified slice may change this.
-func TestCheckpointAPIUnwired(t *testing.T) {
+// checkpointWiringSources reads, by slash path below root, every non-test Go
+// file outside internal/localcell that names a checkpoint API or the package;
+// dot, node_modules, vendor and testdata directories are not walked.
+func checkpointWiringSources(t *testing.T, root string) map[string]string {
+	t.Helper()
 	sources := map[string]string{}
-	for _, root := range []string{"../../cmd", "../../internal"} {
-		err := filepath.WalkDir(root, func(name string, entry fs.DirEntry, err error) error {
-			if err != nil {
-				return err
-			}
-			if entry.IsDir() && filepath.ToSlash(name) == "../../internal/localcell" {
-				return filepath.SkipDir
-			}
-			if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
-				return nil
-			}
-			data, err := os.ReadFile(name)
-			if bytes.Contains(data, []byte(`"github.com/witwave-ai/witself/internal/localcell"`)) {
-				sources[filepath.ToSlash(name)] = string(data)
-			}
+	err := filepath.WalkDir(root, func(name string, entry fs.DirEntry, err error) error {
+		if err != nil {
 			return err
-		})
-		if err != nil || len(sources) == 0 {
-			t.Fatal("cannot read production sources for the checkpoint wiring contract")
 		}
+		rel, err := filepath.Rel(root, name)
+		if rel = filepath.ToSlash(rel); err != nil || rel == "." {
+			return err
+		}
+		if entry.IsDir() && (strings.HasPrefix(entry.Name(), ".") || slices.Contains([]string{"node_modules", "vendor", "testdata"}, entry.Name()) || rel == "internal/localcell") {
+			return filepath.SkipDir
+		}
+		if entry.IsDir() || !strings.HasSuffix(rel, ".go") || strings.HasSuffix(rel, "_test.go") {
+			return nil
+		}
+		data, err := os.ReadFile(name)
+		if bytes.Contains(data, []byte("Checkpoint")) || bytes.Contains(data, []byte("github.com/witwave-ai/witself/internal/localcell")) {
+			sources[rel] = string(data)
+		}
+		return err
+	})
+	if err != nil {
+		t.Fatal("cannot read the module's sources for the checkpoint wiring contract")
+	}
+	return sources
+}
+
+// Dark until E2: no production code of the module outside this package reaches
+// the checkpoint API. Only a later, explicitly specified slice may change this.
+func TestCheckpointAPIUnwired(t *testing.T) {
+	sources := checkpointWiringSources(t, "../..")
+	if _, read := sources["cmd/witself-server/main.go"]; !read {
+		t.Fatal("the checkpoint wiring contract did not read a known importer of the package")
 	}
 	if wired := checkpointAPIWired(sources); len(wired) != 0 {
 		t.Fatalf("the checkpoint API is reachable from production code: %v", wired)
 	}
 	const importing = "package main\n\nimport (\n\t\"context\"\n\n\t\"github.com/witwave-ai/witself/internal/localcell\"\n)\n\nvar _ context.Context\n\n"
+	const call = importing + "func run(ctx context.Context, cell *localcell.Cell) error { return cell.Checkpoint(ctx, localcell.CheckpointOptions{}) }\n"
+	const fixture = "cmd/witself-fixture/main.go"
 	for _, row := range []struct {
-		name, source string
-		wired        bool
+		name  string
+		files map[string]string
+		want  []string
 	}{
-		{"checkpoint-call", importing + "func run(ctx context.Context, cell *localcell.Cell) error { return cell.Checkpoint(ctx, localcell.CheckpointOptions{}) }\n", true},
-		{"delete-call", importing + "func run(ctx context.Context, cell *localcell.Cell) error { return cell.DeleteCheckpoint(ctx, localcell.DeleteCheckpointOptions{}) }\n", true},
-		{"method-value", importing + "var _ = (*localcell.Cell).Checkpoint\n", true},
-		{"unrelated-checkpoint", "package main\n\ntype model struct{}\n\nfunc (model) Checkpoint() {}\n\nfunc run() { model{}.Checkpoint() }\n", false},
+		{"checkpoint-call", map[string]string{fixture: call}, []string{fixture}},
+		{"delete-call", map[string]string{fixture: importing + "func run(ctx context.Context, cell *localcell.Cell) error { return cell.DeleteCheckpoint(ctx, localcell.DeleteCheckpointOptions{}) }\n"}, []string{fixture}},
+		{"method-value", map[string]string{fixture: importing + "var _ = (*localcell.Cell).Checkpoint\n"}, []string{fixture}},
+		{"unrelated-zero-argument-call", map[string]string{"internal/model/model.go": "package model\n\ntype model struct{}\n\nfunc (model) Checkpoint() {}\n\nfunc run() { model{}.Checkpoint() }\n"}, nil},
+		{"same-package-non-importing", map[string]string{fixture: importing + "var cell *localcell.Cell\n", "cmd/witself-fixture/run.go": "package main\n\nvar run = cell.Checkpoint\n"}, []string{"cmd/witself-fixture/run.go"}},
+		{"two-argument-call-without-import", map[string]string{"tools/other/other.go": "package other\n\nfunc run(cell interface{ Checkpoint(any, any) error }) error { return cell.Checkpoint(nil, nil) }\n"}, []string{"tools/other/other.go"}},
+		{"root-level-package", map[string]string{"wiring.go": call}, []string{"wiring.go"}},
+		{"outside-the-walk", map[string]string{".tools/main.go": call, "node_modules/x/main.go": call, "vendor/x/main.go": call, "cmd/witself-fixture/testdata/main.go": call,
+			"internal/localcell/wiring.go": call, "cmd/witself-fixture/main_test.go": call}, nil},
 	} {
-		got := checkpointAPIWired(map[string]string{"cmd/witself-fixture/main.go": row.source})
-		if (len(got) != 0) != row.wired || slices.ContainsFunc(got, func(name string) bool { return strings.HasPrefix(name, "parse:") }) {
-			t.Fatalf("checkpoint wiring fixture %s reported %v", row.name, got)
-		}
+		t.Run(row.name, func(t *testing.T) {
+			root := t.TempDir()
+			for name, source := range row.files {
+				if os.MkdirAll(filepath.Join(root, path.Dir(name)), 0o700) != nil || os.WriteFile(filepath.Join(root, name), []byte(source), 0o600) != nil {
+					t.Fatal("cannot write a checkpoint wiring fixture")
+				}
+			}
+			if got := checkpointAPIWired(checkpointWiringSources(t, root)); !slices.Equal(got, row.want) {
+				t.Fatalf("checkpoint wiring fixture %s reported %v", row.name, got)
+			}
+		})
 	}
 }

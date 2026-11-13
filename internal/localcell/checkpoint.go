@@ -20,6 +20,7 @@ import (
 	"strings"
 	"time"
 	"unicode/utf16"
+	"unicode/utf8"
 
 	"github.com/witwave-ai/witself/internal/id"
 )
@@ -102,8 +103,9 @@ func (c *Cell) checkpointDir(checkpointID string) (string, error) {
 // proven-cold installation byte for byte into a new recovery/<id>/ directory,
 // re-reads the copy, re-proves the cold state and publishes the witness last;
 // only a witnessed checkpoint is complete, and at most two are kept. Nothing
-// is written to PGDATA, custody or the manifest and nothing is launched; a
-// failed call removes only the witness-less directory it created.
+// is written to PGDATA, custody or the manifest, and no server or postmaster
+// is started: pg_controldata runs at admission and again at the witness step.
+// A failed call removes only the witness-less directory it created.
 func (c *Cell) Checkpoint(ctx context.Context, options CheckpointOptions) error {
 	lock, err := c.own(false)
 	if err != nil {
@@ -217,7 +219,8 @@ func (c *Cell) admitCheckpoint(ctx context.Context, options CheckpointOptions, o
 	if err := c.checkpointCold(); err != nil {
 		return nil, err
 	}
-	// A Faulted service is admitted: Checkpoint launches nothing.
+	// A Faulted service is admitted: no server or postmaster is started, only
+	// pg_controldata, at admission and again at the witness step.
 	if d, err := c.ServiceDescriptor(); !errors.Is(err, os.ErrNotExist) {
 		if _, transition := os.Lstat(c.path("service", "transition.json")); err != nil || d.DesiredState == "maintenance" || !errors.Is(transition, os.ErrNotExist) {
 			return nil, errCheckpointState
@@ -308,7 +311,8 @@ func (c *Cell) planCheckpoint(m *Manifest) (*checkpointPlan, error) {
 		rel, err := filepath.Rel(c.path("pg"), name)
 		item := checkpointEntry{path: path.Join("pg", filepath.ToSlash(rel)), directory: entry.IsDir()}
 		info, infoErr := entry.Info()
-		if err != nil || infoErr != nil || strings.HasPrefix(item.path, "pg/pg_tblspc/") || (!item.directory && !entry.Type().IsRegular()) {
+		if err != nil || infoErr != nil || strings.HasPrefix(item.path, "pg/pg_tblspc/") || (!item.directory && !entry.Type().IsRegular()) ||
+			!checkpointNameSupported(item.path) {
 			return errCheckpointSource
 		}
 		if !item.directory {
@@ -353,6 +357,13 @@ func (c *Cell) planCheckpoint(m *Manifest) (*checkpointPlan, error) {
 	return plan, nil
 }
 
+// checkpointNameSupported admits a PGDATA path the inventory spells exactly
+// (valid UTF-8) whose base name is no private temporary: format 1 refuses any
+// .pending-* name, so a cell's own crash residue is refused, never copied.
+func checkpointNameSupported(name string) bool {
+	return utf8.ValidString(name) && !strings.HasPrefix(path.Base(name), ".pending-")
+}
+
 // checkpointPathFits is the Windows bound: below 260 UTF-16 units, with room
 // for a 34-unit private temporary in a directory.
 func checkpointPathFits(name string, directory bool) bool {
@@ -383,6 +394,10 @@ func (p *checkpointPlan) need() uint64 {
 	}
 	return 2*size + checkpointReserve
 }
+
+// syncCheckpointDirectory syncs a checkpoint directory or recovery/. Tests
+// replace it; production always uses syncDirectory.
+var syncCheckpointDirectory = syncDirectory
 
 // openCheckpointEntry opens one planned file read-only: PGDATA through the
 // confined source opener, the manifest and custody as private files.
@@ -472,11 +487,11 @@ func (c *Cell) copyCheckpoint(ctx context.Context, checkpointID string, plan *ch
 	}
 	// Plan order creates parents first; the reverse syncs deepest first.
 	for index := len(plan.entries) - 1; index >= 0; index-- {
-		if plan.entries[index].directory && syncDirectory(filepath.Join(dir, filepath.FromSlash(plan.entries[index].path))) != nil {
+		if plan.entries[index].directory && syncCheckpointDirectory(filepath.Join(dir, filepath.FromSlash(plan.entries[index].path))) != nil {
 			return fail(errCheckpointCopy)
 		}
 	}
-	if err := syncDirectory(dir); err != nil {
+	if err := syncCheckpointDirectory(dir); err != nil {
 		return fail(errCheckpointCopy)
 	}
 	if ops.afterCopy != nil {
@@ -588,11 +603,14 @@ func (c *Cell) witnessCheckpoint(ctx context.Context, checkpointID string, plan 
 	}
 	controlCtx, cancel := c.deadline(ctx)
 	defer cancel()
+	// A run that fails, or the caller's context ending, read nothing: a copy
+	// failure. A reading that differs, a postmaster.pid or a changed pg_control
+	// is a witness mismatch.
 	second, err := ops.control(controlCtx)
-	if ctx.Err() != nil {
+	if ctx.Err() != nil || err != nil {
 		return errCheckpointCopy
 	}
-	if _, pidErr := os.Lstat(c.path("pg", "postmaster.pid")); err != nil || second != plan.control || !errors.Is(pidErr, fs.ErrNotExist) {
+	if _, pidErr := os.Lstat(c.path("pg", "postmaster.pid")); second != plan.control || !errors.Is(pidErr, fs.ErrNotExist) {
 		return errCheckpointWitness
 	}
 	index := slices.IndexFunc(plan.entries, func(entry checkpointEntry) bool { return entry.path == "pg/global/pg_control" && !entry.directory })
@@ -645,7 +663,7 @@ func (c *Cell) discardOwnCheckpoint(checkpointID string) error {
 	if err := os.RemoveAll(dir); err != nil {
 		return errCheckpointCopy
 	}
-	return syncDirectory(c.recoveryDir())
+	return syncCheckpointDirectory(c.recoveryDir())
 }
 
 // failCheckpoint releases this call's directory before the step's failed line.
@@ -701,6 +719,16 @@ func (c *Cell) deleteCheckpointLocked(_ context.Context, options DeleteCheckpoin
 	} else if err != nil || privateDir(dir, false) != nil {
 		return errCheckpointState
 	}
+	// A case-insensitive volume also resolves another spelling: only the exact
+	// on-disk name is deleted.
+	entries, err := os.ReadDir(c.recoveryDir())
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		names = append(names, entry.Name())
+	}
+	if err != nil || !recoveryEntryCanonical(names, options.CheckpointID) {
+		return errCheckpointIdentity
+	}
 	// A purge removed journal/; nothing else is recreated.
 	if err := privateDir(c.path("journal"), true); err != nil {
 		return err
@@ -720,13 +748,13 @@ func (c *Cell) deleteCheckpointLocked(_ context.Context, options DeleteCheckpoin
 			} else if !errors.Is(err, fs.ErrNotExist) {
 				return err
 			}
-			return syncDirectory(dir)
+			return syncCheckpointDirectory(dir)
 		}},
 		{"remove", func() error {
 			if err := os.RemoveAll(dir); err != nil {
 				return err
 			}
-			return syncDirectory(c.recoveryDir())
+			return syncCheckpointDirectory(c.recoveryDir())
 		}},
 	} {
 		if err := c.step("checkpoint_delete", step.name, step.run); errors.Is(err, errInterrupted) {
