@@ -453,6 +453,9 @@ func validJournalStep(operation, step string) bool {
 		"remove":  {"stop": true, "spool": true, "tmp": true, "logs": true, "purge": true, "runtime_cleanup": true},
 
 		"reinstall": {"postgres": true, "verified": true, "stop": true, "readmitted": true},
+
+		"checkpoint":        {"copy": true, "inventory": true, "witness": true},
+		"checkpoint_delete": {"unseal": true, "remove": true},
 	}
 	allowed, ok := steps[operation]
 	return ok && (step == "operation" || step == "revert_stop" || allowed[step])

@@ -28,3 +28,15 @@ var errUpdatePartialState = fixedCause("local_update_partial_state")
 var errReinstallState = fixedCause("local_reinstall_state_unsupported")
 var errReinstallIdentity = fixedCause("local_reinstall_identity_mismatch")
 var errReinstallVersion = fixedCause("local_reinstall_version_mismatch")
+
+// Checkpoint and DeleteCheckpoint refuse a root or request they cannot serve
+// with exactly these causes, and Checkpoint's journaled step failures use
+// them too. None carries a path, an identifier or a value.
+var errCheckpointState = fixedCause("local_checkpoint_state_unsupported")
+var errCheckpointIdentity = fixedCause("local_checkpoint_identity_mismatch")
+var errCheckpointSource = fixedCause("local_checkpoint_source_unsupported")
+var errCheckpointStorage = fixedCause("local_checkpoint_storage_insufficient")
+var errCheckpointLimit = fixedCause("local_checkpoint_limit_reached")
+var errCheckpointIncomplete = fixedCause("local_checkpoint_incomplete")
+var errCheckpointWitness = fixedCause("local_checkpoint_witness_mismatch")
+var errCheckpointCopy = fixedCause("local_checkpoint_copy_failed")

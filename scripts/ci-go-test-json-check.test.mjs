@@ -1067,7 +1067,10 @@ test('why diagnostics from the actual packages recognize production errors and n
     'local_principal_layout_invalid', 'local_principal_provision_refused', 'local_privileged_sessions_present',
     'local_principal_repair_required', 'local_principal_credentials_refused',
     'local_maintenance_fence_active', 'local_update_partial_state', 'local_reinstall_state_unsupported',
-    'local_reinstall_identity_mismatch', 'local_reinstall_version_mismatch']) {
+    'local_reinstall_identity_mismatch', 'local_reinstall_version_mismatch', 'local_checkpoint_state_unsupported',
+    'local_checkpoint_identity_mismatch', 'local_checkpoint_source_unsupported', 'local_checkpoint_storage_insufficient',
+    'local_checkpoint_limit_reached', 'local_checkpoint_incomplete', 'local_checkpoint_witness_mismatch',
+    'local_checkpoint_copy_failed']) {
     assertFixture(script, outputFailure([`    fixture_test.go:12: ${cause}\n`], cause, packages[0]));
     assertFixture(script, outputFailure([`    fixture_test.go:12: ${cause} private-fixture-marker\n`], '(unclassified)', packages[0]));
   }

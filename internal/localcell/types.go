@@ -162,6 +162,7 @@ type Inspection struct {
 	JournalTailIncomplete bool                    `json:"journal_tail_incomplete,omitempty"`
 	InstallState          string                  `json:"install_state,omitempty"`
 	PrincipalTopology     string                  `json:"principal_topology,omitempty"`
+	Checkpoints           []CheckpointSummary     `json:"checkpoints,omitempty"`
 }
 
 // Status adds bounded, live readiness observations to Inspection.
@@ -189,6 +190,7 @@ type Cell struct {
 	installerStart           *installerStartOperations
 	maintenanceTest          *installerMaintenanceOperations
 	reinstallTest            *reinstallOperations
+	checkpointTest           *checkpointOperations
 }
 
 // CanonicalRoot makes two spellings of one directory canonicalize to the same string.
