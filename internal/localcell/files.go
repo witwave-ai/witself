@@ -240,6 +240,7 @@ func (c *Cell) journalCause(operation, step, state, cause string) error {
 // durable prefix may be empty when the first append tears.
 type journalProgress struct {
 	pending        *Interruption
+	cleanupOnly    bool // pending came from the manifest, not an open journal operation
 	done           map[string]bool
 	durableBytes   int64
 	tornTail       bool
@@ -271,6 +272,7 @@ func (c *Cell) readJournal() (journalProgress, error) {
 	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
 		progress.pending, err = c.cleanupInterruption()
+		progress.cleanupOnly = progress.pending != nil
 		return progress, err
 	}
 	if err != nil || !info.Mode().IsRegular() {
@@ -343,6 +345,7 @@ func (c *Cell) readJournal() (journalProgress, error) {
 	}
 	if progress.pending == nil {
 		progress.pending, err = c.cleanupInterruption()
+		progress.cleanupOnly = progress.pending != nil
 	}
 	return progress, err
 }

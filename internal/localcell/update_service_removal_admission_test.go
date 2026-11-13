@@ -21,8 +21,10 @@ func serviceRemovalHoldHost(t *testing.T, c *Cell) func() {
 		_ = file.Close()
 		t.Fatal("Removal host contender acquisition failed")
 	}
+	// Unlock explicitly: Windows may release a byte-range lock asynchronously when
+	// only the handle closes, so a following Remove could still see a live host.
 	return func() {
-		if file.Close() != nil {
+		if unlockFile(file) != nil || file.Close() != nil {
 			t.Fatal("Removal host contender release failed")
 		}
 	}

@@ -172,9 +172,15 @@ func assertAdmissionControl(t *testing.T, f admissionFixture, name string) {
 		if !slices.Contains(*f.trace, "migrate") || !slices.Contains(*f.trace, "resume") {
 			t.Fatal("unfenced repair did not reach migration and resume")
 		}
-	case "RepairCleanup", "RemoveRetain", "RemovePurge":
+	case "RemovePurge":
 		if _, err := os.Stat(f.cell.path("journal")); !errors.Is(err, os.ErrNotExist) {
 			t.Fatal("unfenced cleanup did not remove journal")
+		}
+	case "RepairCleanup", "RemoveRetain":
+		// Ordinary removal keeps the journal; its effect is a settled retained manifest.
+		m, err := readManifest(f.cell.cfg.Root)
+		if _, statErr := os.Stat(f.cell.path("journal")); err != nil || statErr != nil || m.Cleanup != nil || !m.RemovalRetained {
+			t.Fatal("unfenced cleanup did not settle retained removal")
 		}
 	case "RepairTornTail":
 		data, err := os.ReadFile(f.cell.path("journal", "operations.jsonl"))

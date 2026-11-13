@@ -146,6 +146,7 @@ func TestAutobuildSurvivesCommandsUntilPurge(t *testing.T) {
 		}
 	})
 	var witnesses []harnessProcessWitness
+	var custody []byte
 	for _, operation := range []string{"install", "start", "status", "stop", "start", "remove"} {
 		if err := invoke(operation); err != nil {
 			t.Fatalf("harness operation failed: %s: %v", operation, err)
@@ -161,14 +162,29 @@ func TestAutobuildSurvivesCommandsUntilPurge(t *testing.T) {
 				witnesses = append(witnesses, witness)
 			}
 		}
+		if operation == "install" {
+			var err error
+			custody, err = os.ReadFile(filepath.Join(root, "run", "postgres.password"))
+			if err != nil || len(custody) == 0 {
+				t.Fatal("cannot witness synthetic bootstrap custody")
+			}
+		}
 		for _, path := range built {
 			if info, err := os.Stat(path); err != nil || !info.Mode().IsRegular() {
 				t.Fatal("autobuilt component disappeared after command return")
 			}
 		}
 	}
-	if _, err := os.Stat(filepath.Join(root, "run")); !os.IsNotExist(err) {
-		t.Fatal("non-purge removal retained runtime records")
+	if retained, err := os.ReadFile(filepath.Join(root, "run", "postgres.password")); err != nil || !bytes.Equal(retained, custody) {
+		t.Fatal("non-purge removal changed synthetic bootstrap custody")
+	}
+	cell, err := localcell.New(localcell.Config{Root: root})
+	if err != nil {
+		t.Fatal("cannot inspect retained harness cell")
+	}
+	inspection, err := cell.Inspect(t.Context())
+	if err != nil || inspection.Interrupted != nil || inspection.Manifest == nil || !inspection.Manifest.RemovalRetained || !inspection.Manifest.Installed {
+		t.Fatal("non-purge removal did not retain installation identity and close the journal")
 	}
 	for _, witness := range witnesses {
 		if witness.alive(t) {

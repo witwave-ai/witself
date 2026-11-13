@@ -25,8 +25,15 @@
 // without changing them. Status adds bounded live readiness checks. Mutations
 // record started, done, or failed journal steps and atomically replace the
 // manifest. Repair uses those records to complete or reverse interrupted work;
-// it never deletes pg/. Remove preserves pg/ and the manifest unless the caller
-// explicitly requests purge.
+// it never deletes pg/. Ordinary Remove preserves pg/, the manifest, all run/
+// custody and journal/ evidence, and temporary spool/tmp/log material. After a
+// verified stop it publishes removal_retained without clearing Installed, then
+// closes the remove journal before clearing the manifest cleanup checkpoint.
+// The marker independently refuses direct and service PostgreSQL startup;
+// Install does not adopt the retained root, and reinstall remains unsupported.
+// Only a current explicit purge deletes the established owned cleanup targets.
+// Repair never inherits purge authority or regenerates missing custody/history.
+// Retained temporary files do not establish a durable pending-work guarantee.
 //
 // Component binaries are supplied by the caller. PostgreSQL and all service
 // listeners bind to loopback, and server/worker environments are constructed
@@ -37,7 +44,8 @@
 // data directory before signaling anything; it refuses unrelated processes.
 // Unix child startup persists its identity before an explicit handshake allows
 // the component to execute. Final removal checkpoints journal intent in the
-// manifest so Repair can complete cleanup after the journal directory is gone.
+// manifest. Repair can settle predecessor cleanup when the journal is absent,
+// while preserving a surviving journal and avoiding duplicate completion lines.
 //
 // Windows 10+ creates each actual executable suspended in an atomic kill-on-close
 // Job Object, flushes its private creation-FILETIME record before resume, and

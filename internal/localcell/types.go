@@ -68,6 +68,7 @@ type Manifest struct {
 	LastVerifiedSchemaVersion int           `json:"last_verified_schema_version"`
 	LastOperation             string        `json:"last_operation"`
 	Installed                 bool          `json:"installed"`
+	RemovalRetained           bool          `json:"removal_retained,omitempty"`
 	Cleanup                   *journalEntry `json:"cleanup,omitempty"`
 	MigrationWait             time.Duration `json:"migration_wait,omitempty"`
 	JobRestartPolicy          string        `json:"job_restart_policy,omitempty"`
