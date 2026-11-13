@@ -29,8 +29,12 @@
 // custody and journal/ evidence, and temporary spool/tmp/log material. After a
 // verified stop it publishes removal_retained without clearing Installed, then
 // closes the remove journal before clearing the manifest cleanup checkpoint.
-// The marker independently refuses direct and service PostgreSQL startup;
-// Install does not adopt the retained root, and reinstall remains unsupported.
+// Repair completes an open removal the same way, whether it was interrupted or
+// failed, and stops every recorded component before publishing the marker.
+// Start refuses a marked cell before any journal record, credential read or
+// launch (only its operation lock may be created first), and PostgreSQL boot
+// refuses it independently; Install does not adopt the retained root, and
+// reinstall remains unsupported.
 // Only a current explicit purge deletes the established owned cleanup targets.
 // Repair never inherits purge authority or regenerates missing custody/history.
 // Retained temporary files do not establish a durable pending-work guarantee.
