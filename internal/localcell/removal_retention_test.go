@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -449,31 +450,73 @@ func TestRetainedRemovalLegacyCleanup(t *testing.T) {
 	})
 }
 
+// retainedServiceAdapter gives this test's own installed cell a descriptor that
+// matches its root, owner and installation identity, and wires it to the
+// family's existing fake manager. Nothing registers until install runs.
+func retainedServiceAdapter(t *testing.T, family, owner string) (*serviceRemovalFixture, func()) {
+	t.Helper()
+	if family == "Launchd" {
+		a, d, manager := launchdFixture(t)
+		a.uid, d.UID = owner, owner
+		manager.d = d
+		manager.enabled[a.target(d)] = false
+		unixServicePersistDescriptor(t, manager.cell, d)
+		return &serviceRemovalFixture{t: t, cell: manager.cell, d: d, launch: a, lm: manager}, func() { launchdInstallFixture(t, a, d) }
+	}
+	// The fake's own unit cell is installed with a private, canonical root that
+	// the Windows validators accept, and the fake's lock seam already guards it.
+	win := newWindowsTaskFake(t)
+	c := win.cell
+	m, err := readManifest(c.cfg.Root)
+	if err != nil {
+		t.Fatal("cannot read Windows task fixture manifest")
+	}
+	// A Windows installation allocates the identity shape a task name accepts.
+	m.InstallationID, err = newLocalCellInstallationID("windows")
+	if err != nil || writeAtomic(c.path("manifest.json"), m, nil) != nil {
+		t.Fatal("cannot publish Windows task fixture identity")
+	}
+	d := ServiceDescriptor{Version: 1, InstallationID: m.InstallationID, UID: owner, Root: c.cfg.Root, Adapter: "windows-logon-task", Scope: "user",
+		Runtime: "local", DesiredState: "running", ResourceProfile: "unconfigured", Revision: 1,
+		Payload: ServicePayload{Host: filepath.Join(filepath.Dir(c.cfg.Root), "witself.exe"), Generation: "generation-1", Args: []string{"run", "--root", c.cfg.Root}}}
+	unixServicePersistDescriptor(t, c, d)
+	win.d, win.current, win.a.uid = d, d, owner
+	// The descriptor-file seam of newServiceRemovalFixture: the adapter reads
+	// this cell's durable descriptor, never the fake's in-memory copy.
+	win.a.readDescriptor = func(ServiceDescriptor) (ServiceDescriptor, error) {
+		var fresh ServiceDescriptor
+		err := readJSON(c.path("service", "descriptor.json"), &fresh)
+		return fresh, err
+	}
+	return &serviceRemovalFixture{t: t, cell: c, d: d, win: win}, win.apply
+}
+
 func TestRetainedRemovalServiceRetryAndPurge(t *testing.T) {
 	// Each phase logs a closed class first, so a CI failure from a helper's raw
 	// error still shows how far the test got.
 	phase := func(name string) { t.Logf("retained service phase class=%s", name) }
 	phase("setup")
-	a, d, manager := launchdFixture(t)
+	// Windows ownership uses SIDs rather than launchd numeric user IDs, so the
+	// Windows row registers this cell as a logon task. Every phase is shared.
+	family := "Launchd"
+	if runtime.GOOS == "windows" {
+		family = "Windows"
+	}
 	owner, err := serviceOwner()
 	if err != nil {
 		t.Fatal("cannot resolve fixture service owner")
 	}
-	a.uid, d.UID = owner, owner
-	manager.d = d
-	manager.enabled[a.target(d)] = false
-	unixServicePersistDescriptor(t, manager.cell, d)
-	a.drain = func(context.Context, ServiceDescriptor) error {
-		fresh, err := manager.cell.ServiceDescriptor()
+	adapter, install := retainedServiceAdapter(t, family, owner)
+	adapter.setDrain(func(context.Context, ServiceDescriptor) error {
+		fresh, err := adapter.cell.ServiceDescriptor()
 		if err != nil || fresh.DesiredState != "stopped" {
 			return ErrServiceDesiredState
 		}
 		return nil
-	}
+	})
 	phase("install")
-	launchdInstallFixture(t, a, d)
-	adapter := &serviceRemovalFixture{t: t, cell: manager.cell, d: d, launch: a, lm: manager}
-	serviceRemovalStopped(t, adapter.cell, d)
+	install()
+	serviceRemovalStopped(t, adapter.cell, adapter.d)
 	phase("hold_host")
 	release := serviceRemovalHoldHost(t, adapter.cell)
 	release()
