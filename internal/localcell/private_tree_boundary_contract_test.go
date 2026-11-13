@@ -21,7 +21,9 @@ import (
 // in any letter case. files.go holds the validateRoot member (R1) and
 // private_tree_boundary.go the walk boundary (R2). The trust literal is a stage
 // label its generation seal passes to its own check, never a path.
+// checkpoint.go holds recoveryDir, the one checkpoint spelling (LC-S7D2E1 RD).
 var recoveryBoundaryLiteralSites = map[string]int{
+	"checkpoint.go":                    1,
 	"files.go":                         1,
 	"private_tree_boundary.go":         1,
 	"trust/private_generation_seal.go": 1,
@@ -241,6 +243,7 @@ func TestRecoveryBoundarySourceContract(t *testing.T) {
 	}{
 		// Literal inventory: every new spelling of the path element, anywhere.
 		{"new_read_site", "checkpoint_scan.go", "", "package localcell\n\nimport (\n\t\"os\"\n\t\"path/filepath\"\n)\n\nfunc scanCheckpoints(root string) ([]os.DirEntry, error) {\n\treturn os.ReadDir(filepath.Join(root, \"recovery\"))\n}\n", "literal:checkpoint_scan.go"},
+		{"checkpoint_second_literal", "checkpoint.go", "func (c *Cell) recoveryDir() string { return c.path(\"recovery\") }", "func (c *Cell) recoveryDir() string { return c.path(\"recovery\") }\n\nfunc (c *Cell) recoveryStaging() string { return c.path(\"recovery\", \"staging\") }", "literal:checkpoint.go"},
 		{"layout_creates_boundary", "files.go", `"logs", "tmp", "home"} {
 		if err := privateDir(c.path(name), true)`, `"logs", "tmp", "home", "recovery"} {
 		if err := privateDir(c.path(name), true)`, "literal:files.go"},

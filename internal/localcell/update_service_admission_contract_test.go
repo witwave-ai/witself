@@ -70,6 +70,16 @@ if err != nil { return err }
 defer func() { _ = lock.Close() }()
 ` + maintenanceAdmissionStatement + `
 return c.reinstallLocked(ctx, options)`,
+	"Checkpoint": `lock, err := c.own(false)
+if err != nil { return err }
+defer func() { _ = lock.Close() }()
+` + maintenanceAdmissionStatement + `
+return c.checkpointLocked(ctx, options)`,
+	"DeleteCheckpoint": `lock, err := c.own(false)
+if err != nil { return err }
+defer func() { _ = lock.Close() }()
+` + maintenanceAdmissionStatement + `
+return c.deleteCheckpointLocked(ctx, options)`,
 }
 
 var maintenanceServiceAdmissionFiles = map[string]string{
@@ -77,6 +87,8 @@ var maintenanceServiceAdmissionFiles = map[string]string{
 	"RepairService":        "service_descriptor.go",
 	"reconcileServiceBoot": "service_boot.go",
 	"Reinstall":            "reinstall.go",
+	"Checkpoint":           "checkpoint.go",
+	"DeleteCheckpoint":     "checkpoint.go",
 }
 
 var maintenanceServiceAdmissionParameters = map[string]string{
@@ -84,6 +96,8 @@ var maintenanceServiceAdmissionParameters = map[string]string{
 	"RepairService":        "ctx context.Context",
 	"reconcileServiceBoot": "",
 	"Reinstall":            "ctx context.Context, options ReinstallOptions",
+	"Checkpoint":           "ctx context.Context, options CheckpointOptions",
+	"DeleteCheckpoint":     "ctx context.Context, options DeleteCheckpointOptions",
 }
 
 // Keep the old four-owner predicate and its independent counts unchanged.
@@ -298,6 +312,8 @@ func maintenanceServiceAdmissionContract(sources map[string]string) []string {
 			expectedReferences = 2
 		case "service_boot.go", "service_health.go", "service_maintenance.go", "reinstall.go":
 			expectedReferences = 1
+		case "checkpoint.go":
+			expectedReferences = 2
 		}
 		if fileReferences != expectedReferences {
 			failures = append(failures, name+"_reference_count")
@@ -331,7 +347,7 @@ func maintenanceServiceAdmissionContract(sources map[string]string) []string {
 			}
 		}
 	}
-	if totalReferences != 18 {
+	if totalReferences != 20 {
 		failures = append(failures, "global_count")
 	}
 	sort.Strings(failures)
@@ -444,7 +460,7 @@ func serviceAdmissionMutations(owner string) []admissionSourceMutation {
 	if owner == "RepairService" {
 		ownIndex, manifestIndex = 3, 6
 	}
-	if owner == "Reinstall" {
+	if owner == "Reinstall" || owner == "Checkpoint" || owner == "DeleteCheckpoint" {
 		ownIndex, manifestIndex = 0, 1
 	}
 	mutations := []admissionSourceMutation{
@@ -508,7 +524,7 @@ func TestServiceMaintenanceAdmissionSourceContractMutations(t *testing.T) {
 	if failures := maintenanceServiceAdmissionContract(sources); len(failures) != 0 {
 		t.Fatalf("unchanged control: %v", failures)
 	}
-	for _, owner := range []string{"PrepareService", "reconcileServiceBoot", "RepairService", "Reinstall"} {
+	for _, owner := range []string{"PrepareService", "reconcileServiceBoot", "RepairService", "Reinstall", "Checkpoint", "DeleteCheckpoint"} {
 		filename := maintenanceServiceAdmissionFiles[owner]
 		original := admissionNodeText(serviceAdmissionFunction(t, filename, sources[filename], owner))
 		t.Run(owner, func(t *testing.T) {
@@ -582,7 +598,7 @@ func TestServiceMaintenanceAdmissionGuardFixtures(t *testing.T) {
 			t.Fatalf("eight exact admission counts: %v", failures)
 		}
 	})
-	for _, owner := range []string{"PrepareService", "reconcileServiceBoot", "RepairService", "Reinstall"} {
+	for _, owner := range []string{"PrepareService", "reconcileServiceBoot", "RepairService", "Reinstall", "Checkpoint", "DeleteCheckpoint"} {
 		t.Run(owner, func(t *testing.T) {
 			original := approved[owner]
 			filename := maintenanceServiceAdmissionFiles[owner]
@@ -706,7 +722,7 @@ func serviceAdmissionInventoryFixtures(t *testing.T, approved map[string]string)
 	if failures := maintenanceServiceAdmissionContract(control); len(failures) != 0 {
 		t.Fatalf("inventory unchanged control: %v", failures)
 	}
-	for _, owner := range []string{"PrepareService", "reconcileServiceBoot", "RepairService", "Reinstall"} {
+	for _, owner := range []string{"PrepareService", "reconcileServiceBoot", "RepairService", "Reinstall", "Checkpoint", "DeleteCheckpoint"} {
 		t.Run(owner+"_Inventory", func(t *testing.T) {
 			filename := maintenanceServiceAdmissionFiles[owner]
 			for _, fixture := range []struct {

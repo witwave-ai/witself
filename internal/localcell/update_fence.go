@@ -142,8 +142,8 @@ func (c *Cell) readMaintenanceFenceWith(read func(string, any) error) (*maintena
 }
 
 // maintenanceFenceAllows admits Install, Start, Repair, Remove, Reinstall,
-// PrepareService, reconcileServiceBoot, setServiceDesiredStateLocked (running),
-// and RepairService.
+// Checkpoint, DeleteCheckpoint, PrepareService, reconcileServiceBoot,
+// setServiceDesiredStateLocked (running), and RepairService.
 // It also admits the Windows logon-task adapter's Apply and Start.
 // It also admits the systemd-user and launchd-agent adapters' Apply.
 // It is not a service-wide maintenance policy or
