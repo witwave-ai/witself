@@ -188,6 +188,7 @@ type Cell struct {
 	installerPrincipals      *installerPrincipalOperations
 	installerStart           *installerStartOperations
 	maintenanceTest          *installerMaintenanceOperations
+	reinstallTest            *reinstallOperations
 }
 
 // CanonicalRoot makes two spellings of one directory canonicalize to the same string.

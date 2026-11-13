@@ -22,3 +22,9 @@ var ErrLocalPrincipalCredentialsRefused = fixedCause("local_principal_credential
 
 var errMaintenanceFenceActive = fixedCause("local_maintenance_fence_active")
 var errUpdatePartialState = fixedCause("local_update_partial_state")
+
+// Reinstall refuses a root it cannot readmit, a different installation, or a
+// different PostgreSQL major or schema than this build.
+var errReinstallState = fixedCause("local_reinstall_state_unsupported")
+var errReinstallIdentity = fixedCause("local_reinstall_identity_mismatch")
+var errReinstallVersion = fixedCause("local_reinstall_version_mismatch")

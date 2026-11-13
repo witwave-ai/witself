@@ -79,6 +79,11 @@ func (c *Cell) allocateAvailablePorts(previous Ports, component string) (Ports, 
 }
 
 func (c *Cell) prepareComponentPorts(m *Manifest, component string, running, force bool) error {
+	return c.prepareComponentPortsFor("start", m, component, running, force)
+}
+
+// prepareComponentPortsFor journals a reallocation under the calling operation.
+func (c *Cell) prepareComponentPortsFor(operation string, m *Manifest, component string, running, force bool) error {
 	if running {
 		return nil
 	}
@@ -108,5 +113,5 @@ func (c *Cell) prepareComponentPorts(m *Manifest, component string, running, for
 			return err
 		}
 	}
-	return c.journalCause("start", component, "started", "port_reallocated="+component)
+	return c.journalCause(operation, component, "started", "port_reallocated="+component)
 }

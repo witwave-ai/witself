@@ -176,7 +176,7 @@ function assertLocalcellWindowsJob(ci) {
       "$proofJSON = Join-Path $env:RUNNER_TEMP 'lc-pg16\\proof.json'",
       "go test -json ./internal/localcell -run '^TestRealLifecycle$' -count=1 -timeout=15m > $proofJSON 2>&1",
       '$goExit = $LASTEXITCODE',
-      'node scripts/ci-go-test-json-check.mjs --input $proofJSON --diagnose --require TestRealLifecycle,TestRealLifecycle/InstallStartRestartRemove,TestRealLifecycle/TwoCellsAreIndependent,TestRealLifecycle/InterruptedStartRepair,TestRealLifecycle/WaitsForReadiness,TestRealLifecycle/InstallerPrincipals',
+      'node scripts/ci-go-test-json-check.mjs --input $proofJSON --diagnose --require TestRealLifecycle,TestRealLifecycle/InstallStartRestartRemove,TestRealLifecycle/TwoCellsAreIndependent,TestRealLifecycle/InterruptedStartRepair,TestRealLifecycle/WaitsForReadiness,TestRealLifecycle/InstallerPrincipals,TestRealLifecycle/RetainedReinstall',
       '$parserExit = $LASTEXITCODE',
       'if ($goExit -ne 0 -or $parserExit -ne 0) { exit 1 }',
     ].join('\n'),
@@ -231,7 +231,7 @@ const unixPlatforms = [
   {platform: 'macos-arm64', runner: 'macos-15'},
   {platform: 'macos-intel', runner: 'macos-15-intel'},
 ];
-const lifecycleRequired = 'TestRealLifecycle,TestRealLifecycle/InstallStartRestartRemove,TestRealLifecycle/TwoCellsAreIndependent,TestRealLifecycle/InterruptedStartRepair,TestRealLifecycle/WaitsForReadiness,TestRealLifecycle/InstallerPrincipals';
+const lifecycleRequired = 'TestRealLifecycle,TestRealLifecycle/InstallStartRestartRemove,TestRealLifecycle/TwoCellsAreIndependent,TestRealLifecycle/InterruptedStartRepair,TestRealLifecycle/WaitsForReadiness,TestRealLifecycle/InstallerPrincipals,TestRealLifecycle/RetainedReinstall';
 
 function assertLocalcellUnixJob(ci) {
   const label = 'localcell-unix';
@@ -1344,6 +1344,7 @@ const mutations = [
     ["'^TestRealLifecycle$'", "'TestRealLifecycle'", 'broadens the run filter'],
     [',TestRealLifecycle/WaitsForReadiness', '', 'omits a required child'],
     [',TestRealLifecycle/InstallerPrincipals', '', 'omits installer principals child'],
+    [',TestRealLifecycle/RetainedReinstall', '', 'omits retained reinstall child'],
     [' --diagnose', '', 'omits diagnostics'],
     [' --input "$proof_json"', '', 'does not read captured JSON'],
     [' > "$proof_json" 2>&1', '', 'prints raw Go output'],
@@ -1372,6 +1373,7 @@ const mutations = [
   ['Windows proof makes a skip acceptable', data => { const step = data['ci.yml'].jobs['localcell-windows'].steps.find(step => step.name === 'Prove native PostgreSQL sixteen lifecycle'); step.run = step.run.replace(/ --require [^\n]+/, ''); }],
   ['Windows proof omits one required child', data => { const step = data['ci.yml'].jobs['localcell-windows'].steps.find(step => step.name === 'Prove native PostgreSQL sixteen lifecycle'); step.run = step.run.replace(',TestRealLifecycle/WaitsForReadiness', ''); }],
   ['Windows proof omits installer principals child', data => { const step = data['ci.yml'].jobs['localcell-windows'].steps.find(step => step.name === 'Prove native PostgreSQL sixteen lifecycle'); step.run = step.run.replace(',TestRealLifecycle/InstallerPrincipals', ''); }],
+  ['Windows proof omits retained reinstall child', data => { const step = data['ci.yml'].jobs['localcell-windows'].steps.find(step => step.name === 'Prove native PostgreSQL sixteen lifecycle'); step.run = step.run.replace(',TestRealLifecycle/RetainedReinstall', ''); }],
   ['Windows proof ignores native exit', data => { const step = data['ci.yml'].jobs['localcell-windows'].steps.find(step => step.name === 'Prove native PostgreSQL sixteen lifecycle'); step.run = step.run.replace('$goExit -ne 0 -or ', ''); }],
   ['Windows proof ignores parser exit', data => { const step = data['ci.yml'].jobs['localcell-windows'].steps.find(step => step.name === 'Prove native PostgreSQL sixteen lifecycle'); step.run = step.run.replace(' -or $parserExit -ne 0', ''); }],
   ['Windows proof omits bounded diagnostics', data => { const step = data['ci.yml'].jobs['localcell-windows'].steps.find(step => step.name === 'Prove native PostgreSQL sixteen lifecycle'); step.run = step.run.replace(' --diagnose', ''); }],

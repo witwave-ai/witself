@@ -454,7 +454,7 @@ func (c *Cell) Repair(ctx context.Context) error {
 	if pending == nil {
 		return nil
 	}
-	if (pending.Operation == "start" || pending.Operation == "install") && pending.Step == "postgres" {
+	if (pending.Operation == "start" || pending.Operation == "install" || pending.Operation == "reinstall") && pending.Step == "postgres" {
 		if err := c.recoverPostgresRecord(); err != nil {
 			return err
 		}
@@ -663,10 +663,15 @@ func (c *Cell) Inspect(_ context.Context) (Inspection, error) {
 	}
 	if result.Manifest != nil && result.Manifest.RemovalRetained {
 		// The marker refuses startup either way; claim retained data only while
-		// PGDATA exists (an interrupted purge may already have deleted it).
-		result.InstallState = "removed; data retained; reinstall unsupported"
-		if !result.PGDataPresent {
+		// PGDATA exists (an interrupted purge may already have deleted it), and
+		// offer reinstall only where Reinstall's own offline predicate holds.
+		switch {
+		case !result.PGDataPresent:
 			result.InstallState = "removed; data purged or missing; reinstall unsupported"
+		case c.reinstallAvailable(result.Manifest, progress) == nil:
+			result.InstallState = "removed; data retained; explicit reinstall available"
+		default:
+			result.InstallState = "removed; data retained; reinstall unsupported"
 		}
 	}
 	for _, component := range []string{"postgres", "server", "worker"} {
