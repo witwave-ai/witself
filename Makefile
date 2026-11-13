@@ -130,7 +130,7 @@ MEMORY_RELEVANCE_COMMIT   ?= $(shell git rev-parse HEAD)
 MEMORY_RELEVANCE_PROVIDER ?= local
 MEMORY_RELEVANCE_HARDWARE ?= unspecified
 
-.PHONY: help db-up db-down db-reset serve login test test-integration test-memory-cloud-conformance test-memory-load-quality test-memory-curation-load test-memory-recall-load test-memory-archive-load test-memory-concurrency-load test-memory-relevance dashboard-acceptance rehearse-migrations feature-status plan-contract gitops-cell-values build check check-local check-localcell-stream check-static check-go-mod-tidy govulncheck security-scan check-infra check-cell-secrets check-postgres-backup-image check-postgres-image-mirror check-product-site check-docs
+.PHONY: help db-up db-down db-reset serve login test test-integration test-memory-cloud-conformance test-memory-load-quality test-memory-curation-load test-memory-recall-load test-memory-archive-load test-memory-concurrency-load test-memory-relevance dashboard-acceptance rehearse-migrations feature-status plan-contract gitops-cell-values build check check-local check-localcell-stream check-node-selftests check-static check-go-mod-tidy govulncheck security-scan check-infra check-cell-secrets check-postgres-backup-image check-postgres-image-mirror check-product-site check-docs
 
 help: ## List targets
 	@grep -hE '^[a-z-]+:.*##' $(MAKEFILE_LIST) | sed -E 's/:[^#]*## /\t/' | sort
@@ -396,6 +396,9 @@ check-localcell-stream: ## Check Local Cell test results with the CI JSON checke
 	bash scripts/check-localcell-stream.sh
 	bash scripts/test-check-localcell-stream.sh
 
+check-node-selftests: ## Run every repository-root Node self-test the workflow steps name, read from the workflows
+	bash scripts/check-node-selftests.sh
+
 check-static: ## Run local ShellCheck/actionlint and their hermetic regression checks
 	bash scripts/check-static-local.sh
 	bash scripts/test-check-static-local.sh
@@ -467,7 +470,7 @@ check-infra: ## Gates for nested Pulumi plus the isolated Cloudflare Workers
 	bash scripts/test-rehearse-store-migrations.sh
 	bash scripts/test-memory-load-quality-workflow.sh
 	bash scripts/test-provider-contract-workflow.sh
-	node --test scripts/ci-product-scope.test.mjs scripts/ci-product-gate.test.mjs scripts/ci-product-workflow.test.mjs scripts/check-docs.test.mjs scripts/run-docs-check.test.mjs
+	$(MAKE) check-node-selftests
 	bash scripts/test-workflow-runner-labels.sh
 	bash scripts/test-security-scan.sh
 	bash scripts/test-security-scan-images.sh
