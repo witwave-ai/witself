@@ -27,8 +27,9 @@ func TestWindowsServiceBootPublicationValidatorGuard(t *testing.T) {
 		before := windowsBootPublishState(t, path)
 		boot := windowsBootPublishID(t)
 		guard := holdWindowsBootValidatorGuard(t, path)
-		// The publication before this slice was exactly this one call.
-		err := writeAtomic(path, serviceBootRecord{d.InstallationID, boot}, nil)
+		// The publication before FLAKE-35B was exactly one such attempt;
+		// writeAtomic now repeats it only through its shared bounded retry.
+		err := writeAtomicOnce(path, serviceBootRecord{d.InstallationID, boot}, nil)
 		guard.release()
 		if !errors.Is(err, windows.ERROR_SHARING_VIOLATION) || runtimeconfig.WindowsPrivateFailureClass(err) != "sharing_violation" {
 			t.Fatal("validator guard on the boot record did not refuse a single publication with a sharing violation")
@@ -46,7 +47,7 @@ func TestWindowsServiceBootPublicationValidatorGuard(t *testing.T) {
 				guard = holdWindowsBootValidatorGuard(t, pending)
 			}
 		})
-		err := writeAtomic(path, serviceBootRecord{d.InstallationID, boot}, nil)
+		err := writeAtomicOnce(path, serviceBootRecord{d.InstallationID, boot}, nil)
 		if guard == nil || *attempts != 1 {
 			t.Fatal("single boot publication did not reach its pending source once")
 		}

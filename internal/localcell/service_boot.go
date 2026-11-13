@@ -5,8 +5,6 @@ import (
 	"errors"
 	"os"
 	"strings"
-
-	"github.com/witwave-ai/witself/internal/runtimeconfig"
 )
 
 type serviceBootRecord struct {
@@ -47,15 +45,9 @@ func (c *Cell) reconcileServiceBoot() error {
 			return err
 		}
 	}
-	// A concurrent private-tree validation holds each object it checks without
-	// delete sharing, so replacing boot.json or its pending source can be
-	// refused for a moment. Reuse the lease publisher's bounded retry: only that
-	// private sharing or access refusal is retried, within the lease bounds, and
-	// every other failure, like every failure off Windows, is a single attempt.
-	// Each attempt is a complete atomic publication with a fresh pending source.
-	path, record := c.path("service", "boot.json"), serviceBootRecord{d.InstallationID, boot}
-	_, err = retryPublish(func() error { return writeAtomic(path, record, nil) }, func(err error) bool { return runtimeconfig.WindowsPrivateTransient(err) }, leasePublishHooks{})
-	return err
+	// writeAtomic carries the one bounded retry of a transient Windows private
+	// refusal; a retry here would nest inside it.
+	return writeAtomic(c.path("service", "boot.json"), serviceBootRecord{d.InstallationID, boot}, nil)
 }
 
 func (c *Cell) reconcileOldBoot(oldBoot, currentBoot string) error {
