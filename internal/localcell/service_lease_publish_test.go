@@ -31,8 +31,9 @@ func TestPublishErrorKeepsTextAndCause(t *testing.T) {
 	}
 	var literals []string
 	for _, declaration := range f.Decls {
+		// One publication attempt; writeAtomicBytes only retries it.
 		fn, ok := declaration.(*ast.FuncDecl)
-		if !ok || fn.Name.Name != "writeAtomicBytes" {
+		if !ok || fn.Name.Name != "writeAtomicBytesOnce" {
 			continue
 		}
 		ast.Inspect(fn.Body, func(n ast.Node) bool {
@@ -46,16 +47,16 @@ func TestPublishErrorKeepsTextAndCause(t *testing.T) {
 			return true
 		})
 	}
-	// Every remaining string literal in writeAtomicBytes is unchanged. Only
-	// the final publication error now carries the underlying platform cause.
-	// "credentials" is the per-role credential directory whose files share the
-	// password file's pre-write hook (selected Local Cell principals).
+	// Every remaining string literal in a publication attempt is unchanged.
+	// Only the final publication error now carries the underlying platform
+	// cause. "credentials" is the per-role credential directory whose files
+	// share the password file's pre-write hook (selected Local Cell principals).
 	want := []string{"local cell record must be a regular file", "cannot create local cell record", "postgres.password", "credentials", "cannot persist local cell record"}
 	if !slices.Equal(literals, want) {
-		t.Fatal("writeAtomicBytes changed an unrelated literal")
+		t.Fatal("writeAtomicBytesOnce changed an unrelated literal")
 	}
 	if !strings.Contains(source, "if err := publishPrivateFile(f.Name(), path); err != nil {\n\t\treturn &publishError{cause: err}\n\t}") {
-		t.Fatal("writeAtomicBytes discarded the publication cause")
+		t.Fatal("writeAtomicBytesOnce discarded the publication cause")
 	}
 }
 
@@ -207,7 +208,10 @@ func TestPublishServiceLeaseSourceContract(t *testing.T) {
 		{"retry_every_error", "service_lease_publish.go", "!retryable(err) || ", ""},
 		{"budget_zero", "service_lease_publish.go", "2 * time.Second", "0 * time.Second"},
 		{"unbounded_budget", "service_lease_publish.go", "h.now().Sub(start) >= serviceLeasePublishBudget", "false"},
-		{"predicate_true", "service_lease_publish.go", "func(err error) bool { return runtimeconfig.WindowsPrivateTransient(err) }", "func(error) bool { return true }"},
+		// The lease relies on the shared publication retry and its predicate.
+		{"predicate_true", "files.go", "func(err error) bool { return runtimeconfig.WindowsPrivateTransient(err) }", "func(error) bool { return true }"},
+		{"nested_attempt", "service_lease_publish.go", "h.write = writeAtomicOnce", "h.write = writeAtomic"},
+		{"own_retry", "service_lease_publish.go", "attempts, err := publishAtomic(func() error {\n\t\treturn h.write(path, record, nil)\n\t}, h)", "attempts, err := retryPublish(func() error {\n\t\treturn h.write(path, record, nil)\n\t}, func(err error) bool { return runtimeconfig.WindowsPrivateTransient(err) }, h)"},
 		{"production_hook", "service_lease_publish.go", "var serviceLeasePublishTestHooks leasePublishHooks", "var serviceLeasePublishTestHooks = leasePublishHooks{sleep: time.Sleep}"},
 		{"stub_true", "windows_private_class_other.go", "return false", "return true"},
 	} {
@@ -246,7 +250,7 @@ const (
  serviceLeasePublishMaxBackoff = 200 * time.Millisecond
 )
 func (h leasePublishHooks) defaults() leasePublishHooks {
- if h.write == nil { h.write = writeAtomic }
+ if h.write == nil { h.write = writeAtomicOnce }
  if h.sleep == nil { h.sleep = time.Sleep }
  if h.now == nil { h.now = time.Now }
  return h
@@ -266,9 +270,15 @@ func retryPublish(attempt func() error, retryable func(error) bool, h leasePubli
 func (c *Cell) publishServiceLease(path string, record serviceLeaseRecord) error {
  h := serviceLeasePublishTestHooks.defaults()
  start := h.now()
- attempts, err := retryPublish(func() error { return h.write(path, record, nil) }, func(err error) bool { return runtimeconfig.WindowsPrivateTransient(err) }, h)
+ attempts, err := publishAtomic(func() error { return h.write(path, record, nil) }, h)
  if err != nil { writeLeasePublishDiagnostic(os.Stderr, runtimeconfig.WindowsPrivateFailureClass(err), attempts, h.now().Sub(start)) }
  return err
+}`
+	// The lease's one retry is the shared publication retry, with the lease's
+	// own transient predicate: sharing or access refusals of private objects.
+	const expectedShared = `package localcell
+func publishAtomic(attempt func() error, h leasePublishHooks) (int, error) {
+ return retryPublish(attempt, func(err error) bool { return runtimeconfig.WindowsPrivateTransient(err) }, h)
 }`
 	wanted := leasePublishDeclarations(expected)
 	actual := leasePublishDeclarations(sources["service_lease_publish.go"])
@@ -277,7 +287,14 @@ func (c *Cell) publishServiceLease(path string, record serviceLeaseRecord) error
 			return fail
 		}
 	}
-	if len(wanted) != 6 || !strings.Contains(sources["service_foreground.go"], `c.publishServiceLease(c.path("service", "lease.json"), record)`) {
+	wantedShared := leasePublishDeclarations(expectedShared)
+	actualShared := leasePublishDeclarations(sources["files.go"])
+	for name, declaration := range wantedShared {
+		if actualShared[name] != declaration {
+			return fail
+		}
+	}
+	if len(wanted) != 6 || len(wantedShared) != 1 || !strings.Contains(sources["service_foreground.go"], `c.publishServiceLease(c.path("service", "lease.json"), record)`) {
 		return fail
 	}
 	stub := leasePublishDeclarations(sources["windows_private_class_other.go"])

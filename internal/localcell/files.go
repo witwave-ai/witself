@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"time"
+
+	"github.com/witwave-ai/witself/internal/runtimeconfig"
 )
 
 var syncFile = func(f *os.File) error { return f.Sync() }
@@ -150,15 +152,43 @@ func readManifest(root string) (*Manifest, error) {
 	return &m, nil
 }
 
+// writeAtomic publishes value as indented JSON with the same shared bounded
+// publication retry as writeAtomicBytes.
 func writeAtomic(path string, value any, beforeRename func() error) error {
+	_, err := publishAtomic(func() error { return writeAtomicOnce(path, value, beforeRename) }, leasePublishHooks{})
+	return err
+}
+
+// writeAtomicOnce is one complete attempt of writeAtomic: the record encoding
+// and one atomic publication. Only the shared retry may repeat it.
+func writeAtomicOnce(path string, value any, beforeRename func() error) error {
 	data, err := json.MarshalIndent(value, "", "  ")
 	if err != nil {
 		return errors.New("cannot encode local cell record")
 	}
-	return writeAtomicBytes(path, append(data, '\n'), beforeRename)
+	return writeAtomicBytesOnce(path, append(data, '\n'), beforeRename)
 }
 
+// writeAtomicBytes publishes data as one private atomic record replacement. On
+// Windows a concurrent private-tree validation holds each object it checks
+// without delete sharing, so replacing the target or its pending source can be
+// refused for a moment. Only that private sharing or access refusal is retried,
+// within the lease publisher's bounds; every other failure, like every failure
+// off Windows, is a single attempt that returns its unchanged error. Each
+// attempt is a complete atomic publication with a fresh pending source.
 func writeAtomicBytes(path string, data []byte, beforeRename func() error) error {
+	_, err := publishAtomic(func() error { return writeAtomicBytesOnce(path, data, beforeRename) }, leasePublishHooks{})
+	return err
+}
+
+// publishAtomic is the one bounded retry of a private atomic publication. Each
+// attempt must be one complete publication; no caller may retry it again, so
+// the lease budget can never compound.
+func publishAtomic(attempt func() error, h leasePublishHooks) (int, error) {
+	return retryPublish(attempt, func(err error) bool { return runtimeconfig.WindowsPrivateTransient(err) }, h)
+}
+
+func writeAtomicBytesOnce(path string, data []byte, beforeRename func() error) error {
 	if err := validateWriteTarget(path); err != nil {
 		return err
 	}

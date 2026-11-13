@@ -43,9 +43,10 @@ func TestPublishServiceLeaseForeignHandle(t *testing.T) {
 			previousHooks := serviceLeasePublishTestHooks
 			t.Cleanup(func() { serviceLeasePublishTestHooks = previousHooks })
 			serviceLeasePublishTestHooks = leasePublishHooks{
+				// Count each complete attempt of the shared publication retry.
 				write: func(path string, value any, beforeRename func() error) error {
 					attempts++
-					return writeAtomic(path, value, beforeRename)
+					return writeAtomicOnce(path, value, beforeRename)
 				},
 				sleep: func(delay time.Duration) {
 					sleeps++
@@ -96,7 +97,7 @@ func TestPublishServiceLeaseForeignHandle(t *testing.T) {
 		serviceLeasePublishTestHooks = leasePublishHooks{
 			write: func(path string, value any, beforeRename func() error) error {
 				attempts++
-				return writeAtomic(path, value, beforeRename)
+				return writeAtomicOnce(path, value, beforeRename)
 			},
 			sleep: func(time.Duration) { sleeps++ },
 		}

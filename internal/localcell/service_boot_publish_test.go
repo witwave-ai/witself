@@ -71,22 +71,20 @@ func TestServiceBootPublicationRetriesOnlyTransient(t *testing.T) {
 	}
 }
 
-const serviceBootPublicationStatements = `path, record := c.path("service", "boot.json"), serviceBootRecord{d.InstallationID, boot}
-_, err = retryPublish(func() error { return writeAtomic(path, record, nil) }, func(err error) bool { return runtimeconfig.WindowsPrivateTransient(err) }, leasePublishHooks{})
-return err`
+const serviceBootPublicationStatements = `return writeAtomic(c.path("service", "boot.json"), serviceBootRecord{d.InstallationID, boot}, nil)`
 
 // The Windows reproduction cannot run on Linux or macOS hosts. Pin the
-// publication tail it exercises: the lease retry engine, the lease transient
-// classifier, the production default hooks and a complete writeAtomic attempt.
+// publication tail it exercises: one writeAtomic call, whose shared bounded
+// retry (TestAtomicPublicationSharedRetrySourceContract) is the only retry. A
+// call-site retry, such as the one this tail had before, would nest inside it.
 func TestServiceBootPublicationSourceContract(t *testing.T) {
 	source := leasePublishReadSource(t, "service_boot.go")
 	if !serviceBootPublicationContract(source) {
-		t.Fatal("boot publication lost its bounded transient retry")
+		t.Fatal("boot publication left the shared bounded publication retry")
 	}
 	for _, mutation := range []struct{ name, before, after string }{
-		{"single_attempt", "_, err = retryPublish(func() error { return writeAtomic(path, record, nil) }, func(err error) bool { return runtimeconfig.WindowsPrivateTransient(err) }, leasePublishHooks{})\n\treturn err", "return writeAtomic(path, record, nil)"},
-		{"every_error_transient", "func(err error) bool { return runtimeconfig.WindowsPrivateTransient(err) }", "func(error) bool { return true }"},
-		{"test_hooks", "leasePublishHooks{})", "serviceLeasePublishTestHooks)"},
+		{"nested_retry", `return writeAtomic(c.path("service", "boot.json"), serviceBootRecord{d.InstallationID, boot}, nil)`, "path, record := c.path(\"service\", \"boot.json\"), serviceBootRecord{d.InstallationID, boot}\n\t_, err = retryPublish(func() error { return writeAtomic(path, record, nil) }, func(err error) bool { return runtimeconfig.WindowsPrivateTransient(err) }, leasePublishHooks{})\n\treturn err"},
+		{"single_attempt", `return writeAtomic(c.path("service", "boot.json")`, `return writeAtomicOnce(c.path("service", "boot.json")`},
 		{"pending_target", `c.path("service", "boot.json"), serviceBootRecord`, `c.path("service", "boot.pending"), serviceBootRecord`},
 	} {
 		t.Run(mutation.name, func(t *testing.T) {
@@ -119,6 +117,20 @@ func serviceBootPublicationContract(source string) bool {
 		found++
 		body := function.Body.List
 		if len(body) < len(want) || serviceBootPublicationText(&ast.BlockStmt{List: body[len(body)-len(want):]}) != serviceBootPublicationText(&ast.BlockStmt{List: want}) {
+			return false
+		}
+		// Nothing else in the function may retry or bypass the shared retry.
+		bypass := false
+		ast.Inspect(function.Body, func(node ast.Node) bool {
+			if identifier, ok := node.(*ast.Ident); ok {
+				switch identifier.Name {
+				case "retryPublish", "publishAtomic", "writeAtomicOnce", "writeAtomicBytesOnce":
+					bypass = true
+				}
+			}
+			return true
+		})
+		if bypass {
 			return false
 		}
 	}
