@@ -69,7 +69,7 @@ func (c *Cell) validateRoot(create bool) error {
 	if err := privateDir(c.cfg.Root, create); err != nil {
 		return err
 	}
-	for _, name := range []string{"pg", "spool", "run", "journal", "logs", "tmp", "home"} {
+	for _, name := range []string{"pg", "spool", "run", "journal", "logs", "tmp", "home", "recovery"} {
 		if _, err := os.Lstat(c.path(name)); errors.Is(err, os.ErrNotExist) {
 			continue
 		}
