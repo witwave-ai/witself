@@ -421,6 +421,8 @@ func validJournalStep(operation, step string) bool {
 		"start":   {"ports": true, "postgres": true, "server": true, "server_ready": true, "account": true, "worker": true, "worker_ready": true, "principal_verified": true},
 		"stop":    {"stop": true},
 		"remove":  {"stop": true, "spool": true, "tmp": true, "logs": true, "purge": true, "runtime_cleanup": true},
+
+		"reinstall": {"postgres": true, "verified": true, "stop": true, "readmitted": true},
 	}
 	allowed, ok := steps[operation]
 	return ok && (step == "operation" || step == "revert_stop" || allowed[step])

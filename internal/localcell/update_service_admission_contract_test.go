@@ -65,18 +65,25 @@ if err == nil && (previous.InstallationID != d.InstallationID || previous.BootID
 if previous.BootID != "" && previous.BootID != boot {
  if err := c.reconcileOldBoot(previous.BootID, boot); err != nil { return err }
 }`,
+	"Reinstall": `lock, err := c.own(false)
+if err != nil { return err }
+defer func() { _ = lock.Close() }()
+` + maintenanceAdmissionStatement + `
+return c.reinstallLocked(ctx, options)`,
 }
 
 var maintenanceServiceAdmissionFiles = map[string]string{
 	"PrepareService":       "service_descriptor.go",
 	"RepairService":        "service_descriptor.go",
 	"reconcileServiceBoot": "service_boot.go",
+	"Reinstall":            "reinstall.go",
 }
 
 var maintenanceServiceAdmissionParameters = map[string]string{
 	"PrepareService":       "ctx context.Context, d ServiceDescriptor",
 	"RepairService":        "ctx context.Context",
 	"reconcileServiceBoot": "",
+	"Reinstall":            "ctx context.Context, options ReinstallOptions",
 }
 
 // Keep the old four-owner predicate and its independent counts unchanged.
@@ -289,7 +296,7 @@ func maintenanceServiceAdmissionContract(sources map[string]string) []string {
 			expectedReferences = 3
 		case "service_systemd_adapter.go", "service_launchd.go":
 			expectedReferences = 2
-		case "service_boot.go", "service_health.go", "service_maintenance.go":
+		case "service_boot.go", "service_health.go", "service_maintenance.go", "reinstall.go":
 			expectedReferences = 1
 		}
 		if fileReferences != expectedReferences {
@@ -324,7 +331,7 @@ func maintenanceServiceAdmissionContract(sources map[string]string) []string {
 			}
 		}
 	}
-	if totalReferences != 17 {
+	if totalReferences != 18 {
 		failures = append(failures, "global_count")
 	}
 	sort.Strings(failures)
@@ -437,6 +444,9 @@ func serviceAdmissionMutations(owner string) []admissionSourceMutation {
 	if owner == "RepairService" {
 		ownIndex, manifestIndex = 3, 6
 	}
+	if owner == "Reinstall" {
+		ownIndex, manifestIndex = 0, 1
+	}
 	mutations := []admissionSourceMutation{
 		{"DeleteGate", "reference_count", replaceGate("")},
 		{"MatchPositiveGeneration", "position", replaceGate(strings.ReplaceAll(maintenanceAdmissionStatement, "Allows(0)", "Allows(7)"))},
@@ -498,7 +508,7 @@ func TestServiceMaintenanceAdmissionSourceContractMutations(t *testing.T) {
 	if failures := maintenanceServiceAdmissionContract(sources); len(failures) != 0 {
 		t.Fatalf("unchanged control: %v", failures)
 	}
-	for _, owner := range []string{"PrepareService", "reconcileServiceBoot", "RepairService"} {
+	for _, owner := range []string{"PrepareService", "reconcileServiceBoot", "RepairService", "Reinstall"} {
 		filename := maintenanceServiceAdmissionFiles[owner]
 		original := admissionNodeText(serviceAdmissionFunction(t, filename, sources[filename], owner))
 		t.Run(owner, func(t *testing.T) {
@@ -572,7 +582,7 @@ func TestServiceMaintenanceAdmissionGuardFixtures(t *testing.T) {
 			t.Fatalf("eight exact admission counts: %v", failures)
 		}
 	})
-	for _, owner := range []string{"PrepareService", "reconcileServiceBoot", "RepairService"} {
+	for _, owner := range []string{"PrepareService", "reconcileServiceBoot", "RepairService", "Reinstall"} {
 		t.Run(owner, func(t *testing.T) {
 			original := approved[owner]
 			filename := maintenanceServiceAdmissionFiles[owner]
@@ -696,7 +706,7 @@ func serviceAdmissionInventoryFixtures(t *testing.T, approved map[string]string)
 	if failures := maintenanceServiceAdmissionContract(control); len(failures) != 0 {
 		t.Fatalf("inventory unchanged control: %v", failures)
 	}
-	for _, owner := range []string{"PrepareService", "reconcileServiceBoot", "RepairService"} {
+	for _, owner := range []string{"PrepareService", "reconcileServiceBoot", "RepairService", "Reinstall"} {
 		t.Run(owner+"_Inventory", func(t *testing.T) {
 			filename := maintenanceServiceAdmissionFiles[owner]
 			for _, fixture := range []struct {

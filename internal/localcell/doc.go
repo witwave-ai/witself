@@ -19,7 +19,7 @@
 // afterward and rolls back the created object by handle. This is detection with
 // rollback, not prevention; handle-relative creation remains deferred.
 //
-// Install, Start, Stop, Repair, and Remove require exclusive OS advisory locks;
+// Install, Start, Stop, Repair, Remove, and Reinstall require exclusive OS advisory locks;
 // a competing operation fails promptly. Inspect reads the manifest, process
 // identities, data presence, lock state, and interrupted journal operation
 // without changing them. Status adds bounded live readiness checks. Mutations
@@ -33,8 +33,17 @@
 // failed, and stops every recorded component before publishing the marker.
 // Start refuses a marked cell before any journal record, credential read or
 // launch (only its operation lock may be created first), and PostgreSQL boot
-// refuses it independently; Install does not adopt the retained root, and
-// reinstall remains unsupported.
+// refuses it independently; Install does not adopt the retained root. Only an
+// explicit Reinstall naming the exact retained installation readmits it, for the
+// same build and retained custody only: it starts PostgreSQL just to prove the
+// custody the layout uses authenticates and the identity and schema match, stops
+// it, and clears the marker last. It mints, rotates, migrates and deletes nothing.
+// In the selected layout the bootstrap password is format-checked only: that
+// layout never uses the bootstrap login after install, and its proof
+// authenticates the six role credentials instead. A service in maintenance,
+// Faulted or mid-transition refuses Reinstall, and a refusal may leave only the
+// run/ lock entries that its lock prefix creates, as Start's does. Inspect offers
+// reinstall only where Reinstall's offline admission predicate holds.
 // Only a current explicit purge deletes the established owned cleanup targets.
 // Repair never inherits purge authority or regenerates missing custody/history.
 // Retained temporary files do not establish a durable pending-work guarantee.
