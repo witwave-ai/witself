@@ -136,10 +136,16 @@ func TestWindowsForegroundSubprocessClassEnrollment(t *testing.T) {
 
 func TestWindowsForegroundShortReceiptClassEnrollment(t *testing.T) {
 	var rows []foregroundClassEnrollment
+	const idle = "service_shutdown phase=idle operation=none journal_pending=false journal_read_ok=true\n"
 	for _, row := range []struct{ name, receipt, class string }{
 		{"missing", "", "no_output"},
-		{"malformed", "private /synthetic/home\n", "unclassified"},
-		{"partial", "service_shutdown", "unclassified"},
+		{"malformed", "private /synthetic/home\n", "unclassified_one_line"},
+		{"partial", "service_shutdown", "unclassified_one_line"},
+		{"blank", "\n", "unclassified_blank"},
+		{"startup", strings.Replace(idle, "phase=idle operation=none", "phase=startup operation=reconcile", 1), "unclassified_receipt_startup"},
+		{"tick", strings.Replace(idle, "phase=idle", "phase=tick", 1), "unclassified_receipt_tick"},
+		{"control", strings.Replace(idle, "phase=idle", "phase=control", 1), "unclassified_receipt_control"},
+		{"journal_pending", strings.Replace(idle, "journal_pending=false", "journal_pending=true", 1), "unclassified_one_line"},
 	} {
 		receipt := []byte(row.receipt)
 		failure := foregroundShutdownFailure(receipt)
