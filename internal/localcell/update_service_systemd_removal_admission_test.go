@@ -243,11 +243,13 @@ func TestServiceAdapterRemovalHostExclusionSystemd(t *testing.T) {
 		}
 		before := serviceMaintenanceSnapshot(t, m.cell)
 		seen := map[string]bool{}
+		var order []string
 		removing := false
 		a.command = func(ctx context.Context, binary string, args ...string) ([]byte, error) {
 			if binary == a.systemctl && len(args) > 1 && (args[1] == "disable" || args[1] == "daemon-reload") {
 				serviceRemovalLocksHeld(t, m.cell)
 				seen[args[1]] = true
+				order = append(order, args[1])
 				removing = args[1] == "disable"
 			}
 			return m.command(ctx, binary, args...)
@@ -255,17 +257,27 @@ func TestServiceAdapterRemovalHostExclusionSystemd(t *testing.T) {
 		a.inspectFile = func(path string) (os.FileInfo, error) {
 			if removing && path == a.unitPath(d) {
 				serviceRemovalLocksHeld(t, m.cell)
-				seen["final_unlink"] = true
+				seen["owned_unit_check"] = true
+				order = append(order, "owned_unit_check")
 			}
 			return os.Lstat(path)
+		}
+		a.removeFile = func(path string) error {
+			serviceRemovalLocksHeld(t, m.cell)
+			seen["final_unlink"] = true
+			order = append(order, "final_unlink")
+			return os.Remove(path)
 		}
 		if a.Remove(t.Context(), d) != nil {
 			t.Fatal("Systemd continuous lock removal failed")
 		}
-		for _, site := range []string{"disable", "daemon-reload", "final_unlink"} {
+		for _, site := range []string{"disable", "owned_unit_check", "final_unlink", "daemon-reload"} {
 			if !seen[site] {
 				t.Fatal("Systemd continuous lock callback was not reached")
 			}
+		}
+		if !reflect.DeepEqual(order, []string{"disable", "owned_unit_check", "final_unlink", "daemon-reload"}) {
+			t.Fatal("Systemd removal callbacks changed order")
 		}
 		after := serviceMaintenanceSnapshot(t, m.cell)
 		delete(after, ".service-host.lock")

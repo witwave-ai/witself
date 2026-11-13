@@ -68,6 +68,7 @@ type systemdUserAdapter struct {
 	owned                                             func(string, os.FileInfo) bool
 	accessible                                        func(string, bool) bool
 	inspectFile                                       func(string) (os.FileInfo, error)
+	removeFile                                        func(string) error
 	writeUnit                                         func(*os.File, []byte) error
 	unavailable                                       bool
 }
@@ -637,7 +638,11 @@ func (a *systemdUserAdapter) Remove(ctx context.Context, d ServiceIdentity) erro
 	} else if !exists {
 		return serviceSystemdError(ErrServiceOwnershipConflict, "remove:unit_file", "missing")
 	}
-	if err := os.Remove(a.unitPath(d)); err != nil {
+	removeFile := a.removeFile
+	if removeFile == nil {
+		removeFile = os.Remove
+	}
+	if err := removeFile(a.unitPath(d)); err != nil {
 		return a.commandError(ErrServiceRemovalFailed, "unit_file:remove", err, d.Root)
 	}
 	if err := syncDirectory(a.unitDir); err != nil {

@@ -25,6 +25,7 @@ func systemdFixture(t *testing.T) (*systemdUserAdapter, ServiceDescriptor, *syst
 	c, d := unixServiceFixtureCell(t, "cell's 日本 space", d)
 	a := &systemdUserAdapter{uid: d.UID, home: home, runtimeDir: runtimeDir, unitDir: filepath.Join(home, ".config", "systemd", "user"), systemctl: "/fixture/systemctl", busctl: "/fixture/busctl", owned: func(_ string, _ os.FileInfo) bool { return true }}
 	m := &systemdFixtureManager{t: t, adapter: a, descriptor: d, cell: c}
+	a.removeFile = os.Remove
 	a.command = m.command
 	a.drain = func(_ context.Context, value ServiceDescriptor) error {
 		serviceRemovalStopped(t, c, value)

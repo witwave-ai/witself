@@ -27,7 +27,7 @@ func removalCallName(call *ast.CallExpr) string {
 
 func removalDestructiveCall(call *ast.CallExpr) bool {
 	switch removalCallName(call) {
-	case "Remove", "removePrivateFile", "removePlistIdentity", "bootout", "syncDirectory":
+	case "Remove", "removeFile", "removePrivateFile", "removePlistIdentity", "bootout", "syncDirectory":
 		return true
 	case "command":
 		for _, argument := range call.Args {
