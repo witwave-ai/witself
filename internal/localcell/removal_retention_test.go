@@ -151,7 +151,8 @@ func retainedAssertMaterial(t *testing.T, f *retainedFixture) {
 			continue
 		}
 		if got, ok := after[name]; !ok || got != before {
-			t.Fatalf("retained original bytes or private mode missing: %s", name)
+			t.Logf("retained material class=%s", retainedArea(name))
+			t.Fatal("retained original bytes or private mode missing")
 		}
 	}
 	if !bytes.HasPrefix(retainedRead(t, f.cell, "journal/operations.jsonl"), f.prefix) {
@@ -476,11 +477,13 @@ func TestRetainedRemovalServiceRetryAndPurge(t *testing.T) {
 		t.Fatal(err)
 	}
 	f := seedRetainedFixture(t, c, m)
-	for _, action := range []func(context.Context) error{
+	steps := []string{"remove_first", "stop", "repair", "remove_again"}
+	for i, action := range []func(context.Context) error{
 		func(ctx context.Context) error { return c.Remove(ctx, RemoveOptions{}) }, c.Stop, c.Repair,
 		func(ctx context.Context) error { return c.Remove(ctx, RemoveOptions{}) },
 	} {
 		if err := action(t.Context()); err != nil {
+			t.Logf("retained service retry class=%s", steps[i])
 			t.Fatal("service retained lifecycle retry failed")
 		}
 		if _, err := c.ServiceDescriptor(); err != nil {
@@ -645,4 +648,16 @@ func TestRetainedRemovalManifestCompatibility(t *testing.T) {
 			t.Fatal("predecessor strict reader ignored retained launch refusal")
 		}
 	}
+}
+
+// retainedArea names the top-level area of a retained entry with a closed,
+// value-free word so a CI failure says where the tree changed.
+func retainedArea(name string) string {
+	top, _, _ := strings.Cut(name, "/")
+	for _, area := range []string{"pg", "run", "journal", "service", "payload", "trust", "spool", "tmp", "logs"} {
+		if top == area {
+			return area
+		}
+	}
+	return "root"
 }
