@@ -450,6 +450,10 @@ func TestRetainedRemovalLegacyCleanup(t *testing.T) {
 }
 
 func TestRetainedRemovalServiceRetryAndPurge(t *testing.T) {
+	// Each phase logs a closed class first, so a CI failure from a helper's raw
+	// error still shows how far the test got.
+	phase := func(name string) { t.Logf("retained service phase class=%s", name) }
+	phase("setup")
 	a, d, manager := launchdFixture(t)
 	owner, err := serviceOwner()
 	if err != nil {
@@ -466,22 +470,27 @@ func TestRetainedRemovalServiceRetryAndPurge(t *testing.T) {
 		}
 		return nil
 	}
+	phase("install")
 	launchdInstallFixture(t, a, d)
 	adapter := &serviceRemovalFixture{t: t, cell: manager.cell, d: d, launch: a, lm: manager}
 	serviceRemovalStopped(t, adapter.cell, d)
+	phase("hold_host")
 	release := serviceRemovalHoldHost(t, adapter.cell)
 	release()
 	c := adapter.cell
+	phase("manifest")
 	m, err := readManifest(c.cfg.Root)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatal("cannot read retained service manifest")
 	}
+	phase("seed")
 	f := seedRetainedFixture(t, c, m)
 	steps := []string{"remove_first", "stop", "repair", "remove_again"}
 	for i, action := range []func(context.Context) error{
 		func(ctx context.Context) error { return c.Remove(ctx, RemoveOptions{}) }, c.Stop, c.Repair,
 		func(ctx context.Context) error { return c.Remove(ctx, RemoveOptions{}) },
 	} {
+		phase(steps[i])
 		if err := action(t.Context()); err != nil {
 			t.Logf("retained service retry class=%s", steps[i])
 			t.Fatal("service retained lifecycle retry failed")
@@ -491,6 +500,7 @@ func TestRetainedRemovalServiceRetryAndPurge(t *testing.T) {
 		}
 		retainedAssertMaterial(t, f)
 	}
+	phase("adapter_remove")
 	before := retainedSnapshot(t, c)
 	if adapter.remove() != nil || adapter.registered() {
 		t.Fatal("fake manager unregister did not complete")
@@ -498,9 +508,11 @@ func TestRetainedRemovalServiceRetryAndPurge(t *testing.T) {
 	if !reflect.DeepEqual(before, retainedSnapshot(t, c)) {
 		t.Fatal("adapter removal mutated lifecycle custody")
 	}
+	phase("purge")
 	if c.Remove(t.Context(), RemoveOptions{Purge: true}) != nil {
 		t.Fatal("uninterrupted explicit service purge failed")
 	}
+	phase("verify")
 	for _, name := range []string{"pg", "run", "journal", "manifest.json"} {
 		if _, err := os.Lstat(c.path(name)); !errors.Is(err, os.ErrNotExist) {
 			t.Fatal("explicit purge left an established deletion target")
