@@ -22,7 +22,14 @@ import (
 // the explicitly weaker shared-database rehearsal. Build output is private: an
 // unavailable cached predecessor is reported by its fixed NOT RUN reason only.
 func TestCaptureMixMatrix(t *testing.T) {
-	dsn := testenv.RequirePostgres(t)
+	// The executable matrix's production target policy deliberately requires
+	// the exact shared lane database or the exclusively owned witself cluster.
+	// Keep its explicit base target; ordinary schema fixtures use package DBs.
+	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
+	if dsn == "" {
+		dsn = testenv.RequirePostgres(t) // Preserve the shared missing-DSN policy.
+	}
+	dsn = testenv.GuardPostgresTransactions(t, dsn)
 	ctx, cancel := context.WithTimeout(context.Background(), 24*time.Minute)
 	defer cancel()
 	current := os.Getenv("WITSELF_CAPTUREMIX_CURRENT_BIN_DIR")

@@ -103,7 +103,7 @@ func TestNarrativeMemoryConcurrencyLoadPostgres(t *testing.T) {
 	if os.Getenv(memoryConcurrencyLoadEnabled) != "1" {
 		t.Skip(memoryConcurrencyLoadEnabled + "=1 is required")
 	}
-	dsn := strings.TrimSpace(os.Getenv("WITSELF_TEST_DATABASE_URL"))
+	dsn := strings.TrimSpace(testenv.PostgresDatabaseURL(t))
 	if dsn == "" {
 		t.Fatal("WITSELF_TEST_DATABASE_URL is required when memory concurrency load testing is enabled")
 	}

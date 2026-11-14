@@ -120,3 +120,24 @@ func TestValidateHarnessPostgresDSN(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateHarnessPostgresPackageDatabase(t *testing.T) {
+	t.Setenv("WITSELF_SYNC_HARNESS_DB", "codex_b")
+	identity := postgresTestPackageIdentity()
+	if identity == "" {
+		t.Fatal("test package identity unavailable")
+	}
+	base := "postgres://fixture:synthetic@127.0.0.1:5599/"
+	if ValidateHarnessPostgresDSN(base+PostgresDatabaseName("codex_b", identity)) != nil {
+		t.Fatal("exact package database refused by its base lane guard")
+	}
+	for _, name := range []string{
+		PostgresDatabaseName("codex_a", identity),
+		PostgresDatabaseName("codex_b", identity+"/another"),
+		"codex_b_unrelated",
+	} {
+		if ValidateHarnessPostgresDSN(base+name) == nil {
+			t.Fatal("lane guard accepted an unrelated database")
+		}
+	}
+}

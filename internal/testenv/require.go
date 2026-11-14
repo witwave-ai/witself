@@ -21,11 +21,11 @@ const (
 	requireNodeEnv     = "WITSELF_TEST_REQUIRE_NODE"
 )
 
-// RequirePostgres returns the configured PostgreSQL test DSN. When the DSN is
+// RequirePostgres returns this package's PostgreSQL test DSN. When the DSN is
 // absent, it skips by default and fails if WITSELF_TEST_REQUIRE_DATABASE=1.
 func RequirePostgres(t testing.TB) string {
 	t.Helper()
-	dsn := os.Getenv(databaseURLEnv)
+	dsn := PostgresDatabaseURL(t)
 	if dsn != "" {
 		return GuardPostgresTransactions(t, dsn)
 	}

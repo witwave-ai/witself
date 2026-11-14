@@ -46,7 +46,7 @@ func TestStorePostgresTransactionGuard(t *testing.T) {
 				return
 			}
 			if mode == "harness_validator_tagged_dsn" {
-				dsn := testenv.GuardPostgresTransactions(t, os.Getenv("WITSELF_TEST_DATABASE_URL"))
+				dsn := testenv.GuardPostgresTransactions(t, testenv.PostgresDatabaseURL(t))
 				parsed, err := pgx.ParseConfig(dsn)
 				if err != nil || !strings.HasPrefix(parsed.RuntimeParams["application_name"], "witself-test-") {
 					t.Fatal("harness validator control did not receive a process tag")
@@ -73,7 +73,7 @@ func TestStorePostgresTransactionGuard(t *testing.T) {
 			})
 			var dsn string
 			if mode == "direct_guard_leaking_transaction" {
-				dsn = testenv.GuardPostgresTransactions(t, os.Getenv("WITSELF_TEST_DATABASE_URL"))
+				dsn = testenv.GuardPostgresTransactions(t, testenv.PostgresDatabaseURL(t))
 			} else {
 				dsn = testenv.RequirePostgres(t)
 			}
@@ -354,7 +354,7 @@ func testStorePostgresForeignHolder(t *testing.T) {
 			}
 		}
 	})
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
+	dsn := testenv.PostgresDatabaseURL(t)
 	foreignConfig, err := pgx.ParseConfig(dsn)
 	if err != nil {
 		t.Fatal("transaction guard foreign configuration failed")
@@ -571,7 +571,7 @@ func observePostgresGuardForeignTransactions(ctx context.Context, t *testing.T, 
 
 func testStorePostgresTaggedDSN(t *testing.T, mode string) {
 	t.Helper()
-	dsn := os.Getenv("WITSELF_TEST_DATABASE_URL")
+	dsn := testenv.PostgresDatabaseURL(t)
 	config, err := pgx.ParseConfig(dsn)
 	if err != nil {
 		t.Fatal("transaction guard DSN control configuration failed")

@@ -20,7 +20,7 @@ func clearServerRuntimeEnvironment(t *testing.T) {
 	t.Helper()
 	for _, entry := range os.Environ() {
 		name, _, _ := strings.Cut(entry, "=")
-		if strings.HasPrefix(name, "WITSELF_") && name != "WITSELF_TEST_DATABASE_URL" && name != "WITSELF_TEST_REQUIRE_DATABASE" {
+		if strings.HasPrefix(name, "WITSELF_") && name != "WITSELF_TEST_DATABASE_URL" && name != "WITSELF_TEST_REQUIRE_DATABASE" && name != "WITSELF_TEST_REQUIRE_PACKAGE_DATABASE" {
 			t.Setenv(name, "")
 			if err := os.Unsetenv(name); err != nil {
 				t.Fatal("unset test configuration")
