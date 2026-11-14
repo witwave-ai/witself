@@ -190,15 +190,7 @@ dashboard-acceptance: ## Run the release's headless Agent Console acceptance on 
 			--out "$(DASHBOARD_ACCEPTANCE_OUT)"
 
 test-integration: db-up ## Run the PostgreSQL-backed store tests in a disposable database
-	@set -eu; \
-		integration_db="witself_test_$$(date -u +%Y%m%d%H%M%S)_$$$$"; \
-		cleanup_integration_db() { \
-			docker compose exec -T postgres dropdb --if-exists -U witself "$$integration_db" >/dev/null; \
-		}; \
-		trap cleanup_integration_db EXIT HUP INT TERM; \
-		docker compose exec -T postgres createdb -U witself "$$integration_db"; \
-		WITSELF_TEST_DATABASE_URL="postgres://witself:witself@localhost:5432/$$integration_db?sslmode=disable" \
-			go test ./internal/store -count=1 -timeout=$(STORE_TEST_TIMEOUT)
+	bash scripts/run-store-integration.sh "$(STORE_TEST_TIMEOUT)"
 
 test-memory-cloud-conformance: ## Run the opt-in 3x3 memory/account-move rehearsal or certification
 	WITSELF_MEMORY_CLOUD_CONFORMANCE=1 go test ./internal/store \
@@ -468,6 +460,7 @@ check-infra: ## Gates for nested Pulumi plus the isolated Cloudflare Workers
 	bash scripts/test-roll-train.sh
 	bash scripts/test-release-ops.sh
 	bash scripts/test-rehearse-store-migrations.sh
+	bash scripts/test-run-store-integration.sh
 	bash scripts/test-memory-load-quality-workflow.sh
 	bash scripts/test-provider-contract-workflow.sh
 	$(MAKE) check-node-selftests
