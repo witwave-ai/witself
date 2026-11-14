@@ -106,7 +106,10 @@ func tenantNewRuntime(t *testing.T) *tenantRuntime {
 	if err != nil {
 		t.Fatalf("tenant matrix store open failed: %s", tenantHarnessSafeError(err))
 	}
-	if err := rt.st.Migrate(); err != nil {
+	started := time.Now()
+	err = rt.st.Migrate()
+	rt.migrationWork = time.Since(started)
+	if err != nil {
 		t.Fatalf("tenant matrix schema migration failed: %s", tenantHarnessSafeError(err))
 	}
 	rt.db, err = sql.Open("pgx", rt.dsn)
@@ -251,7 +254,9 @@ func tenantStartChild(t *testing.T, rt *tenantRuntime) {
 				t.Logf("tenant matrix child stderr (last 200 lines):\n%s", tenantRedactChildLog(stderr.String(), rt))
 			}
 		})
-		readyCtx, readyCancel := context.WithTimeout(context.Background(), 60*time.Second)
+		budget := testenv.MigrationBudget(rt.migrationWork)
+		t.Logf("tenant matrix child readiness budget %s", budget)
+		readyCtx, readyCancel := context.WithTimeout(context.Background(), budget)
 		poll := time.NewTicker(100 * time.Millisecond)
 		for {
 			select {

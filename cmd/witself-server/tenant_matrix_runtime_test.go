@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/witwave-ai/witself/internal/routeinventory"
 	"github.com/witwave-ai/witself/internal/store"
@@ -25,6 +26,7 @@ type tenantRuntime struct {
 	f                 *tenantFixture
 	st                *store.Store
 	db                *sql.DB
+	migrationWork     time.Duration
 	schema, dsn       string
 	creds             map[tenantSide]map[tenantCred]string
 	freshCreds        map[tenantSide]map[string]string
