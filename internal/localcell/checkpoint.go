@@ -35,13 +35,91 @@ type CheckpointOptions struct{ InstallationID string }
 type DeleteCheckpointOptions struct{ CheckpointID string }
 
 // CheckpointSummary is Inspect's value-free view of one checkpoint; an
-// incomplete one reports only its identifier.
+// incomplete one reports only its identifier. Call Printable before rendering
+// witness metadata; completeness alone does not establish its safe shape.
 type CheckpointSummary struct {
 	ID             string    `json:"id"`
 	InstallationID string    `json:"installation_id,omitempty"`
 	CreatedAt      time.Time `json:"created_at,omitzero"`
 	Bytes          int64     `json:"bytes,omitempty"`
 	Complete       bool      `json:"complete"`
+}
+
+// checkpointStateError carries only a closed reason, never a refused name or
+// OS error. Unwrap preserves the existing fixed cause and journal vocabulary.
+type checkpointStateError struct{ reason string }
+
+func (e checkpointStateError) Error() string { return "local_checkpoint_state_unsupported" }
+func (e checkpointStateError) Unwrap() error { return errCheckpointState }
+
+// CheckpointFailure is safe to render: Class and Reason contain only closed
+// constants. A nil failure has the zero value. CleanupIncomplete means that
+// the failed operation could not remove its own witness-less directory.
+type CheckpointFailure struct {
+	Class             string
+	Reason            string
+	CleanupIncomplete bool
+}
+
+var checkpointFailureClasses = []struct {
+	cause error
+	class string
+}{
+	{errCheckpointState, "local_checkpoint_state_unsupported"},
+	{errCheckpointIdentity, "local_checkpoint_identity_mismatch"},
+	{errCheckpointSource, "local_checkpoint_source_unsupported"},
+	{errCheckpointStorage, "local_checkpoint_storage_insufficient"},
+	{errCheckpointLimit, "local_checkpoint_limit_reached"},
+	{errCheckpointIncomplete, "local_checkpoint_incomplete"},
+	{errCheckpointWitness, "local_checkpoint_witness_mismatch"},
+	{errCheckpointCopy, "local_checkpoint_copy_failed"},
+	{errMaintenanceFenceActive, "local_maintenance_fence_active"},
+	{ErrLocked, "local_cell_locked"},
+	{context.Canceled, "local_checkpoint_interrupted"},
+	{context.DeadlineExceeded, "local_checkpoint_interrupted"},
+	{errPrivateLayout, "local_cell_layout_refused"},
+	{errLocalDirectory, "local_cell_layout_refused"},
+	{errLocalDirectoryPrivate, "local_cell_layout_refused"},
+	{errLocalParentUnavailable, "local_cell_layout_refused"},
+	{errLocalParentChanged, "local_cell_layout_refused"},
+}
+
+// ClassifyCheckpointFailure classifies identities, including wrapped causes,
+// without reading error text. Unknown failures expose no original information.
+func ClassifyCheckpointFailure(err error) CheckpointFailure {
+	if err == nil {
+		return CheckpointFailure{}
+	}
+	result := CheckpointFailure{Class: "local_checkpoint_operation_failed"}
+	var cleanup checkpointCleanupError
+	if errors.As(err, &cleanup) {
+		result.CleanupIncomplete = true
+		err = cleanup.Unwrap()
+	}
+	for _, entry := range checkpointFailureClasses {
+		if errors.Is(err, entry.cause) {
+			result.Class = entry.class
+			break
+		}
+	}
+	var state checkpointStateError
+	if errors.As(err, &state) {
+		switch state.reason {
+		case "boundary_unreadable", "boundary_noncanonical", "boundary_not_private",
+			"descendant_refused", "tree_unreadable", "unknown_entries":
+			result.Reason = state.reason
+		}
+	}
+	return result
+}
+
+// Printable checks only metadata shape, not completeness, integrity or restore
+// readiness. It does not affect admission, counting, or exact-ID deletion.
+func (s CheckpointSummary) Printable() bool {
+	return checkpointIDPattern.MatchString(s.ID) && s.Bytes >= 0 &&
+		(len(s.InstallationID) <= 64 && strings.Trim(s.InstallationID, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-") == "") &&
+		(s.InstallationID != "" || !s.Complete) &&
+		(!s.CreatedAt.IsZero() || !s.Complete) && s.CreatedAt.Year() >= 1 && s.CreatedAt.Year() <= 9999
 }
 
 var checkpointIDPattern = regexp.MustCompile(`^ckpt_[a-z2-7]{16}$`)
@@ -322,7 +400,7 @@ func (c *Cell) admitCheckpoint(ctx context.Context, options CheckpointOptions, o
 	case slices.ContainsFunc(summaries, func(summary CheckpointSummary) bool { return !summary.Complete }):
 		return nil, errCheckpointIncomplete
 	case unknown != 0:
-		return nil, errCheckpointState
+		return nil, checkpointStateError{reason: "unknown_entries"}
 	case len(summaries) >= checkpointLimit:
 		return nil, errCheckpointLimit
 	}
@@ -875,7 +953,7 @@ func (c *Cell) listCheckpoints() ([]CheckpointSummary, int, error) {
 		return nil, 0, nil
 	} else if err != nil {
 		// Never report zero checkpoints for a recovery/ that could not be read.
-		return nil, 0, errCheckpointState
+		return nil, 0, checkpointStateError{reason: "boundary_unreadable"}
 	}
 	var summaries []CheckpointSummary
 	unknown := 0
@@ -921,7 +999,7 @@ func (c *Cell) checkpointSummaries(lock *operationLock, inspection *Inspection) 
 		return err
 	}
 	var err error
-	inspection.Checkpoints, _, err = c.listCheckpoints()
+	inspection.Checkpoints, inspection.CheckpointUnknown, err = c.listCheckpoints()
 	return err
 }
 
@@ -932,18 +1010,36 @@ func (c *Cell) validateRecovery() error {
 	if _, err := os.Lstat(c.recoveryDir()); errors.Is(err, fs.ErrNotExist) {
 		return nil
 	} else if err != nil {
-		return errCheckpointState
+		return checkpointStateError{reason: "boundary_unreadable"}
 	}
 	entries, err := os.ReadDir(c.cfg.Root)
 	names := make([]string, 0, len(entries))
 	for _, entry := range entries {
 		names = append(names, entry.Name())
 	}
-	if err != nil || !recoveryEntryCanonical(names, filepath.Base(c.recoveryDir())) || privateDir(c.recoveryDir(), false) != nil ||
-		validatePrivateTreeSnapshot(c.recoveryDir(), filepath.WalkDir, validateRecoveryObject, os.Lstat) != nil {
-		return errCheckpointState
+	if err != nil {
+		return checkpointStateError{reason: "boundary_unreadable"}
 	}
-	return nil
+	if !recoveryEntryCanonical(names, filepath.Base(c.recoveryDir())) {
+		return checkpointStateError{reason: "boundary_noncanonical"}
+	}
+	if privateDir(c.recoveryDir(), false) != nil {
+		return checkpointStateError{reason: "boundary_not_private"}
+	}
+	return recoveryTreeFailure(validatePrivateTreeSnapshot(c.recoveryDir(), filepath.WalkDir, validateRecoveryObject, os.Lstat))
+}
+
+// recoveryTreeFailure consumes only identities already established by the one
+// snapshot walk. Object checks cannot distinguish unreadability from privacy
+// refusal, so those use the coarser descendant reason. No OS error is retained.
+func recoveryTreeFailure(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, errPrivateLayout) || errors.Is(err, fs.ErrNotExist) {
+		return checkpointStateError{reason: "tree_unreadable"}
+	}
+	return checkpointStateError{reason: "descendant_refused"}
 }
 
 // recoveryEntryCanonical reports whether the listing holds want byte for byte.

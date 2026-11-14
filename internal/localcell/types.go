@@ -157,7 +157,9 @@ type Interruption struct {
 // or no lock file existed and the recovery boundary was observed absent. It is
 // "busy" when another operation owns the cell, or "unowned" when no lock file
 // exists and the boundary cannot be shown absent. In those two states Checkpoints
-// is nil and means unobserved, never that no checkpoints exist.
+// is nil and means unobserved, never that no checkpoints exist. CheckpointUnknown
+// counts entries that are not id-shaped directories only on an owned listed
+// path; under busy or unowned it is zero and meaningless. No names are exposed.
 type Inspection struct {
 	Manifest              *Manifest               `json:"manifest,omitempty"`
 	Locked                bool                    `json:"locked"`
@@ -169,6 +171,7 @@ type Inspection struct {
 	PrincipalTopology     string                  `json:"principal_topology,omitempty"`
 	Checkpoints           []CheckpointSummary     `json:"checkpoints,omitempty"`
 	CheckpointListing     string                  `json:"checkpoint_listing"`
+	CheckpointUnknown     int                     `json:"checkpoint_unknown"`
 }
 
 // Status adds bounded, live readiness observations to Inspection.

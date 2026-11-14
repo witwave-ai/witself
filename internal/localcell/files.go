@@ -30,6 +30,11 @@ var syncPrivateDirParent = syncDirectory
 // its first data write. It is nil outside tests.
 var beforePasswordWrite func(f *os.File)
 
+var errLocalDirectory = errors.New("local cell directory is missing or not a real directory")
+var errLocalDirectoryPrivate = errors.New("local cell directory must be private and owned by the current user")
+var errLocalParentUnavailable = errors.New("local cell parent directory is unavailable")
+var errLocalParentChanged = errors.New("local cell parent directory identity changed")
+
 func privateDir(path string, create bool) error {
 	created := false
 	info, err := os.Lstat(path)
@@ -41,10 +46,10 @@ func privateDir(path string, create bool) error {
 		info, err = os.Lstat(path)
 	}
 	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return errors.New("local cell directory is missing or not a real directory")
+		return errLocalDirectory
 	}
 	if !privateOwnedDir(path, info) {
-		return errors.New("local cell directory must be private and owned by the current user")
+		return errLocalDirectoryPrivate
 	}
 	if created {
 		if err := syncPrivateDirParent(filepath.Dir(path)); err != nil {
@@ -62,10 +67,10 @@ func (c *Cell) validateRoot(create bool) error {
 	// layout symlink. Callers must supply an existing parent directory.
 	parent, err := filepath.EvalSymlinks(filepath.Dir(c.cfg.Root))
 	if err != nil {
-		return errors.New("local cell parent directory is unavailable")
+		return errLocalParentUnavailable
 	}
 	if filepath.Join(parent, filepath.Base(c.cfg.Root)) != c.cfg.Root {
-		return errors.New("local cell parent directory identity changed")
+		return errLocalParentChanged
 	}
 	if err := privateDir(c.cfg.Root, create); err != nil {
 		return err

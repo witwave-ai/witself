@@ -1,7 +1,6 @@
 package localcell
 
 import (
-	"errors"
 	"io/fs"
 	"path/filepath"
 	"strings"
@@ -57,7 +56,7 @@ func classifyPrivateTreePath(root, path string) privateTreeClass {
 func privateTreeEntry(root, path string, directory bool, strict func() error, postgres func(pg string) error) error {
 	switch classifyPrivateTreePath(root, path) {
 	case privateTreeAlias:
-		return errors.New("cannot inspect private local cell layout")
+		return errPrivateLayout
 	case privateTreeBoundary:
 		if err := strict(); err != nil || !directory {
 			return err

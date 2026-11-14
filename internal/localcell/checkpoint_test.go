@@ -1029,7 +1029,10 @@ func TestCheckpointRecoveryValidator(t *testing.T) {
 		} else if runtime.GOOS == "windows" {
 			checkpointRefused(t, f, "cannot inspect private local cell layout", "")
 		} else {
-			checkpointRefusedEverywhere(t, f)
+			checkpointRefused(t, f, "local_checkpoint_state_unsupported", "listed")
+		}
+		if _, err := os.Lstat(f.cell.recoveryDir()); err == nil {
+			checkpointDiagnosticReason(t, f.cell.validateRecovery(), "boundary_noncanonical")
 		}
 	})
 	t.Run("nested-recovery-non-private", func(t *testing.T) {
@@ -1049,6 +1052,7 @@ func TestCheckpointRecoveryValidator(t *testing.T) {
 func checkpointRefusedEverywhere(t *testing.T, f *retainedFixture) {
 	t.Helper()
 	checkpointRefused(t, f, "local_checkpoint_state_unsupported", "listed")
+	checkpointDiagnosticReason(t, f.cell.validateRecovery(), "descendant_refused")
 }
 
 // checkpointRefused requires RV to refuse with the checkpoint state cause and
