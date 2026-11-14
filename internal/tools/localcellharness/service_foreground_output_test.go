@@ -2,11 +2,14 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"os"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -16,6 +19,17 @@ func foregroundOutputLines(captured []byte) []string {
 		return nil
 	}
 	return strings.Split(strings.TrimSuffix(string(captured), "\n"), "\n")
+}
+
+// Valid only after the foreground fixture's completed stopped commands: desired
+// and durable state stopped, clean journal, no pending startup or maintenance.
+// service_supervisor.go:324-350 retains tick on cancellation; :504-517 returns
+// before start/health and skips stop when running is false. Only the clock hook
+// at :464 runs, without an operation label. Startup calls are excluded by :328.
+// TestForegroundStoppedReceiptProofContract ties this set to the portable proof.
+var stoppedForegroundShutdownReceipts = []string{
+	"service_shutdown phase=idle operation=none journal_pending=false journal_read_ok=true\n",
+	"service_shutdown phase=tick operation=none journal_pending=false journal_read_ok=true\n",
 }
 
 // An abandoned readiness probe can disconnect between named-pipe connection
@@ -48,8 +62,7 @@ func foregroundShutdownFailure(captured []byte) string {
 	if !regexp.MustCompile(`^service_shutdown phase=(startup|tick|control|idle) operation=(reconcile|repair|stop|start|health|none) journal_pending=(true|false) journal_read_ok=(true|false)\n$`).MatchString(receipt) {
 		return "foreground shutdown receipt has invalid grammar or extra bytes"
 	}
-	const wantReceipt = "service_shutdown phase=idle operation=none journal_pending=false journal_read_ok=true\n"
-	if receipt != wantReceipt {
+	if !slices.Contains(stoppedForegroundShutdownReceipts, receipt) {
 		return "foreground shutdown receipt has unexpected field values"
 	}
 	return ""
@@ -107,7 +120,9 @@ func TestForegroundShutdownOutput(t *testing.T) {
 		{"unknown_peer", "service_control accept=rejected step=peer:other\n" + receipt, false},
 		{"peer_extra_bytes", "service_control accept=rejected step=peer:pid extra\n" + receipt, false},
 		{"receipt_extra_bytes", "extra " + receipt, false},
-		{"unexpected_phase", strings.Replace(receipt, "phase=idle", "phase=tick", 1), false},
+		{"interrupted_tick", strings.Replace(receipt, "phase=idle", "phase=tick", 1), true},
+		{"interrupted_tick_after_peer", "service_control accept=rejected step=peer:pid\n" + strings.Replace(receipt, "phase=idle", "phase=tick", 1), true},
+		{"unexpected_phase", strings.Replace(receipt, "phase=idle", "phase=control", 1), false},
 		{"missing_field", strings.Replace(receipt, " journal_pending=false", "", 1), false},
 		{"crlf_receipt", strings.ReplaceAll(receipt, "\n", "\r\n"), false},
 		{"crlf_peer", "service_control accept=rejected step=peer:pid\r\n" + receipt, false},
@@ -115,6 +130,99 @@ func TestForegroundShutdownOutput(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			if (foregroundShutdownFailure([]byte(test.output)) == "") != test.accepted {
 				t.Fatal("foreground shutdown output violated closed diagnostic prefixes and one exact final receipt")
+			}
+		})
+	}
+}
+
+// Exhaust the existing grammar independently of the acceptance table. A new
+// operation, phase, pending journal or failed read must not broaden the set.
+func TestForegroundStoppedReceiptClosedSet(t *testing.T) {
+	for _, phase := range []string{"startup", "tick", "control", "idle"} {
+		for _, operation := range []string{"reconcile", "repair", "stop", "start", "health", "none"} {
+			for _, pending := range []bool{false, true} {
+				for _, readOK := range []bool{false, true} {
+					name := fmt.Sprintf("%s_%s_pending=%t_read=%t", phase, operation, pending, readOK)
+					t.Run(name, func(t *testing.T) {
+						receipt := fmt.Sprintf("service_shutdown phase=%s operation=%s journal_pending=%t journal_read_ok=%t\n", phase, operation, pending, readOK)
+						want := (phase == "idle" || phase == "tick") && operation == "none" && !pending && readOK
+						failure := foregroundShutdownFailure([]byte(receipt))
+						if (failure == "") != want {
+							t.Fatal("stopped foreground receipt escaped its closed field set")
+						}
+						if !want && failure != "foreground shutdown receipt has unexpected field values" {
+							t.Fatal("wrong receipt fields lost their fixed value-free rejection")
+						}
+					})
+				}
+			}
+		}
+	}
+	t.Run("health_site", func(t *testing.T) {
+		if foregroundShutdownFailure([]byte("service_shutdown phase=tick operation=health site=health_lock journal_pending=false journal_read_ok=true\n")) == "" {
+			t.Fatal("stopped foreground accepted an unreachable health site")
+		}
+	})
+}
+
+// Follow the existing AST source-contract style: read the other package's
+// literal proof rows without exporting test helpers into production. Parse both
+// line endings and compare the exact set, including journal fields and newline.
+func TestForegroundStoppedReceiptProofContract(t *testing.T) {
+	source, err := os.ReadFile("../../localcell/service_stopped_tick_receipt_test.go")
+	if err != nil {
+		t.Fatal("cannot read stopped tick receipt proof")
+	}
+	lf := strings.ReplaceAll(string(source), "\r\n", "\n")
+	for _, row := range []struct{ name, source string }{
+		{"lf", lf}, {"crlf", strings.ReplaceAll(lf, "\n", "\r\n")},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			file, err := parser.ParseFile(token.NewFileSet(), "stopped-proof", row.source, 0)
+			if err != nil {
+				t.Fatal("cannot parse stopped tick receipt proof")
+			}
+			var expected []string
+			found := 0
+			ast.Inspect(file, func(node ast.Node) bool {
+				declaration, ok := node.(*ast.ValueSpec)
+				if !ok || len(declaration.Names) != 1 || declaration.Names[0].Name != "stoppedTickReceiptCases" {
+					return true
+				}
+				found++
+				if len(declaration.Values) != 1 {
+					t.Fatal("stopped tick proof lost its literal case table")
+				}
+				table, ok := declaration.Values[0].(*ast.CompositeLit)
+				if !ok || len(table.Elts) == 0 {
+					t.Fatal("stopped tick proof lost its literal case rows")
+				}
+				for _, element := range table.Elts {
+					entry, ok := element.(*ast.CompositeLit)
+					if !ok || len(entry.Elts) != 4 {
+						t.Fatal("stopped tick proof case shape changed")
+					}
+					values := make([]string, 4)
+					for index, field := range entry.Elts {
+						literal, ok := field.(*ast.BasicLit)
+						if !ok || literal.Kind != token.STRING {
+							t.Fatal("stopped tick proof labels must remain literal")
+						}
+						values[index], err = strconv.Unquote(literal.Value)
+						if err != nil {
+							t.Fatal("cannot decode stopped tick proof label")
+						}
+					}
+					expected = append(expected, "service_shutdown phase="+values[2]+" operation="+values[3]+" journal_pending=false journal_read_ok=true\n")
+				}
+				return false
+			})
+			slices.Sort(expected)
+			expected = slices.Compact(expected)
+			actual := slices.Clone(stoppedForegroundShutdownReceipts)
+			slices.Sort(actual)
+			if found != 1 || !slices.Equal(actual, expected) {
+				t.Fatal("foreground acceptance drifted from the stopped tick cancellation proof")
 			}
 		})
 	}

@@ -75,6 +75,11 @@ func foregroundFailureClass(captured []byte) string {
 	if len(captured) == 0 {
 		return "no_output"
 	}
+	// The logger also reports accepted multiline shutdown output. Give that
+	// case a success label, never an interrupted-tick failure classification.
+	if foregroundShutdownFailure(captured) == "" {
+		return "shutdown_accepted"
+	}
 	for _, line := range foregroundOutputLines(captured) {
 		switch strings.TrimSuffix(line, "\r") {
 		case "native service host site=host_config":
@@ -159,7 +164,7 @@ func foregroundFailureClass(captured []byte) string {
 	}
 	// No known site line: name only the output's closed shape, never its bytes.
 	// The first matching shape wins: a Go crash, a known localcell fixed cause, a
-	// well-formed shutdown receipt left outside idle, then the count of lines
+	// shutdown receipt outside the stopped set, then the count of lines
 	// with visible text. Every class keeps the unclassified stem.
 	lines := foregroundOutputLines(captured)
 	for _, line := range lines {
@@ -235,10 +240,10 @@ var foregroundFailureSites = []string{
 	"boot_binding", "descriptor_write", "unknown",
 }
 
-// Output without a known site line keeps the unclassified stem and adds only
-// its closed shape. Empty output keeps its original class.
+// Accepted shutdown output has a success label. Other output without a known
+// site keeps the unclassified stem and its shape; empty output keeps its class.
 var foregroundFailureShapes = []string{
-	"no_output", "unclassified_go_panic", "unclassified_go_fatal_error", "unclassified_fixed_cause",
+	"no_output", "shutdown_accepted", "unclassified_go_panic", "unclassified_go_fatal_error", "unclassified_fixed_cause",
 	"unclassified_receipt_startup", "unclassified_receipt_tick", "unclassified_receipt_control",
 	"unclassified_blank", "unclassified_one_line", "unclassified_multi_line",
 }
@@ -277,12 +282,15 @@ func TestForegroundFailureClass(t *testing.T) {
 		{"fixed_cause_detail", "service_manager_unavailable: use explicit localcellharness run foreground fallback: adapter:platform: unsupported\n", "unclassified_fixed_cause"},
 		{"fixed_cause_over_receipt", "localcell: service_shutdown_forced\n" + strings.Replace(idle, "phase=idle", "phase=control", 1), "unclassified_fixed_cause"},
 		{"receipt_startup", strings.Replace(idle, "phase=idle operation=none", "phase=startup operation=reconcile", 1), "unclassified_receipt_startup"},
-		{"receipt_tick", strings.Replace(idle, "phase=idle", "phase=tick", 1), "unclassified_receipt_tick"},
+		{"receipt_idle", idle, "shutdown_accepted"},
+		{"receipt_tick_accepted", strings.Replace(idle, "phase=idle", "phase=tick", 1), "shutdown_accepted"},
+		{"receipt_tick_outside_set", strings.Replace(idle, "phase=idle operation=none", "phase=tick operation=stop", 1), "unclassified_receipt_tick"},
+		{"receipt_tick_pending", strings.ReplaceAll(strings.Replace(idle, "phase=idle", "phase=tick", 1), "journal_pending=false", "journal_pending=true"), "unclassified_receipt_tick"},
 		{"receipt_control", strings.Replace(idle, "phase=idle", "phase=control", 1), "unclassified_receipt_control"},
-		{"receipt_after_peer", "service_control accept=rejected step=peer:pid\n" + strings.Replace(idle, "phase=idle", "phase=tick", 1), "unclassified_receipt_tick"},
+		{"receipt_after_peer", "service_control accept=rejected step=peer:pid\n" + strings.Replace(idle, "phase=idle", "phase=tick", 1), "shutdown_accepted"},
 		{"receipt_phase_token", strings.Replace(idle, "phase=idle", "phase=tickle", 1), "unclassified_one_line"},
 		{"receipt_idle_fields", strings.Replace(idle, "journal_pending=false", "journal_pending=true", 1), "unclassified_one_line"},
-		{"receipt_idle_after_peer", "service_control accept=rejected step=peer:pid\n" + idle, "unclassified_multi_line"},
+		{"receipt_idle_after_peer", "service_control accept=rejected step=peer:pid\n" + idle, "shutdown_accepted"},
 		{"blank", "\n", "unclassified_blank"},
 		{"blank_whitespace", " \r\n\t\n", "unclassified_blank"},
 		{"one_line_between_blanks", "\n\nprivate /synthetic/home\n\n", "unclassified_one_line"},
