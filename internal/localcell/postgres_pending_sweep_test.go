@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -104,7 +105,9 @@ func TestPostgresPendingSweepPreservesAndQuiets(t *testing.T) {
 }
 
 func TestPostgresPendingShapes(t *testing.T) {
-	for _, row := range []struct {
+	// Rows are named by index: several shapes carry bytes that the CI stream
+	// checker rejects in a test name.
+	for index, row := range []struct {
 		name          string
 		unix, windows bool
 	}{
@@ -122,7 +125,7 @@ func TestPostgresPendingShapes(t *testing.T) {
 		{".pending-1/2", false, false}, {".pending-1\\2", false, false},
 		{".pending-1.", false, false}, {"other.pending-1", false, false}, {"", false, false},
 	} {
-		t.Run(row.name, func(t *testing.T) {
+		t.Run(strconv.Itoa(index), func(t *testing.T) {
 			if unixPrivateTempName(row.name) != row.unix || windowsPrivateTempName(row.name) != row.windows {
 				t.Fatal("private temporary shape predicate disagrees with table")
 			}
