@@ -41,6 +41,8 @@ func createPrivateTemp(dir string) (*os.File, error) {
 	return runtimeconfig.WindowsPrivateCreateTemp(dir)
 }
 
+func privateTempName(name string) bool { return windowsPrivateTempName(name) }
+
 // A pre-existing untrusted object anywhere in the layout must fail before the
 // operation creates a lock, appends a journal entry, or removes retained state.
 // The one exception is content below <root>/recovery: that directory is

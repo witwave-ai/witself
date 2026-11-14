@@ -191,6 +191,7 @@ type Cell struct {
 	maintenanceTest          *installerMaintenanceOperations
 	reinstallTest            *reinstallOperations
 	checkpointTest           *checkpointOperations
+	postgresPendingTest      *postgresPendingOperations
 }
 
 // CanonicalRoot makes two spellings of one directory canonicalize to the same string.

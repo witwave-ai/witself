@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/witwave-ai/witself/internal/runtimeconfig"
@@ -186,6 +187,18 @@ func writeAtomicBytes(path string, data []byte, beforeRename func() error) error
 // the lease budget can never compound.
 func publishAtomic(attempt func() error, h leasePublishHooks) (int, error) {
 	return retryPublish(attempt, func(err error) bool { return runtimeconfig.WindowsPrivateTransient(err) }, h)
+}
+
+// These recognisers describe createPrivateTemp's two platform generators.
+// Keep both available everywhere so each platform tests the complete contract.
+func unixPrivateTempName(name string) bool {
+	suffix, ok := strings.CutPrefix(name, ".pending-")
+	return ok && suffix != "" && strings.Trim(suffix, "0123456789") == ""
+}
+
+func windowsPrivateTempName(name string) bool {
+	suffix, ok := strings.CutPrefix(name, ".pending-")
+	return ok && len(suffix) == 24 && strings.Trim(suffix, "0123456789abcdef") == ""
 }
 
 func writeAtomicBytesOnce(path string, data []byte, beforeRename func() error) error {
