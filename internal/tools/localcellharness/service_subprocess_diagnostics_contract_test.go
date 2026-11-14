@@ -138,23 +138,31 @@ func TestWindowsForegroundShortReceiptClassEnrollment(t *testing.T) {
 	var rows []foregroundClassEnrollment
 	const idle = "service_shutdown phase=idle operation=none journal_pending=false journal_read_ok=true\n"
 	for _, row := range []struct{ name, receipt, class string }{
+		{"idle_accepted", idle, "shutdown_accepted"},
+		{"tick_accepted", strings.Replace(idle, "phase=idle", "phase=tick", 1), "shutdown_accepted"},
 		{"missing", "", "no_output"},
 		{"malformed", "private /synthetic/home\n", "unclassified_one_line"},
 		{"partial", "service_shutdown", "unclassified_one_line"},
 		{"blank", "\n", "unclassified_blank"},
 		{"startup", strings.Replace(idle, "phase=idle operation=none", "phase=startup operation=reconcile", 1), "unclassified_receipt_startup"},
-		{"tick", strings.Replace(idle, "phase=idle", "phase=tick", 1), "unclassified_receipt_tick"},
+		{"tick_outside_set", strings.Replace(idle, "phase=idle operation=none", "phase=tick operation=stop", 1), "unclassified_receipt_tick"},
+		{"tick_pending", strings.ReplaceAll(strings.Replace(idle, "phase=idle", "phase=tick", 1), "journal_pending=false", "journal_pending=true"), "unclassified_receipt_tick"},
 		{"control", strings.Replace(idle, "phase=idle", "phase=control", 1), "unclassified_receipt_control"},
 		{"journal_pending", strings.Replace(idle, "journal_pending=false", "journal_pending=true", 1), "unclassified_one_line"},
 	} {
 		receipt := []byte(row.receipt)
 		failure := foregroundShutdownFailure(receipt)
-		if len(foregroundOutputLines(receipt)) > 1 || failure == "" {
-			t.Fatal("short receipt fixture did not exercise an unclassified failure")
+		if len(foregroundOutputLines(receipt)) > 1 || (failure == "") != (row.class == "shutdown_accepted") {
+			t.Fatal("short receipt fixture lost its stopped acceptance boundary")
 		}
 		class := foregroundFailureClass(receipt)
 		if class != row.class {
 			t.Fatal("short receipt lost its closed foreground failure class")
+		}
+		if failure == "" {
+			// Accepted output is not a failure and must not inject a fatal into
+			// the checker. Its success label is enrolled with the vocabulary.
+			continue
 		}
 		// Inject the real dynamic fatal. The scanner does not enroll returned
 		// error strings, but the independent class must remain visible.
