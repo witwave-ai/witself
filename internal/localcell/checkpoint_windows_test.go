@@ -4,6 +4,7 @@ package localcell
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"io/fs"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/witwave-ai/witself/internal/runtimeconfig"
 	"github.com/witwave-ai/witself/internal/store"
+	"golang.org/x/sys/windows"
 )
 
 // checkpointPGDATAFixture selects W1's restricted-token child; it is unset in
@@ -252,5 +254,55 @@ func TestWindowsCheckpointPrivateCopy(t *testing.T) {
 	checkpointUnchanged(t, long, snapshot)
 	if r.calls["control"] != 0 || r.calls["free"] != 0 || len(listed) != 0 || len(windowsCheckpointListed(t, long)) != 0 {
 		t.Fatal("the long-root refusal reached a boundary or listed a checkpoint")
+	}
+}
+
+// TestCheckpointRetryWindowsSharing uses real sharing refusals at S1 and S2.
+// beforeStep only observes the private name and attempt count; sleep releases
+// the conflicting handle. Publication, opening and classification stay real.
+func TestCheckpointRetryWindowsSharing(t *testing.T) {
+	for _, step := range []string{"publish", "open"} {
+		t.Run(step, func(t *testing.T) {
+			c, _, options := windowsCheckpointFixture(t, testPrivateRoot(t))
+			held := windows.InvalidHandle
+			t.Cleanup(func() {
+				if held != windows.InvalidHandle {
+					_ = windows.CloseHandle(held)
+				}
+			})
+			chosen, attempts, sleeps := "", 0, 0
+			c.checkpointTest.beforeStep = func(current, path string) {
+				if current != step || (chosen != "" && chosen != path) {
+					return
+				}
+				attempts++
+				if chosen != "" {
+					return
+				}
+				chosen = path
+				pointer, err := windows.UTF16PtrFromString(path)
+				if err != nil {
+					t.Fatal("cannot prepare sharing refusal")
+				}
+				share := uint32(windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE)
+				if step == "open" {
+					share = windows.FILE_SHARE_WRITE | windows.FILE_SHARE_DELETE
+				}
+				held, err = windows.CreateFile(pointer, windows.GENERIC_READ, share, nil, windows.OPEN_EXISTING, 0, 0)
+				if err != nil {
+					t.Fatal("cannot hold sharing refusal handle")
+				}
+			}
+			c.checkpointTest.sleep = func(context.Context, time.Duration) {
+				sleeps++
+				if held == windows.InvalidHandle || windows.CloseHandle(held) != nil {
+					t.Fatal("cannot release sharing refusal handle")
+				}
+				held = windows.InvalidHandle
+			}
+			if c.Checkpoint(t.Context(), options) != nil || attempts < 2 || sleeps != 1 {
+				t.Fatal("real sharing refusal did not retry and complete")
+			}
+		})
 	}
 }

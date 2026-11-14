@@ -146,16 +146,22 @@ func TestStopManifestPublicationSingleAttemptRefusal(t *testing.T) {
 	}
 }
 
-// writeAtomic and writeAtomicBytes are every private atomic publication. Pin
-// their one shared bounded retry, and that no other production code retries a
-// publication again (nesting) or publishes with a single attempt (bypass). The
-// Windows reproductions are the behavioral oracle and cannot run on hosts.
+// Pin writeAtomic, writeAtomicBytes and checkpoint steps to one shared bounded
+// retry, with no caller retrying a publication again (nesting) or publishing
+// with a single attempt (bypass). The Windows reproductions are the behavioral
+// oracle and cannot run on hosts.
 func TestAtomicPublicationSharedRetrySourceContract(t *testing.T) {
 	sources := atomicPublicationSources(t)
 	if err := atomicPublicationContract(sources); err != nil {
 		t.Fatal(err)
 	}
 	for _, mutation := range []struct{ name, file, before, after string }{
+		{"checkpoint_publish_bypass", "checkpoint.go", "if retryCheckpointStep(ctx, budget, ops, func() error {", "if func(_ context.Context, _ *checkpointRetryBudget, _ checkpointOperations, _ func() error) error { return publishPrivateFile(temporary.Name(), target) }(ctx, budget, ops, func() error {"},
+		{"checkpoint_open_bypass", "checkpoint.go", "err := retryCheckpointStep(ctx, budget, ops, func() error {", "err := func(_ context.Context, _ *checkpointRetryBudget, _ checkpointOperations, _ func() error) error { var err error; copied, err = openPrivateFile(filepath.Join(dir, filepath.FromSlash(entry.path)), os.O_RDONLY, 0); return err }(ctx, budget, ops, func() error {"},
+		{"checkpoint_second_engine_caller", "checkpoint.go", "func checkpointDigits(", "func checkpointUnexpectedRetry() { _ = retryPublish }\nfunc checkpointDigits("},
+		{"checkpoint_nested_bytes", "checkpoint.go", "return attempt()", `return writeAtomicBytes("", nil, nil)`},
+		{"checkpoint_nested_atomic", "checkpoint.go", "return attempt()", "_, err := publishAtomic(attempt, leasePublishHooks{}); return err"},
+		{"checkpoint_recopies", "checkpoint.go", "return ops.publish(temporary.Name(), target)", "_, _ = io.Copy(io.Discard, nil); return ops.publish(temporary.Name(), target)"},
 		{"shared_retry_removed", "files.go", "_, err := publishAtomic(func() error { return writeAtomicBytesOnce(path, data, beforeRename) }, leasePublishHooks{})\n\treturn err", "return writeAtomicBytesOnce(path, data, beforeRename)"},
 		{"record_retry_removed", "files.go", "_, err := publishAtomic(func() error { return writeAtomicOnce(path, value, beforeRename) }, leasePublishHooks{})\n\treturn err", "return writeAtomicOnce(path, value, beforeRename)"},
 		{"predicate_any_error", "files.go", "func(err error) bool { return runtimeconfig.WindowsPrivateTransient(err) }", "func(error) bool { return true }"},
@@ -175,11 +181,19 @@ func TestAtomicPublicationSharedRetrySourceContract(t *testing.T) {
 			if strings.Count(changed[mutation.file], mutation.before) != 1 {
 				t.Fatal("shared publication mutation anchor is not unique")
 			}
-			changed[mutation.file] = strings.Replace(changed[mutation.file], mutation.before, mutation.after, 1)
-			if atomicPublicationContract(changed) == nil {
-				t.Fatal("shared publication contract accepted a mutation")
+			for _, ending := range []string{"\n", "\r\n"} {
+				changed[mutation.file] = strings.ReplaceAll(strings.Replace(sources[mutation.file], mutation.before, mutation.after, 1), "\n", ending)
+				if atomicPublicationContract(changed) == nil {
+					t.Fatal("shared publication contract accepted a mutation")
+				}
 			}
 		})
+	}
+	for name, source := range sources {
+		sources[name] = strings.ReplaceAll(source, "\n", "\r\n")
+	}
+	if atomicPublicationContract(sources) != nil {
+		t.Fatal("shared publication contract refused CRLF sources")
 	}
 }
 
@@ -233,7 +247,8 @@ func publishAtomic(attempt func() error, h leasePublishHooks) (int, error) {
 	// passes its single-attempt hook to the shared retry) and that hook's
 	// production default. A package-level value counts under "".
 	want := map[string]map[string]int{
-		"retryPublish":         {"publishAtomic": 1},
+		"retryPublish":         {"publishAtomic": 1, "retryCheckpointStep": 1},
+		"retryCheckpointStep":  {"copyCheckpoint": 1, "inventoryCheckpoint": 1},
 		"publishAtomic":        {"writeAtomic": 1, "writeAtomicBytes": 1, "publishServiceLease": 1},
 		"writeAtomicOnce":      {"writeAtomic": 1, "defaults": 1},
 		"writeAtomicBytesOnce": {"writeAtomicOnce": 1, "writeAtomicBytes": 1},
@@ -252,11 +267,29 @@ func publishAtomic(attempt func() error, h leasePublishHooks) (int, error) {
 				}
 				owner, node = function.Name.Name, function.Body
 			}
-			retries, publishes := false, false
+			retries, publishes, bypass := false, false, false
 			ast.Inspect(node, func(child ast.Node) bool {
+				// Retrying a copy would re-read mutable source bytes. Only the
+				// already closed temporary may be retried at publication.
+				if call, ok := child.(*ast.CallExpr); ok {
+					if callee, ok := call.Fun.(*ast.Ident); ok && callee.Name == "retryCheckpointStep" {
+						ast.Inspect(call, func(attempt ast.Node) bool {
+							if selector, ok := attempt.(*ast.SelectorExpr); ok {
+								if receiver, ok := selector.X.(*ast.Ident); ok && receiver.Name == "io" && selector.Sel.Name == "Copy" {
+									bypass = true
+								}
+							}
+							return true
+						})
+					}
+				}
 				identifier, ok := child.(*ast.Ident)
 				if !ok {
 					return true
+				}
+				if (owner == "copyCheckpoint" && identifier.Name == "publishPrivateFile") ||
+					(owner == "inventoryCheckpoint" && identifier.Name == "openPrivateFile") {
+					bypass = true
 				}
 				switch identifier.Name {
 				case "retryPublish", "publishAtomic":
@@ -273,7 +306,7 @@ func publishAtomic(attempt func() error, h leasePublishHooks) (int, error) {
 				return true
 			})
 			// A retry wrapped around a retrying publication would nest.
-			if retries && publishes {
+			if bypass || retries && publishes {
 				return fail
 			}
 		}

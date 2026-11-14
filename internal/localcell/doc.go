@@ -67,6 +67,10 @@
 // The inventory and witness record digests that a later check can use to detect
 // accidental corruption or truncation, not a same-user rewrite. Nothing verifies
 // a kept checkpoint yet, and Inspect lists a damaged one as complete.
+// Windows transient refusals while publishing a copied file or reopening it
+// for re-hashing use the shared 2 s retry budget and 25–200 ms backoff, bounded
+// also by 10 s plus 100 ms per planned file in cumulative requested sleep and
+// by context cancellation. Other failures remain single attempts.
 // Ordinary operations validate only the recovery/ directory itself;
 // Checkpoint, DeleteCheckpoint and Inspect validate all of recovery/** and
 // refuse a tree that fails, which must then be repaired by hand. A private
