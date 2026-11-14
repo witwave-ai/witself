@@ -66,17 +66,23 @@
 // drill: complete means the writer finished, not that the data was verified.
 // The inventory and witness record digests that a later check can use to detect
 // accidental corruption or truncation, not a same-user rewrite. Nothing verifies
-// a kept checkpoint yet, and Inspect lists a damaged one as complete.
+// a kept checkpoint yet, and Inspect can list a damaged one as complete.
 // Windows transient refusals while publishing a copied file or reopening it
 // for re-hashing use the shared 2 s retry budget and 25–200 ms backoff, bounded
 // also by 10 s plus 100 ms per planned file in cumulative requested sleep and
 // by context cancellation. Other failures remain single attempts.
 // Ordinary operations validate only the recovery/ directory itself;
-// Checkpoint, DeleteCheckpoint and Inspect validate all of recovery/** and
-// refuse a tree that fails, which must then be repaired by hand. A private
+// Checkpoint and DeleteCheckpoint validate all of recovery/** and refuse a
+// tree that fails, which must then be repaired by hand. Inspect validates and
+// lists checkpoints only while holding the cell lock, reporting listed. It
+// reports busy when another operation owns the cell, or unowned when no lock
+// file exists and the recovery boundary cannot be shown absent; neither state
+// means there are no checkpoints. With no lock file and an absent boundary it
+// reports listed with no checkpoints and creates nothing. A private
 // unknown entry there (for example a 0600 .DS_Store on Unix) blocks Checkpoint
 // but permits Inspect and exact-id DeleteCheckpoint; a non-private entry
-// (for example 0644 on Unix) makes all three refuse until repaired by hand.
+// (for example 0644 on Unix) makes both mutations and an owned Inspect refuse
+// until repaired by hand.
 // A new installation in a purged root inherits the old checkpoints, with their
 // passwords, which count toward the limit. Drill,
 // restore, rollback, update wiring and D9 remain pending; this is no M4/M5 or

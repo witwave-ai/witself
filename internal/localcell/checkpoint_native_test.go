@@ -189,7 +189,7 @@ func checkpointNativeWitness(t *testing.T, checkpointID, installationID string, 
 func checkpointNativeListed(t *testing.T, cell *localcell.Cell) map[string]bool {
 	t.Helper()
 	inspection, err := cell.Inspect(t.Context())
-	if err != nil {
+	if err != nil || inspection.CheckpointListing != "listed" {
 		t.Fatalf("inspect after a checkpoint operation: %v", err)
 	}
 	listed := map[string]bool{}

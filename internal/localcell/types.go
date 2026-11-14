@@ -153,6 +153,11 @@ type Interruption struct {
 }
 
 // Inspection is a read-only snapshot. Locked snapshots may change concurrently.
+// On success, CheckpointListing is "listed" when the owner lock protected the entire listing,
+// or no lock file existed and the recovery boundary was observed absent. It is
+// "busy" when another operation owns the cell, or "unowned" when no lock file
+// exists and the boundary cannot be shown absent. In those two states Checkpoints
+// is nil and means unobserved, never that no checkpoints exist.
 type Inspection struct {
 	Manifest              *Manifest               `json:"manifest,omitempty"`
 	Locked                bool                    `json:"locked"`
@@ -163,6 +168,7 @@ type Inspection struct {
 	InstallState          string                  `json:"install_state,omitempty"`
 	PrincipalTopology     string                  `json:"principal_topology,omitempty"`
 	Checkpoints           []CheckpointSummary     `json:"checkpoints,omitempty"`
+	CheckpointListing     string                  `json:"checkpoint_listing"`
 }
 
 // Status adds bounded, live readiness observations to Inspection.
@@ -191,6 +197,8 @@ type Cell struct {
 	maintenanceTest          *installerMaintenanceOperations
 	reinstallTest            *reinstallOperations
 	checkpointTest           *checkpointOperations
+	// Test barriers inside Inspect's listing path. Nil in production.
+	inspectCheckpointListing func(string)
 	postgresPendingTest      *postgresPendingOperations
 }
 

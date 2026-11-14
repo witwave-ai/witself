@@ -465,7 +465,7 @@ func TestCheckpointSequenceAndContents(t *testing.T) {
 					t.Fatal("checkpoint changed the live tree or the manifest")
 				}
 				inspection, err := c.Inspect(t.Context())
-				if err != nil || !reflect.DeepEqual(inspection.Checkpoints, []CheckpointSummary{{ID: ids[0], InstallationID: m.InstallationID,
+				if err != nil || inspection.CheckpointListing != "listed" || !reflect.DeepEqual(inspection.Checkpoints, []CheckpointSummary{{ID: ids[0], InstallationID: m.InstallationID,
 					CreatedAt: witness.CreatedAt, Bytes: copied, Complete: true}}) {
 					t.Fatal("inspection does not list the complete checkpoint")
 				}
@@ -601,7 +601,7 @@ func checkpointFailpoint(operation, cut string) func(string, string) error {
 func checkpointSummaryOf(t *testing.T, c *Cell, checkpointID string) CheckpointSummary {
 	t.Helper()
 	inspection, err := c.Inspect(t.Context())
-	if index := slices.IndexFunc(inspection.Checkpoints, func(s CheckpointSummary) bool { return s.ID == checkpointID }); err == nil && index >= 0 {
+	if index := slices.IndexFunc(inspection.Checkpoints, func(s CheckpointSummary) bool { return s.ID == checkpointID }); err == nil && inspection.CheckpointListing == "listed" && index >= 0 {
 		return inspection.Checkpoints[index]
 	}
 	t.Fatal("inspection does not list the checkpoint")
@@ -891,7 +891,7 @@ func TestCheckpointRetentionAcrossLifecycle(t *testing.T) {
 		}
 	}
 	inspection, err := c.Inspect(t.Context())
-	if err != nil || len(inspection.Checkpoints) != 2 || !inspection.Checkpoints[0].Complete || !inspection.Checkpoints[1].Complete {
+	if err != nil || inspection.CheckpointListing != "listed" || len(inspection.Checkpoints) != 2 || !inspection.Checkpoints[0].Complete || !inspection.Checkpoints[1].Complete {
 		t.Fatal("purged root does not still list both checkpoints")
 	}
 }
@@ -970,8 +970,8 @@ func TestCheckpointFenceAndContention(t *testing.T) {
 		})
 	}
 	inspection, err := c.Inspect(t.Context())
-	if err != nil || !inspection.Locked || !reflect.DeepEqual(inspection.Checkpoints, []CheckpointSummary{{ID: inFlight}}) {
-		t.Fatal("locked inspection did not list the in-flight checkpoint as incomplete")
+	if err != nil || !inspection.Locked || inspection.CheckpointListing != "busy" || inspection.Checkpoints != nil {
+		t.Fatal("locked inspection did not report busy without a checkpoint listing")
 	}
 	if unblock(); <-result != nil || !checkpointSummaryOf(t, c, inFlight).Complete {
 		t.Fatal("blocked checkpoint did not complete after release")
@@ -1050,7 +1050,7 @@ func checkpointRefusedEverywhere(t *testing.T, f *retainedFixture) {
 		t.Fatal("the validator, checkpoint or deletion admitted a bad recovery tree")
 	}
 	checkpointUnchanged(t, c, before)
-	if inspection, err := c.Inspect(t.Context()); !checkpointSameError(err, want) || len(inspection.Checkpoints) != 0 {
+	if inspection, err := c.Inspect(t.Context()); !checkpointSameError(err, want) || inspection.CheckpointListing != "listed" || len(inspection.Checkpoints) != 0 {
 		t.Fatal("inspection listed a bad recovery tree")
 	}
 }

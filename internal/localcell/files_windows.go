@@ -47,7 +47,8 @@ func privateTempName(name string) bool { return windowsPrivateTempName(name) }
 // operation creates a lock, appends a journal entry, or removes retained state.
 // The one exception is content below <root>/recovery: that directory is
 // validated as a single object and never descended, and what it holds is
-// validated only by the operations that use it.
+// validated only by the operations that use it. Direct-child case aliases of
+// recovery are refused before opening the alias or descending into it.
 // WalkDir does not traverse symlinks; validation also rejects every reparse tag.
 func validatePrivateTree(root string) error {
 	if err := validateRootPath(root); err != nil {
