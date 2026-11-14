@@ -91,9 +91,16 @@ func (h *harness) args(verb string, extra ...string) []string {
 	return append(args, extra...)
 }
 func (h *harness) run(args ...string) (int, string, string) {
+	return h.runContext(context.Background(), args...)
+}
+func (h *harness) runContext(ctx context.Context, args ...string) (int, string, string) {
+	h.cell.mu.Lock()
+	h.cell.inRun = true
+	h.cell.mu.Unlock()
+	defer func() { h.cell.mu.Lock(); h.cell.inRun = false; h.cell.mu.Unlock() }()
 	h.out.Reset()
 	h.err.Reset()
-	code := cliWithOptions(context.Background(), args, h.d, h.o)
+	code := cliWithOptions(ctx, args, h.d, h.o)
 	return code, h.out.String(), h.err.String()
 }
 func assertResult(t *testing.T, code, want int, stderr, message string) {
@@ -284,7 +291,7 @@ func TestLoadResumesAfterInterrupt(t *testing.T) {
 			cancel()
 		}
 	}
-	code := cliWithOptions(ctx, h.args("load", "--entries", "45"), h.d, h.o)
+	code, _, _ := h.runContext(ctx, h.args("load", "--entries", "45")...)
 	if code != 130 || h.err.String() != "stopped: interrupted\n" {
 		t.Fatal("canceled load did not report interruption")
 	}
@@ -305,7 +312,7 @@ func TestLoadResumesMidTranscript(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	h.cell.afterBatch = cancel
-	code := cliWithOptions(ctx, h.args("load", "--entries", "250"), h.d, h.o)
+	code, _, _ := h.runContext(ctx, h.args("load", "--entries", "250")...)
 	assertResult(t, code, 130, h.err.String(), "stopped: interrupted\n")
 	assertLayout(t, h.cell, 150, 100)
 	if len(h.cell.transcripts) != 2 || len(h.cell.transcripts["wfl1-t001"].Entries) != 100 {
@@ -842,9 +849,19 @@ func valueFreeWorkflow(t *testing.T) *harness {
 	return h
 }
 func TestOutputIsValueFree(t *testing.T) { valueFreeWorkflow(t) }
-func assertRoutes(t *testing.T, f *fakeCell) {
+
+type routeReporter interface {
+	Helper()
+	Logf(string, ...any)
+	Fatal(...any)
+}
+
+func assertRoutes(t routeReporter, f *fakeCell) {
 	t.Helper()
-	for _, r := range f.requests {
+	f.mu.Lock()
+	requests := append([]fakeRequest(nil), f.requests...)
+	f.mu.Unlock()
+	for i, r := range requests {
 		allowed := false
 		switch r.Method {
 		case "GET":
@@ -853,7 +870,9 @@ func assertRoutes(t *testing.T, f *fakeCell) {
 			allowed = r.Path == "/v1/transcripts" || r.Path == "/v1/accounts/"+fakeAccount+":close" || regexp.MustCompile(`^/v1/transcripts/trn_[a-z2-7]{16}/entries:batch$`).MatchString(r.Path)
 		}
 		if !allowed {
+			t.Logf("off_list_request index=%d of=%d method=%s route=%s credential=%s in_run=%s", i, len(requests), r.MethodClass.String(), r.RouteClass.String(), r.CredentialClass.String(), r.InRun.String())
 			t.Fatal("HTTP request fell outside the closed route list")
+			return
 		}
 	}
 }
