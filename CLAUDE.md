@@ -86,6 +86,13 @@ Three traps in this repository produce a green result that proves nothing:
   export WITSELF_TEST_DATABASE_URL="postgres://postgres:test@127.0.0.1:5599/postgres?sslmode=disable"
   ```
 
+  Each test package then runs in its own database derived from the configured
+  one. If that database cannot be created the package falls back to the
+  configured database and prints `NOT RUN package_database_unavailable`; a run
+  with that line is not isolated. `WITSELF_TEST_REQUIRE_PACKAGE_DATABASE=1`
+  makes it fatal; `make check-local` and CI set it, so the test principal must
+  be allowed to create databases.
+
 - **A fresh git worktree has no `node_modules`** under `infra/cloudflare/*/`,
   so `check-infra` fails on a missing wrangler until `npm ci` has run in each
   worker directory. That failure is environmental, not a code defect — but do

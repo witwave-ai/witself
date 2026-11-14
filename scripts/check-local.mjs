@@ -67,6 +67,7 @@ export async function runLocalChecks({
   if (gate === 'application') {
     run('make', ['check'], {cwd, env: {
       ...env, WITSELF_TEST_REQUIRE_DATABASE: '1', WITSELF_TEST_REQUIRE_NODE: '1',
+      WITSELF_TEST_REQUIRE_PACKAGE_DATABASE: '1',
     }});
   } else if (selectLocalGate(cwd, productClassifier, rollClassifier, integrityChecker) !== gate) {
     throw new Error('local check: checkout changed during focused checks');

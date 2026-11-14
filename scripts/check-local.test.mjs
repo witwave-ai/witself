@@ -24,12 +24,15 @@ function fixture(overrides = {}) {
   return {options, calls, logs};
 }
 
-test('ordinary or uncertain changes use the full gate with required database and Node tests', async () => {
+test('ordinary or uncertain changes use the full gate with required package databases and Node tests', async () => {
   for (const rollClassifier of [() => ({roll_only: false}), () => { throw new Error('missing base'); }]) {
     const f = fixture({rollClassifier});
     assert.deepEqual(await runLocalChecks(f.options), {passed: true, gate: 'application'});
     assert.deepEqual(f.calls.map(c => [c.file, ...c.args]), [['git', 'fetch', 'origin'], ['make', 'check']]);
-    assert.deepEqual(f.calls[1].options.env, {MARKER: 'retained', WITSELF_TEST_REQUIRE_DATABASE: '1', WITSELF_TEST_REQUIRE_NODE: '1'});
+    assert.deepEqual(f.calls[1].options.env, {
+      MARKER: 'retained', WITSELF_TEST_REQUIRE_DATABASE: '1', WITSELF_TEST_REQUIRE_NODE: '1',
+      WITSELF_TEST_REQUIRE_PACKAGE_DATABASE: '1',
+    });
   }
 });
 
@@ -92,6 +95,7 @@ test('confirmed migration changes select the full local path without focused app
   assert.deepEqual(await runLocalChecks(f.options), {passed: true, gate: 'application'});
   assert.deepEqual(f.calls.map(c => [c.file, ...c.args]), [['git', 'fetch', 'origin'], ['make', 'check']]);
   assert.equal(f.calls[1].options.env.WITSELF_TEST_REQUIRE_DATABASE, '1');
+  assert.equal(f.calls[1].options.env.WITSELF_TEST_REQUIRE_PACKAGE_DATABASE, '1');
   assert.equal(f.calls[1].options.env.WITSELF_TEST_REQUIRE_NODE, '1');
   assert.equal(f.logs.at(-1), 'local check: PASS application');
 });
