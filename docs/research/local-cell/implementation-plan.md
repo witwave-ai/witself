@@ -1288,21 +1288,27 @@ checkpoint holds all data and every password, survives purge, and stays
 unverified until the D2.1-b2 drill: complete means that the writer finished, not
 that the data was verified. The inventory and witness record digests that a
 later check can use to detect accidental corruption or truncation, not a
-same-user rewrite. Nothing verifies a kept checkpoint yet, and `Inspect` lists
+same-user rewrite. Nothing verifies a kept checkpoint yet, and `Inspect` can list
 a damaged one as complete. Windows transient refusals while publishing a
 copied file or reopening it for re-hashing use the shared 2 s retry budget and
 25–200 ms backoff, bounded also by 10 s plus 100 ms per planned file in cumulative
 requested sleep and by context cancellation. Other failures remain single
 attempts. Ordinary operations
-validate only the `recovery/` directory itself; `Checkpoint`, `DeleteCheckpoint`
-and `Inspect` validate all of `recovery/**` and refuse a tree that fails, which
-must then be repaired by hand. A private unknown entry in `recovery/` (for
+validate only the `recovery/` directory itself; `Checkpoint` and `DeleteCheckpoint`
+validate all of `recovery/**` and refuse a tree that fails, which must then be
+repaired by hand. `Inspect` validates and lists checkpoints only while holding
+the cell lock, reporting `checkpoint_listing: listed`. It reports `busy` while
+another operation owns the cell, or `unowned` when no lock file exists and the
+recovery boundary cannot be shown absent; neither state means there are no
+checkpoints. With no lock file and an absent boundary it reports `listed` with
+no checkpoints and creates nothing. A private unknown entry in `recovery/` (for
 example a 0600 `.DS_Store` on Unix) blocks `Checkpoint` but permits `Inspect`
 and exact-id `DeleteCheckpoint`; a non-private entry (for example 0644 on Unix)
-makes all three refuse until repaired by hand. A new installation in a purged
-root inherits the old checkpoints, with their passwords, which count toward
-the limit. W1 uses synthetic files written by a restricted-token child with
-real inherited ACLs; real PostgreSQL files are copied on Windows only by the
+makes both mutations and an owned `Inspect` refuse until repaired by hand.
+A new installation in a purged root inherits the old checkpoints, with their
+passwords, which count toward the limit. W1 uses synthetic files written by a
+restricted-token child with real inherited ACLs; real PostgreSQL files are
+copied on Windows only by the
 native proof. LC-S7D2E2 requires that PostgreSQL 16 proof,
 `TestRealLifecycle/Checkpoint`, on all five CI rows. Drill, restore, rollback,
 update wiring and D9 remain pending; this is no M4/M5 completion or

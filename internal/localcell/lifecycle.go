@@ -674,7 +674,7 @@ func (c *Cell) Inspect(_ context.Context) (Inspection, error) {
 			result.InstallState = "removed; data retained; reinstall unsupported"
 		}
 	}
-	if result.Checkpoints, err = c.checkpointSummaries(); err != nil {
+	if err := c.checkpointSummaries(lock, &result); err != nil {
 		return result, err
 	}
 	for _, component := range []string{"postgres", "server", "worker"} {

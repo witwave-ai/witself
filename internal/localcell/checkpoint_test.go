@@ -465,7 +465,7 @@ func TestCheckpointSequenceAndContents(t *testing.T) {
 					t.Fatal("checkpoint changed the live tree or the manifest")
 				}
 				inspection, err := c.Inspect(t.Context())
-				if err != nil || !reflect.DeepEqual(inspection.Checkpoints, []CheckpointSummary{{ID: ids[0], InstallationID: m.InstallationID,
+				if err != nil || inspection.CheckpointListing != "listed" || !reflect.DeepEqual(inspection.Checkpoints, []CheckpointSummary{{ID: ids[0], InstallationID: m.InstallationID,
 					CreatedAt: witness.CreatedAt, Bytes: copied, Complete: true}}) {
 					t.Fatal("inspection does not list the complete checkpoint")
 				}
@@ -601,7 +601,7 @@ func checkpointFailpoint(operation, cut string) func(string, string) error {
 func checkpointSummaryOf(t *testing.T, c *Cell, checkpointID string) CheckpointSummary {
 	t.Helper()
 	inspection, err := c.Inspect(t.Context())
-	if index := slices.IndexFunc(inspection.Checkpoints, func(s CheckpointSummary) bool { return s.ID == checkpointID }); err == nil && index >= 0 {
+	if index := slices.IndexFunc(inspection.Checkpoints, func(s CheckpointSummary) bool { return s.ID == checkpointID }); err == nil && inspection.CheckpointListing == "listed" && index >= 0 {
 		return inspection.Checkpoints[index]
 	}
 	t.Fatal("inspection does not list the checkpoint")
@@ -891,7 +891,7 @@ func TestCheckpointRetentionAcrossLifecycle(t *testing.T) {
 		}
 	}
 	inspection, err := c.Inspect(t.Context())
-	if err != nil || len(inspection.Checkpoints) != 2 || !inspection.Checkpoints[0].Complete || !inspection.Checkpoints[1].Complete {
+	if err != nil || inspection.CheckpointListing != "listed" || len(inspection.Checkpoints) != 2 || !inspection.Checkpoints[0].Complete || !inspection.Checkpoints[1].Complete {
 		t.Fatal("purged root does not still list both checkpoints")
 	}
 }
@@ -970,8 +970,8 @@ func TestCheckpointFenceAndContention(t *testing.T) {
 		})
 	}
 	inspection, err := c.Inspect(t.Context())
-	if err != nil || !inspection.Locked || !reflect.DeepEqual(inspection.Checkpoints, []CheckpointSummary{{ID: inFlight}}) {
-		t.Fatal("locked inspection did not list the in-flight checkpoint as incomplete")
+	if err != nil || !inspection.Locked || inspection.CheckpointListing != "busy" || inspection.Checkpoints != nil {
+		t.Fatal("locked inspection did not report busy without a checkpoint listing")
 	}
 	if unblock(); <-result != nil || !checkpointSummaryOf(t, c, inFlight).Complete {
 		t.Fatal("blocked checkpoint did not complete after release")
@@ -1014,16 +1014,22 @@ func TestCheckpointRecoveryValidator(t *testing.T) {
 		}
 	})
 	// On a case-sensitive volume another spelling is an ordinary directory;
-	// where it also resolves as recovery, RV refuses it.
+	// where it also resolves as recovery, RV refuses it. On Windows the walk
+	// that precedes the lock refuses that alias first, with the layout text,
+	// so no operation reaches RV and Inspect reports no listing state.
 	t.Run("non-canonical-spelling", func(t *testing.T) {
 		f, _ := checkpointFixture(t, "legacy", false)
 		if privateDir(filepath.Join(f.cell.cfg.Root, "Recovery"), true) != nil {
 			t.Fatal("cannot prepare a differently spelled recovery directory")
 		}
-		if _, err := os.Lstat(f.cell.recoveryDir()); !errors.Is(err, os.ErrNotExist) {
+		if _, err := os.Lstat(f.cell.recoveryDir()); errors.Is(err, os.ErrNotExist) {
+			if f.cell.validateRecovery() != nil {
+				t.Fatal("a differently spelled directory on a case-sensitive volume was refused")
+			}
+		} else if runtime.GOOS == "windows" {
+			checkpointRefused(t, f, "cannot inspect private local cell layout", "")
+		} else {
 			checkpointRefusedEverywhere(t, f)
-		} else if f.cell.validateRecovery() != nil {
-			t.Fatal("a differently spelled directory on a case-sensitive volume was refused")
 		}
 	})
 	t.Run("nested-recovery-non-private", func(t *testing.T) {
@@ -1039,18 +1045,25 @@ func TestCheckpointRecoveryValidator(t *testing.T) {
 }
 
 // checkpointRefusedEverywhere requires RV, Checkpoint, DeleteCheckpoint and
-// Inspect to refuse one bad recovery tree: the operations with zero writes,
-// Inspect without listing anything.
+// Inspect to refuse with the checkpoint state cause, each without a write.
 func checkpointRefusedEverywhere(t *testing.T, f *retainedFixture) {
 	t.Helper()
-	c, want := f.cell, "local_checkpoint_state_unsupported"
+	checkpointRefused(t, f, "local_checkpoint_state_unsupported", "listed")
+}
+
+// checkpointRefused requires RV to refuse with the checkpoint state cause and
+// Checkpoint, DeleteCheckpoint and Inspect to refuse with want, each without a
+// write; listing is the state Inspect reports beside its refusal.
+func checkpointRefused(t *testing.T, f *retainedFixture, want, listing string) {
+	t.Helper()
+	c := f.cell
 	before := checkpointTreeState(t, c)
-	if !checkpointSameError(c.validateRecovery(), want) || !checkpointSameError(c.Checkpoint(t.Context(), checkpointOptions(f)), want) ||
+	if !checkpointSameError(c.validateRecovery(), "local_checkpoint_state_unsupported") || !checkpointSameError(c.Checkpoint(t.Context(), checkpointOptions(f)), want) ||
 		!checkpointSameError(c.DeleteCheckpoint(t.Context(), DeleteCheckpointOptions{CheckpointID: "ckpt_aaaaaaaaaaaaaaaa"}), want) {
 		t.Fatal("the validator, checkpoint or deletion admitted a bad recovery tree")
 	}
 	checkpointUnchanged(t, c, before)
-	if inspection, err := c.Inspect(t.Context()); !checkpointSameError(err, want) || len(inspection.Checkpoints) != 0 {
+	if inspection, err := c.Inspect(t.Context()); !checkpointSameError(err, want) || inspection.CheckpointListing != listing || len(inspection.Checkpoints) != 0 {
 		t.Fatal("inspection listed a bad recovery tree")
 	}
 }

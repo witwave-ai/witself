@@ -894,13 +894,35 @@ func (c *Cell) listCheckpoints() ([]CheckpointSummary, int, error) {
 	return summaries, unknown, nil
 }
 
-// checkpointSummaries is Inspect's read-only listing.
-func (c *Cell) checkpointSummaries() ([]CheckpointSummary, error) {
-	if err := c.validateRecovery(); err != nil {
-		return nil, err
+// checkpointSummaries is Inspect's read-only listing. Inspect retains its own
+// acquired lock until this returns; without it we never descend into recovery.
+func (c *Cell) checkpointSummaries(lock *operationLock, inspection *Inspection) error {
+	switch {
+	case inspection.Locked:
+		inspection.CheckpointListing = "busy"
+		return nil
+	case lock == nil:
+		inspection.CheckpointListing = "unowned"
+		// An absent boundary is the only empty listing we can observe without
+		// ownership. Never recheck or descend if it appears after this Lstat.
+		if _, err := os.Lstat(c.recoveryDir()); errors.Is(err, os.ErrNotExist) {
+			inspection.CheckpointListing = "listed"
+			if c.inspectCheckpointListing != nil {
+				c.inspectCheckpointListing("absent")
+			}
+		}
+		return nil
 	}
-	summaries, _, err := c.listCheckpoints()
-	return summaries, err
+	inspection.CheckpointListing = "listed"
+	if c.inspectCheckpointListing != nil {
+		c.inspectCheckpointListing("owned")
+	}
+	if err := c.validateRecovery(); err != nil {
+		return err
+	}
+	var err error
+	inspection.Checkpoints, _, err = c.listCheckpoints()
+	return err
 }
 
 // validateRecovery is the one validator of recovery/** (RV): every object at

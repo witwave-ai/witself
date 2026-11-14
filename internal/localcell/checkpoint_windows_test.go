@@ -124,7 +124,7 @@ func windowsCheckpointFixture(t *testing.T, root string) (*Cell, *checkpointReco
 func windowsCheckpointListed(t *testing.T, c *Cell) map[string]bool {
 	t.Helper()
 	inspection, err := c.Inspect(t.Context())
-	if err != nil {
+	if err != nil || inspection.CheckpointListing != "listed" {
 		t.Fatal("inspect failed after a checkpoint operation")
 	}
 	listed := map[string]bool{}

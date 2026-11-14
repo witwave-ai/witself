@@ -161,15 +161,8 @@ func TestPrivateTreeRecoveryBoundary(t *testing.T) {
 			"spool/recovery/deep/f", "pg/recovery/deep/f", "run/y",
 		}
 		privateTreeFixture(t, root, entries...)
-		// Case-folded spellings are separate objects only on a case-sensitive
-		// filesystem; the classifier row (e) covers them everywhere.
-		if _, err := os.Lstat(filepath.Join(root, "RECOVERY")); errors.Is(err, os.ErrNotExist) {
-			cased := []string{"Recovery/deep/f", "RECOVERY/deep/f"}
-			privateTreeFixture(t, root, cased...)
-			entries = append(entries, cased...)
-		} else {
-			t.Log("case-insensitive filesystem; case-folded spellings are covered by the classifier row")
-		}
+		// Direct-child case aliases now have stronger refusal coverage in
+		// TestPrivateTreeRecoveryAlias; these other look-alikes still walk fully.
 		visits, err := recordPrivateTreeWalk(t, root, nil)
 		got, want := sortedPrivateTreeVisits(visits), sortedPrivateTreeVisits(privateTreeExpected(entries...))
 		if err != nil || !reflect.DeepEqual(got, want) {
@@ -196,9 +189,10 @@ func TestPrivateTreeRecoveryBoundary(t *testing.T) {
 			{root, boundary, privateTreeBoundary},
 			{named, filepath.Join(named, "recovery"), privateTreeBoundary},
 			{root, root + "/recovery", slashed},
-			{root, filepath.Join(root, "Recovery"), privateTreeStrict},
-			{root, filepath.Join(root, "RECOVERY"), privateTreeStrict},
-			{root, filepath.Join(root, "recoverY"), privateTreeStrict},
+			{root, filepath.Join(root, "Recovery"), privateTreeAlias},
+			{root, filepath.Join(root, "RECOVERY"), privateTreeAlias},
+			{root, filepath.Join(root, "recoverY"), privateTreeAlias},
+			{root, filepath.Join(root, "recoverx"), privateTreeStrict},
 			{root, boundary + separator, privateTreeStrict},
 			{root, boundary + separator + "anything", privateTreeStrict},
 			{root, filepath.Join(boundary, "recovery"), privateTreeStrict},
@@ -207,8 +201,10 @@ func TestPrivateTreeRecoveryBoundary(t *testing.T) {
 			{root, root, privateTreeStrict},
 			{named, named, privateTreeStrict},
 			{root, filepath.Join(root, "spool", "recovery"), privateTreeStrict},
+			{root, filepath.Join(root, "spool", "Recovery"), privateTreeStrict},
 			{root, filepath.Join(root, "pg"), privateTreePostgres},
 			{root, filepath.Join(root, "pg", "recovery"), privateTreePostgres},
+			{root, filepath.Join(root, "pg", "Recovery"), privateTreePostgres},
 			{root, filepath.Join(root, "pgx"), privateTreeStrict},
 		} {
 			if got := classifyPrivateTreePath(test.root, test.path); got != test.want {
