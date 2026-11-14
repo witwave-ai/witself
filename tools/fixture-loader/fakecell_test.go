@@ -28,7 +28,41 @@ const fakeOtherToken = "test-other-token-not-real"
 const fakeRealm = "rlm_aaaaaaaaaaaaaaaa"
 const fakeAgent = "agt_aaaaaaaaaaaaaaaa"
 
-type fakeRequest struct{ Method, Path string }
+type requestClass uint8
+
+const (
+	classGET requestClass = iota
+	classPOST
+	classOther
+	classDirectory
+	classClose
+	classSelf
+	classAccount
+	classList
+	classCreate
+	classAppend
+	classTail
+	classExport
+	classRedirect
+	classOtherAccount
+	classUnknown
+	classAgent
+	classOperator
+	classOtherFixture
+	classNone
+	classForeign
+	classTrue
+	classFalse
+)
+
+func (c requestClass) String() string {
+	return [...]string{"GET", "POST", "other", "directory_lookup", "close_account", "read_self", "read_account", "list_transcripts", "create_transcript", "append_entries", "read_transcript_tail", "export", "redirect_target", "directory_other_account", "unknown", "agent", "operator", "other_fixture", "none", "foreign", "true", "false"}[c]
+}
+
+type fakeRequest struct {
+	Method, Path                                    string
+	MethodClass, RouteClass, CredentialClass, InRun requestClass
+}
 type fakeTranscript struct {
 	transcript
 	Entries []entry
@@ -36,6 +70,7 @@ type fakeTranscript struct {
 }
 
 type fakeCell struct {
+	inRun                                                                                       bool
 	mu                                                                                          sync.Mutex
 	exporting                                                                                   atomic.Bool
 	server                                                                                      *httptest.Server
@@ -147,11 +182,46 @@ func fakeDrop(w http.ResponseWriter) {
 	}
 }
 
+// recordRequest is called at listener arrival while holding f.mu.
+func (f *fakeCell) recordRequest(r *http.Request) {
+	method := classOther
+	switch r.Method {
+	case http.MethodGet:
+		method = classGET
+	case http.MethodPost:
+		method = classPOST
+	}
+	route := map[string]requestClass{"directory lookup": classDirectory, "close account": classClose, "read self": classSelf, "read account": classAccount, "list transcripts": classList, "create transcript": classCreate, "append entries": classAppend, "read transcript tail": classTail, "export": classExport, "unknown": classUnknown}[fakeOp(r.Method, r.URL.Path)]
+	if r.URL.Path == "/redirect-target" {
+		route = classRedirect
+	} else if route == classDirectory && r.URL.Path != "/v1/directory/"+f.account {
+		route = classOtherAccount
+	}
+	credential := classForeign
+	switch r.Header.Get("Authorization") {
+	case "":
+		if _, present := r.Header["Authorization"]; !present {
+			credential = classNone
+		}
+	case "Bearer " + fakeAgentToken:
+		credential = classAgent
+	case "Bearer " + fakeOperatorToken:
+		credential = classOperator
+	case "Bearer " + fakeOtherToken:
+		credential = classOtherFixture
+	}
+	inRun := classFalse
+	if f.inRun {
+		inRun = classTrue
+	}
+	f.requests = append(f.requests, fakeRequest{r.Method, r.URL.Path, method, route, credential, inRun})
+}
+
 func (f *fakeCell) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	if fakeOp(r.Method, r.URL.Path) == "export" {
 		if !f.exporting.CompareAndSwap(false, true) {
 			f.mu.Lock()
-			f.requests = append(f.requests, fakeRequest{r.Method, r.URL.Path})
+			f.recordRequest(r)
 			f.mu.Unlock()
 			w.WriteHeader(409)
 			return
@@ -160,7 +230,7 @@ func (f *fakeCell) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.requests = append(f.requests, fakeRequest{r.Method, r.URL.Path})
+	f.recordRequest(r)
 	if r.URL.Path == "/redirect-target" {
 		f.redirectHits++
 		w.WriteHeader(200)
