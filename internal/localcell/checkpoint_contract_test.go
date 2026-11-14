@@ -204,7 +204,7 @@ func checkpointSourceContract(sources map[string]string) []string {
 				// (b) each writer's path is rooted in a checkpointDir value, or is
 				// exactly recovery/ (create or sync) or journal/ (one create).
 				paths := map[string]int{"writeAtomic": 1, "writeAtomicBytes": 1, "createPrivateTemp": 1, "removePrivateFile": 1, "syncDirectory": 1,
-					"syncCheckpointDirectory": 1, "os.RemoveAll": 1, "publishPrivateFile": 2, "privateDir": 1}[function]
+					"syncCheckpointDirectory": 1, "os.RemoveAll": 1, "publishPrivateFile": 2, "ops.publish": 2, "privateDir": 1}[function]
 				if function == "privateDir" && types.ExprString(call.Args[1]) == "false" {
 					paths = 0
 				}
@@ -264,7 +264,7 @@ func TestCheckpointSourceContract(t *testing.T) {
 		{"removeall_on_recovery_path", "checkpoint.go", "if err := os.RemoveAll(dir); err != nil {\n\t\treturn errCheckpointCopy", "if err := os.RemoveAll(c.path(\"recovery\", checkpointID)); err != nil {\n\t\treturn errCheckpointCopy", "removeall_target:checkpoint.go"},
 		{"third_removeall", "checkpoint.go", tail, "func checkpointSweep(c *Cell) error { dir, _ := c.checkpointDir(\"x\"); return os.RemoveAll(dir) }\n\n" + tail, "removeall_count:checkpoint.go"},
 		{"lifecycle_removeall_dropped", "lifecycle.go", "if err := os.RemoveAll(c.path(name)); err != nil {", "if err := removePrivateFile(c.path(name)); err != nil {", "removeall_count:lifecycle.go"},
-		{"publish_into_pgdata", "checkpoint.go", "publishPrivateFile(temporary.Name(), filepath.Join(dir, ", "publishPrivateFile(temporary.Name(), filepath.Join(c.path(\"pg\"), ", "writer_root:checkpoint.go:publishPrivateFile"},
+		{"publish_into_pgdata", "checkpoint.go", "target, attempted := filepath.Join(dir, filepath.FromSlash(entry.path)), false", "target, attempted := filepath.Join(c.path(\"pg\"), filepath.FromSlash(entry.path)), false", "writer_root:checkpoint.go:ops.publish"},
 		{"escape_by_literal", "checkpoint.go", "writeAtomic(filepath.Join(dir, checkpointWitnessName), witness, nil)", "writeAtomic(filepath.Join(dir, \"..\", \"..\", \"manifest.json\"), witness, nil)", "writer_root:checkpoint.go:writeAtomic"},
 		{"temporary_in_run", "checkpoint.go", "createPrivateTemp(filepath.Join(dir, filepath.FromSlash(path.Dir(entry.path))))", "createPrivateTemp(c.path(\"run\"))", "live_path_not_read:checkpoint.go:run"},
 		{"recovery_joined_sync", "checkpoint.go", "return syncCheckpointDirectory(c.recoveryDir())\n}\n\n// failCheckpoint", "return syncCheckpointDirectory(filepath.Join(c.recoveryDir(), checkpointID))\n}\n\n// failCheckpoint", "writer_root:checkpoint.go:syncCheckpointDirectory"},

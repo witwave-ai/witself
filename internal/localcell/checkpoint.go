@@ -23,6 +23,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/witwave-ai/witself/internal/id"
+	"github.com/witwave-ai/witself/internal/runtimeconfig"
 )
 
 // CheckpointOptions names the installation whose cold state Checkpoint copies.
@@ -52,6 +53,8 @@ const (
 	checkpointControlLimit  = 16 << 10
 	checkpointInventoryName = "inventory.json"
 	checkpointWitnessName   = "witness.json"
+	checkpointRetryFloor    = 10 * time.Second
+	checkpointRetryPerFile  = 100 * time.Millisecond
 )
 
 var errCheckpointAllocation = errors.New("cannot allocate local cell checkpoint identity")
@@ -70,6 +73,12 @@ type checkpointOperations struct {
 	afterCopy   func(string)
 	beforeClose func()
 	newID       func() (string, error)
+	publish     func(string, string) error
+	open        func(string) (*os.File, error)
+	transient   func(error) bool
+	sleep       func(context.Context, time.Duration)
+	now         func() time.Time
+	beforeStep  func(step, path string) // observes attempts without replacing operations
 }
 
 func (c *Cell) checkpointOps() checkpointOperations {
@@ -77,10 +86,58 @@ func (c *Cell) checkpointOps() checkpointOperations {
 	if c.checkpointTest != nil {
 		ops = *c.checkpointTest
 	}
+	if ops.control == nil {
+		ops.control = c.checkpointControl
+	}
+	if ops.free == nil {
+		ops.free = checkpointFreeSpace
+	}
 	if ops.newID == nil {
 		ops.newID = func() (string, error) { return id.New("ckpt") }
 	}
+	if ops.publish == nil {
+		ops.publish = publishPrivateFile
+	}
+	if ops.open == nil {
+		ops.open = func(name string) (*os.File, error) { return openPrivateFile(name, os.O_RDONLY, 0) }
+	}
+	if ops.transient == nil {
+		ops.transient = runtimeconfig.WindowsPrivateTransient
+	}
+	if ops.now == nil {
+		ops.now = time.Now
+	}
+	if ops.sleep == nil {
+		ops.sleep = func(ctx context.Context, delay time.Duration) {
+			timer := time.NewTimer(delay)
+			defer timer.Stop()
+			select {
+			case <-ctx.Done():
+			case <-timer.C:
+			}
+		}
+	}
 	return ops
+}
+
+type checkpointRetryBudget struct{ slept, limit time.Duration }
+
+// retryCheckpointStep adds call-wide sleep and cancellation bounds to the
+// shared per-step engine. Cancellation never starts another file operation.
+func retryCheckpointStep(ctx context.Context, budget *checkpointRetryBudget, ops checkpointOperations, attempt func() error) error {
+	_, err := retryPublish(func() error {
+		if ctx.Err() != nil {
+			return errCheckpointCopy
+		}
+		return attempt()
+	}, func(err error) bool {
+		return ctx.Err() == nil && budget.slept < budget.limit && ops.transient(err)
+	}, leasePublishHooks{now: ops.now, sleep: func(delay time.Duration) {
+		delay = min(delay, budget.limit-budget.slept)
+		budget.slept += delay
+		ops.sleep(ctx, delay)
+	}})
+	return err
 }
 
 // recoveryDir is the one production spelling of <root>/recovery.
@@ -173,12 +230,18 @@ func (c *Cell) checkpointLocked(ctx context.Context, options CheckpointOptions) 
 		return errInterrupted
 	}
 	created := false
+	budget := checkpointRetryBudget{limit: checkpointRetryFloor}
+	for _, entry := range plan.entries {
+		if !entry.directory {
+			budget.limit += checkpointRetryPerFile
+		}
+	}
 	for _, step := range []struct {
 		name string
 		run  func() error
 	}{
-		{"copy", func() error { return c.copyCheckpoint(ctx, checkpointID, plan, &created, ops) }},
-		{"inventory", func() error { return c.inventoryCheckpoint(ctx, checkpointID, plan) }},
+		{"copy", func() error { return c.copyCheckpoint(ctx, checkpointID, plan, &created, ops, &budget) }},
+		{"inventory", func() error { return c.inventoryCheckpoint(ctx, checkpointID, plan, ops, &budget) }},
 		{"witness", func() error { return c.witnessCheckpoint(ctx, checkpointID, plan, ops) }},
 	} {
 		// A crash leaves the operation open for Repair and discards nothing.
@@ -417,7 +480,7 @@ func (c *Cell) openCheckpointEntry(entry checkpointEntry, open func(string) (*os
 // copyCheckpoint copies the plan in order into a new directory: each file of
 // exactly its planned size through a SHA-256 tee into a private temporary
 // published once. A failure removes the directory before the failed line.
-func (c *Cell) copyCheckpoint(ctx context.Context, checkpointID string, plan *checkpointPlan, created *bool, ops checkpointOperations) error {
+func (c *Cell) copyCheckpoint(ctx context.Context, checkpointID string, plan *checkpointPlan, created *bool, ops checkpointOperations, budget *checkpointRetryBudget) error {
 	dir, err := c.checkpointDir(checkpointID)
 	if err != nil {
 		return err
@@ -465,7 +528,23 @@ func (c *Cell) copyCheckpoint(ctx context.Context, checkpointID string, plan *ch
 		if syncFile(temporary) != nil || temporary.Close() != nil {
 			return errCheckpointCopy
 		}
-		if publishPrivateFile(temporary.Name(), filepath.Join(dir, filepath.FromSlash(entry.path))) != nil {
+		target, attempted := filepath.Join(dir, filepath.FromSlash(entry.path)), false
+		if retryCheckpointStep(ctx, budget, ops, func() error {
+			// A post-move validation refusal can leave the complete target.
+			// Only this call owns the directory; inventory re-hashes the file.
+			if attempted {
+				_, sourceErr := os.Lstat(temporary.Name())
+				info, targetErr := os.Lstat(target)
+				if errors.Is(sourceErr, fs.ErrNotExist) && targetErr == nil && info.Mode().IsRegular() {
+					return nil
+				}
+			}
+			attempted = true
+			if ops.beforeStep != nil {
+				ops.beforeStep("publish", temporary.Name())
+			}
+			return ops.publish(temporary.Name(), target)
+		}) != nil {
 			return errCheckpointCopy
 		}
 		copy(entry.digest[:], hash.Sum(nil))
@@ -517,7 +596,7 @@ type checkpointInventory struct {
 
 // inventoryCheckpoint proves the tree is exactly the plan and every copy has
 // its copy-time size and digest, then publishes the sorted inventory.
-func (c *Cell) inventoryCheckpoint(ctx context.Context, checkpointID string, plan *checkpointPlan) error {
+func (c *Cell) inventoryCheckpoint(ctx context.Context, checkpointID string, plan *checkpointPlan, ops checkpointOperations, budget *checkpointRetryBudget) error {
 	dir, err := c.checkpointDir(checkpointID)
 	if err != nil {
 		return err
@@ -547,8 +626,19 @@ func (c *Cell) inventoryCheckpoint(ctx context.Context, checkpointID string, pla
 	for _, entry := range plan.entries {
 		item := checkpointInventoryEntry{Path: entry.path, Type: "dir"}
 		if !entry.directory {
-			copied, err := openPrivateFile(filepath.Join(dir, filepath.FromSlash(entry.path)), os.O_RDONLY, 0)
+			var copied *os.File
+			err := retryCheckpointStep(ctx, budget, ops, func() error {
+				if ops.beforeStep != nil {
+					ops.beforeStep("open", filepath.Join(dir, filepath.FromSlash(entry.path)))
+				}
+				var err error
+				copied, err = ops.open(filepath.Join(dir, filepath.FromSlash(entry.path)))
+				return err
+			})
 			if err != nil {
+				if ctx.Err() != nil {
+					return fail(errCheckpointCopy)
+				}
 				return fail(errCheckpointWitness)
 			}
 			digest, size, err := checkpointHash(copied)
@@ -576,8 +666,9 @@ func (c *Cell) inventoryCheckpoint(ctx context.Context, checkpointID string, pla
 	return nil
 }
 
-// checkpointWitness, published last, detects accidental corruption, not a
-// same-user rewrite of both records; it holds no path, secret or log text.
+// checkpointWitness, published last, records digests that a later check can use
+// to detect accidental corruption or truncation, not a same-user rewrite; it
+// holds no path, secret or log text.
 type checkpointWitness struct {
 	Format                 int           `json:"format"`
 	CheckpointID           string        `json:"checkpoint_id"`
