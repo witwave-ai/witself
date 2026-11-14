@@ -62,14 +62,14 @@ func TestServerLocalRuntimeSyncStartupPostgres(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			base := testenv.RequirePostgres(t)
 			fixture := testenv.NewPostgresSchema(t, base)
-			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-			defer cancel()
-			db, err := pgx.Connect(ctx, fixture.DSN())
+			setupCtx, cancelSetup := context.WithTimeout(context.Background(), testenv.MigrationBudget(0))
+			defer cancelSetup()
+			db, err := pgx.Connect(setupCtx, fixture.DSN())
 			if err != nil {
 				t.Fatal("open startup schema observer failed")
 			}
-			defer func() { _ = db.Close(ctx) }()
-			if mode == "sync" && testenv.EnsureSyncPrincipalRoles(ctx, db, store.SyncPrincipalRoleNames()...) != nil {
+			defer func() { _ = db.Close(context.Background()) }()
+			if mode == "sync" && testenv.EnsureSyncPrincipalRoles(setupCtx, db, store.SyncPrincipalRoleNames()...) != nil {
 				t.Fatal("sync startup principal fixture provisioning failed")
 			}
 			clearServerRuntimeEnvironment(t)
@@ -144,7 +144,11 @@ func TestServerLocalRuntimeSyncStartupPostgres(t *testing.T) {
 					return nil
 				},
 			}
+			started := time.Now()
 			status, _ := captureMigrationStartup(t, startup)
+			work := time.Since(started)
+			budget := testenv.MigrationBudget(work)
+			t.Logf("sync startup budget %s", budget)
 			wantSyncCalls := 0
 			if mode == "sync" {
 				wantSyncCalls = 1
@@ -153,11 +157,15 @@ func TestServerLocalRuntimeSyncStartupPostgres(t *testing.T) {
 				t.Fatal("production startup migration/listener ordering failed")
 			}
 			if mode == "sync" {
+				ctx, cancel := context.WithTimeout(context.Background(), budget)
+				defer cancel()
 				var version int
 				if db.QueryRow(ctx, `SELECT max(version_id) FROM witself_sync_schema_version WHERE is_applied`).Scan(&version) != nil || version != 3 {
 					t.Fatal("sync startup fixture did not install schema 3")
 				}
 			}
+			ctx, cancel := context.WithTimeout(context.Background(), budget)
+			defer cancel()
 			var tables int
 			if err := db.QueryRow(ctx, `SELECT count(*) FROM pg_tables WHERE schemaname=current_schema() AND left(tablename,5)='sync_'`).Scan(&tables); err != nil {
 				t.Fatal("read startup table inventory failed")
