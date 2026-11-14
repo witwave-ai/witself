@@ -16,6 +16,7 @@ import (
 // Helpers must dispatch before runtime.main releases the initial OS thread.
 // Keep this initializer test-only: hosted imports of localcell stay inert.
 func init() {
+	dispatchCheckpointControlHelper()
 	DispatchProcessHelper()
 }
 
