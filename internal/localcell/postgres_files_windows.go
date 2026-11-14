@@ -22,6 +22,10 @@ func readPostgresFile(path string) ([]byte, error) {
 	return runtimeconfig.WindowsPrivatePostgresRead(filepath.Dir(path), path)
 }
 
+func postgresPendingRegular(root, path string) bool {
+	return runtimeconfig.WindowsPrivatePostgresValidate(root, path, false) == nil
+}
+
 func (c *Cell) writePostgresConfig(data []byte) error {
 	root, path := c.path("pg"), c.path("pg", "postgresql.conf")
 	if err := runtimeconfig.WindowsPrivatePostgresValidate(root, root, true); err != nil {
@@ -34,7 +38,7 @@ func (c *Cell) writePostgresConfig(data []byte) error {
 	if err != nil {
 		return errors.New("cannot create local cell PostgreSQL configuration")
 	}
-	defer func() { _ = runtimeconfig.WindowsPrivateRemove(file.Name()) }()
+	defer func() { _ = removePrivateFile(file.Name()) }()
 	if _, err = file.Write(data); err == nil {
 		err = syncFile(file)
 	}

@@ -14,6 +14,12 @@ func openPrivateFile(path string, flags int, mode os.FileMode) (*os.File, error)
 func readPrivateFile(path string) ([]byte, error) { return os.ReadFile(path) }
 
 func createPrivateTemp(dir string) (*os.File, error) { return os.CreateTemp(dir, ".pending-*") }
+func privateTempName(name string) bool               { return unixPrivateTempName(name) }
+
+func postgresPendingRegular(_ string, path string) bool {
+	info, err := os.Lstat(path)
+	return err == nil && info.Mode().IsRegular()
+}
 
 func privatePassword(_ string, info os.FileInfo) bool { return info.Mode().Perm() == 0o600 }
 

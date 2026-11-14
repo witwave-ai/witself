@@ -212,6 +212,7 @@ func (c *Cell) reportedVersion(ctx context.Context, binary string) (string, erro
 }
 
 func (c *Cell) configurePostgres(m *Manifest) error {
+	c.sweepPostgresPending()
 	// Loopback TCP only: every connection the lifecycle makes uses 127.0.0.1,
 	// and a Unix socket under a long root would exceed macOS's 104-byte limit.
 	socketDir := ""
