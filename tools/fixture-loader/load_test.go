@@ -65,7 +65,7 @@ func newHarness(t *testing.T, e int) *harness {
 	t.Helper()
 	h := &harness{cell: newFakeCell(t), o: options{e, 150000, 500000}, clock: &fakeClock{time: time.Date(2026, 9, 30, 14, 0, 0, 0, time.UTC)}, cluster: newClusterFixture()}
 	h.c = config{account: fakeAccount, agentTokenFile: fixtureTokenFile(t, fakeAgentToken, 0o600), operatorTokenFile: fixtureTokenFile(t, fakeOperatorToken, 0o600), expectCell: "fake-cell", controlPlane: h.cell.server.URL, kubeContext: "fake-context", kubectl: "kubectl", rate: 1000000, maxMeasures: 2, limits: thresholds{90, 5, 70, 75}}
-	h.d = deps{now: h.clock.now, sleep: h.clock.sleep, run: h.cluster.run, client: newHTTPClient(), stdout: &h.out, stderr: &h.err}
+	h.d = deps{now: h.clock.now, sleep: h.clock.sleep, run: h.cluster.run, client: newFixtureHTTPClient(t), stdout: &h.out, stderr: &h.err}
 	return h
 }
 func markedHarness(t *testing.T, e int) *harness {
@@ -332,6 +332,7 @@ func TestLoadResumesMidTranscript(t *testing.T) {
 }
 func TestLoadRetriesCommittedButLostResponse(t *testing.T) {
 	h := markedHarness(t, 10)
+	h.d.client = newHTTPClient()
 	h.cell.dropBatch = true
 	code, _, stderr := h.run(h.args("load", "--entries", "10")...)
 	assertResult(t, code, 0, stderr, "")

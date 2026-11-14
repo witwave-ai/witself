@@ -7,9 +7,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -20,6 +25,116 @@ import (
 
 	"github.com/witwave-ai/witself/internal/export"
 )
+
+func newFixtureHTTPClient(t testing.TB) *http.Client {
+	t.Helper()
+	client := newHTTPClient()
+	wrapper, ok := client.Transport.(handshakeTransport)
+	if !ok {
+		t.Fatal("fixture HTTP transport shape changed")
+	}
+	transport, ok := wrapper.base.(*http.Transport)
+	if !ok {
+		t.Fatal("fixture HTTP transport shape changed")
+	}
+	transport.DisableKeepAlives = false
+	t.Cleanup(transport.CloseIdleConnections)
+	return client
+}
+
+func TestHTTPClientKeepsConnectionsFresh(t *testing.T) {
+	client := newHTTPClient()
+	wrapper, ok := client.Transport.(handshakeTransport)
+	if !ok {
+		t.Fatal("production HTTP transport shape changed")
+	}
+	transport, ok := wrapper.base.(*http.Transport)
+	if !ok {
+		t.Fatal("production HTTP transport shape changed")
+	}
+	if !transport.DisableKeepAlives {
+		t.Fatal("production HTTP client must disable keep-alives")
+	}
+}
+
+func TestFixtureHTTPClientReusesConnections(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		client func(testing.TB) *http.Client
+		want   int32
+	}{
+		{"fixture", newFixtureHTTPClient, 1},
+		{"production", func(testing.TB) *http.Client { return newHTTPClient() }, 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var connections atomic.Int32
+			server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			server.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+				if state == http.StateNew {
+					connections.Add(1)
+				}
+			}
+			server.Start()
+			t.Cleanup(server.Close)
+			client := tc.client(t)
+			for range 3 {
+				resp, err := client.Get(server.URL)
+				if err != nil {
+					t.Fatal("connection probe request failed")
+				}
+				_, readErr := io.Copy(io.Discard, resp.Body)
+				if closeErr := resp.Body.Close(); readErr != nil || closeErr != nil {
+					t.Fatal("connection probe response failed")
+				}
+			}
+			if connections.Load() != tc.want {
+				t.Fatal("HTTP client connection count differs")
+			}
+		})
+	}
+}
+
+func TestFixtureClientAdoptionContract(t *testing.T) {
+	allowed := map[string]string{
+		"fakecell_test.go: newFixtureHTTPClient":                          "preserves the production wrapper and redirect policy",
+		"fakecell_test.go: TestHTTPClientKeepsConnectionsFresh":           "pins the production transport policy",
+		"fakecell_test.go: TestFixtureHTTPClientReusesConnections":        "compares production connection counts",
+		"load_test.go: TestLoadRetriesCommittedButLostResponse":           "drops a committed batch response",
+		"measure_test.go: TestMeasureDetectsDamage":                       "truncates the export response body",
+		"measure_test.go: TestMeasureIsNeverRetried":                      "hijacks and drops the export response",
+		"measure_test.go: TestTruncatedJSONResponseRetainsTransportClass": "truncates a JSON response body",
+		"measure_test.go: TestTLSHandshakePhaseIsValueFree":               "injects a TLS handshake failure",
+	}
+	files, err := filepath.Glob("*_test.go")
+	if err != nil || len(files) == 0 {
+		t.Fatal("fixture client sources unavailable")
+	}
+	for _, name := range files {
+		file, err := parser.ParseFile(token.NewFileSet(), name, nil, 0)
+		if err != nil {
+			t.Fatalf("%s: fixture client source invalid", name)
+		}
+		for _, decl := range file.Decls {
+			function := "<package>"
+			if fn, ok := decl.(*ast.FuncDecl); ok {
+				function = fn.Name.Name
+			}
+			ast.Inspect(decl, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				callee, ok := ast.Unparen(call.Fun).(*ast.Ident)
+				if ok && callee.Name == "newHTTPClient" && allowed[name+": "+function] == "" {
+					t.Errorf("%s: %s: newHTTPClient requires an allow-list entry", name, function)
+				}
+				return true
+			})
+		}
+	}
+}
 
 const fakeAccount = "acc_aaaaaaaaaaaaaaaa"
 const fakeAgentToken = "test-agent-token-not-real"

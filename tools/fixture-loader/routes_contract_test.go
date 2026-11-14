@@ -23,6 +23,7 @@ func (r *recordingRouteReporter) Logf(f string, a ...any) {
 func (r *recordingRouteReporter) Fatal(a ...any) { r.fatals = append(r.fatals, fmt.Sprint(a...)) }
 
 func TestRouteDiagnostic(t *testing.T) {
+	client := newFixtureHTTPClient(t)
 	for _, tc := range []struct {
 		name, method, path, auth, classes string
 		allowed                           bool
@@ -43,7 +44,7 @@ func TestRouteDiagnostic(t *testing.T) {
 			if tc.auth != "" || tc.name == "empty_header" {
 				req.Header.Set("Authorization", tc.auth)
 			}
-			resp, err := newHTTPClient().Do(req)
+			resp, err := client.Do(req)
 			if err != nil {
 				t.Fatal("injection failed")
 			}

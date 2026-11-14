@@ -29,7 +29,7 @@ func measureFixture(t *testing.T) (*fakeCell, config, deps, session, readings, *
 	}
 	f.transcripts[tr.ExternalID] = tr
 	out := new(bytes.Buffer)
-	d := deps{now: func() time.Time { return time.Date(2026, 9, 30, 14, 0, 0, 0, time.UTC) }, client: newHTTPClient(), stdout: out, stderr: io.Discard, sleep: func(context.Context, time.Duration) error {
+	d := deps{now: func() time.Time { return time.Date(2026, 9, 30, 14, 0, 0, 0, time.UTC) }, client: newFixtureHTTPClient(t), stdout: out, stderr: io.Discard, sleep: func(context.Context, time.Duration) error {
 		t.Fatal("measure unexpectedly requested a sleep")
 		return nil
 	}}
@@ -134,6 +134,9 @@ func TestMeasureDetectsDamage(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			f, c, d, s, r, _ := measureFixture(t)
 			tc.set(f)
+			if tc.name == "length" {
+				d.client = newHTTPClient()
+			}
 			_, err := measureArchive(context.Background(), c, d, s, r, 100000, 1, 1, false)
 			var stop *toolError
 			if !errors.As(err, &stop) || stop.code != 5 || stop.msg != "stopped: archive check failed ("+tc.reason+")" {
@@ -158,6 +161,9 @@ func TestMeasureIsNeverRetried(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			f, c, d, s, r, _ := measureFixture(t)
 			tc.set(f)
+			if tc.name == "connection" {
+				d.client = newHTTPClient()
+			}
 			_, err := measureArchive(context.Background(), c, d, s, r, 100000, 1, 1, false)
 			var stop *toolError
 			if !errors.As(err, &stop) || stop.code != 5 || stop.msg != tc.want {
@@ -215,7 +221,7 @@ func TestHTTPCallsNeverFollowRedirects(t *testing.T) {
 		t.Run(tc.op, func(t *testing.T) {
 			f := newFakeCell(t)
 			f.redirect[tc.op] = true
-			d := deps{client: newHTTPClient()}
+			d := deps{client: newFixtureHTTPClient(t)}
 			var out map[string]any
 			err := requestJSON(context.Background(), d, tc.method, f.server.URL, tc.path, fakeAgentToken, tc.op, 30*time.Second, nil, &out, 200)
 			if err == nil || err.Error() != "stopped: "+tc.op+" returned HTTP 302" {
@@ -249,7 +255,7 @@ func TestMeasureRefusesUnexpectedHeaders(t *testing.T) {
 				_, _ = io.WriteString(w, "x")
 			}))
 			defer server.Close()
-			d := deps{now: func() time.Time { return time.Date(2026, 9, 30, 14, 0, 0, 0, time.UTC) }, client: newHTTPClient(), stdout: io.Discard, stderr: io.Discard}
+			d := deps{now: func() time.Time { return time.Date(2026, 9, 30, 14, 0, 0, 0, time.UTC) }, client: newFixtureHTTPClient(t), stdout: io.Discard, stderr: io.Discard}
 			c := config{account: fakeAccount, limits: thresholds{90, 5, 70, 75}}
 			s := session{endpoint: server.URL, operatorToken: fakeOperatorToken}
 			r := readings{nodes: []nodeReading{{fsCapacity: 1 << 30}}, ready: true}
