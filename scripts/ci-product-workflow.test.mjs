@@ -10,7 +10,8 @@ import {assertGate} from './ci-product-gate.mjs';
 import {classifyChanges} from './ci-product-scope.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
-const files = ['ci.yml', 'product-site-checks.yml', 'product-site.yml'];
+const databaseWorkflows = ['ci.yml', 'release.yml', 'memory-load-quality.yml'];
+const files = [...databaseWorkflows, 'product-site-checks.yml', 'product-site.yml'];
 // Ruby/Psych is already a repository gate dependency. Normalize YAML 1.1's
 // interpretation of the top-level `on` key before inspecting workflow data.
 const workflows = JSON.parse(execFileSync('ruby', ['-rjson', '-ryaml', '-e', `
@@ -21,6 +22,22 @@ const workflows = JSON.parse(execFileSync('ruby', ['-rjson', '-ryaml', '-e', `
   end
   puts JSON.generate(result)
 `, ...files.map(file => `${root}.github/workflows/${file}`)], {encoding: 'utf8'}));
+
+test('database-backed workflow env maps require package databases', () => {
+  for (const file of databaseWorkflows) {
+    for (const [id, job] of Object.entries(workflows[file].jobs)) {
+      const maps = [
+        ['job', job.env],
+        ...(job.steps ?? []).map((step, index) => [`step ${index + 1} (${step.name ?? step.id ?? step.uses})`, step.env]),
+      ];
+      for (const [scope, env] of maps) {
+        if (!Object.hasOwn(env ?? {}, 'WITSELF_TEST_DATABASE_URL')) continue;
+        assert.equal(env.WITSELF_TEST_REQUIRE_PACKAGE_DATABASE, '1',
+          `${file} ${id} ${scope}: WITSELF_TEST_DATABASE_URL requires WITSELF_TEST_REQUIRE_PACKAGE_DATABASE="1" in the same env map`);
+      }
+    }
+  }
+});
 
 const wrapperDependencies = {
   go: ['go-rest', 'go-store', 'go-capture-principals', 'go-capture-mixed', 'go-infra', 'localcell-windows', 'localcell-unix', 'postgres-backup-image', 'postgres-image-mirror', 'provider-contract-evidence', 'static-analysis'],

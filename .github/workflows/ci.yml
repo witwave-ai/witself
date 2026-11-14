@@ -394,6 +394,7 @@ jobs:
         shell: bash
         env:
           WITSELF_TEST_DATABASE_URL: postgres://witself:witself@localhost:5432/witself?sslmode=disable
+          WITSELF_TEST_REQUIRE_PACKAGE_DATABASE: "1"
           WITSELF_TEST_REQUIRE_DATABASE: "1"
           WITSELF_TEST_REQUIRE_NODE: "1"
           WITSELF_TEST_REQUIRE_OPENSSL: "1"
@@ -479,6 +480,7 @@ jobs:
     env:
       GOTOOLCHAIN: local
       WITSELF_TEST_DATABASE_URL: postgres://witself:witself@localhost:5432/witself?sslmode=disable
+      WITSELF_TEST_REQUIRE_PACKAGE_DATABASE: "1"
       WITSELF_TEST_DISPOSABLE_CLUSTER: "1"
       WITSELF_TEST_REQUIRE_DATABASE: "1"
     steps:
@@ -531,6 +533,7 @@ jobs:
     env:
       GOTOOLCHAIN: local
       WITSELF_TEST_DATABASE_URL: postgres://witself:witself@localhost:5432/witself?sslmode=disable
+      WITSELF_TEST_REQUIRE_PACKAGE_DATABASE: "1"
       WITSELF_TEST_DISPOSABLE_CLUSTER: "1"
       WITSELF_TEST_REQUIRE_DATABASE: "1"
       WITSELF_CAPTUREMIX_CURRENT_BIN_DIR: ${{ github.workspace }}/current/bin
@@ -640,6 +643,7 @@ jobs:
       # Keep the production-backed store tests in the normal CI gate. Without
       # this DSN they intentionally skip, which can hide PostgreSQL semantics.
       WITSELF_TEST_DATABASE_URL: postgres://witself:witself@localhost:5432/witself?sslmode=disable
+      WITSELF_TEST_REQUIRE_PACKAGE_DATABASE: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
