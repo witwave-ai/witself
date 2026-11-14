@@ -1181,6 +1181,10 @@ jobs:
         timeout-minutes: 10
         run: bash scripts/test-rehearse-store-migrations.sh
 
+      - name: store integration cleanup offline contract checks
+        timeout-minutes: 10
+        run: bash scripts/test-run-store-integration.sh
+
       - name: memory load quality workflow contract checks
         run: bash scripts/test-memory-load-quality-workflow.sh
       - name: hosted runner image and required check name contract checks
