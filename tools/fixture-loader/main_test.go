@@ -97,7 +97,7 @@ func TestUsageAndFlagValidation(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
-			client := newHTTPClient()
+			client := newFixtureHTTPClient(t)
 			client.Transport = validationTransport{t: t}
 			d := deps{client: client, stdout: &stdout, stderr: &stderr, run: func(context.Context, string, []string) ([]byte, int, error) {
 				t.Error("invalid flags invoked subprocess")
@@ -143,7 +143,7 @@ func TestTokenFileModeRefused(t *testing.T) {
 			agentFile := mainTokenFile(t, tc.value, tc.mode)
 			operatorFile := mainTokenFile(t, fakeOperatorToken, 0o600)
 			var stdout, stderr bytes.Buffer
-			d := deps{now: func() time.Time { return f.createdAt.Add(time.Hour) }, client: newHTTPClient(), stdout: &stdout, stderr: &stderr}
+			d := deps{now: func() time.Time { return f.createdAt.Add(time.Hour) }, client: newFixtureHTTPClient(t), stdout: &stdout, stderr: &stderr}
 			args := []string{"mark", "--account", fakeAccount, "--agent-token-file", agentFile, "--operator-token-file", operatorFile, "--expect-cell", "fake-cell", "--control-plane", f.server.URL, "--yes"}
 			code := cliWithOptions(context.Background(), args, d, productionOptions())
 			if code != tc.code {

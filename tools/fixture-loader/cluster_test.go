@@ -288,7 +288,7 @@ func TestThresholdFlagRanges(t *testing.T) {
 		for _, value := range tc.values {
 			t.Run(tc.flag+"/"+value, func(t *testing.T) {
 				var stdout, stderr bytes.Buffer
-				d := deps{stdout: &stdout, stderr: &stderr, client: newHTTPClient(), run: func(context.Context, string, []string) ([]byte, int, error) {
+				d := deps{stdout: &stdout, stderr: &stderr, client: newFixtureHTTPClient(t), run: func(context.Context, string, []string) ([]byte, int, error) {
 					t.Error("invalid flags invoked subprocess")
 					return nil, 1, nil
 				}}
