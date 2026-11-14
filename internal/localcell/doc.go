@@ -79,10 +79,19 @@
 // file exists and the recovery boundary cannot be shown absent; neither state
 // means there are no checkpoints. With no lock file and an absent boundary it
 // reports listed with no checkpoints and creates nothing. A private
-// unknown entry there (for example a 0600 .DS_Store on Unix) blocks Checkpoint
+// unknown entry there (counted by CheckpointUnknown only on an owned listing,
+// never named; for example a 0600 .DS_Store on Unix) blocks Checkpoint
 // but permits Inspect and exact-id DeleteCheckpoint; a non-private entry
 // (for example 0644 on Unix) makes both mutations and an owned Inspect refuse
 // until repaired by hand.
+// Recovery refusals retain the checkpoint state cause and exact text, with one
+// value-free reason identifying the existing refusing check. Delete still
+// validates the full recovery tree before resolving its exact target. The
+// failure classifier exposes only closed classes and reasons plus a cleanup
+// flag, never raw error text. Root checks can refuse before recovery validation.
+// Printable validates summary metadata shape for callers; it changes neither
+// witness completeness nor admission and does not prove restore readiness.
+//
 // A new installation in a purged root inherits the old checkpoints, with their
 // passwords, which count toward the limit. Drill,
 // restore, rollback, update wiring and D9 remain pending; this is no M4/M5 or

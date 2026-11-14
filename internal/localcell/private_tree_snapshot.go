@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 )
 
+var errPrivateLayout = errors.New("cannot inspect private local cell layout")
+
 // A WalkDir entry can disappear between enumeration and opened-object
 // validation when PostgreSQL removes a transient file or the host publishes an
 // atomic replacement. An incomplete pass never establishes privacy: retry the
@@ -18,7 +20,7 @@ func validatePrivateTreeSnapshot(root string, walk func(string, fs.WalkDirFunc) 
 		retry := false
 		result = walk(root, func(path string, entry fs.DirEntry, walkErr error) error {
 			if walkErr != nil || entry == nil {
-				return errors.New("cannot inspect private local cell layout")
+				return errPrivateLayout
 			}
 			err := validate(path, entry.IsDir())
 			if err == nil || !errors.Is(err, os.ErrNotExist) || path == root || !entry.Type().IsRegular() {

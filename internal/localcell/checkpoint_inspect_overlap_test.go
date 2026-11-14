@@ -23,12 +23,12 @@ func checkpointInspectState(t *testing.T, c *Cell, want string) Inspection {
 	t.Helper()
 	inspection, err := c.Inspect(t.Context())
 	if err != nil || inspection.CheckpointListing != want || inspection.Locked != (want == "busy") ||
-		(want != "listed" && inspection.Checkpoints != nil) {
+		(want != "listed" && (inspection.Checkpoints != nil || inspection.CheckpointUnknown != 0)) {
 		t.Fatal("inspection did not return the expected ownership and listing state")
 	}
 	data, err := json.Marshal(inspection)
 	var fields map[string]json.RawMessage
-	if err != nil || json.Unmarshal(data, &fields) != nil || string(fields["checkpoint_listing"]) != `"`+want+`"` {
+	if err != nil || json.Unmarshal(data, &fields) != nil || string(fields["checkpoint_listing"]) != `"`+want+`"` || len(fields["checkpoint_unknown"]) == 0 {
 		t.Fatal("inspection JSON omitted or changed the listing state")
 	}
 	return inspection
