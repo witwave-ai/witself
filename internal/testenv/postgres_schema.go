@@ -133,7 +133,8 @@ func PostgresDSNWithSearchPath(baseDSN, schema string) (string, error) {
 
 // ValidateHarnessPostgresDSN rejects non-local targets and connection overrides
 // before allocation. WITSELF_SYNC_HARNESS_DB is an optional lane guard: when set,
-// it must match the database selected by WITSELF_TEST_DATABASE_URL.
+// it must match the selected database or the exact package database derived
+// from that base. A prefix match would admit unrelated databases and is unsafe.
 func ValidateHarnessPostgresDSN(dsn string) error {
 	u, err := url.Parse(dsn)
 	if err != nil || (u.Scheme != "postgres" && u.Scheme != "postgresql") || !harnessLocalHost(u.Hostname()) || u.Path == "" || u.Path == "/" || u.Fragment != "" {
@@ -141,7 +142,10 @@ func ValidateHarnessPostgresDSN(dsn string) error {
 	}
 	database := strings.TrimPrefix(u.Path, "/")
 	if guard := os.Getenv("WITSELF_SYNC_HARNESS_DB"); guard != "" && guard != database {
-		return errors.New("harness database lane guard does not match")
+		identity := postgresTestPackageIdentity()
+		if identity == "" || database != PostgresDatabaseName(guard, identity) {
+			return errors.New("harness database lane guard does not match")
+		}
 	}
 	// Query overrides and multi-host fallbacks must not redirect an apparently
 	// local URL. Require the parsed driver's effective target as well.

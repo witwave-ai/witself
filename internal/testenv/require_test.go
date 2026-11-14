@@ -13,10 +13,14 @@ const helperModeEnv = "WITSELF_TESTENV_HELPER_MODE"
 
 func TestRequirePostgres(t *testing.T) {
 	t.Run("returns configured DSN", func(t *testing.T) {
+		previous := postgresPackageDatabase
+		postgresPackageDatabase = &postgresDatabaseProvisioner{}
+		postgresPackageDatabase.once.Do(func() { postgresPackageDatabase.dsn = "postgres://configured" })
+		t.Cleanup(func() { postgresPackageDatabase = previous })
 		t.Setenv(databaseURLEnv, "postgres://configured")
 		t.Setenv(requireDatabaseEnv, "1")
 		if got := RequirePostgres(t); got != "postgres://configured" {
-			t.Fatalf("RequirePostgres() = %q", got)
+			t.Fatal("RequirePostgres did not return the configured database")
 		}
 	})
 

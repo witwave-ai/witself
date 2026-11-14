@@ -4,8 +4,9 @@ import (
 	"testing"
 )
 
-// No database is configured or contacted. Disabled guards must preserve even
-// invalid strings exactly; validation belongs exclusively to the enabled path.
+// No database is contacted. The require row receives a precompleted provisioner
+// result; disabled guards must preserve those bytes even when they are invalid.
+// Database provisioning and its refusal policy have their own tests.
 func TestPostgresDSNReturnContract(t *testing.T) {
 	previous := postgresTransactionGuardsEnabled.Swap(false)
 	t.Cleanup(func() { postgresTransactionGuardsEnabled.Store(previous) })
@@ -17,6 +18,11 @@ func TestPostgresDSNReturnContract(t *testing.T) {
 	}{
 		{"require", func(t *testing.T, value string) string {
 			t.Setenv(databaseURLEnv, value)
+			previous := postgresPackageDatabase
+			provisioned := &postgresDatabaseProvisioner{}
+			provisioned.once.Do(func() { provisioned.dsn = value })
+			postgresPackageDatabase = provisioned
+			t.Cleanup(func() { postgresPackageDatabase = previous })
 			return RequirePostgres(t)
 		}},
 		{"direct_disabled_guard", func(t *testing.T, value string) string {

@@ -53,7 +53,7 @@ func TestNarrativeMemoryRecallLoadPostgres(t *testing.T) {
 	if os.Getenv(memoryRecallLoadEnabled) != "1" {
 		t.Skip(memoryRecallLoadEnabled + "=1 is required")
 	}
-	dsn := strings.TrimSpace(os.Getenv("WITSELF_TEST_DATABASE_URL"))
+	dsn := strings.TrimSpace(testenv.PostgresDatabaseURL(t))
 	if dsn == "" {
 		t.Fatal("WITSELF_TEST_DATABASE_URL is required when memory recall load testing is enabled")
 	}
