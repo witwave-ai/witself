@@ -1546,7 +1546,7 @@ test('an input stream error fails closed without reflecting its message', async 
 
 const requiredTests = ['TestRealLifecycle', ...[
   'InstallStartRestartRemove', 'TwoCellsAreIndependent', 'InterruptedStartRepair', 'WaitsForReadiness', 'InstallerPrincipals',
-  'RetainedReinstall',
+  'RetainedReinstall', 'Checkpoint',
 ].map(name => `TestRealLifecycle/${name}`)];
 const requiredArgs = ['--require', requiredTests.join(',')];
 const proofEvents = [event('start', packages[0]), event('run', packages[0], requiredTests[0]),

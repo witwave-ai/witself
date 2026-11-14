@@ -80,7 +80,7 @@ for directory in bin lib share; do
   [[ -d $runtime_dir/$directory ]] || fail 'runtime tree is incomplete'
 done
 version_pattern='\(PostgreSQL\) 16\.[0-9]+($|[[:space:]])'
-for name in postgres initdb pg_ctl psql createdb; do
+for name in postgres initdb pg_ctl psql createdb pg_controldata; do
   executable="$runtime_dir/bin/$name"
   [[ -f $executable && -x $executable ]] || fail 'runtime executable is missing'
   version=$("$executable" --version) || fail 'runtime executable failed'

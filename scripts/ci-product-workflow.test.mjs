@@ -176,7 +176,7 @@ function assertLocalcellWindowsJob(ci) {
       "$proofJSON = Join-Path $env:RUNNER_TEMP 'lc-pg16\\proof.json'",
       "go test -json ./internal/localcell -run '^TestRealLifecycle$' -count=1 -timeout=15m > $proofJSON 2>&1",
       '$goExit = $LASTEXITCODE',
-      'node scripts/ci-go-test-json-check.mjs --input $proofJSON --diagnose --require TestRealLifecycle,TestRealLifecycle/InstallStartRestartRemove,TestRealLifecycle/TwoCellsAreIndependent,TestRealLifecycle/InterruptedStartRepair,TestRealLifecycle/WaitsForReadiness,TestRealLifecycle/InstallerPrincipals,TestRealLifecycle/RetainedReinstall',
+      'node scripts/ci-go-test-json-check.mjs --input $proofJSON --diagnose --require TestRealLifecycle,TestRealLifecycle/InstallStartRestartRemove,TestRealLifecycle/TwoCellsAreIndependent,TestRealLifecycle/InterruptedStartRepair,TestRealLifecycle/WaitsForReadiness,TestRealLifecycle/InstallerPrincipals,TestRealLifecycle/RetainedReinstall,TestRealLifecycle/Checkpoint',
       '$parserExit = $LASTEXITCODE',
       'if ($goExit -ne 0 -or $parserExit -ne 0) { exit 1 }',
     ].join('\n'),
@@ -231,7 +231,7 @@ const unixPlatforms = [
   {platform: 'macos-arm64', runner: 'macos-15'},
   {platform: 'macos-intel', runner: 'macos-15-intel'},
 ];
-const lifecycleRequired = 'TestRealLifecycle,TestRealLifecycle/InstallStartRestartRemove,TestRealLifecycle/TwoCellsAreIndependent,TestRealLifecycle/InterruptedStartRepair,TestRealLifecycle/WaitsForReadiness,TestRealLifecycle/InstallerPrincipals,TestRealLifecycle/RetainedReinstall';
+const lifecycleRequired = 'TestRealLifecycle,TestRealLifecycle/InstallStartRestartRemove,TestRealLifecycle/TwoCellsAreIndependent,TestRealLifecycle/InterruptedStartRepair,TestRealLifecycle/WaitsForReadiness,TestRealLifecycle/InstallerPrincipals,TestRealLifecycle/RetainedReinstall,TestRealLifecycle/Checkpoint';
 
 function assertLocalcellUnixJob(ci) {
   const label = 'localcell-unix';
@@ -409,12 +409,12 @@ if (command === 'uname') {
   if (config.mode === 'install-failure' && install) process.exit(1);
   if (install) {
     for (const directory of ['bin', 'lib', 'share']) mkdirSync(join(config.runtime, directory), {recursive: true});
-    for (const name of ['postgres', 'initdb', 'pg_ctl', 'psql', 'createdb']) {
+    for (const name of ['postgres', 'initdb', 'pg_ctl', 'psql', 'createdb', 'pg_controldata']) {
       if (config.mode === 'missing-binary' && name === 'psql') continue;
       executable(join(config.runtime, 'bin', name), name);
     }
   }
-} else if (['postgres', 'initdb', 'pg_ctl', 'psql', 'createdb'].includes(command)) {
+} else if (['postgres', 'initdb', 'pg_ctl', 'psql', 'createdb', 'pg_controldata'].includes(command)) {
   if (args.length !== 1 || args[0] !== '--version') process.exit(42);
   trace('version:' + command);
   if (config.mode === 'nonzero-version' && command === 'initdb') process.exit(1);
@@ -494,13 +494,13 @@ for (const options of [
   {platform: 'linux-x64', os: 'Linux', arch: 'x86_64'},
   {platform: 'linux-arm64', os: 'Linux', arch: 'aarch64'},
 ]) {
-  test(`Unix provisioner ${options.platform} verifies all five executables before export and cleanup is repeatable`, () => {
+  test(`Unix provisioner ${options.platform} verifies all six executables before export and cleanup is repeatable`, () => {
     withUnixProvisionFixture(options, fixture => {
       const result = fixture.run();
       assert(result.error === undefined && result.status === 0, 'Complete mocked provisioning must pass');
       assert.deepEqual(fixture.operations(), [
         'download', 'hash', 'extract', 'configure', 'build', 'install',
-        'version:postgres', 'version:initdb', 'version:pg_ctl', 'version:psql', 'version:createdb',
+        'version:postgres', 'version:initdb', 'version:pg_ctl', 'version:psql', 'version:createdb', 'version:pg_controldata',
       ]);
       assert(fixture.exported() === `WITSELF_LOCALCELL_PGBIN=${fixture.runtime}/bin\n`, 'Only the completely verified runtime is published');
       assert(existsSync(join(fixture.proofRoot, 'testtmp')), 'Proof temporary files belong to the cleanup tree');
@@ -664,7 +664,7 @@ function assertPostgresProvisionContract(source) {
     "Get-FileHash -LiteralPath $archivePath -Algorithm SHA256",
     "if ($actualDigest -cne $pin.sha256)",
     "'^pgsql/(bin|lib|share)/'", "@('bin', 'lib', 'share')",
-    "@('initdb', 'pg_ctl', 'postgres', 'psql', 'createdb')",
+    "@('initdb', 'pg_ctl', 'postgres', 'psql', 'createdb', 'pg_controldata')",
     "New-Item -ItemType Directory -Path (Join-Path $proofRoot 'testtmp')",
     "$version -notmatch '\\(PostgreSQL\\) 16\\.[0-9]+'",
     "$LASTEXITCODE -ne 0", "$archive.Dispose()",
@@ -1345,6 +1345,7 @@ const mutations = [
     [',TestRealLifecycle/WaitsForReadiness', '', 'omits a required child'],
     [',TestRealLifecycle/InstallerPrincipals', '', 'omits installer principals child'],
     [',TestRealLifecycle/RetainedReinstall', '', 'omits retained reinstall child'],
+    [',TestRealLifecycle/Checkpoint', '', 'omits checkpoint child'],
     [' --diagnose', '', 'omits diagnostics'],
     [' --input "$proof_json"', '', 'does not read captured JSON'],
     [' > "$proof_json" 2>&1', '', 'prints raw Go output'],
@@ -1374,6 +1375,7 @@ const mutations = [
   ['Windows proof omits one required child', data => { const step = data['ci.yml'].jobs['localcell-windows'].steps.find(step => step.name === 'Prove native PostgreSQL sixteen lifecycle'); step.run = step.run.replace(',TestRealLifecycle/WaitsForReadiness', ''); }],
   ['Windows proof omits installer principals child', data => { const step = data['ci.yml'].jobs['localcell-windows'].steps.find(step => step.name === 'Prove native PostgreSQL sixteen lifecycle'); step.run = step.run.replace(',TestRealLifecycle/InstallerPrincipals', ''); }],
   ['Windows proof omits retained reinstall child', data => { const step = data['ci.yml'].jobs['localcell-windows'].steps.find(step => step.name === 'Prove native PostgreSQL sixteen lifecycle'); step.run = step.run.replace(',TestRealLifecycle/RetainedReinstall', ''); }],
+  ['Windows proof omits checkpoint child', data => { const step = data['ci.yml'].jobs['localcell-windows'].steps.find(step => step.name === 'Prove native PostgreSQL sixteen lifecycle'); step.run = step.run.replace(',TestRealLifecycle/Checkpoint', ''); }],
   ['Windows proof ignores native exit', data => { const step = data['ci.yml'].jobs['localcell-windows'].steps.find(step => step.name === 'Prove native PostgreSQL sixteen lifecycle'); step.run = step.run.replace('$goExit -ne 0 -or ', ''); }],
   ['Windows proof ignores parser exit', data => { const step = data['ci.yml'].jobs['localcell-windows'].steps.find(step => step.name === 'Prove native PostgreSQL sixteen lifecycle'); step.run = step.run.replace(' -or $parserExit -ne 0', ''); }],
   ['Windows proof omits bounded diagnostics', data => { const step = data['ci.yml'].jobs['localcell-windows'].steps.find(step => step.name === 'Prove native PostgreSQL sixteen lifecycle'); step.run = step.run.replace(' --diagnose', ''); }],

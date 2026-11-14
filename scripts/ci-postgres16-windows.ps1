@@ -65,7 +65,7 @@ foreach ($directory in @('bin', 'lib', 'share')) {
         throw 'PostgreSQL proof runtime tree is incomplete'
     }
 }
-foreach ($name in @('initdb', 'pg_ctl', 'postgres', 'psql', 'createdb')) {
+foreach ($name in @('initdb', 'pg_ctl', 'postgres', 'psql', 'createdb', 'pg_controldata')) {
     $executable = Join-Path $proofRoot "pgsql/bin/$name.exe"
     if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) {
         throw 'PostgreSQL proof executable is missing'

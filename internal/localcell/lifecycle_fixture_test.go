@@ -16,7 +16,7 @@ func lifecycleExecutableName(name string) string {
 
 func TestPostgresBinariesPresentRequiresNativeNames(t *testing.T) {
 	directory := t.TempDir()
-	names := []string{"postgres", "initdb", "pg_ctl", "psql", "createdb"}
+	names := []string{"postgres", "initdb", "pg_ctl", "psql", "createdb", "pg_controldata"}
 	if runtime.GOOS == "windows" {
 		// Construct the expected paths independently of the helper under test.
 		// Extensionless peers must not satisfy Windows PostgreSQL discovery.
