@@ -67,8 +67,11 @@ func nativePrincipalConnection(t *testing.T, root string, m localcell.Manifest, 
 
 func nativePrincipalCredentialMismatch(t *testing.T, cell *localcell.Cell, root string) {
 	t.Helper()
-	if cell.Stop(t.Context()) != nil || cell.SetServiceDesiredState(t.Context(), "running") != nil {
-		t.Fatal("native credential mismatch fixture could not stop selected runtime")
+	if cell.Stop(t.Context()) != nil {
+		t.Fatal("native credential mismatch fixture stop failed")
+	}
+	if cell.SetServiceDesiredState(t.Context(), "running") != nil {
+		t.Fatal("native credential mismatch fixture desired state failed")
 	}
 	path := filepath.Join(root, "run", "credentials", string(store.SyncPrincipalServer))
 	original, err := os.ReadFile(path)
@@ -250,8 +253,17 @@ func testInstallerPrincipalsNative(t *testing.T, binaries localcell.Binaries) {
 	if err != nil {
 		t.Fatal("native service descriptor host unavailable")
 	}
-	if cell.PrepareService(t.Context(), localcell.ServiceDescriptor{Adapter: "foreground", Payload: localcell.ServicePayload{Host: host, Args: []string{"run", "--root", root}}}) != nil || cell.SetServiceDesiredState(t.Context(), "running") != nil || cell.ServiceHealth(t.Context()) != nil || cell.ServiceHealth(t.Context()) != nil {
-		t.Fatal("native maintenance authenticated health failed")
+	if cell.PrepareService(t.Context(), localcell.ServiceDescriptor{Adapter: "foreground", Payload: localcell.ServicePayload{Host: host, Args: []string{"run", "--root", root}}}) != nil {
+		t.Fatal("native maintenance prepare service failed")
+	}
+	if cell.SetServiceDesiredState(t.Context(), "running") != nil {
+		t.Fatal("native maintenance desired state failed")
+	}
+	if cell.ServiceHealth(t.Context()) != nil {
+		t.Fatal("native maintenance first health failed")
+	}
+	if cell.ServiceHealth(t.Context()) != nil {
+		t.Fatal("native maintenance second health failed")
 	}
 	checks++
 	var drained bool
@@ -292,12 +304,18 @@ func testInstallerPrincipalsNative(t *testing.T, binaries localcell.Binaries) {
 	}
 	checks++
 	nativePrincipalCredentialMismatch(t, cell, root)
-	if cell.SetServiceDesiredState(t.Context(), "running") != nil || cell.Start(t.Context()) != nil {
-		t.Fatal("native selected restart failed")
+	if cell.SetServiceDesiredState(t.Context(), "running") != nil {
+		t.Fatal("native selected restart desired state failed")
+	}
+	if cell.Start(t.Context()) != nil {
+		t.Fatal("native selected restart start failed")
 	}
 	other, otherRoot := disposableCell(t, binaries, nil)
-	if other.Install(t.Context(), localcell.InstallOptions{ManagedPrincipals: true}) != nil || other.Start(t.Context()) != nil {
-		t.Fatal("native independent selected installation failed")
+	if other.Install(t.Context(), localcell.InstallOptions{ManagedPrincipals: true}) != nil {
+		t.Fatal("native independent selected install failed")
+	}
+	if other.Start(t.Context()) != nil {
+		t.Fatal("native independent selected start failed")
 	}
 	secondManifest := nativePrincipalManifest(t, otherRoot)
 	if secondManifest.InstallationID == m.InstallationID || secondManifest.Ports.Postgres == m.Ports.Postgres || secondManifest.AccountID == m.AccountID {
@@ -307,8 +325,11 @@ func testInstallerPrincipalsNative(t *testing.T, binaries localcell.Binaries) {
 		cell *localcell.Cell
 		root string
 	}{{cell, root}, {other, otherRoot}} {
-		if entry.cell.Stop(t.Context()) != nil || entry.cell.Remove(t.Context(), localcell.RemoveOptions{Purge: true}) != nil {
-			t.Fatal("native selected cleanup failed")
+		if entry.cell.Stop(t.Context()) != nil {
+			t.Fatal("native selected cleanup stop failed")
+		}
+		if entry.cell.Remove(t.Context(), localcell.RemoveOptions{Purge: true}) != nil {
+			t.Fatal("native selected cleanup remove failed")
 		}
 		assertStopped(t, entry.cell)
 		if _, err := os.Stat(filepath.Join(entry.root, "pg")); !os.IsNotExist(err) {
