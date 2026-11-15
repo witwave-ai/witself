@@ -1930,6 +1930,152 @@ for (const mutation of [
 }
 
 const storePackage = 'github.com/witwave-ai/witself/internal/store';
+const commandPackage = 'github.com/witwave-ai/witself/cmd/witself';
+const commandFile = 'local_checkpoint_command_test.go';
+
+test('explicit command package requires a complete non-skipped proof', async () => {
+  for (const action of ['pass', 'skip', 'fail']) {
+    const input = stream(packageEvents(commandPackage, action));
+    const result = await checkGoTestJSON([input], ['TestFixture'], {packageName: commandPackage});
+    assert.equal(result.valid, action === 'pass');
+    assert.equal(result.reason, action === 'pass' ? null : action === 'fail' ? failureDiagnostic.trimEnd() : diagnostic.trimEnd());
+    assert.equal(result.lines[0], `package ${commandPackage} pass=${Number(action === 'pass')} skip=${Number(action === 'skip')} fail=${Number(action === 'fail')}`);
+    assertFixture(script, {input, args: ['--package', commandPackage, '--require', 'TestFixture'],
+      status: action === 'pass' ? 0 : 1, stderr: result.reason ? `${result.reason}\n` : '', output: `${result.lines.join('\n')}\n`});
+  }
+});
+
+test('command package cannot widen default or native package coverage', async () => {
+  const {expectedPackages} = await import('./ci-go-test-json-check.mjs');
+  assert.deepEqual(expectedPackages, packages);
+  assert(Object.isFrozen(expectedPackages));
+  const input = stream(packageEvents(commandPackage));
+  for (const required of [[], ['TestFixture']]) {
+    const result = await checkGoTestJSON([input], required);
+    assert.equal(result.valid, false);
+    assertFixture(script, {input, args: required.length ? ['--require', 'TestFixture'] : [],
+      status: 1, stderr: diagnostic, output: `${result.lines.join('\n')}\n`});
+  }
+  for (const events of [passing, packageEvents(storePackage)]) {
+    assert.equal((await checkGoTestJSON([stream(events)], ['TestFixture'], {packageName: commandPackage})).valid, false);
+  }
+});
+
+test('command package rejects absent tests zero tests skipped children truncation and service modes', async () => {
+  const proof = packageEvents(commandPackage);
+  for (const events of [
+    [event('start', commandPackage), event('pass', commandPackage)],
+    proof.map(value => value.Test ? {...value, Test: 'TestOther'} : value),
+    [...proof.slice(0, 2), event('run', commandPackage, 'TestFixture/child'),
+      event('skip', commandPackage, 'TestFixture/child'), ...proof.slice(2)], proof.slice(0, -1),
+  ]) {
+    const input = stream(events);
+    const result = await checkGoTestJSON([input], ['TestFixture'], {packageName: commandPackage});
+    assert.equal(result.valid, false);
+    assertFixture(script, {input, args: ['--package', commandPackage, '--require', 'TestFixture'],
+      status: 1, stderr: diagnostic, output: `${result.lines.join('\n')}\n`});
+  }
+  assert.equal((await checkGoTestJSON([stream(proof)], [], {packageName: commandPackage})).valid, false);
+  for (const args of [[], ['--manager-required', '--require', serviceTest], ['--require', `${serviceTest},service_shutdown_channel`]]) {
+    const run = name => spawnSync(process.execPath, [script, '--package', name, ...args], {input: stream(proof), encoding: 'utf8'});
+    const actual = run(commandPackage), baseline = run(storePackage);
+    assert.equal(actual.status, 1);
+    assert.deepEqual([actual.stdout, actual.stderr], [baseline.stdout, baseline.stderr]);
+    if (!args.length) assert.deepEqual([actual.stdout, actual.stderr], ['', 'FAIL: invalid Go test checker arguments\n']);
+    const result = await checkGoTestJSON([stream(proof)], args.length ? args.at(-1).split(',') : [],
+      {packageName: commandPackage, managerRequired: args.includes('--manager-required')});
+    assert.equal(result.valid, false);
+  }
+});
+
+function withCommandSources(callback) {
+  withDiagnosticSources(target => {
+    const directory = join(target, '..', '..', 'cmd', 'witself');
+    const store = join(target, '..', '..', 'internal', 'store');
+    mkdirSync(directory, {recursive: true});
+    mkdirSync(store, {recursive: true});
+    writeFileSync(join(store, 'errors.go'), 'var err = errors.New("store fixed error")');
+    writeFileSync(join(directory, 'main.go'), 'var err = errors.New("command production error")');
+    writeFileSync(join(directory, 'other_test.go'), 't.Fatal("command fixed assertion"); t.Fatalf("unenrolled fixed prefix: %s", value); t.Logf("unenrolled class: %s", value); _ = "outside"');
+    writeFileSync(join(directory, commandFile), 't.Fatal("command fixed assertion"); t.Fatalf("command fixed prefix: %s", value); t.Logf("command class: %s", value); _ = "inside"');
+    callback(target, directory);
+  });
+}
+
+function commandFailure(packageName, output) {
+  return stream([event('start', packageName), event('run', packageName, 'TestFixture'),
+    event('output', packageName, 'TestFixture', {Output: output}), event('fail', packageName, 'TestFixture'), event('fail', packageName)]);
+}
+
+test('command package diagnostics are closed to its enrolled test file', () => {
+  withCommandSources((target, directory) => {
+    const check = (name, message, why = '(unclassified)', extra = '') => assertFixture(target, {
+      input: commandFailure(name, `    ${commandFile}:12: ${message}\n`), status: 1, stderr: failureDiagnostic,
+      args: ['--package', name, '--require', 'TestFixture'],
+      output: `package ${name} pass=0 skip=0 fail=1\nfail ${name} TestFixture\nwhy ${name} TestFixture :: ${why}\n${extra}`,
+    });
+    check(commandPackage, 'command fixed assertion', 'command fixed assertion');
+    check(commandPackage, 'command fixed prefix: private-marker', 'command fixed prefix');
+    check(commandPackage, 'command class: inside', '(unclassified)', `class ${commandPackage} TestFixture :: command class: inside\n`);
+    check(commandPackage, 'command class: outside', '(unclassified)', `class ${commandPackage} TestFixture :: command class: (rejected)\n`);
+    for (const message of ['command production error', 'localcell: fixed private error', 'store fixed error',
+      'unenrolled fixed prefix: private-marker', 'unenrolled class: outside']) check(commandPackage, message);
+    for (const name of [packages[0], storePackage]) {
+      for (const message of ['command fixed assertion', 'command fixed prefix: private-marker', 'command class: inside']) check(name, message);
+    }
+    rmSync(join(directory, commandFile));
+    check(commandPackage, 'command fixed assertion');
+    check(commandPackage, 'command fixed prefix: private-marker');
+    check(commandPackage, 'command class: inside');
+  });
+});
+
+test('command package output stays masked and value-free', () => {
+  withCommandSources(target => {
+    const values = ['a'.repeat(64), ['reader', 'fixture'].join(':') + '@', '/private/fixture/path'];
+    const output = values.map(value => `    ${commandFile}:12: ${value}\n`).join('') + '    other_test.go:12: unenrolled marker\n';
+    assertFixture(target, {input: commandFailure(commandPackage, output), status: 1, stderr: failureDiagnostic,
+      args: ['--diagnose', '--package', commandPackage, '--require', 'TestFixture'],
+      output: `package ${commandPackage} pass=0 skip=0 fail=1\nfail ${commandPackage} TestFixture\nwhy ${commandPackage} TestFixture :: (unclassified)\n` +
+        ['[MASKED]', '[MASKED]@', '[MASKED]'].map(value => `diagnose ${commandPackage} TestFixture ::     ${commandFile}:12: ${value}\n`).join('')});
+  });
+});
+
+for (const [name, row, edits] of [
+  ['M1', 'explicit command package requires a complete non-skipped proof', [
+    ['[...expectedPackages, storePackage, commandPackage]', '[...expectedPackages, storePackage]']]],
+  ['M2', 'command package cannot widen default or native package coverage', [
+    ['export const expectedPackages = Object.freeze([', "export const expectedPackages = Object.freeze(['github.com/witwave-ai/witself/cmd/witself',"]]],
+  ['M3', 'command package diagnostics are closed to its enrolled test file', [
+    ['...(name === commandPackage ? commandErrors : name === storePackage', '...(name === commandPackage ? errors : name === storePackage']]],
+  ['M4', 'command package diagnostics are closed to its enrolled test file', [
+    ['? commandTestFiles : readdirSync(directory)', "? readdirSync(directory).filter(file => file.endsWith('_test.go')) : readdirSync(directory)"]]],
+  ['M5', 'command package diagnostics are closed to its enrolled test file', [
+    ['? commandTestFiles : readdirSync(directory)', "? [...commandTestFiles, ...readdirSync(directory).filter(file => file.endsWith('.go') && !file.endsWith('_test.go'))] : readdirSync(directory)"]]],
+  ['M6', 'command package rejects absent tests zero tests skipped children truncation and service modes', [
+    ['&& requiredTests.length !== 0)', '&& (requiredTests.length !== 0 || packageName === commandPackage))'],
+    ["options['--diagnose'] || options['--package'] ||", "options['--diagnose'] || (options['--package'] && options['--package'] !== commandPackage) ||"]]],
+]) {
+  test(`mutation killed: command package ${name}`, () => {
+    withDiagnosticSources(target => {
+      let source = readFileSync(target, 'utf8');
+      for (const [from, to] of edits) {
+        assert.equal(source.split(from).length, 2, `${name} must target exactly one site`);
+        source = source.replace(from, to);
+      }
+      writeFileSync(target, source);
+      const suite = join(dirname(target), 'ci-go-test-json-check.test.mjs');
+      writeFileSync(suite, readFileSync(fileURLToPath(import.meta.url), 'utf8'));
+      const childEnvironment = {...process.env};
+      delete childEnvironment.NODE_TEST_CONTEXT;
+      const result = spawnSync(process.execPath, ['--test', '--test-name-pattern', `^${row}$`, suite], {encoding: 'utf8', timeout: 30000, env: childEnvironment});
+      assert.ifError(result.error);
+      assert.equal(result.status, 1, `${name} must fail its named row`);
+      assert(result.stdout.includes(row) && result.stdout.includes('ERR_ASSERTION'), `${name} must raise an assertion in its named row`);
+    });
+  });
+}
+
 const principalTest = 'TestSyncPrincipalBypassDenied';
 
 test('explicit store package requires a complete non-skipped principal proof', async () => {

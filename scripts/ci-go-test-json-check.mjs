@@ -11,7 +11,9 @@ export const expectedPackages = Object.freeze([
 ]);
 
 const storePackage = 'github.com/witwave-ai/witself/internal/store';
-const selectablePackages = Object.freeze([...expectedPackages, storePackage]);
+const commandPackage = 'github.com/witwave-ai/witself/cmd/witself';
+const commandTestFiles = Object.freeze(['local_checkpoint_command_test.go']);
+const selectablePackages = Object.freeze([...expectedPackages, storePackage, commandPackage]);
 
 const terminalActions = new Set(['pass', 'skip', 'fail']);
 // The three-package unit step has one -timeout for a whole package; show
@@ -124,6 +126,7 @@ function sourceLiterals(source, assertions, fixedCauses = false) {
 function diagnosticAllowlist() {
   const errors = new Set();
   const storeErrors = new Set();
+  const commandErrors = new Set();
   const assertions = new Map(selectablePackages.map(name => [name, new Set()]));
   const prefixes = new Map(selectablePackages.map(name => [name, new Map()]));
   const classes = new Map(selectablePackages.map(name => [name, {prefixes: new Set(), vocabulary: new Set()}]));
@@ -131,7 +134,7 @@ function diagnosticAllowlist() {
   for (const name of selectablePackages) {
     const directory = new URL(`../${name.slice('github.com/witwave-ai/witself/'.length)}/`, import.meta.url);
     let files;
-    try { files = readdirSync(directory).filter(file => file.endsWith('.go')); } catch { continue; }
+    try { files = name === commandPackage ? commandTestFiles : readdirSync(directory).filter(file => file.endsWith('.go')); } catch { continue; }
     for (const file of files) {
       let source;
       try { source = readFileSync(new URL(file, directory), 'utf8'); } catch { continue; }
@@ -141,7 +144,7 @@ function diagnosticAllowlist() {
       const sourceDiagnostics = sourceLiterals(source, isTest,
         !isTest && name === expectedPackages[0] && file === 'fixed_cause.go');
       for (const literal of sourceDiagnostics.literals) {
-        (isTest ? assertions.get(name) : name === storePackage ? storeErrors : errors).add(literal);
+        (isTest ? assertions.get(name) : name === commandPackage ? commandErrors : name === storePackage ? storeErrors : errors).add(literal);
       }
       for (const {match, message} of sourceDiagnostics.prefixes) prefixes.get(name).set(match, message);
       if (isTest) {
@@ -159,10 +162,10 @@ function diagnosticAllowlist() {
     for (const literal of diagnostics.literals) assertions.get(storePackage).add(literal);
     for (const {match, message} of diagnostics.prefixes) prefixes.get(storePackage).set(match, message);
   } catch { /* Missing fixture sources never authorize arbitrary diagnostics. */ }
-  // The helpers' fixed errors propagate across package boundaries. Assertions
-  // remain local to their package. A copied script with no sources emits only
+  // Local Cell helpers share fixed errors; command proofs enroll only the closed
+  // test list. Assertions remain package-local. A copy with no sources emits only
   // unclassified reasons; a missing source never licenses arbitrary output.
-  return {messages: new Map([...assertions].map(([name, messages]) => [name, new Set([...(name === storePackage ? storeErrors : errors), ...messages])])), prefixes, classes, testFiles};
+  return {messages: new Map([...assertions].map(([name, messages]) => [name, new Set([...(name === commandPackage ? commandErrors : name === storePackage ? storeErrors : errors), ...messages])])), prefixes, classes, testFiles};
 }
 
 const {messages: allowlist, prefixes: prefixAllowlist, classes: classAllowlist, testFiles} = diagnosticAllowlist();
@@ -207,12 +210,13 @@ function maskedDiagnostic(value, limit) {
 function proofDiagnostic(line, packageName) {
   const assertion = /^[ \t]*([A-Za-z0-9_.-]+_test\.go):[1-9][0-9]*: /.exec(line);
   if (!/^[ \t]*--- FAIL: /.test(line) && !(assertion && testFiles.get(packageName)?.has(assertion[1]))) return null;
+  if (packageName === commandPackage) line = line.replace(/\/[^\r\n]*/g, '[MASKED]');
   return maskedDiagnostic(line.replace(/\r$/, ''), 200);
 }
 
 // --require defaults to the native localcell proof. An explicit --package
-// selects one reviewed package and requires named tests; default unit coverage
-// and its skip policy remain unchanged.
+// selects one reviewed package, including cmd/witself, and requires named tests;
+// default unit coverage and its skip policy remain unchanged.
 export async function checkGoTestJSON(input, requiredTests = [], {diagnose = false, packageName, managerRequired = false} = {}) {
   const channelRequirements = requiredTests.filter(name => name === 'service_shutdown_channel').length;
   const requireShutdownChannel = channelRequirements === 1;
