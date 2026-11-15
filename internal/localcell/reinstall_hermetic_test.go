@@ -55,13 +55,8 @@ func TestReinstallHermeticProcesses(t *testing.T) {
 		}
 		// Success stops the proof's PostgreSQL; Start would adopt a live one.
 		assertStopped(t, cell)
-		for _, action := range []func(context.Context) error{cell.Start, cell.Stop, func(ctx context.Context) error {
-			return cell.Remove(ctx, localcell.RemoveOptions{Purge: true})
-		}} {
-			if err := action(t.Context()); err != nil {
-				t.Fatalf("readmitted synthetic lifecycle: %v", err)
-			}
-		}
+		requireLifecycleSteps(t, lifecycleStep{"readmitted start", cell.Start}, lifecycleStep{"readmitted stop", cell.Stop},
+			lifecycleStep{"readmitted remove", func(ctx context.Context) error { return cell.Remove(ctx, localcell.RemoveOptions{Purge: true}) }})
 	})
 	t.Run("VerificationFailureStopsPostgres", func(t *testing.T) {
 		cell, root, options := reinstallHermeticRemoved(t, binaries, nil)
@@ -123,17 +118,13 @@ func TestReinstallHermeticProcesses(t *testing.T) {
 func reinstallHermeticRemoved(t *testing.T, binaries localcell.Binaries, failpoint func(string, string) error, extra ...func(context.Context, *localcell.Cell, string) error) (*localcell.Cell, string, localcell.ReinstallOptions) {
 	t.Helper()
 	cell, root := disposableCell(t, binaries, failpoint)
-	steps := []func(context.Context) error{func(ctx context.Context) error {
+	steps := []lifecycleStep{{"install", func(ctx context.Context) error {
 		return cell.Install(ctx, localcell.InstallOptions{})
-	}, cell.Start, cell.Stop}
+	}}, {"start", cell.Start}, {"stop", cell.Stop}}
 	for _, step := range extra {
-		steps = append(steps, func(ctx context.Context) error { return step(ctx, cell, root) })
+		steps = append(steps, lifecycleStep{"extra", func(ctx context.Context) error { return step(ctx, cell, root) }})
 	}
-	for _, action := range append(steps, func(ctx context.Context) error { return cell.Remove(ctx, localcell.RemoveOptions{}) }) {
-		if err := action(t.Context()); err != nil {
-			t.Fatalf("synthetic retained lifecycle: %v", err)
-		}
-	}
+	requireLifecycleSteps(t, append(steps, lifecycleStep{"remove", func(ctx context.Context) error { return cell.Remove(ctx, localcell.RemoveOptions{}) }})...)
 	if localcell.SeedVerifiedSchemaForTest(cell, store.SchemaVersion()) != nil {
 		t.Fatal("cannot seed the verified schema")
 	}
@@ -143,6 +134,78 @@ func reinstallHermeticRemoved(t *testing.T, binaries localcell.Binaries, failpoi
 	}
 	localcell.ReinstallQueryForTest(cell, reinstallHermeticQuery(inspection.Manifest.AccountID))
 	return cell, root, localcell.ReinstallOptions{InstallationID: inspection.Manifest.InstallationID}
+}
+
+type lifecycleStep struct {
+	name string
+	run  func(context.Context) error
+}
+
+func runLifecycleSteps(ctx context.Context, steps ...lifecycleStep) (string, error) {
+	for _, step := range steps {
+		if err := step.run(ctx); err != nil {
+			return step.name, err
+		}
+	}
+	return "", nil
+}
+
+func requireLifecycleSteps(t *testing.T, steps ...lifecycleStep) {
+	t.Helper()
+	step, err := runLifecycleSteps(t.Context(), steps...)
+	if err == nil {
+		return
+	}
+	// The CI checker retains only literal prefixes before the first format verb.
+	switch step {
+	case "install":
+		t.Fatalf("synthetic lifecycle install: %v", err)
+	case "start":
+		t.Fatalf("synthetic lifecycle start: %v", err)
+	case "stop":
+		t.Fatalf("synthetic lifecycle stop: %v", err)
+	case "extra":
+		t.Fatalf("synthetic lifecycle extra: %v", err)
+	case "remove":
+		t.Fatalf("synthetic lifecycle remove: %v", err)
+	case "readmitted start":
+		t.Fatalf("readmitted lifecycle start: %v", err)
+	case "readmitted stop":
+		t.Fatalf("readmitted lifecycle stop: %v", err)
+	case "readmitted remove":
+		t.Fatalf("readmitted lifecycle remove: %v", err)
+	default:
+		t.Fatal("synthetic lifecycle step unknown")
+	}
+}
+
+func TestReinstallHermeticStepLabels(t *testing.T) {
+	labels := []string{"install", "start", "stop", "extra", "remove"}
+	refusal := errors.New("injected lifecycle step refusal")
+	for fail := 0; fail <= len(labels); fail++ {
+		calls := 0
+		var steps []lifecycleStep
+		for i, label := range labels {
+			steps = append(steps, lifecycleStep{label, func(ctx context.Context) error {
+				if ctx != t.Context() || calls != i {
+					t.Fatal("lifecycle step order or context changed")
+				}
+				calls++
+				if i == fail {
+					return refusal
+				}
+				return nil
+			}})
+		}
+		label, err := runLifecycleSteps(t.Context(), steps...)
+		if fail < len(labels) {
+			if label != labels[fail] || err != refusal || calls != fail+1 {
+				t.Fatal("lifecycle failure lost its step or continued after refusal")
+			}
+		} else if label != "" || err != nil || calls != len(labels) {
+			t.Fatal("successful lifecycle sequence did not complete cleanly")
+		}
+	}
 }
 
 func reinstallHermeticQuery(account string) func(context.Context, *localcell.Manifest, string) (string, error) {
