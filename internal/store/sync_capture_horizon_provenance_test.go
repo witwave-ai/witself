@@ -49,7 +49,13 @@ func TestSyncCaptureAccountSnapshotHorizonProvenance(t *testing.T) {
 	if syncCaptureAccountSnapshotSafe(ctx, probe, account) {
 		t.Fatal("horizon provenance expected conservative refusal of visible account snapshot")
 	}
-	logSyncCaptureActivityTypes(t, st, syncCaptureActivityScope{account: account, expectedPID: visible.Conn().PgConn().PID()})
+	expected := logSyncCaptureActivityTypes(t, st, syncCaptureActivityScope{account: account, expectedPID: visible.Conn().PgConn().PID()})
+	if syncCaptureFixtureFailure("capture fixture foreign snapshot horizon persisted", expected) != "capture fixture expected test transaction snapshot horizon persisted" {
+		t.Fatal("horizon provenance expected transaction exhaustion label differs")
+	}
+	if syncCaptureFixtureFailure("capture fixture foreign snapshot horizon persisted", false) != "capture fixture foreign snapshot horizon persisted" || syncCaptureFixtureFailure("capture fixture activation failed", true) != "capture fixture activation failed" {
+		t.Fatal("horizon provenance unrelated refusal label changed")
+	}
 	if visible.Rollback(ctx) != nil {
 		t.Fatal("horizon provenance visible transaction release failed")
 	}
