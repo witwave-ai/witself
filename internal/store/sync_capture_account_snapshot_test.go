@@ -28,7 +28,7 @@ type syncCaptureActivityScope struct {
 // Diagnostics show bounded metadata and sanitized SQL structure only. Redaction
 // runs before truncation so the boundary cannot disclose part of a literal,
 // connection string, credential assignment, or long opaque token.
-func logSyncCaptureActivityTypes(t *testing.T, st *Store, scopes ...syncCaptureActivityScope) {
+func logSyncCaptureActivityTypes(t *testing.T, st *Store, scopes ...syncCaptureActivityScope) (expectedHorizon bool) {
 	t.Helper()
 	var scope syncCaptureActivityScope
 	if len(scopes) != 0 {
@@ -74,13 +74,16 @@ func logSyncCaptureActivityTypes(t *testing.T, st *Store, scopes ...syncCaptureA
 		}
 		t.Logf("capture activity application_name=%q backend=%s state=%s xact_age=%s horizon=%s expected_test_transaction=%t query_prefix=%q",
 			syncCaptureDiagnosticText(application, 63), backend, state, age, horizon, expected, syncCaptureDiagnosticText(query, 80))
+		expectedHorizon = expectedHorizon || (expected && horizon == "matches")
 	}
 	if rows.Err() != nil {
 		t.Log("capture activity diagnostics unavailable")
 	}
+	return
 }
 
 var syncCaptureDiagnosticRedactions = []*regexp.Regexp{
+	regexp.MustCompile(`\bwitself_migration_[A-Za-z0-9_]+\b`),
 	regexp.MustCompile(`(?i)(?:[a-z][a-z0-9+.-]*://)[^\s]+`),
 	regexp.MustCompile(`(?i)\b(?:password|passwd|token|secret|credential|authorization|api[_-]?key)\s*[:=]\s*[^\s,;]+`),
 	regexp.MustCompile(`(?i)\bbearer\s+[^\s,;]+`),

@@ -75,8 +75,8 @@ func activateSyncFixture(t *testing.T, st *Store, account string, options ...syn
 	}
 	a, failure := retrySyncCaptureFixtureAdmission(ctx, st, account, true, option.seedWork, t.Logf)
 	if failure != "" {
-		logSyncCaptureActivityTypes(t, st, syncCaptureActivityScope{account: account, expectedPID: option.expectedPID})
-		t.Fatal(failure)
+		expected := logSyncCaptureActivityTypes(t, st, syncCaptureActivityScope{account: account, expectedPID: option.expectedPID})
+		t.Fatal(syncCaptureFixtureFailure(failure, expected))
 	}
 	defer a.Close()
 	p, err := a.PinSnapshot(ctx)
@@ -219,17 +219,14 @@ func TestSyncCaptureStaleSnapshots(t *testing.T) {
 			t.Run(string(iso)+map[bool]string{true: "_missing", false: "_old"}[missing], func(t *testing.T) {
 				st, p := newSyncCaptureFixture(t, !missing)
 				ctx := context.Background()
-				v, err := st.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: iso})
-				if err != nil {
-					t.Fatal("capture stale begin failed")
-				}
+				v := beginSyncCaptureSnapshot(t, st, p.AccountID, iso)
 				defer func() { _ = v.Rollback(ctx) }()
 				var count int
 				if v.QueryRow(ctx, `SELECT count(*) FROM sync_capture WHERE account_id=$1`, p.AccountID).Scan(&count) != nil {
 					t.Fatal("capture stale snapshot failed")
 				}
 				activateSyncFixture(t, st, p.AccountID, syncFixtureActivation{expectedPID: v.Conn().PgConn().PID()})
-				_, err = admitSyncTx(ctx, v, p.AccountID, SyncPreferencesPrincipal, SyncPreferencesCapability)
+				_, err := admitSyncTx(ctx, v, p.AccountID, SyncPreferencesPrincipal, SyncPreferencesCapability)
 				captureRefusedSnapshot(t, err) // LC-S6C1 fix 2 (F6)
 				t.Logf("capture stale snapshot refusal SQLSTATE=%s", syncTestSQLState(err))
 				completed++
@@ -471,17 +468,14 @@ func TestSyncCaptureRawMissingControlSnapshots(t *testing.T) {
 			if st.pool.QueryRow(ctx, `SELECT to_jsonb(a) FROM accounts a WHERE id=$1`, p.AccountID).Scan(&before) != nil {
 				t.Fatal("capture raw account bytes failed")
 			}
-			old, err := st.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: iso})
-			if err != nil {
-				t.Fatal("capture raw snapshot begin failed")
-			}
+			old := beginSyncCaptureSnapshot(t, st, p.AccountID, iso)
 			defer func() { _ = old.Rollback(ctx) }()
 			var count int
 			if old.QueryRow(ctx, `SELECT count(*) FROM sync_capture WHERE account_id=$1`, p.AccountID).Scan(&count) != nil || count != 0 {
 				t.Fatal("capture raw missing snapshot failed")
 			}
-			activateSyncFixture(t, st, p.AccountID)
-			_, err = old.Exec(ctx, `INSERT INTO agent_dashboard_preferences(agent_id,account_id,realm_id,prefs) VALUES($1,$2,$3,'{"schema":"witself.dashboard-prefs.v1","theme":"amber"}')`, p.ID, p.AccountID, p.RealmID)
+			activateSyncFixture(t, st, p.AccountID, syncFixtureActivation{expectedPID: old.Conn().PgConn().PID()})
+			_, err := old.Exec(ctx, `INSERT INTO agent_dashboard_preferences(agent_id,account_id,realm_id,prefs) VALUES($1,$2,$3,'{"schema":"witself.dashboard-prefs.v1","theme":"amber"}')`, p.ID, p.AccountID, p.RealmID)
 			captureRefusedSnapshot(t, err) // LC-S6C1 fix 2 (F6)
 			if st.pool.QueryRow(ctx, `SELECT to_jsonb(a) FROM accounts a WHERE id=$1`, p.AccountID).Scan(&after) != nil || !bytes.Equal(before, after) {
 				t.Fatal("capture raw activation changed account bytes")

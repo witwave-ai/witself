@@ -136,10 +136,7 @@ func TestSyncCaptureTruncateStaleSnapshot(t *testing.T) {
 					t.Fatal("capture truncate inert capability fixture failed")
 				}
 			}
-			tx, err := st.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: tc.isolation})
-			if err != nil {
-				t.Fatal("capture truncate snapshot begin failed")
-			}
+			tx := beginSyncCaptureSnapshot(t, st, principal.AccountID, tc.isolation)
 			defer func() { _ = tx.Rollback(ctx) }()
 			var controlExists bool
 			if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM sync_capture WHERE account_id=$1)`, principal.AccountID).Scan(&controlExists); err != nil || controlExists != tc.existingControl {
@@ -152,7 +149,7 @@ func TestSyncCaptureTruncateStaleSnapshot(t *testing.T) {
 				}
 			}
 			activateSyncFixture(t, st, principal.AccountID, syncFixtureActivation{expectedPID: tx.Conn().PgConn().PID()})
-			_, err = tx.Exec(ctx, `TRUNCATE agent_dashboard_preferences`)
+			_, err := tx.Exec(ctx, `TRUNCATE agent_dashboard_preferences`)
 			captureRefusedSnapshot(t, err) // LC-S6C1 fix 2 (F6)
 			if err := tx.Rollback(ctx); err != nil {
 				t.Fatal("capture truncate refused transaction rollback failed")

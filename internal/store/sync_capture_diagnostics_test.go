@@ -11,6 +11,7 @@ func TestSyncCaptureActivityDiagnosticRedaction(t *testing.T) {
 		name, input, want string
 	}{
 		{"query_structure", " SELECT count(*)\nFROM sync_capture WHERE account_id=$1 ", "SELECT count(*) FROM sync_capture WHERE account_id=$1"},
+		{"fixture_schema", "CREATE SCHEMA witself_migration_123_1", "CREATE SCHEMA [redacted]"},
 		{"sql_literal", "SELECT 'synthetic private value'", "SELECT [redacted]"},
 		{"escaped_literal", "SELECT 'synthetic ''private'' value'", "SELECT [redacted]"},
 		{"backslash_literal", `SELECT E'synthetic \'private value'`, "SELECT E[redacted]"},
