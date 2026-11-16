@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"io"
 	"path/filepath"
@@ -88,24 +89,31 @@ func localCheckpointParse(args []string) (localCheckpointRequest, string) {
 	f := flag.NewFlagSet("checkpoint", flag.ContinueOnError)
 	f.SetOutput(io.Discard)
 	mode, timeout := "", "30s"
-	f.StringVar(&mode, "checkpoint-mode", "", "")
-	f.StringVar(&r.root, "root", "", "")
-	f.StringVar(&timeout, "timeout", "30s", "")
+	register := func(target *string, name string) {
+		seen := false
+		f.Func(name, "", func(value string) error {
+			if seen {
+				return errors.New("repeated flag")
+			}
+			seen, *target = true, value
+			return nil
+		})
+	}
+	register(&mode, "checkpoint-mode")
+	register(&r.root, "root")
+	register(&timeout, "timeout")
 	switch r.operation {
 	case "create":
-		f.StringVar(&r.pgbin, "pgbin", "", "")
-		f.StringVar(&r.installationID, "installation-id", "", "")
+		register(&r.pgbin, "pgbin")
+		register(&r.installationID, "installation-id")
 	case "delete":
-		f.StringVar(&r.checkpointID, "checkpoint-id", "", "")
-	case "inspect":
-	default:
-		return r, "local_checkpoint_arguments_invalid"
+		register(&r.checkpointID, "checkpoint-id")
 	}
 	err := f.Parse(args[1:])
 	if mode != "cold-v1" {
 		return r, "local_checkpoint_command_disabled"
 	}
-	if err != nil || f.NArg() != 0 {
+	if err != nil || f.NArg() != 0 || (r.operation != "create" && r.operation != "inspect" && r.operation != "delete") {
 		return r, "local_checkpoint_arguments_invalid"
 	}
 	r.timeout, err = time.ParseDuration(timeout)
