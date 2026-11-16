@@ -231,6 +231,14 @@ model-visible output contract:
    session-start envelope carries `fact_capacity` whenever self does; prompt
    hydration carries it only when `near_limit`, `at_limit`, `over_limit`, or
    `unavailable` needs attention, so ordinary capacity stays low-profile.
+   Only the runtime with a capped MCP instruction channel (`claude-code`)
+   receives the optional `identity_statement` here, on session start only;
+   other runtimes receive the statement through MCP instructions. Its name is
+   the authenticated self digest's agent name, after installed-binding verification.
+   It uses the short form at budgets of at least 8 KiB and the one-line form below.
+   Budget trimming removes narratives, then facts, then the statement before any
+   checkpoint policy; if the statement is removed, the original envelope is
+   budgeted again without it, preserving the prior bytes and `elided` behavior.
    The separately rendered `fact_capacity` and `memory_capacity` are
    authenticated value-free policy state, not authority for a semantic change.
    The separately rendered
