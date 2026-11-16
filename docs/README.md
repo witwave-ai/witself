@@ -41,6 +41,8 @@ deployment cells under a thin global control plane.
 - [requirements.md](requirements.md): product requirements, terminology,
   identity posture, billing posture, backend requirements, and settled v0
   decisions.
+- [one-identity-many-hands.md](one-identity-many-hands.md): the shared agent
+  identity across clients, models, vendors and sessions, and its memory rules.
 - [v0-scope.md](v0-scope.md): first release target, required capabilities,
   capability-gated surfaces, non-goals, and exit criteria.
 - [memory-model.md](memory-model.md): the earlier memory payload, lifecycle,

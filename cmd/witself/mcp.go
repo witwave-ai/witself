@@ -1201,6 +1201,9 @@ func mcpCmd(args []string) int {
 
 // runConfiguredMCPServer is the serve path shared by stdio and transport tests.
 func runConfiguredMCPServer(ctx context.Context, cfg transcriptcapture.Config, options mcpServerOptions, transport mcp.Transport) error {
+	// The installed binding is verified against the authenticated identity on
+	// every backend operation; instruction construction adds no preflight.
+	options.IdentityAgentName = cfg.AgentName
 	profile := effectiveMCPProfile(options)
 	backend, err := newConfiguredMCPBackend(cfg, profile)
 	if err != nil {
@@ -1281,6 +1284,7 @@ type mcpServerOptions struct {
 	Profile            string
 	NoValueTools       bool
 	ProviderServerName string
+	IdentityAgentName  string
 }
 
 func newWitselfMCPServerForRuntimeOptions(backend witselfMCPBackend, runtimeName string, opts mcpServerOptions) *mcp.Server {
@@ -1322,6 +1326,7 @@ func newWitselfMCPServerForRuntimeOptions(backend witselfMCPBackend, runtimeName
 	if opts.NoValueTools {
 		instructions += "\n\nThis MCP server has value-returning secret tools disabled. It may search, show, and create redacted secret records when the selected profile permits, but it cannot reveal a field, generate a password for model context, or calculate a TOTP code. Never use another Witself surface to bypass that value-egress boundary."
 	}
+	instructions = appendMCPIdentityInstructions(instructions, runtimeName, opts)
 	server := mcp.NewServer(
 		&mcp.Implementation{Name: "witself", Version: version.Version},
 		&mcp.ServerOptions{Instructions: instructions},
@@ -2395,6 +2400,31 @@ func normalizeMCPMessageLeaseSeconds(seconds int) (int, error) {
 		return 0, fmt.Errorf("lease_seconds must be between 30 and 900")
 	}
 	return seconds, nil
+}
+
+// appendMCPIdentityInstructions preserves the entire existing instruction prefix,
+// including the first 512 bytes and any value-egress suffix. The owner display
+// name is not available at construction, so only the owner-absent form is used.
+func appendMCPIdentityInstructions(instructions, runtimeName string, opts mcpServerOptions) string {
+	maxBytes := 0
+	if runtimeName == transcriptcapture.RuntimeClaudeCode {
+		maxBytes = 2048 // Documented client truncation limit.
+		if effectiveMCPProfile(opts) == mcpProfileFull && !opts.NoValueTools {
+			maxBytes = 2016 // Existing synopsis test reserves 32 bytes of headroom.
+		}
+	}
+	for _, form := range []mcpIdentityForm{mcpIdentityShort, mcpIdentityOneLine} {
+		paragraph := renderMCPIdentityParagraph(opts.IdentityAgentName, "", form)
+		if paragraph == "" {
+			return instructions
+		}
+		if maxBytes == 0 || len(instructions)+2+len(paragraph) <= maxBytes {
+			return instructions + "\n\n" + paragraph
+		}
+	}
+	// Existing over-cap variants must remain unchanged: an appended paragraph
+	// would be truncated, and shortening their current policy is not permitted.
+	return instructions
 }
 
 func mcpInstructions(runtimeName, selfTool, messageListTool string) string {
