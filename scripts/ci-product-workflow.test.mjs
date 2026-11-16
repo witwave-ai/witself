@@ -8,6 +8,7 @@ import {dirname, join} from 'node:path';
 import test from 'node:test';
 import {assertGate} from './ci-product-gate.mjs';
 import {classifyChanges} from './ci-product-scope.mjs';
+import {checkGoTestJSON} from './ci-go-test-json-check.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const databaseWorkflows = ['ci.yml', 'release.yml', 'memory-load-quality.yml'];
@@ -149,6 +150,11 @@ function assertDocsJob(job) {
   assert.equal(checks[0]['continue-on-error'], undefined);
 }
 
+const checkpointRequired = 'TestLocalCheckpointSelection,TestLocalCheckpointSelection/absent,TestLocalCheckpointSelection/unknown,TestLocalCheckpointSelection/explicit,TestLocalCheckpointArguments,TestLocalCheckpointArguments/relative-root,TestLocalCheckpointArguments/wrong-verb-flag,TestLocalCheckpointArguments/missing-consent,TestLocalCheckpointArguments/exact-id,TestLocalCheckpointOutput,TestLocalCheckpointOutput/raw-error,TestLocalCheckpointOutput/metadata,TestLocalCheckpointOutput/partial-observation,TestLocalCheckpointErrorObservation,TestLocalCheckpointErrorObservation/witness-survives,TestLocalCheckpointErrorObservation/post-busy,TestLocalCheckpointErrorObservation/concurrent-change,TestLocalCheckpointNeverStopsOrRepairs,TestLocalCheckpointNeverStopsOrRepairs/recorder,TestLocalCheckpointNeverStopsOrRepairs/source-contract';
+const checkpointTest = "go test -json ./cmd/witself -run '^TestLocalCheckpoint' -count=1 -timeout=10m";
+const checkpointCheck = `node scripts/ci-go-test-json-check.mjs --package github.com/witwave-ai/witself/cmd/witself --require ${checkpointRequired}`;
+const checkpointStage = 'Test Local Checkpoint command and require complete results';
+
 function assertLocalcellWindowsJob(ci) {
   const label = 'localcell-windows';
   assert.equal(ci.env, undefined, `${label}: no inherited workflow environment`);
@@ -174,7 +180,8 @@ function assertLocalcellWindowsJob(ci) {
   assert.deepEqual(node.with, {'node-version': 22});
   assert.deepEqual(job.steps.slice(0, 3), [checkout, go, node]);
   const checks = job.steps.slice(3);
-  const packages = './cmd/witself-server ./cmd/witself-worker ./internal/localcell/... ./internal/tools/localcellharness/... ./internal/runtimeconfig/...';
+  assert.deepEqual(checks.map(step => step.name), ['Build Local Cell packages', 'Vet Local Cell packages', 'Test Go JSON result checker', 'Test Local Cell packages and require complete results', checkpointStage, 'Provision pinned PostgreSQL sixteen', 'Prove native PostgreSQL sixteen lifecycle', 'Prove native service restart or record adapter capability', 'Clean PostgreSQL proof tree']);
+  const packages = './cmd/witself ./cmd/witself-server ./cmd/witself-worker ./internal/localcell/... ./internal/tools/localcellharness/... ./internal/runtimeconfig/...';
   const expectedRuns = [
     `go build ${packages}`,
     `go vet ${packages}`,
@@ -188,6 +195,7 @@ function assertLocalcellWindowsJob(ci) {
       '$parserExit = $LASTEXITCODE',
       'if ($goExit -ne 0 -or $parserExit -ne 0) { exit 1 }',
     ].join('\n'),
+    ['$goExit = 1', '& {', `  ${checkpointTest}`, '  $script:goExit = $LASTEXITCODE', `} | ${checkpointCheck}`, '$parserExit = $LASTEXITCODE', 'if ($goExit -ne 0 -or $parserExit -ne 0) { exit 1 }'].join('\n'),
     './scripts/ci-postgres16-windows.ps1',
     [
       "$proofJSON = Join-Path $env:RUNNER_TEMP 'lc-pg16\\proof.json'",
@@ -219,10 +227,10 @@ function assertLocalcellWindowsJob(ci) {
   assert.deepEqual(checks.map(step => step.run.trim()), expectedRuns,
     `${label}: unit execution stays unchanged and both native proofs are narrow, complete, and fail closed`);
   for (const step of checks) assert.equal(step.shell, 'pwsh');
-  const proof = checks[5];
-  const serviceProof = checks[6];
-  const cleanup = checks[7];
-  assert.equal(serviceProof.run, `${expectedRuns[6]}\n`, `${label}: service proof run text is byte-exact`);
+  const proof = checks[6];
+  const serviceProof = checks[7];
+  const cleanup = checks[8];
+  assert.equal(serviceProof.run, `${expectedRuns[7]}\n`, `${label}: service proof run text is byte-exact`);
   assert.deepEqual(proof.env, {
     WITSELF_LOCALCELL_PGBIN: '${{ runner.temp }}\\lc-pg16\\pgsql\\bin',
     TEMP: '${{ runner.temp }}\\lc-pg16\\testtmp',
@@ -268,7 +276,7 @@ function assertLocalcellUnixJob(ci) {
   const windows = ci.jobs['localcell-windows'];
   assert.deepEqual(job.steps.slice(0, 3), windows.steps.slice(0, 3), `${label}: same pinned checkout and toolchain`);
   const checks = job.steps.slice(3);
-  const packages = './cmd/witself-server ./cmd/witself-worker ./internal/localcell/... ./internal/tools/localcellharness/... ./internal/runtimeconfig/...';
+  const packages = './cmd/witself ./cmd/witself-server ./cmd/witself-worker ./internal/localcell/... ./internal/tools/localcellharness/... ./internal/runtimeconfig/...';
   assert.deepEqual(checks.map(step => step.name), windows.steps.slice(3).map(step => step.name), `${label}: same ordered lifecycle and service proof stages`);
   assert.deepEqual(checks.map(step => step.run.trim()), [
     `go build ${packages}`,
@@ -281,6 +289,7 @@ function assertLocalcellUnixJob(ci) {
       'set -e',
       'if (( test_exits[0] != 0 || test_exits[1] != 0 )); then exit 1; fi',
     ].join('\n'),
+    ['set +e', `${checkpointTest} | ${checkpointCheck}`, 'test_exits=("${PIPESTATUS[@]}")', 'set -e', 'if (( test_exits[0] != 0 || test_exits[1] != 0 )); then exit 1; fi'].join('\n'),
     "bash scripts/ci-postgres16-unix.sh '${{ matrix.platform }}'",
     [
       'proof_json="$RUNNER_TEMP/lc-pg16/proof.json"',
@@ -301,9 +310,9 @@ function assertLocalcellUnixJob(ci) {
     'bash scripts/ci-postgres16-unix.sh --cleanup',
   ], `${label}: narrow proof preserves native and checker failures`);
   for (const step of checks) assert.equal(step.shell, 'bash');
-  const proof = checks[5];
-  const serviceProof = checks[6];
-  const cleanup = checks[7];
+  const proof = checks[6];
+  const serviceProof = checks[7];
+  const cleanup = checks[8];
   assert.deepEqual(serviceProof.env, {TMPDIR: '${{ runner.temp }}/lc-pg16/testtmp'});
   assert.deepEqual(proof.env, {TMPDIR: '${{ runner.temp }}/lc-pg16/testtmp'});
   assert.equal(expression(cleanup.if), 'always()', `${label}: cleanup also runs after failure`);
@@ -571,7 +580,7 @@ for (const [name, options, message] of [
   });
 }
 
-for (const stage of ['Test Local Cell packages and require complete results', 'Prove native PostgreSQL sixteen lifecycle', 'Prove native service restart or record adapter capability']) {
+for (const stage of ['Test Local Cell packages and require complete results', checkpointStage, 'Prove native PostgreSQL sixteen lifecycle', 'Prove native service restart or record adapter capability']) {
   test(`Unix bash exit propagation: ${stage}`, () => {
     const script = workflows['ci.yml'].jobs['localcell-unix'].steps.find(step => step.name === stage).run;
     const temporary = mkdtempSync(join(root, '.lc-unix-workflow-test-'));
@@ -598,6 +607,20 @@ for (const stage of ['Test Local Cell packages and require complete results', 'P
     }
   });
 }
+
+test('command proof requires every complete result', async () => {
+  const packageName = 'github.com/witwave-ai/witself/cmd/witself';
+  const required = checkpointRequired.split(',');
+  const event = (Action, Test) => ({Action, Package: packageName, ...(Test ? {Test} : {})});
+  const events = [event('start'), ...required.flatMap(name => [event('run', name), event('pass', name)]), event('pass')];
+  const check = rows => checkGoTestJSON([rows.map(row => JSON.stringify(row)).join('\n') + '\n'], required, {packageName});
+  assert.equal((await check(events)).valid, true, 'Complete command results must pass');
+  for (const name of required) {
+    assert.equal((await check(events.filter(row => row.Test !== name))).valid, false, 'Missing command result must fail');
+    for (const Action of ['skip', 'fail']) assert.equal((await check(events.map(row => row.Test === name && row.Action === 'pass' ? {...row, Action} : row))).valid, false, 'Nonpassing command result must fail');
+  }
+  for (const rows of [[], events.slice(0, -1)]) assert.equal((await check(rows)).valid, false, 'Incomplete command stream must fail');
+});
 
 // This is a deliberately narrow structural contract, not a PowerShell evaluator.
 // Preserve offsets and statement boundaries while removing non-executable text.
@@ -1342,7 +1365,7 @@ const mutations = [
   ].map(([key, value]) => [`Unix ${key} boundary changed`, data => { data['ci.yml'].jobs['localcell-unix'][key] = value; }]),
   ...[
     'Build Local Cell packages', 'Vet Local Cell packages', 'Test Go JSON result checker',
-    'Test Local Cell packages and require complete results', 'Provision pinned PostgreSQL sixteen',
+    'Test Local Cell packages and require complete results', checkpointStage, 'Provision pinned PostgreSQL sixteen',
     'Prove native PostgreSQL sixteen lifecycle', 'Prove native service restart or record adapter capability', 'Clean PostgreSQL proof tree',
   ].map(name => [`Unix stage removed: ${name}`, data => {
     const job = data['ci.yml'].jobs['localcell-unix'];
@@ -1350,10 +1373,10 @@ const mutations = [
   }]),
   ['Unix proof runs before provisioning', data => {
     const steps = data['ci.yml'].jobs['localcell-unix'].steps;
-    [steps[7], steps[8]] = [steps[8], steps[7]];
+    [steps[8], steps[9]] = [steps[9], steps[8]];
   }],
-  ['Unix proof runs after failed provisioning', data => { data['ci.yml'].jobs['localcell-unix'].steps[8].if = 'always()'; }],
-  ['Unix provisioning ignores failure', data => { data['ci.yml'].jobs['localcell-unix'].steps[7]['continue-on-error'] = true; }],
+  ['Unix proof runs after failed provisioning', data => { data['ci.yml'].jobs['localcell-unix'].steps[9].if = 'always()'; }],
+  ['Unix provisioning ignores failure', data => { data['ci.yml'].jobs['localcell-unix'].steps[8]['continue-on-error'] = true; }],
   ['Unix cleanup only runs after success', data => { delete data['ci.yml'].jobs['localcell-unix'].steps.at(-1).if; }],
   ['Unix unit loses native pipe exit', data => { data['ci.yml'].jobs['localcell-unix'].steps[6].run = data['ci.yml'].jobs['localcell-unix'].steps[6].run.replace('test_exits[0] != 0 || ', ''); }],
   ['Unix unit loses checker pipe exit', data => { data['ci.yml'].jobs['localcell-unix'].steps[6].run = data['ci.yml'].jobs['localcell-unix'].steps[6].run.replace(' || test_exits[1] != 0', ''); }],
@@ -1372,7 +1395,7 @@ const mutations = [
     ['go_exit != 0 || ', '', 'masks native exit'],
     [' || parser_exit != 0', '', 'masks checker exit'],
   ].map(([before, after, name]) => [`Unix proof ${name}`, data => {
-    const step = data['ci.yml'].jobs['localcell-unix'].steps[8];
+    const step = data['ci.yml'].jobs['localcell-unix'].steps[9];
     step.run = step.run.replace(before, after);
   }]),
   ...[
@@ -1385,7 +1408,22 @@ const mutations = [
     const step = data['ci.yml'].jobs['localcell-unix'].steps.find(step => step.name === 'Prove native service restart or record adapter capability');
     step.run = step.run.replace(before, after);
   }]),
-  ['Unix proof temporary files escape cleanup tree', data => { data['ci.yml'].jobs['localcell-unix'].steps[8].env.TMPDIR = '${{ runner.temp }}'; }],
+  ['Unix proof temporary files escape cleanup tree', data => { data['ci.yml'].jobs['localcell-unix'].steps[9].env.TMPDIR = '${{ runner.temp }}'; }],
+  ...['localcell-windows', 'localcell-unix'].flatMap(label => [
+    [`${label} command step removed`, data => { const job = data['ci.yml'].jobs[label]; job.steps = job.steps.filter(step => step.name !== checkpointStage); }],
+    ...[
+      ["'^TestLocalCheckpoint'", "'TestLocalCheckpoint'", 'broadens filter'],
+      [' --package github.com/witwave-ai/witself/cmd/witself', '', 'omits package'],
+      [`,${checkpointRequired.split(',').at(-1)}`, '', 'omits required command result'],
+      [' -count=1', '', 'allows cached command proof'],
+      [label === 'localcell-windows' ? '$goExit -ne 0 -or ' : 'test_exits[0] != 0 || ', '', 'loses Go exit'],
+      [label === 'localcell-windows' ? ' -or $parserExit -ne 0' : ' || test_exits[1] != 0', '', 'loses checker exit'],
+    ].map(([before, after, name]) => [`${label} command ${name}`, data => {
+      const step = data['ci.yml'].jobs[label].steps.find(step => step.name === checkpointStage);
+      assert(step.run.includes(before), 'Command mutant must reach its raising site');
+      step.run = step.run.replace(before, after);
+    }]),
+  ]),
   ['Windows proof step removed', data => { const job = data['ci.yml'].jobs['localcell-windows']; job.steps = job.steps.filter(step => step.name !== 'Prove native PostgreSQL sixteen lifecycle'); }],
   ['Windows proof broadens the run filter', data => { const step = data['ci.yml'].jobs['localcell-windows'].steps.find(step => step.name === 'Prove native PostgreSQL sixteen lifecycle'); step.run = step.run.replace("'^TestRealLifecycle$'", "'TestRealLifecycle'"); }],
   ['Windows proof makes a skip acceptable', data => { const step = data['ci.yml'].jobs['localcell-windows'].steps.find(step => step.name === 'Prove native PostgreSQL sixteen lifecycle'); step.run = step.run.replace(/ --require [^\n]+/, ''); }],
