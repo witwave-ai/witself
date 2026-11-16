@@ -75,6 +75,9 @@ func identityEnvelope(t *testing.T, text string) contextEnvelope {
 }
 
 func TestIdentityStatementSessionDelivery(t *testing.T) {
+	if needsSessionIdentity("") || needsSessionIdentity(transcriptcapture.RuntimeCodex) || !needsSessionIdentity(transcriptcapture.RuntimeClaudeCode) {
+		t.Fatal("session identity predicate changed")
+	}
 	for _, row := range []struct {
 		name, runtime, event, agent string
 		mismatch, present           bool
@@ -121,6 +124,9 @@ func TestIdentityStatementSessionDelivery(t *testing.T) {
 				}
 				if err != nil || got.Context != baseline {
 					t.Fatal("statement-free envelope changed")
+				}
+				if strings.Contains(got.Context, "identity_statement") {
+					t.Fatal("statement-free envelope carries the statement key")
 				}
 			}
 		})
@@ -216,6 +222,7 @@ func TestIdentityStatementEscaping(t *testing.T) {
 	d := client.SelfDigest{Identity: exactIdentity()}
 	d.Identity.AgentName = "Férn 葉"
 	d.Identity.RealmName = "<grove>&\"\n"
+	d.PrimaryFacts = []client.SelfFact{{ID: "fixture", Name: "fixture/name", Value: "fixture value"}}
 	text, err := renderSelf(d, DefaultMaximumBytes, transcriptcapture.RuntimeClaudeCode)
 	if err != nil {
 		t.Fatal(err)
@@ -226,6 +233,12 @@ func TestIdentityStatementEscaping(t *testing.T) {
 	}
 	if !strings.Contains(text, "},\"identity_statement\":") || e.Schema != "witself.hydration.v1" {
 		t.Fatal("envelope field order or schema changed")
+	}
+	_, rest, found := strings.Cut(text, "},\"identity_statement\":")
+	raw, _, followed := strings.Cut(rest, ",\"canonical_facts\":[")
+	var between string
+	if !found || !followed || len(e.CanonicalFacts) != 1 || json.Unmarshal([]byte(raw), &between) != nil || between != e.IdentityStatement {
+		t.Fatal("statement is not directly between identity and canonical facts")
 	}
 }
 
