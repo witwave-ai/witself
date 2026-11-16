@@ -935,8 +935,8 @@ func (c *Cell) deleteCheckpointLocked(_ context.Context, options DeleteCheckpoin
 	return c.journal("checkpoint_delete", "operation", "done")
 }
 
-// checkpointComplete is the one reader of witness.json: a format-1 witness
-// naming this identifier.
+// checkpointComplete reads a format-1 witness naming this identifier;
+// verifyCheckpointDocuments also reads the witness for integrity verification.
 func checkpointComplete(dir, checkpointID string) (checkpointWitness, bool) {
 	var witness checkpointWitness
 	if err := readJSON(filepath.Join(dir, checkpointWitnessName), &witness); err != nil {
