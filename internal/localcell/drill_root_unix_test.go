@@ -10,6 +10,10 @@ import (
 )
 
 func init() {
+	drillRootSwapParent = func(t *testing.T, dir, aside, target string) bool {
+		drillAssert(t, os.Rename(dir, aside) == nil && os.Symlink(target, dir) == nil, "cannot prepare the drill root fixture")
+		return true
+	}
 	drillRootLockPayload = func(t *testing.T, dir string) func() {
 		if os.Geteuid() == 0 {
 			t.Skip("root deletes from a non writable directory")

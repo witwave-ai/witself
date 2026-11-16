@@ -12,6 +12,13 @@ import (
 )
 
 func init() {
+	drillRootSwapParent = func(t *testing.T, dir, aside, target string) bool {
+		if os.Rename(dir, aside) != nil {
+			return false
+		}
+		createTestJunction(t, dir, target)
+		return true
+	}
 	drillRootLockPayload = func(t *testing.T, dir string) func() {
 		pointer, err := windows.UTF16PtrFromString(filepath.Join(dir, "pg", "payload"))
 		drillAssert(t, err == nil, "cannot prepare the drill root fixture")

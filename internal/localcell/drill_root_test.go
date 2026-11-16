@@ -9,6 +9,7 @@ import (
 )
 
 var drillRootPlatformRows = func(*testing.T) {}
+var drillRootSwapParent = func(*testing.T, string, string, string) bool { return false }
 var drillRootLockPayload = func(t *testing.T, _ string) func() {
 	t.Skip("drill removal fixture needs platform support")
 	return nil
@@ -78,6 +79,25 @@ func drillRootAddBystanders(t *testing.T, c *Cell, v drillRecord) {
 }
 
 func TestDrillRoot(t *testing.T) {
+	t.Run("record_limit", func(t *testing.T) {
+		c, v := drillRootFixture(t)
+		dir := drillRootPlant(t, c, v.DrillID, v)
+		data := drillJSON(t, v)
+		data = append(data, []byte(strings.Repeat(" ", drillMaxBytes-len(data)))...)
+		drillAssert(t, writeAtomicBytes(filepath.Join(dir, drillRootRecordName), data, nil) == nil, "cannot prepare the drill root fixture")
+		drillRootWant(t, c, 1, 0, 0, 0, "drill root accepted an oversize valid prefix")
+		drillAssert(t, writeAtomicBytes(filepath.Join(dir, drillRootRecordName), append(data, ' '), nil) == nil, "cannot prepare the drill root fixture")
+		drillRootWant(t, c, 0, 0, 0, 1, "drill root accepted an oversize valid prefix")
+		drillRootRefused(t, c, v.DrillID, "unknown_kind", "drill root accepted an oversize valid prefix")
+	})
+	t.Run("classify_not_private", func(t *testing.T) {
+		v := drillFixture()
+		dir := filepath.Join(t.TempDir(), "ordinary")
+		drillAssert(t, os.Mkdir(dir, 0o755) == nil && privateDir(dir, false) != nil &&
+			testWriteFile(filepath.Join(dir, drillRootRecordName), drillJSON(t, v), 0o600) == nil, "cannot prepare the drill root fixture")
+		kind, _, _ := drillRootClassify(dir, v.DrillID, v.Binding.InstallationID)
+		drillAssert(t, kind == "unknown", "drill root classified a directory that is not private")
+	})
 	t.Run("declared", func(t *testing.T) {
 		c, v := drillRootFixture(t)
 		drillRootWant(t, c, 0, 0, 0, 0, "drill root listing was not exact")
@@ -161,6 +181,65 @@ func TestDrillRoot(t *testing.T) {
 }
 
 func TestDeleteDrill(t *testing.T) {
+	t.Run("parent_replaced", func(t *testing.T) {
+		c, v := drillRootFixture(t)
+		v.State = "stopped"
+		dir := drillRootPlant(t, c, v.DrillID, v)
+		target, aside := testPrivateRoot(t), c.path("aside")
+		drillAssert(t, privateDir(filepath.Join(target, "pg"), true) == nil &&
+			testWriteFile(filepath.Join(target, "pg", "payload"), []byte("kept payload"), 0o600) == nil, "cannot prepare the drill root fixture")
+		swapped, calls := false, 0
+		c.drillRootTest = &drillRootOperations{beforeRemove: func(string) { calls++; swapped = drillRootSwapParent(t, dir, aside, target) }}
+		err := c.deleteDrillLocked(v.DrillID)
+		data, readErr := os.ReadFile(filepath.Join(target, "pg", "payload"))
+		drillAssert(t, calls == 1 && readErr == nil && string(data) == "kept payload", "drill delete followed a replaced parent")
+		if swapped {
+			drillAssert(t, err == (drillRootError{reason: "boundary_refused"}), "drill delete followed a replaced parent")
+			record, recordErr := os.ReadFile(filepath.Join(aside, drillRootRecordName))
+			payload, payloadErr := os.ReadFile(filepath.Join(aside, "pg", "payload"))
+			drillAssert(t, recordErr == nil && payloadErr == nil && string(record) == string(drillJSON(t, v)) && string(payload) == "inert payload", "drill delete followed a replaced parent")
+		} else {
+			_, statErr := os.Lstat(dir)
+			drillAssert(t, err == nil && os.IsNotExist(statErr), "drill delete followed a replaced parent")
+		}
+	})
+	t.Run("parent_replaced_directory", func(t *testing.T) {
+		c, v := drillRootFixture(t)
+		v.State = "stopped"
+		dir, aside, swapped := drillRootPlant(t, c, v.DrillID, v), c.path("aside"), false
+		c.drillRootTest = &drillRootOperations{beforeRemove: func(string) {
+			swapped = os.Rename(dir, aside) == nil
+			drillAssert(t, !swapped || (privateDir(dir, true) == nil && testWriteFile(filepath.Join(dir, "kept"), []byte("kept payload"), 0o600) == nil), "cannot prepare the drill root fixture")
+		}}
+		err := c.deleteDrillLocked(v.DrillID)
+		if !swapped {
+			drillAssert(t, err == nil, "drill delete followed a replaced parent")
+			return
+		}
+		kept, keptErr := os.ReadFile(filepath.Join(dir, "kept"))
+		_, recordErr := os.Lstat(filepath.Join(aside, drillRootRecordName))
+		drillAssert(t, err == (drillRootError{reason: "boundary_refused"}) && keptErr == nil && string(kept) == "kept payload" && recordErr == nil, "drill delete followed a replaced parent")
+	})
+	t.Run("late_entry", func(t *testing.T) {
+		c, v := drillRootFixture(t)
+		dir := drillRootPlant(t, c, v.DrillID, v)
+		drillRootAddBystanders(t, c, v)
+		before, calls := drillRootBystanders(t, c, v), 0
+		c.drillRootTest = &drillRootOperations{beforeRemove: func(string) {
+			calls++
+			drillAssert(t, testWriteFile(filepath.Join(dir, "late"), []byte("late payload"), 0o600) == nil, "cannot prepare the drill root fixture")
+		}}
+		drillAssert(t, c.deleteDrillLocked(v.DrillID) == nil && calls == 1 && reflect.DeepEqual(before, drillRootBystanders(t, c, v)), "drill delete left a late entry behind")
+		_, err := os.Lstat(dir)
+		drillAssert(t, os.IsNotExist(err), "drill delete left a late entry behind")
+	})
+	t.Run("journal_before_boundary", func(t *testing.T) {
+		c, v := drillRootFixture(t)
+		drillRootPlant(t, c, v.DrillID, v)
+		drillAssert(t, c.begin("stop") == nil && os.RemoveAll(c.recoveryDir()) == nil && testWriteFile(c.recoveryDir(), []byte("boundary fault"), 0o600) == nil, "cannot prepare the drill root fixture")
+		drillAssert(t, c.validateRecovery() != nil, "cannot prepare the drill root fixture")
+		drillRootRefused(t, c, v.DrillID, "journal_pending", "drill delete ignored a pending journal")
+	})
 	for _, state := range []string{"reserved", "copied", "verified", "launched", "probed", "stopped"} {
 		t.Run("running/"+state, func(t *testing.T) {
 			c, v := drillRootFixture(t)

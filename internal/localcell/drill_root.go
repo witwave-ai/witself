@@ -15,7 +15,7 @@ type drillRootError struct{ reason string }
 
 func (drillRootError) Error() string { return "drill root operation refused" }
 
-// drillDir confines every deletion and sync below the boundary to one exact ID.
+// drillDir resolves one exact drill ID below the recovery boundary.
 func (c *Cell) drillDir(drillID string) (string, error) {
 	if !drillValidID(drillID) {
 		return "", drillRootError{reason: "identity_invalid"}
@@ -33,7 +33,6 @@ type drillRootListing struct {
 }
 
 // drillRootClassify is shared by observation and exact-identifier deletion.
-// It preserves the listing order for payload removal, with the record last.
 func drillRootClassify(dir, name, installation string) (string, drillRecord, []os.DirEntry) {
 	if privateDir(dir, false) != nil {
 		return "unknown", drillRecord{}, nil
@@ -109,7 +108,8 @@ func (c *Cell) drillRootList() (drillRootListing, error) {
 }
 
 // deleteDrillLocked requires the caller's operation lock and maintenance fence.
-// No journal entry is written: payload removal precedes record removal.
+// Removals act on the held directory. A final boundary sync failure leaves the
+// target absent, so a retry answers absent; no journal entry is written.
 func (c *Cell) deleteDrillLocked(drillID string) error {
 	if checkpointIDPattern.MatchString(drillID) {
 		return drillRootError{reason: "checkpoint_target"}
@@ -145,7 +145,16 @@ func (c *Cell) deleteDrillLocked(drillID string) error {
 	if err != nil {
 		return drillRootError{reason: "identity_invalid"}
 	}
-	kind, record, children := drillRootClassify(dir, drillID, manifest.InstallationID)
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return drillRootError{reason: "unknown_kind"}
+	}
+	defer func() { _ = root.Close() }()
+	held, err := root.Stat(".")
+	if err != nil {
+		return drillRootError{reason: "unknown_kind"}
+	}
+	kind, record, _ := drillRootClassify(dir, drillID, manifest.InstallationID)
 	switch kind {
 	case "unknown":
 		return drillRootError{reason: "unknown_kind"}
@@ -161,21 +170,33 @@ func (c *Cell) deleteDrillLocked(drillID string) error {
 	if c.drillRootTest != nil && c.drillRootTest.beforeRemove != nil {
 		c.drillRootTest.beforeRemove(dir)
 	}
-	if kind != "remainder" {
-		for _, entry := range children {
-			if entry.Name() == drillRootRecordName {
-				continue
-			}
-			child := filepath.Join(dir, entry.Name())
-			if os.RemoveAll(child) != nil {
-				return drillRootError{reason: "remove_failed"}
-			}
-		}
-		if syncCheckpointDirectory(dir) != nil {
+	now, err := os.Lstat(dir)
+	if err != nil || !now.IsDir() || now.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 || !os.SameFile(held, now) {
+		return drillRootError{reason: "boundary_refused"}
+	}
+	f, err := root.Open(".")
+	if err != nil {
+		return drillRootError{reason: "remove_failed"}
+	}
+	names, err := f.Readdirnames(-1)
+	closed := f.Close()
+	if err != nil || closed != nil {
+		return drillRootError{reason: "remove_failed"}
+	}
+	for _, name := range names {
+		if name != drillRootRecordName && root.RemoveAll(name) != nil {
 			return drillRootError{reason: "remove_failed"}
 		}
 	}
-	if os.RemoveAll(dir) != nil {
+	if kind != "remainder" {
+		if syncCheckpointDirectory(dir) != nil {
+			return drillRootError{reason: "remove_failed"}
+		}
+		if root.Remove(drillRootRecordName) != nil {
+			return drillRootError{reason: "remove_failed"}
+		}
+	}
+	if root.Close() != nil || os.Remove(dir) != nil {
 		return drillRootError{reason: "remove_failed"}
 	}
 	if syncCheckpointDirectory(c.recoveryDir()) != nil {
