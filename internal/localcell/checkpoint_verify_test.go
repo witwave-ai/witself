@@ -70,6 +70,8 @@ func openCheckpointVerifyCase(t *testing.T, c *Cell, id string) *checkpointVerif
 
 // Each mutating row owns a private copy; the writer compatibility and preservation
 // rows still exercise a freshly written checkpoint. Bases live only in this test.
+// Copied files use the private test creator: a plain write inherits the parent ACL
+// on Windows and the owner lock then refuses the copied tree.
 func checkpointVerifyFactory(parent *testing.T) func(*testing.T, bool) *checkpointVerifyCase {
 	bases := map[bool]*checkpointVerifyCase{}
 	return func(t *testing.T, selected bool) *checkpointVerifyCase {
@@ -107,7 +109,7 @@ func checkpointVerifyFactory(parent *testing.T) func(*testing.T, bool) *checkpoi
 				var data []byte
 				data, err = os.ReadFile(name)
 				if err == nil {
-					err = os.WriteFile(dest, data, info.Mode().Perm())
+					err = testWriteFile(dest, data, info.Mode().Perm())
 				}
 			} else {
 				return errors.New("fixture copy entry refused")
