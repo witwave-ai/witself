@@ -160,15 +160,20 @@ func TestDrillRecord(t *testing.T) {
 		{"unknown_field", drillMalformed, func(s string) string { return strings.Replace(s, `"format":1`, `"format":1,"extra":0`, 1) }},
 		{"wrong_type", drillMalformed, func(s string) string { return strings.Replace(s, `"format":1`, `"format":"1"`, 1) }},
 		{"trailing_data", drillMalformed, func(s string) string { return s + "{}" }},
-		{"too_large", drillTooLarge, func(s string) string { return s + strings.Repeat(" ", drillMaxBytes) }},
+		{"exact_size", "", func(s string) string { return s + strings.Repeat(" ", drillMaxBytes-len(s)) }},
+		{"too_large", drillTooLarge, func(s string) string { return s + strings.Repeat(" ", drillMaxBytes+1-len(s)) }},
+		{"missing_cleanup_due", drillMalformed, func(s string) string { return strings.Replace(s, `,"cleanup_due":true`, "", 1) }},
 	} {
 		t.Run(row.name, func(t *testing.T) {
-			parse(t, []byte(row.change(string(drillJSON(t, base)))), row.reason)
+			got, err := drillParseRecord([]byte(row.change(string(drillJSON(t, base)))))
+			check(t, err, row.reason)
+			drillAssert(t, err == nil && got == base || err != nil && got == (drillRecord{}), "drill parser result incorrect")
 			r := at("stopped", "passed")
 			receipt, err := drillMakeReceipt(r)
 			check(t, err, "")
-			_, err = drillParseReceipt([]byte(row.change(string(drillJSON(t, receipt)))))
+			gotReceipt, err := drillParseReceipt([]byte(row.change(string(drillJSON(t, receipt)))))
 			check(t, err, row.reason)
+			drillAssert(t, err == nil && gotReceipt == receipt || err != nil && gotReceipt == (drillReceipt{}), "drill parser result incorrect")
 			if row.name == "duplicate_field" {
 				parse(t, []byte(strings.Replace(string(drillJSON(t, base)), `"schema_version":1`, `"schema_version":1,"schema_version":1`, 1)), drillMalformed)
 			}
@@ -430,6 +435,11 @@ func TestDrillRecord(t *testing.T) {
 	})
 }
 func drillContract(sources map[string]string) string {
+	for _, source := range sources {
+		if strings.Contains(source, "go:"+"linkname") {
+			return "linkname"
+		}
+	}
 	fset := token.NewFileSet()
 	files := map[string]*ast.File{}
 	for name, source := range sources {
@@ -453,6 +463,9 @@ func drillContract(sources map[string]string) string {
 
 	methods := 0
 	for _, decl := range f.Decls {
+		if fn, ok := decl.(*ast.FuncDecl); ok && fn.Recv == nil && fn.Name.Name == "init" {
+			return "declarations"
+		}
 		if fn, ok := decl.(*ast.FuncDecl); ok && fn.Recv != nil {
 			methods++
 			recv, ok := fn.Recv.List[0].Type.(*ast.Ident)
@@ -485,10 +498,16 @@ func drillContract(sources map[string]string) string {
 	info := &types.Info{Uses: map[*ast.Ident]types.Object{}, Types: map[ast.Expr]types.TypeAndValue{}}
 	config := types.Config{Importer: importer.Default()}
 	if _, err := config.Check("drillcontract", fset, []*ast.File{f}, info); err != nil {
-		return "calls"
+		return "types"
 	}
-	bad := false
+	bad, statements := false, false
 	ast.Inspect(f, func(n ast.Node) bool {
+		switch n.(type) {
+		case *ast.GoStmt:
+			statements = true
+		case *ast.DeferStmt:
+			statements = true
+		}
 		call, ok := n.(*ast.CallExpr)
 		if !ok || info.Types[call.Fun].IsType() {
 			return true
@@ -506,6 +525,7 @@ func drillContract(sources map[string]string) string {
 			return true
 		}
 		if _, ok := obj.(*types.Builtin); ok {
+			bad = bad || obj.Name() != "len" && obj.Name() != "delete"
 			return true
 		}
 		if obj.Pos() >= f.Pos() && obj.Pos() <= f.End() {
@@ -519,6 +539,9 @@ func drillContract(sources map[string]string) string {
 		}
 		return true
 	})
+	if statements {
+		return "statements"
+	}
 	if bad {
 		return "calls"
 	}
@@ -553,17 +576,32 @@ func TestDrillRecordSourceContract(t *testing.T) {
 			s["drill_record.go"] = strings.Replace(s["drill_record.go"], "(drillError) Error", "(*drillError) Error", 1)
 		}},
 		{"variable", "declarations", func(s map[string]string) { s["drill_record.go"] += "\nvar drillProbe = 1" }},
-		{"operation_reference", "calls", func(s map[string]string) {
+		{"operation_reference", "types", func(s map[string]string) {
 			s["drill_record.go"] += "\nfunc drillProbe() { _ = validUpdateOperationID }"
 		}},
-		{"checkpoint_reference", "calls", func(s map[string]string) { s["drill_record.go"] += "\nfunc drillProbe() { _ = checkpointIDPattern }" }},
-		{"external_call", "calls", func(s map[string]string) {
+		{"checkpoint_reference", "types", func(s map[string]string) { s["drill_record.go"] += "\nfunc drillProbe() { _ = checkpointIDPattern }" }},
+		{"external_call", "types", func(s map[string]string) {
 			s["drill_external.go"] = "package localcell; func drillOutsideProbe() {}"
 			s["drill_record.go"] += "\nfunc drillProbe() { drillOutsideProbe() }"
 		}},
 		{"calls", "imports", func(s map[string]string) {
 			s["drill_record.go"] = strings.Replace(s["drill_record.go"], "import (", "import (\n\"fmt\"", 1) + "\nfunc drillProbe() { _ = fmt.Sprint(1) }"
 		}},
+		{"linkname_new_file", "linkname", func(s map[string]string) {
+			s["drill_probe.go"] = "package localcell\nimport _ \"unsafe\"\n//go:" + "linkname drillProbe github.com/witwave-ai/witself/internal/localcell.drillStateIndex\nfunc drillProbe(string) int\n"
+		}},
+		{"linkname_in_file", "linkname", func(s map[string]string) { s["drill_record.go"] += "\n//go:" + "linkname drillStateIndex\n" }},
+		{"init", "declarations", func(s map[string]string) { s["drill_record.go"] += "\nfunc init() {}" }},
+		{"goroutine", "statements", func(s map[string]string) {
+			s["drill_record.go"] += "\nfunc drillProbe() { go drillOther() }; func drillOther() {}"
+		}},
+		{"deferred", "statements", func(s map[string]string) {
+			s["drill_record.go"] += "\nfunc drillProbe() { defer drillOther() }; func drillOther() {}"
+		}},
+		{"builtin_print", "calls", func(s map[string]string) { s["drill_record.go"] += "\nfunc drillProbe() { print() }" }},
+		{"builtin_println", "calls", func(s map[string]string) { s["drill_record.go"] += "\nfunc drillProbe() { println() }" }},
+		{"builtin_panic", "calls", func(s map[string]string) { s["drill_record.go"] += "\nfunc drillProbe() { panic(\"x\") }" }},
+		{"builtin_rec" + "over", "calls", func(s map[string]string) { s["drill_record.go"] += "\nfunc drillProbe() { _ = rec" + "over() }" }},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			copySources := map[string]string{}
@@ -571,7 +609,21 @@ func TestDrillRecordSourceContract(t *testing.T) {
 				copySources[k] = v
 			}
 			row.change(copySources)
-			drillAssert(t, drillContract(copySources) == row.want, "drill contract mutation survived")
+			for name, ending := range map[string]string{"lf": "\n", "crlf": "\r\n"} {
+				t.Run(name, func(t *testing.T) {
+					seed := map[string]string{}
+					for k, v := range copySources {
+						seed[k] = strings.ReplaceAll(v, "\n", ending)
+					}
+					drillAssert(t, drillContract(seed) == row.want, "drill contract mutation survived")
+					if row.want == "linkname" {
+						for k, v := range seed {
+							seed[k] = strings.ReplaceAll(v, "go:"+"linkname", "ordinary comment")
+						}
+						drillAssert(t, drillContract(seed) == "", "drill contract control rejected")
+					}
+				})
+			}
 		})
 	}
 }
