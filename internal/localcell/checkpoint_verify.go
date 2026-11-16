@@ -48,6 +48,7 @@ func (checkpointVerifyError) Error() string { return "checkpoint integrity verif
 
 // verifyCheckpoint checks only the sealed bytes of one kept copy under the
 // caller's lock. No live manifest or process contributes to the result.
+// The result covers bytes read under the cooperating lock, not a change the same user makes outside that lock while the read is in progress.
 func (c *Cell) verifyCheckpoint(ctx context.Context, lock *operationLock, id string) (checkpointVerifyResult, error) {
 	if lock == nil {
 		return "", checkpointVerifyError{checkpointVerifyLockRequired}
@@ -101,17 +102,33 @@ func (c *Cell) verifyCheckpoint(ctx context.Context, lock *operationLock, id str
 		manifest, malformed = Manifest{}, false
 		decoder := json.NewDecoder(r)
 		err := decoder.Decode(&manifest)
+		if err == nil {
+			remainder := io.MultiReader(decoder.Buffered(), r)
+			var tail [512]byte
+			for {
+				n, readErr := remainder.Read(tail[:])
+				if readErr != nil && readErr != io.EOF {
+					return readErr
+				}
+				for _, value := range tail[:n] {
+					if value != ' ' && value != '\t' && value != '\r' && value != '\n' {
+						malformed = true
+					}
+				}
+				if malformed || readErr == io.EOF {
+					return nil
+				}
+			}
+		}
 		// Syntax/type errors describe content; other errors came from the reader.
-		if err != nil {
-			switch err.(type) {
-			case *json.SyntaxError, *json.UnmarshalTypeError, *time.ParseError:
-				malformed = true
-				return nil
-			}
-			if err == io.EOF || err == io.ErrUnexpectedEOF {
-				malformed = true
-				return nil
-			}
+		switch err.(type) {
+		case *json.SyntaxError, *json.UnmarshalTypeError, *time.ParseError:
+			malformed = true
+			return nil
+		}
+		if err == io.EOF || err == io.ErrUnexpectedEOF {
+			malformed = true
+			return nil
 		}
 		return err
 	})
@@ -180,17 +197,16 @@ func verifyCheckpointDocuments(ctx context.Context, budget *checkpointRetryBudge
 		return w, inventory, checkpointVerifyError{checkpointVerifyIdentityMismatch}
 	}
 	var buffer bytes.Buffer
-	hash := sha256.New()
+	var matched bool
 	err = checkpointVerifyRead(ctx, budget, ops, filepath.Join(dir, checkpointInventoryName), func(r *os.File) error {
-		buffer.Reset()
-		hash.Reset()
-		_, err := io.Copy(io.MultiWriter(&buffer, hash), r)
+		var err error
+		matched, err = checkpointVerifyInventory(r, w.InventorySHA256, &buffer)
 		return err
 	})
 	if err != nil {
 		return w, inventory, checkpointVerifyReadError(ctx, checkpointVerifyInventoryUnreadable)
 	}
-	if hex.EncodeToString(hash.Sum(nil)) != w.InventorySHA256 {
+	if !matched {
 		return w, inventory, checkpointVerifyError{checkpointVerifyInventoryDigestMismatch}
 	}
 	if !checkpointVerifyJSON(buffer.Bytes(), &inventory) {
@@ -203,6 +219,21 @@ func verifyCheckpointDocuments(ctx context.Context, budget *checkpointRetryBudge
 		return w, inventory, checkpointVerifyError{checkpointVerifyIdentityMismatch}
 	}
 	return w, inventory, nil
+}
+
+func checkpointVerifyInventory(r io.ReadSeeker, expected string, buffer *bytes.Buffer) (bool, error) {
+	buffer.Reset()
+	hash := sha256.New()
+	size, err := io.Copy(hash, r)
+	if err != nil || hex.EncodeToString(hash.Sum(nil)) != expected {
+		return false, err
+	}
+	if _, err := r.Seek(0, io.SeekStart); err != nil {
+		return false, err
+	}
+	hash.Reset()
+	count, err := io.Copy(io.MultiWriter(buffer, hash), io.LimitReader(r, size+1))
+	return count == size && hex.EncodeToString(hash.Sum(nil)) == expected, err
 }
 
 func checkpointVerifyDigest(value string) bool {

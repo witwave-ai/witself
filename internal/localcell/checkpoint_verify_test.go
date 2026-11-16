@@ -10,6 +10,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -245,6 +246,14 @@ func TestCheckpointVerify(t *testing.T) {
 			v.document("manifest.json", m)
 			v.contentSeal("manifest.json")
 		}},
+		{"manifest_trailing_object", "manifest_mismatch", func(v *checkpointVerifyCase) {
+			v.write("manifest.json", append(v.read("manifest.json"), []byte("{}")...))
+			v.contentSeal("manifest.json")
+		}},
+		{"manifest_trailing_junk", "manifest_mismatch", func(v *checkpointVerifyCase) {
+			v.write("manifest.json", append(v.read("manifest.json"), 'x'))
+			v.contentSeal("manifest.json")
+		}},
 		{"live_manifest_newer", "integrity_verified", func(v *checkpointVerifyCase) {
 			m, err := readManifest(v.c.cfg.Root)
 			if err != nil {
@@ -277,6 +286,15 @@ func TestCheckpointVerify(t *testing.T) {
 		}},
 		{"large_witness", "witness_malformed", func(v *checkpointVerifyCase) {
 			v.write(checkpointWitnessName, append(v.read(checkpointWitnessName), bytes.Repeat([]byte(" "), checkpointControlLimit)...))
+		}},
+		{"witness_exact_limit", "integrity_verified", func(v *checkpointVerifyCase) {
+			data := v.read(checkpointWitnessName)
+			v.write(checkpointWitnessName, append(data, bytes.Repeat([]byte(" "), checkpointControlLimit-len(data))...))
+		}},
+		{"witness_limit_plus_one", "witness_malformed", func(v *checkpointVerifyCase) {
+			data := v.read(checkpointWitnessName)
+			data = append(data, bytes.Repeat([]byte(" "), checkpointControlLimit-len(data))...)
+			v.write(checkpointWitnessName, append(data, '\n'))
 		}},
 		{"file_size_negative", "inventory_malformed", func(v *checkpointVerifyCase) { size := int64(-1); v.entry(target).Size = &size; v.inventorySeal() }},
 		{"file_size_missing", "inventory_malformed", func(v *checkpointVerifyCase) { v.entry(target).Size = nil; v.inventorySeal() }},
@@ -668,6 +686,36 @@ func checkpointVerifyOpenCases(t *testing.T, target string, fixture func(*testin
 			}
 		})
 	}
+	t.Run("transient_inventory_second_read", func(t *testing.T) {
+		v := fixture(t, false)
+		ops := v.c.checkpointOps()
+		original := ops.open
+		calls, sleeps := 0, 0
+		failure := errors.New("injected transient")
+		ops.open = func(name string) (*os.File, error) { calls++; return original(name) }
+		ops.transient = func(err error) bool { return errors.Is(err, failure) }
+		ops.sleep = func(context.Context, time.Duration) { sleeps++ }
+		var buffer bytes.Buffer
+		budget := checkpointRetryBudget{limit: checkpointRetryFloor}
+		err := checkpointVerifyRead(t.Context(), &budget, ops, filepath.Join(v.dir, checkpointInventoryName), func(file *os.File) error {
+			reader := checkpointVerifyCountingReader{reader: file}
+			if calls == 1 {
+				reader.readErr = failure
+			}
+			matched, err := checkpointVerifyInventory(&reader, v.witness.InventorySHA256, &buffer)
+			if calls == 1 && (reader.secondBytes == 0 || !errors.Is(err, failure)) {
+				t.Fatal("transient partial read injection failed")
+			}
+			if err == nil && !matched {
+				t.Fatal("integrity positive outcome missing")
+			}
+			return err
+		})
+		if err != nil || calls != 2 || sleeps != 1 || !bytes.Equal(buffer.Bytes(), v.read(checkpointInventoryName)) {
+			t.Fatal("transient retry attempt count differs")
+		}
+		v.check(t.Context(), "integrity_verified")
+	})
 	t.Run("cancelled", func(t *testing.T) {
 		v := fixture(t, false)
 		ctx, cancel := context.WithCancel(t.Context())
@@ -689,4 +737,73 @@ func checkpointVerifyOpenCases(t *testing.T, target string, fixture func(*testin
 			t.Fatal("cancelled verification opened another file")
 		}
 	})
+}
+
+type checkpointVerifyCountingReader struct {
+	reader                         io.ReadSeeker
+	after                          []byte
+	seekErr, readErr               error
+	seeks, firstBytes, secondBytes int
+}
+
+func (r *checkpointVerifyCountingReader) Read(p []byte) (int, error) {
+	if r.seeks > 0 && r.readErr != nil {
+		if r.secondBytes > 0 {
+			return 0, r.readErr
+		}
+		p = p[:1]
+	}
+	n, err := r.reader.Read(p)
+	if r.seeks == 0 {
+		r.firstBytes += n
+	} else {
+		r.secondBytes += n
+	}
+	return n, err
+}
+
+func (r *checkpointVerifyCountingReader) Seek(offset int64, whence int) (int64, error) {
+	r.seeks++
+	if r.seekErr != nil {
+		return 0, r.seekErr
+	}
+	if r.after != nil {
+		r.reader = bytes.NewReader(r.after)
+	}
+	return r.reader.Seek(offset, whence)
+}
+
+func TestCheckpointVerifyInventory(t *testing.T) {
+	data := []byte("inventory")
+	digest := sha256.Sum256(data)
+	expected := hex.EncodeToString(digest[:])
+	failure := errors.New("injected refusal")
+	for _, row := range []struct {
+		name, expected string
+		after          []byte
+		seekErr        error
+		matched        bool
+		seeks          int
+	}{
+		{"inventory_mismatch_single_pass", "", nil, nil, false, 0},
+		{"inventory_changed_between_passes", expected, []byte("InventorY"), nil, false, 1},
+		{"inventory_grew_between_passes", expected, bytes.Repeat(data, 3), nil, false, 1},
+		{"inventory_match", expected, nil, nil, true, 1},
+		{"inventory_seek_failure", expected, nil, failure, false, 1},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			reader := checkpointVerifyCountingReader{reader: bytes.NewReader(data), after: row.after, seekErr: row.seekErr}
+			buffer := *bytes.NewBufferString("previous attempt")
+			matched, err := checkpointVerifyInventory(&reader, row.expected, &buffer)
+			if matched != row.matched || !errors.Is(err, row.seekErr) || reader.seeks != row.seeks || reader.firstBytes != len(data) {
+				t.Fatal("integrity inventory binding differs")
+			}
+			if buffer.Len() > len(data)+1 || reader.secondBytes > len(data)+1 || (row.seeks == 0 && buffer.Len() != 0) {
+				t.Fatal("integrity inventory buffering differs")
+			}
+			if matched && !bytes.Equal(buffer.Bytes(), data) {
+				t.Fatal("integrity positive outcome missing")
+			}
+		})
+	}
 }
