@@ -184,6 +184,9 @@ func rollbackScenarios(t *testing.T) []rollbackScenario {
 			x.policy.rollbackTargets[1023] = 9
 		}},
 		{"allowed/listed_zero_sequence", rollbackAllowed, func(x *rollbackInputs) { x.target.rollbackSequence = 0; x.policy.rollbackTargets = []uint64{0} }},
+		{"allowed/minimum_high_water", rollbackAllowed, func(x *rollbackInputs) {
+			x.target.rollbackSequence, x.applied.rollbackHighWater, x.policy.rollbackSequence, x.policy.rollbackTargets = 0, 1, 1, []uint64{0}
+		}},
 		{"schema_older/core", rollbackSchemaOlder, func(x *rollbackInputs) { x.target.rollbackCoreSchema-- }},
 		{"schema_newer/core", rollbackSchemaNewer, func(x *rollbackInputs) { x.target.rollbackCoreSchema++ }},
 		{"sync_schema/target_unselected", rollbackSyncSchema, func(x *rollbackInputs) { x.target.rollbackSyncSelected = false }},
@@ -215,6 +218,9 @@ func rollbackScenarios(t *testing.T) []rollbackScenario {
 		{"abi/target_prefix", rollbackABI, func(x *rollbackInputs) { x.target.rollbackABI += "/extra" }},
 		{"abi/applied_prefix", rollbackABI, func(x *rollbackInputs) { x.applied.rollbackABI += "/extra" }},
 		{"abi/opaque_bytes", rollbackABI, func(x *rollbackInputs) { x.target.rollbackABI += "\x00" }},
+		{"abi/different_last_byte", rollbackABI, func(x *rollbackInputs) {
+			x.target.rollbackABI, x.applied.rollbackABI = strings.Repeat("x", 127)+"a", strings.Repeat("x", 127)+"b"
+		}},
 		{"layout/layout", rollbackLayout, func(x *rollbackInputs) { x.target.rollbackLayout++ }},
 		{"layout/principal", rollbackLayout, func(x *rollbackInputs) { x.target.rollbackPrincipalLayout++ }},
 		{"incomplete/evidence_missing", rollbackIncomplete, func(x *rollbackInputs) { x.target.rollbackEvidence = rollbackEvidenceMissing }},
