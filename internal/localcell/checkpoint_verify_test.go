@@ -686,6 +686,68 @@ func checkpointVerifyOpenCases(t *testing.T, target string, fixture func(*testin
 			}
 		})
 	}
+	for _, row := range []struct {
+		name, want    string
+		retry         bool
+		opens, sleeps int
+	}{
+		{"transient_inventory_second_pass", "integrity_verified", true, 2, 1},
+		{"terminal_inventory_second_pass", "inventory_unreadable", false, 1, 0},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			v := fixture(t, false)
+			original := v.c.checkpointOps().open
+			data := v.read(checkpointInventoryName)
+			calls, seeks, sleeps := 0, 0, 0
+			done := make(chan struct{})
+			var written bool
+			v.c.checkpointTest.open = func(name string) (*os.File, error) {
+				if name == filepath.Join(v.dir, checkpointInventoryName) {
+					calls++
+					if calls == 1 {
+						file, writer, err := os.Pipe()
+						if err != nil {
+							t.Fatal("inventory pipe creation failed")
+						}
+						t.Cleanup(func() { _ = file.Close(); _ = writer.Close(); <-done })
+						go func() {
+							n, err := writer.Write(data)
+							written = err == nil && n == len(data)
+							_ = writer.Close()
+							close(done)
+						}()
+						return file, nil
+					}
+				}
+				return original(name)
+			}
+			v.c.checkpointTest.transient = func(err error) bool {
+				var pathError *fs.PathError
+				if errors.As(err, &pathError) && pathError.Op == "seek" {
+					seeks++
+					return row.retry
+				}
+				return false
+			}
+			now := time.Time{}
+			v.c.checkpointTest.now = func() time.Time { return now }
+			v.c.checkpointTest.sleep = func(_ context.Context, delay time.Duration) { sleeps++; now = now.Add(delay) }
+			v.check(t.Context(), row.want)
+			<-done
+			if !written {
+				t.Fatal("inventory pipe write incomplete")
+			}
+			if seeks != 1 {
+				t.Fatal("inventory seek refusal count differs")
+			}
+			if calls != row.opens {
+				t.Fatal("inventory opener count differs")
+			}
+			if sleeps != row.sleeps {
+				t.Fatal("inventory retry sleep count differs")
+			}
+		})
+	}
 	t.Run("transient_inventory_second_read", func(t *testing.T) {
 		v := fixture(t, false)
 		ops := v.c.checkpointOps()
