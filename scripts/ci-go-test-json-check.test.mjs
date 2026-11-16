@@ -2076,6 +2076,104 @@ for (const [name, row, edits] of [
   });
 }
 
+// The closed list's second entry. Its literal also sits in an unenrolled test
+// file and in the production file beside it; each row writes the entry itself.
+const adapterFile = 'local_checkpoint_adapter_test.go';
+const adapterSource = 't.Fatal("adapter fixed assertion"); t.Fatalf("adapter fixed prefix: %s", value); t.Logf("adapter class: %s", value); _ = "adapted"';
+const diagnoseCommand = ['--diagnose', '--package', commandPackage, '--require', 'TestFixture'];
+
+function withAdapterSources(callback) {
+  withCommandSources((target, directory) => {
+    const other = join(directory, 'other_test.go');
+    writeFileSync(other, `${readFileSync(other, 'utf8')}; t.Fatal("adapter fixed assertion")`);
+    writeFileSync(join(directory, 'local_checkpoint_adapter.go'), 'var err = errors.New("adapter fixed assertion"); t.Fatal("adapter fixed assertion")');
+    callback(target, directory);
+  });
+}
+
+function commandCheck(target, name, lines, why = '(unclassified)', {file = adapterFile, args = ['--package', name, '--require', 'TestFixture'], extra = ''} = {}) {
+  assertFixture(target, {input: commandFailure(name, [lines].flat().map(line => `    ${file}:12: ${line}\n`).join('')),
+    args, status: 1, stderr: failureDiagnostic,
+    output: `package ${name} pass=0 skip=0 fail=1\nfail ${name} TestFixture\nwhy ${name} TestFixture :: ${why}\n${extra}`});
+}
+
+test('command package diagnostics cover the adapter test file', () => {
+  withAdapterSources((target, directory) => {
+    const [command, adapter, arbitrary] = ['command fixed assertion', 'adapter fixed assertion', 'arbitrary private-marker'];
+    // Original file only: the adapter literal in other_test.go and the production file stays unclassified.
+    commandCheck(target, commandPackage, command, command, {file: commandFile});
+    commandCheck(target, commandPackage, adapter);
+    commandCheck(target, commandPackage, arbitrary, undefined, {args: diagnoseCommand});
+    writeFileSync(join(directory, adapterFile), adapterSource);
+    for (const message of [command, adapter]) commandCheck(target, commandPackage, message, message);
+    commandCheck(target, commandPackage, 'adapter fixed prefix: private-marker', 'adapter fixed prefix');
+    commandCheck(target, commandPackage, 'adapter class: adapted', undefined, {extra: `class ${commandPackage} TestFixture :: adapter class: adapted\n`});
+    commandCheck(target, commandPackage, adapter, adapter, {args: diagnoseCommand,
+      extra: `diagnose ${commandPackage} TestFixture ::     ${adapterFile}:12: ${adapter}\n`});
+    // Adapter file only, then neither: an absent entry enrolls nothing and licenses no output.
+    rmSync(join(directory, commandFile));
+    commandCheck(target, commandPackage, adapter, adapter);
+    commandCheck(target, commandPackage, command, undefined, {file: commandFile});
+    commandCheck(target, commandPackage, arbitrary, undefined, {file: commandFile, args: diagnoseCommand});
+    rmSync(join(directory, adapterFile));
+    for (const message of [command, adapter]) commandCheck(target, commandPackage, message);
+  });
+});
+
+test('adapter test file enrollment stays inside the command package', () => {
+  withAdapterSources((target, directory) => {
+    writeFileSync(join(directory, adapterFile), adapterSource);
+    const lines = ['adapter fixed assertion', 'adapter fixed prefix: private-marker', 'adapter class: adapted'];
+    commandCheck(target, commandPackage, lines, lines[0], {extra: `class ${commandPackage} TestFixture :: adapter class: adapted\n`});
+    for (const name of [...packages, storePackage]) commandCheck(target, name, lines);
+    commandCheck(target, packages[0], lines, undefined, {args: ['--require', 'TestFixture']});
+    const output = lines.map(line => `    ${adapterFile}:12: ${line}\n`).join('');
+    for (const name of packages) assertFixture(target, outputFailure([output], '(unclassified)', name));
+    // Default and native modes reject command-package events exactly as the one-entry list did.
+    const command = commandFailure(commandPackage, output);
+    assertFixture(target, {input: command, output: summary(Object.fromEntries(packages.map(name => [name, {pass: 0}])))});
+    assertFixture(target, {input: command, args: ['--require', 'TestFixture'], output: `package ${packages[0]} pass=0 skip=0 fail=0\n`});
+  });
+});
+
+test('command test file list is closed at two entries', () => {
+  const declarations = readFileSync(script, 'utf8').match(/^const commandTestFiles = [^\r\n]*/gm);
+  assert.deepEqual(declarations, [`const commandTestFiles = Object.freeze(['${commandFile}', '${adapterFile}']);`]);
+  withAdapterSources((target, directory) => {
+    const third = 'local_checkpoint_third_test.go';
+    writeFileSync(join(directory, adapterFile), adapterSource);
+    writeFileSync(join(directory, third), 't.Fatal("third fixed assertion"); t.Fatalf("third fixed prefix: %s", value); t.Logf("third class: %s", value); _ = "thirdword"');
+    for (const message of ['command fixed assertion', 'adapter fixed assertion']) commandCheck(target, commandPackage, message, message);
+    commandCheck(target, commandPackage, ['third fixed assertion', 'third fixed prefix: private-marker', 'third class: thirdword'],
+      undefined, {file: third, args: diagnoseCommand});
+  });
+});
+
+for (const [name, row, from, to] of [
+  ['M1', 'command package diagnostics cover the adapter test file', `, '${adapterFile}'`, ''],
+  ['M2', 'command package diagnostics cover the adapter test file', `'${adapterFile}'`, "'local_checkpoint_adapter.go'"],
+  ['M3', 'command test file list is closed at two entries', '? commandTestFiles : readdirSync(directory)',
+    "? readdirSync(directory).filter(file => file.endsWith('_test.go')) : readdirSync(directory)"],
+  ['M4', 'adapter test file enrollment stays inside the command package', 'storeErrors : errors), ...messages',
+    'storeErrors : [...errors, ...assertions.get(commandPackage)]), ...messages'],
+]) {
+  test(`mutation killed: adapter enrollment ${name}`, () => {
+    withDiagnosticSources(target => {
+      const source = readFileSync(target, 'utf8');
+      assert.equal(source.split(from).length, 2, `${name} must target exactly one site`);
+      writeFileSync(target, source.replace(from, to));
+      const suite = join(dirname(target), 'ci-go-test-json-check.test.mjs');
+      writeFileSync(suite, readFileSync(fileURLToPath(import.meta.url), 'utf8'));
+      const childEnvironment = {...process.env};
+      delete childEnvironment.NODE_TEST_CONTEXT;
+      const result = spawnSync(process.execPath, ['--test', '--test-name-pattern', `^${row}$`, suite], {encoding: 'utf8', timeout: 30000, env: childEnvironment});
+      assert.ifError(result.error);
+      assert.equal(result.status, 1, `${name} must fail its named row`);
+      assert(result.stdout.includes(row) && result.stdout.includes('ERR_ASSERTION'), `${name} must raise an assertion in its named row`);
+    });
+  });
+}
+
 const principalTest = 'TestSyncPrincipalBypassDenied';
 
 test('explicit store package requires a complete non-skipped principal proof', async () => {
