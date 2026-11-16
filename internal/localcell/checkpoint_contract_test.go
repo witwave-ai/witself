@@ -18,8 +18,8 @@ import (
 	"testing"
 )
 
-// checkpointFiles are the four files that implement checkpoints.
-var checkpointFiles = []string{"checkpoint.go", "checkpoint_unix.go", "checkpoint_windows.go", "checkpoint_other.go"}
+// checkpointFiles are the files that implement checkpoints.
+var checkpointFiles = []string{"checkpoint.go", "checkpoint_unix.go", "checkpoint_windows.go", "checkpoint_other.go", "checkpoint_verify.go"}
 
 // checkpointForbiddenOS are calls the checkpoint files may not make (C7(e));
 // os.RemoveAll is counted by (a) and os.OpenRoot is the Unix opener's alone.
@@ -107,11 +107,37 @@ func checkpointRoot(values map[any][]ast.Expr, expression ast.Expr, depth int) (
 	return "", false
 }
 
+// checkpointDocumentReference follows local aliases of a document name.
+func checkpointDocumentReference(values map[any][]ast.Expr, expression ast.Expr, document string, depth int) bool {
+	if depth >= 8 {
+		return false
+	}
+	found := false
+	ast.Inspect(expression, func(node ast.Node) bool {
+		identifier, ok := node.(*ast.Ident)
+		if !ok || found {
+			return !found
+		}
+		if identifier.Name == document {
+			found = true
+		} else if identifier.Obj != nil {
+			for _, value := range values[identifier.Obj] {
+				if value != nil && checkpointDocumentReference(values, value, document, depth+1) {
+					found = true
+				}
+			}
+		}
+		return !found
+	})
+	return found
+}
+
 // checkpointSourceContract returns every failed C7 check over production
 // sources, independent of GOOS and build tags.
 func checkpointSourceContract(sources map[string]string) []string {
 	failures := map[string]bool{}
 	declared, parsed := map[string]bool{}, map[string]*ast.File{}
+	packageFunctions := map[string]bool{}
 	for name, source := range sources {
 		file, err := parser.ParseFile(token.NewFileSet(), name, strings.ReplaceAll(source, "\r\n", "\n"), 0)
 		if err != nil {
@@ -124,6 +150,9 @@ func checkpointSourceContract(sources map[string]string) []string {
 		ast.Inspect(file, func(node ast.Node) bool {
 			switch node := node.(type) {
 			case *ast.FuncDecl:
+				if node.Recv == nil && !strings.HasSuffix(name, "_test.go") {
+					packageFunctions[node.Name.Name] = true
+				}
 				declared[node.Name.Name] = declared[node.Name.Name] || slices.Contains(checkpointFiles, name) && (node.Recv == nil || updateReceiverName(node) == "Cell")
 			case *ast.TypeSpec:
 				declared[node.Name.Name] = declared[node.Name.Name] || slices.Contains(checkpointFiles, name)
@@ -137,10 +166,23 @@ func checkpointSourceContract(sources map[string]string) []string {
 		})
 	}
 	removals := map[string]int{"checkpoint.go": 0, "lifecycle.go": 0}
-	witnessSpellings, journalCreates, inspectSummaries := 0, 0, 0
+	documentReads := map[string]int{}
+	wantedReads := map[string]int{"witness_read:checkpoint.go:checkpointComplete": 1,
+		"witness_read:checkpoint_verify.go:verifyCheckpointDocuments": 1, "inventory_read:checkpoint_verify.go:verifyCheckpointDocuments": 1}
+	documentReferences, verifierNames := map[string]int{}, map[string]int{}
+	wantedReferences := map[string]int{
+		"checkpointWitnessName:checkpoint.go:witnessCheckpoint": 1, "checkpointWitnessName:checkpoint.go:discardOwnCheckpoint": 1,
+		"checkpointWitnessName:checkpoint.go:deleteCheckpointLocked": 2, "checkpointWitnessName:checkpoint.go:checkpointComplete": 1,
+		"checkpointInventoryName:checkpoint.go:inventoryCheckpoint":            1,
+		"checkpointWitnessName:checkpoint_verify.go:verifyCheckpointDocuments": 1, "checkpointInventoryName:checkpoint_verify.go:verifyCheckpointDocuments": 1,
+		"checkpointWitnessName:checkpoint_verify.go:checkpointVerifyPath": 1, "checkpointInventoryName:checkpoint_verify.go:checkpointVerifyPath": 1,
+		"checkpointWitnessName:checkpoint_verify.go:checkpointVerifyTree": 1, "checkpointInventoryName:checkpoint_verify.go:checkpointVerifyTree": 1,
+	}
+	witnessSpellings, inventorySpellings, journalCreates, inspectSummaries := 0, 0, 0, 0
 	for name, file := range parsed {
 		checkpointFile := slices.Contains(checkpointFiles, name)
 		values, read := checkpointAssignments(file), map[ast.Node]bool{}
+		selectorNames, readOnlyOpens := map[*ast.Ident]bool{}, map[ast.Node]bool{}
 		var markRead func([]ast.Expr)
 		markRead = func(arguments []ast.Expr) {
 			for _, argument := range arguments {
@@ -151,6 +193,12 @@ func checkpointSourceContract(sources map[string]string) []string {
 			}
 		}
 		ast.Inspect(file, func(node ast.Node) bool {
+			if selector, ok := node.(*ast.SelectorExpr); ok {
+				selectorNames[selector.Sel] = true
+			}
+			if call, ok := node.(*ast.CallExpr); ok && len(call.Args) == 3 && types.ExprString(call.Args[1]) == "os.O_RDONLY" {
+				readOnlyOpens[call], readOnlyOpens[call.Fun] = true, true
+			}
 			if call, ok := node.(*ast.CallExpr); ok && slices.Contains(checkpointReaders, types.ExprString(call.Fun)) &&
 				(types.ExprString(call.Fun) != "openPrivateFile" || types.ExprString(call.Args[1]) == "os.O_RDONLY") {
 				markRead(call.Args)
@@ -162,7 +210,39 @@ func checkpointSourceContract(sources map[string]string) []string {
 			if fn, ok := declaration.(*ast.FuncDecl); ok {
 				owner = fn.Name.Name
 			}
+			constantNames := map[*ast.Ident]bool{}
+			declarationNames := map[ast.Node]string{}
+			if group, ok := declaration.(*ast.GenDecl); ok {
+				for _, spec := range group.Specs {
+					switch spec := spec.(type) {
+					case *ast.ValueSpec:
+						declarationNames[spec] = spec.Names[0].Name
+						if group.Tok == token.CONST {
+							for _, identifier := range spec.Names {
+								constantNames[identifier] = true
+							}
+						}
+					case *ast.TypeSpec:
+						declarationNames[spec] = spec.Name.Name
+					}
+				}
+			}
+			referenceOwner := owner
 			ast.Inspect(declaration, func(node ast.Node) bool {
+				if declaredName, ok := declarationNames[node]; ok {
+					referenceOwner = declaredName
+				}
+				if identifier, ok := node.(*ast.Ident); ok {
+					if !constantNames[identifier] && (identifier.Name == "checkpointWitnessName" || identifier.Name == "checkpointInventoryName") {
+						documentReferences[identifier.Name+":"+name+":"+referenceOwner]++
+					}
+					if name == "checkpoint_verify.go" && identifier.Name == "verifyCheckpoint" {
+						verifierNames[referenceOwner]++
+					}
+				}
+				if identifier, ok := node.(*ast.Ident); ok && name != "checkpoint_verify.go" && identifier.Name == "verifyCheckpoint" {
+					failures["verifier_called:"+name+":"+owner] = true
+				}
 				if identifier, ok := node.(*ast.Ident); ok && !checkpointFile && declared[identifier.Name] {
 					// (f) checkpoint declarations are reached only from the hook field
 					// and summary type in types.go, and from Inspect.
@@ -179,6 +259,34 @@ func checkpointSourceContract(sources map[string]string) []string {
 				if checkpointLiteral(node) == checkpointWitnessName {
 					witnessSpellings++
 				}
+				if checkpointLiteral(node) == checkpointInventoryName {
+					inventorySpellings++
+				}
+				if name == "checkpoint_verify.go" {
+					member := ""
+					if call, ok := node.(*ast.CallExpr); ok {
+						function := types.ExprString(call.Fun)
+						member = function[strings.LastIndex(function, ".")+1:]
+					} else if selector, ok := node.(*ast.SelectorExpr); ok {
+						member = selector.Sel.Name
+					} else if identifier, ok := node.(*ast.Ident); ok && !selectorNames[identifier] && packageFunctions[identifier.Name] && (identifier.Obj == nil || identifier.Obj.Kind == ast.Fun) {
+						member = identifier.Name
+					}
+					switch {
+					case member == "checkpointComplete":
+						failures["verifier_shortcut"] = true
+					case member == "begin" || member == "step" || member == "closeCheckpointFailure" || strings.Contains(strings.ToLower(member), "journal"):
+						failures["verifier_journal"] = true
+					case slices.Contains([]string{"Remove", "RemoveAll", "removePrivateFile", "discardOwnCheckpoint", "deleteCheckpointLocked", "DeleteCheckpoint"}, member):
+						failures["verifier_remove"] = true
+					case slices.Contains([]string{"Write", "WriteAt", "WriteString", "WriteFile", "Create", "CreateTemp", "Mkdir", "MkdirAll", "Rename", "Chmod", "Chown", "Chtimes", "Truncate", "Sync",
+						"writeAtomic", "writeAtomicBytes", "createPrivateTemp", "publishPrivateFile", "publish", "syncDirectory", "syncCheckpointDirectory", "syncFile", "privateDir", "failCheckpoint", "Checkpoint", "copyCheckpoint", "inventoryCheckpoint", "witnessCheckpoint"}, member):
+						failures["verifier_write"] = true
+					}
+					if member == "openPrivateFile" && !readOnlyOpens[node] {
+						failures["verifier_write"] = true
+					}
+				}
 				call, ok := node.(*ast.CallExpr)
 				if !ok {
 					return true
@@ -190,6 +298,19 @@ func checkpointSourceContract(sources map[string]string) []string {
 					root, bare := checkpointRoot(values, call.Args[0], 0)
 					if _, local := call.Args[0].(*ast.Ident); name == "checkpoint.go" && (!local || root != "checkpoint" || !bare) {
 						failures["removeall_target:"+name] = true
+					}
+				}
+				// (g) exact document reader inventories, including repeated reads
+				// within an otherwise permitted owner and local path aliases.
+				if slices.Contains([]string{"readJSON", "openPrivateFile", "readPrivateFile", "readPostgresFile", "os.ReadFile", "os.Open", "ops.open", "checkpointVerifyRead"}, function) {
+					argument := 0
+					if function == "checkpointVerifyRead" {
+						argument = 3
+					}
+					for document, kind := range map[string]string{"checkpointWitnessName": "witness_read:", "checkpointInventoryName": "inventory_read:"} {
+						if len(call.Args) > argument && checkpointDocumentReference(values, call.Args[argument], document, 0) {
+							documentReads[kind+name+":"+owner]++
+						}
 					}
 				}
 				if !checkpointFile {
@@ -218,11 +339,6 @@ func checkpointSourceContract(sources map[string]string) []string {
 						failures["writer_root:"+name+":"+function] = true
 					}
 				}
-				// (g) the witness is read only by checkpointComplete.
-				if slices.Contains([]string{"readJSON", "openPrivateFile", "readPrivateFile", "readPostgresFile", "os.ReadFile", "os.Open"}, function) &&
-					strings.Contains(types.ExprString(call), "checkpointWitnessName") && owner != "checkpointComplete" {
-					failures["witness_read:"+name+":"+owner] = true
-				}
 				// (b) a path below pg/ or run/, or the manifest, reaches only a reader.
 				if first := ""; function == "c.path" && len(call.Args) > 0 {
 					if first = checkpointLiteral(call.Args[0]); (first == "pg" || first == "run" || first == "manifest.json") && !read[call] {
@@ -232,6 +348,27 @@ func checkpointSourceContract(sources map[string]string) []string {
 				return true
 			})
 		}
+	}
+	for key := range wantedReferences {
+		failures["document_reference:"+key] = documentReferences[key] != wantedReferences[key]
+	}
+	for key := range documentReferences {
+		failures["document_reference:"+key] = documentReferences[key] != wantedReferences[key]
+	}
+	if !maps.Equal(verifierNames, map[string]int{"verifyCheckpoint": 1}) {
+		for owner := range verifierNames {
+			failures["verifier_called:checkpoint_verify.go:"+owner] = true
+		}
+		if len(verifierNames) == 0 {
+			failures["verifier_called:checkpoint_verify.go:"] = true
+		}
+	}
+	failures["inventory_name_spelling"] = inventorySpellings != 1
+	for reader := range wantedReads {
+		failures[reader] = documentReads[reader] != wantedReads[reader]
+	}
+	for reader := range documentReads {
+		failures[reader] = documentReads[reader] != wantedReads[reader]
 	}
 	for name, count := range removals {
 		failures["removeall_count:"+name] = count != map[string]int{"checkpoint.go": 2, "lifecycle.go": 3}[name]
@@ -260,6 +397,7 @@ func TestCheckpointSourceContract(t *testing.T) {
 	}
 	type mutation struct{ name, file, before, after, want string }
 	const tail = "func checkpointDigits("
+	const verifyTail = "func (c *Cell) verifyCheckpoint("
 	mutations := []mutation{
 		{"removeall_on_recovery_path", "checkpoint.go", "if err := os.RemoveAll(dir); err != nil {\n\t\treturn errCheckpointCopy", "if err := os.RemoveAll(c.path(\"recovery\", checkpointID)); err != nil {\n\t\treturn errCheckpointCopy", "removeall_target:checkpoint.go"},
 		{"third_removeall", "checkpoint.go", tail, "func checkpointSweep(c *Cell) error { dir, _ := c.checkpointDir(\"x\"); return os.RemoveAll(dir) }\n\n" + tail, "removeall_count:checkpoint.go"},
@@ -278,6 +416,25 @@ func TestCheckpointSourceContract(t *testing.T) {
 		{"summaries_outside_inspect", "lifecycle.go", "func (c *Cell) finishRemoval(", "func (c *Cell) listRecovery() { _ = c.checkpointSummaries(nil, &Inspection{}) }\n\nfunc (c *Cell) finishRemoval(", "reference:lifecycle.go:checkpointSummaries"},
 		{"checkpoint_called_elsewhere", "reinstall.go", "func (c *Cell) reinstallBoundary(", "func (c *Cell) reinstallCheckpoint() { _ = c.Checkpoint(nil, CheckpointOptions{}) }\n\nfunc (c *Cell) reinstallBoundary(", "reference:reinstall.go:Checkpoint"},
 		{"call_os.OpenRoot_off_unix", "checkpoint_other.go", "func validateRecoveryObject(", "func checkpointCall() { os.OpenRoot(\"\") }\n\nfunc validateRecoveryObject(", "forbidden_call:checkpoint_other.go:os.OpenRoot"},
+		{"third_witness_reader", "checkpoint_verify.go", verifyTail, "func checkpointVerifyPeek(dir string) { _, _ = os.Open(filepath.Join(dir, checkpointWitnessName)) }\n\n" + verifyTail, "witness_read:checkpoint_verify.go:checkpointVerifyPeek"},
+		{"second_inventory_reader", "checkpoint_verify.go", verifyTail, "func checkpointVerifyInventoryPeek(dir string) { p := filepath.Join(dir, checkpointInventoryName); _, _ = os.Open(p) }\n\n" + verifyTail, "inventory_read:checkpoint_verify.go:checkpointVerifyInventoryPeek"},
+		{"repeated_witness_owner", "checkpoint.go", tail, "func checkpointComplete(dir string) { _, _ = os.Open(filepath.Join(dir, checkpointWitnessName)) }\n\n" + tail, "witness_read:checkpoint.go:checkpointComplete"},
+		{"repeated_inventory_owner", "checkpoint_verify.go", verifyTail, "func verifyCheckpointDocuments(dir string) { _, _ = os.Open(filepath.Join(dir, checkpointInventoryName)) }\n\n" + verifyTail, "inventory_read:checkpoint_verify.go:verifyCheckpointDocuments"},
+		{"verifier_writes", "checkpoint_verify.go", verifyTail, "func checkpointVerifyWrite(f *os.File) { _, _ = f.Write(nil) }\n\n" + verifyTail, "verifier_write"},
+		{"verifier_syncs", "checkpoint_verify.go", verifyTail, "func checkpointVerifySync(f *os.File) { _ = syncFile(f) }\n\n" + verifyTail, "verifier_write"},
+		{"verifier_removes", "checkpoint_verify.go", verifyTail, "func checkpointVerifyRemove() { _ = os.Remove(\"\") }\n\n" + verifyTail, "verifier_remove"},
+		{"verifier_journals", "checkpoint_verify.go", verifyTail, "func checkpointVerifyJournal(c *Cell) { _ = c.begin(\"checkpoint\") }\n\n" + verifyTail, "verifier_journal"},
+		{"verifier_shortcut", "checkpoint_verify.go", verifyTail, "func checkpointVerifyShortcut() { _, _ = checkpointComplete(\"\", \"\") }\n\n" + verifyTail, "verifier_shortcut"},
+		{"verifier_called_elsewhere", "checkpoint.go", tail, "func checkpointVerifyCaller(c *Cell) { _, _ = c.verifyCheckpoint(nil, nil, \"\") }\n\n" + tail, "verifier_called:checkpoint.go:checkpointVerifyCaller"},
+		{"helper_return", "checkpoint_verify.go", verifyTail, "func reviewPath(dir string) string { return filepath.Join(dir, checkpointWitnessName) }\nfunc reviewRead(dir string) { _, _ = os.Open(reviewPath(dir)) }\n\n" + verifyTail, "document_reference:checkpointWitnessName:checkpoint_verify.go:reviewPath"},
+		{"struct_field", "checkpoint_verify.go", verifyTail, "func reviewRead(dir string) { holder := struct{ path string }{}; holder.path = filepath.Join(dir, checkpointWitnessName); _, _ = os.Open(holder.path) }\n\n" + verifyTail, "document_reference:checkpointWitnessName:checkpoint_verify.go:reviewRead"},
+		{"method_value", "checkpoint_verify.go", verifyTail, "func reviewRead(dir string, ops checkpointOperations) { reader := ops.open; _, _ = reader(filepath.Join(dir, checkpointWitnessName)) }\n\n" + verifyTail, "document_reference:checkpointWitnessName:checkpoint_verify.go:reviewRead"},
+		{"unrecognized_reader", "checkpoint_verify.go", verifyTail, "func reviewRead(dir string) { _, _ = os.DirFS(dir).Open(checkpointWitnessName) }\n\n" + verifyTail, "document_reference:checkpointWitnessName:checkpoint_verify.go:reviewRead"},
+		{"method_value_write", "checkpoint_verify.go", verifyTail, "func reviewWrite(f *os.File) { writer := f.Write; _, _ = writer([]byte{0x01}) }\n\n" + verifyTail, "verifier_write"},
+		{"function_value_write", "checkpoint_verify.go", verifyTail, "func reviewWrite() { publish := writeAtomicBytes; _ = publish }\n\n" + verifyTail, "verifier_write"},
+		{"same_file_caller", "checkpoint_verify.go", verifyTail, "func reviewCaller(c *Cell) { _, _ = c.verifyCheckpoint(nil, nil, \"\") }\n\n" + verifyTail, "verifier_called:checkpoint_verify.go:reviewCaller"},
+		{"inventory_second_spelling", "checkpoint.go", tail, "var checkpointInventorySeal = \"inventory.json\"\n\n" + tail, "inventory_name_spelling"},
+		{"inventory_reference_elsewhere", "checkpoint.go", tail, "func reviewInventory() string { return checkpointInventoryName }\n\n" + tail, "document_reference:checkpointInventoryName:checkpoint.go:reviewInventory"},
 	}
 	for _, helper := range checkpointForbiddenHelpers {
 		mutations = append(mutations, mutation{"helper_" + helper, "checkpoint.go", tail, "func checkpointCalls(c *Cell) { _ = " + helper + " }\n\n" + tail, "forbidden_helper:checkpoint.go:" + helper})

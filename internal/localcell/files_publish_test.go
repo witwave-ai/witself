@@ -162,6 +162,11 @@ func TestAtomicPublicationSharedRetrySourceContract(t *testing.T) {
 		{"checkpoint_nested_bytes", "checkpoint.go", "return attempt()", `return writeAtomicBytes("", nil, nil)`},
 		{"checkpoint_nested_atomic", "checkpoint.go", "return attempt()", "_, err := publishAtomic(attempt, leasePublishHooks{}); return err"},
 		{"checkpoint_recopies", "checkpoint.go", "return ops.publish(temporary.Name(), target)", "_, _ = io.Copy(io.Discard, nil); return ops.publish(temporary.Name(), target)"},
+		{"verifier_retry_bypass", "checkpoint_verify.go", "err := retryCheckpointStep(ctx, budget, ops, func() error {", "err := func(_ context.Context, _ *checkpointRetryBudget, _ checkpointOperations, attempt func() error) error { return attempt() }(ctx, budget, ops, func() error {"},
+		{"verifier_second_retry_owner", "checkpoint_verify.go", "func checkpointVerifyReadError(", "func checkpointVerifyUnexpectedRetry() { _ = retryCheckpointStep }\nfunc checkpointVerifyReadError("},
+		{"verifier_open_bypass", "checkpoint_verify.go", "file, err := ops.open(name)", "file, err := openPrivateFile(name, os.O_RDONLY, 0)"},
+		{"verifier_publishes", "checkpoint_verify.go", "file, err := ops.open(name)", "_ = ops.publish\n\t\tfile, err := ops.open(name)"},
+		{"verifier_engine_caller", "checkpoint_verify.go", "func checkpointVerifyReadError(", "func checkpointVerifyUnexpectedEngine() { _ = retryPublish }\nfunc checkpointVerifyReadError("},
 		{"shared_retry_removed", "files.go", "_, err := publishAtomic(func() error { return writeAtomicBytesOnce(path, data, beforeRename) }, leasePublishHooks{})\n\treturn err", "return writeAtomicBytesOnce(path, data, beforeRename)"},
 		{"record_retry_removed", "files.go", "_, err := publishAtomic(func() error { return writeAtomicOnce(path, value, beforeRename) }, leasePublishHooks{})\n\treturn err", "return writeAtomicOnce(path, value, beforeRename)"},
 		{"predicate_any_error", "files.go", "func(err error) bool { return runtimeconfig.WindowsPrivateTransient(err) }", "func(error) bool { return true }"},
@@ -245,10 +250,12 @@ func publishAtomic(attempt func() error, h leasePublishHooks) (int, error) {
 	// Exactly these declarations may name the engine, the shared retry or a
 	// single attempt: the shared layer itself, the lease publisher (which
 	// passes its single-attempt hook to the shared retry) and that hook's
-	// production default. A package-level value counts under "".
+	// production default. checkpointVerifyRead re-reads kept bytes from offset
+	// zero under the caller's lock and publishes nothing. A package-level value
+	// counts under "".
 	want := map[string]map[string]int{
 		"retryPublish":         {"publishAtomic": 1, "retryCheckpointStep": 1},
-		"retryCheckpointStep":  {"copyCheckpoint": 1, "inventoryCheckpoint": 1},
+		"retryCheckpointStep":  {"copyCheckpoint": 1, "inventoryCheckpoint": 1, "checkpointVerifyRead": 1},
 		"publishAtomic":        {"writeAtomic": 1, "writeAtomicBytes": 1, "publishServiceLease": 1},
 		"writeAtomicOnce":      {"writeAtomic": 1, "defaults": 1},
 		"writeAtomicBytesOnce": {"writeAtomicOnce": 1, "writeAtomicBytes": 1},
@@ -288,7 +295,8 @@ func publishAtomic(attempt func() error, h leasePublishHooks) (int, error) {
 					return true
 				}
 				if (owner == "copyCheckpoint" && identifier.Name == "publishPrivateFile") ||
-					(owner == "inventoryCheckpoint" && identifier.Name == "openPrivateFile") {
+					(owner == "inventoryCheckpoint" && identifier.Name == "openPrivateFile") ||
+					(owner == "checkpointVerifyRead" && (identifier.Name == "openPrivateFile" || identifier.Name == "publishPrivateFile" || identifier.Name == "publish")) {
 					bypass = true
 				}
 				switch identifier.Name {
