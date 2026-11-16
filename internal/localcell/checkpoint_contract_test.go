@@ -19,7 +19,7 @@ import (
 )
 
 // checkpointFiles are the files that implement checkpoints.
-var checkpointFiles = []string{"checkpoint.go", "checkpoint_unix.go", "checkpoint_windows.go", "checkpoint_other.go", "checkpoint_verify.go"}
+var checkpointFiles = []string{"checkpoint.go", "checkpoint_unix.go", "checkpoint_windows.go", "checkpoint_other.go", "checkpoint_verify.go", "drill_root.go"}
 
 // checkpointForbiddenOS are calls the checkpoint files may not make (C7(e));
 // os.RemoveAll is counted by (a) and os.OpenRoot is the Unix opener's alone.
@@ -86,6 +86,8 @@ func checkpointRoot(values map[any][]ast.Expr, expression ast.Expr, depth int) (
 	switch function := types.ExprString(call.Fun); {
 	case function == "c.checkpointDir" && len(call.Args) == 1:
 		return "checkpoint", true
+	case function == "c.drillDir" && len(call.Args) == 1:
+		return "drill", true
 	case function == "c.recoveryDir":
 		return "recovery", true
 	case function == "c.path" && len(call.Args) == 1 && checkpointLiteral(call.Args[0]) == "journal":
@@ -136,7 +138,7 @@ func checkpointDocumentReference(values map[any][]ast.Expr, expression ast.Expr,
 // sources, independent of GOOS and build tags.
 func checkpointSourceContract(sources map[string]string) []string {
 	failures := map[string]bool{}
-	declared, parsed := map[string]bool{}, map[string]*ast.File{}
+	declared, parsed := map[string]string{}, map[string]*ast.File{}
 	packageFunctions := map[string]bool{}
 	for name, source := range sources {
 		file, err := parser.ParseFile(token.NewFileSet(), name, strings.ReplaceAll(source, "\r\n", "\n"), 0)
@@ -153,19 +155,25 @@ func checkpointSourceContract(sources map[string]string) []string {
 				if node.Recv == nil && !strings.HasSuffix(name, "_test.go") {
 					packageFunctions[node.Name.Name] = true
 				}
-				declared[node.Name.Name] = declared[node.Name.Name] || slices.Contains(checkpointFiles, name) && (node.Recv == nil || updateReceiverName(node) == "Cell")
+				if slices.Contains(checkpointFiles, name) && (node.Recv == nil || updateReceiverName(node) == "Cell") {
+					declared[node.Name.Name] = name
+				}
 			case *ast.TypeSpec:
-				declared[node.Name.Name] = declared[node.Name.Name] || slices.Contains(checkpointFiles, name)
+				if slices.Contains(checkpointFiles, name) {
+					declared[node.Name.Name] = name
+				}
 			case *ast.ValueSpec:
 				for _, identifier := range node.Names {
-					declared[identifier.Name] = declared[identifier.Name] || slices.Contains(checkpointFiles, name)
+					if slices.Contains(checkpointFiles, name) {
+						declared[identifier.Name] = name
+					}
 				}
 			}
 			_, isFunction := node.(*ast.FuncDecl)
 			return !isFunction
 		})
 	}
-	removals := map[string]int{"checkpoint.go": 0, "lifecycle.go": 0}
+	removals := map[string]int{"checkpoint.go": 0, "lifecycle.go": 0, "drill_root.go": 0}
 	documentReads := map[string]int{}
 	wantedReads := map[string]int{"witness_read:checkpoint.go:checkpointComplete": 1,
 		"witness_read:checkpoint_verify.go:verifyCheckpointDocuments": 1, "inventory_read:checkpoint_verify.go:verifyCheckpointDocuments": 1}
@@ -178,7 +186,7 @@ func checkpointSourceContract(sources map[string]string) []string {
 		"checkpointWitnessName:checkpoint_verify.go:checkpointVerifyPath": 1, "checkpointInventoryName:checkpoint_verify.go:checkpointVerifyPath": 1,
 		"checkpointWitnessName:checkpoint_verify.go:checkpointVerifyTree": 1, "checkpointInventoryName:checkpoint_verify.go:checkpointVerifyTree": 1,
 	}
-	witnessSpellings, inventorySpellings, journalCreates, inspectSummaries := 0, 0, 0, 0
+	witnessSpellings, inventorySpellings, journalCreates, inspectSummaries, drillHooks := 0, 0, 0, 0, 0
 	for name, file := range parsed {
 		checkpointFile := slices.Contains(checkpointFiles, name)
 		values, read := checkpointAssignments(file), map[ast.Node]bool{}
@@ -243,11 +251,23 @@ func checkpointSourceContract(sources map[string]string) []string {
 				if identifier, ok := node.(*ast.Ident); ok && name != "checkpoint_verify.go" && identifier.Name == "verifyCheckpoint" {
 					failures["verifier_called:"+name+":"+owner] = true
 				}
-				if identifier, ok := node.(*ast.Ident); ok && !checkpointFile && declared[identifier.Name] {
+				if identifier, ok := node.(*ast.Ident); ok && declared[identifier.Name] != "" {
+					origin := declared[identifier.Name]
+					if checkpointFile && name != "drill_root.go" && origin == "drill_root.go" {
+						failures["drill_reference:"+name+":"+identifier.Name] = true
+					}
+					if name == "drill_root.go" && origin != "drill_root.go" && !slices.Contains([]string{"recoveryDir", "validateRecovery", "syncCheckpointDirectory", "checkpointIDPattern"}, identifier.Name) {
+						failures["drill_checkpoint_reference:"+name+":"+identifier.Name] = true
+					}
+					if name == "types.go" && identifier.Name == "drillRootOperations" {
+						drillHooks++
+					}
+				}
+				if identifier, ok := node.(*ast.Ident); ok && !checkpointFile && declared[identifier.Name] != "" {
 					// (f) checkpoint declarations are reached only from the hook field
 					// and summary type in types.go, and from Inspect.
 					switch {
-					case name == "types.go" && (identifier.Name == "checkpointOperations" || identifier.Name == "CheckpointSummary"):
+					case name == "types.go" && (identifier.Name == "checkpointOperations" || identifier.Name == "CheckpointSummary" || identifier.Name == "drillRootOperations"):
 					case name == "lifecycle.go" && identifier.Name == "checkpointSummaries" && owner == "Inspect":
 						inspectSummaries++
 					default:
@@ -299,6 +319,9 @@ func checkpointSourceContract(sources map[string]string) []string {
 					if _, local := call.Args[0].(*ast.Ident); name == "checkpoint.go" && (!local || root != "checkpoint" || !bare) {
 						failures["removeall_target:"+name] = true
 					}
+					if _, local := call.Args[0].(*ast.Ident); name == "drill_root.go" && (!local || root != "drill") {
+						failures["removeall_target:"+name] = true
+					}
 				}
 				// (g) exact document reader inventories, including repeated reads
 				// within an otherwise permitted owner and local path aliases.
@@ -331,8 +354,9 @@ func checkpointSourceContract(sources map[string]string) []string {
 				}
 				for _, argument := range call.Args[:min(paths, len(call.Args))] {
 					switch root, bare := checkpointRoot(values, argument, 0); {
-					case root == "checkpoint":
-					case root == "recovery" && bare && (function == "privateDir" || function == "syncDirectory" || function == "syncCheckpointDirectory"):
+					case root == "checkpoint" && name != "drill_root.go":
+					case root == "drill" && name == "drill_root.go":
+					case root == "recovery" && bare && (function == "privateDir" && name != "drill_root.go" || function == "syncDirectory" || function == "syncCheckpointDirectory"):
 					case root == "journal" && bare && function == "privateDir" && owner == "deleteCheckpointLocked":
 						journalCreates++
 					default:
@@ -371,8 +395,9 @@ func checkpointSourceContract(sources map[string]string) []string {
 		failures[reader] = documentReads[reader] != wantedReads[reader]
 	}
 	for name, count := range removals {
-		failures["removeall_count:"+name] = count != map[string]int{"checkpoint.go": 2, "lifecycle.go": 3}[name]
+		failures["removeall_count:"+name] = count != map[string]int{"checkpoint.go": 2, "lifecycle.go": 3, "drill_root.go": 2}[name]
 	}
+	failures["drill_hook_count"] = drillHooks != 1
 	failures["journal_create_count"], failures["witness_name_spelling"], failures["inspect_summaries"] = journalCreates != 1, witnessSpellings != 1, inspectSummaries != 1
 	var result []string
 	for failure, failed := range failures {
@@ -398,7 +423,16 @@ func TestCheckpointSourceContract(t *testing.T) {
 	type mutation struct{ name, file, before, after, want string }
 	const tail = "func checkpointDigits("
 	const verifyTail = "func (c *Cell) verifyCheckpoint("
+	const drillTail = "const drillRootRecordName"
 	mutations := []mutation{
+		{"drill_checkpoint_writer", "drill_root.go", drillTail, "func drillRootProbe(c *Cell) { dir, _ := c.checkpointDir(\"\"); _ = syncCheckpointDirectory(dir) }\n\n" + drillTail, "writer_root:drill_root.go:syncCheckpointDirectory"},
+		{"drill_removeall_recovery", "drill_root.go", drillTail, "func drillRootProbe(c *Cell) { dir := c.recoveryDir(); _ = os.RemoveAll(dir) }\n\n" + drillTail, "removeall_target:drill_root.go"},
+		{"drill_third_removeall", "drill_root.go", drillTail, "func drillRootProbe(c *Cell) { dir, _ := c.drillDir(\"\"); _ = os.RemoveAll(dir) }\n\n" + drillTail, "removeall_count:drill_root.go"},
+		{"checkpoint_drill_writer", "checkpoint.go", tail, "func checkpointProbe(c *Cell) { dir, _ := c.drillDir(\"\"); _ = syncCheckpointDirectory(dir) }\n\n" + tail, "writer_root:checkpoint.go:syncCheckpointDirectory"},
+		{"drill_outside_reference", "lifecycle.go", "func (c *Cell) begin(", "func drillRootOutsideProbe() { _ = drillRootRecordName }\n\n" + "func (c *Cell) begin(", "reference:lifecycle.go:drillRootRecordName"},
+		{"drill_checkpoint_reference", "checkpoint.go", tail, "func checkpointProbe() { _ = drillRootRecordName }\n\n" + tail, "drill_reference:checkpoint.go:drillRootRecordName"},
+		{"drill_second_hook", "types.go", "type Cell struct {", "var drillRootHookProbe *drillRootOperations\n\n" + "type Cell struct {", "drill_hook_count"},
+		{"drill_calls_checkpoint_delete", "drill_root.go", drillTail, "func drillRootProbe(c *Cell) { _ = c.deleteCheckpointLocked(\"\") }\n\n" + drillTail, "drill_checkpoint_reference:drill_root.go:deleteCheckpointLocked"},
 		{"removeall_on_recovery_path", "checkpoint.go", "if err := os.RemoveAll(dir); err != nil {\n\t\treturn errCheckpointCopy", "if err := os.RemoveAll(c.path(\"recovery\", checkpointID)); err != nil {\n\t\treturn errCheckpointCopy", "removeall_target:checkpoint.go"},
 		{"third_removeall", "checkpoint.go", tail, "func checkpointSweep(c *Cell) error { dir, _ := c.checkpointDir(\"x\"); return os.RemoveAll(dir) }\n\n" + tail, "removeall_count:checkpoint.go"},
 		{"lifecycle_removeall_dropped", "lifecycle.go", "if err := os.RemoveAll(c.path(name)); err != nil {", "if err := removePrivateFile(c.path(name)); err != nil {", "removeall_count:lifecycle.go"},

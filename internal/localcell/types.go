@@ -200,6 +200,7 @@ type Cell struct {
 	maintenanceTest          *installerMaintenanceOperations
 	reinstallTest            *reinstallOperations
 	checkpointTest           *checkpointOperations
+	drillRootTest            *drillRootOperations
 	// Test barriers inside Inspect's listing path. Nil in production.
 	inspectCheckpointListing func(string)
 	postgresPendingTest      *postgresPendingOperations
