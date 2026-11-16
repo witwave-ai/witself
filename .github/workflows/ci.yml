@@ -196,10 +196,10 @@ jobs:
           node-version: 22
       - name: Build Local Cell packages
         shell: pwsh
-        run: go build ./cmd/witself-server ./cmd/witself-worker ./internal/localcell/... ./internal/tools/localcellharness/... ./internal/runtimeconfig/...
+        run: go build ./cmd/witself ./cmd/witself-server ./cmd/witself-worker ./internal/localcell/... ./internal/tools/localcellharness/... ./internal/runtimeconfig/...
       - name: Vet Local Cell packages
         shell: pwsh
-        run: go vet ./cmd/witself-server ./cmd/witself-worker ./internal/localcell/... ./internal/tools/localcellharness/... ./internal/runtimeconfig/...
+        run: go vet ./cmd/witself ./cmd/witself-server ./cmd/witself-worker ./internal/localcell/... ./internal/tools/localcellharness/... ./internal/runtimeconfig/...
       - name: Test Go JSON result checker
         shell: pwsh
         run: node --test scripts/ci-go-test-json-check.test.mjs
@@ -211,6 +211,16 @@ jobs:
             go test -json ./internal/localcell ./internal/runtimeconfig ./internal/tools/localcellharness -count=1 -timeout=20m
             $script:goExit = $LASTEXITCODE
           } | node scripts/ci-go-test-json-check.mjs
+          $parserExit = $LASTEXITCODE
+          if ($goExit -ne 0 -or $parserExit -ne 0) { exit 1 }
+      - name: Test Local Checkpoint command and require complete results
+        shell: pwsh
+        run: |
+          $goExit = 1
+          & {
+            go test -json ./cmd/witself -run '^TestLocalCheckpoint' -count=1 -timeout=10m
+            $script:goExit = $LASTEXITCODE
+          } | node scripts/ci-go-test-json-check.mjs --package github.com/witwave-ai/witself/cmd/witself --require TestLocalCheckpointSelection,TestLocalCheckpointSelection/absent,TestLocalCheckpointSelection/unknown,TestLocalCheckpointSelection/explicit,TestLocalCheckpointArguments,TestLocalCheckpointArguments/relative-root,TestLocalCheckpointArguments/wrong-verb-flag,TestLocalCheckpointArguments/missing-consent,TestLocalCheckpointArguments/exact-id,TestLocalCheckpointOutput,TestLocalCheckpointOutput/raw-error,TestLocalCheckpointOutput/metadata,TestLocalCheckpointOutput/partial-observation,TestLocalCheckpointErrorObservation,TestLocalCheckpointErrorObservation/witness-survives,TestLocalCheckpointErrorObservation/post-busy,TestLocalCheckpointErrorObservation/concurrent-change,TestLocalCheckpointNeverStopsOrRepairs,TestLocalCheckpointNeverStopsOrRepairs/recorder,TestLocalCheckpointNeverStopsOrRepairs/source-contract
           $parserExit = $LASTEXITCODE
           if ($goExit -ne 0 -or $parserExit -ne 0) { exit 1 }
       - name: Provision pinned PostgreSQL sixteen
@@ -291,10 +301,10 @@ jobs:
           node-version: 22
       - name: Build Local Cell packages
         shell: bash
-        run: go build ./cmd/witself-server ./cmd/witself-worker ./internal/localcell/... ./internal/tools/localcellharness/... ./internal/runtimeconfig/...
+        run: go build ./cmd/witself ./cmd/witself-server ./cmd/witself-worker ./internal/localcell/... ./internal/tools/localcellharness/... ./internal/runtimeconfig/...
       - name: Vet Local Cell packages
         shell: bash
-        run: go vet ./cmd/witself-server ./cmd/witself-worker ./internal/localcell/... ./internal/tools/localcellharness/... ./internal/runtimeconfig/...
+        run: go vet ./cmd/witself ./cmd/witself-server ./cmd/witself-worker ./internal/localcell/... ./internal/tools/localcellharness/... ./internal/runtimeconfig/...
       - name: Test Go JSON result checker
         shell: bash
         run: node --test scripts/ci-go-test-json-check.test.mjs
@@ -303,6 +313,14 @@ jobs:
         run: |
           set +e
           go test -json ./internal/localcell ./internal/runtimeconfig ./internal/tools/localcellharness -count=1 -timeout=20m | node scripts/ci-go-test-json-check.mjs
+          test_exits=("${PIPESTATUS[@]}")
+          set -e
+          if (( test_exits[0] != 0 || test_exits[1] != 0 )); then exit 1; fi
+      - name: Test Local Checkpoint command and require complete results
+        shell: bash
+        run: |
+          set +e
+          go test -json ./cmd/witself -run '^TestLocalCheckpoint' -count=1 -timeout=10m | node scripts/ci-go-test-json-check.mjs --package github.com/witwave-ai/witself/cmd/witself --require TestLocalCheckpointSelection,TestLocalCheckpointSelection/absent,TestLocalCheckpointSelection/unknown,TestLocalCheckpointSelection/explicit,TestLocalCheckpointArguments,TestLocalCheckpointArguments/relative-root,TestLocalCheckpointArguments/wrong-verb-flag,TestLocalCheckpointArguments/missing-consent,TestLocalCheckpointArguments/exact-id,TestLocalCheckpointOutput,TestLocalCheckpointOutput/raw-error,TestLocalCheckpointOutput/metadata,TestLocalCheckpointOutput/partial-observation,TestLocalCheckpointErrorObservation,TestLocalCheckpointErrorObservation/witness-survives,TestLocalCheckpointErrorObservation/post-busy,TestLocalCheckpointErrorObservation/concurrent-change,TestLocalCheckpointNeverStopsOrRepairs,TestLocalCheckpointNeverStopsOrRepairs/recorder,TestLocalCheckpointNeverStopsOrRepairs/source-contract
           test_exits=("${PIPESTATUS[@]}")
           set -e
           if (( test_exits[0] != 0 || test_exits[1] != 0 )); then exit 1; fi
