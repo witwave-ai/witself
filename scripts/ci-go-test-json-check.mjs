@@ -12,7 +12,7 @@ export const expectedPackages = Object.freeze([
 
 const storePackage = 'github.com/witwave-ai/witself/internal/store';
 const commandPackage = 'github.com/witwave-ai/witself/cmd/witself';
-const commandTestFiles = Object.freeze(['local_checkpoint_command_test.go']);
+const commandTestFiles = Object.freeze(['local_checkpoint_command_test.go', 'local_checkpoint_adapter_test.go']);
 const selectablePackages = Object.freeze([...expectedPackages, storePackage, commandPackage]);
 
 const terminalActions = new Set(['pass', 'skip', 'fail']);
