@@ -10,7 +10,6 @@ import (
 
 const drillRootRecordName = "drill.json"
 
-type drillRootOperations struct{ beforeRemove func(string) }
 type drillRootError struct{ reason string }
 
 func (drillRootError) Error() string { return "drill root operation refused" }
@@ -32,7 +31,7 @@ type drillRootListing struct {
 	foreign, unknown    int
 }
 
-// drillRootClassify is shared by observation and exact-identifier deletion.
+// drillRootClassify names one drill directory declared, remainder, foreign or unknown.
 func drillRootClassify(dir, name, installation string) (string, drillRecord, []os.DirEntry) {
 	if privateDir(dir, false) != nil {
 		return "unknown", drillRecord{}, nil
@@ -105,102 +104,4 @@ func (c *Cell) drillRootList() (drillRootListing, error) {
 		}
 	}
 	return listing, nil
-}
-
-// deleteDrillLocked requires the caller's operation lock and maintenance fence.
-// Removals act on the held directory. A final boundary sync failure leaves the
-// target absent, so a retry answers absent; no journal entry is written.
-func (c *Cell) deleteDrillLocked(drillID string) error {
-	if checkpointIDPattern.MatchString(drillID) {
-		return drillRootError{reason: "checkpoint_target"}
-	}
-	if !drillValidID(drillID) {
-		return drillRootError{reason: "identity_invalid"}
-	}
-	if progress, err := c.readJournal(); err != nil || progress.pending != nil || progress.tornTail {
-		return drillRootError{reason: "journal_pending"}
-	}
-	if c.validateRecovery() != nil {
-		return drillRootError{reason: "boundary_refused"}
-	}
-	manifest, err := readManifest(c.cfg.Root)
-	if err != nil {
-		return drillRootError{reason: "boundary_refused"}
-	}
-	entries, err := os.ReadDir(c.recoveryDir())
-	if err != nil {
-		return drillRootError{reason: "boundary_refused"}
-	}
-	found := false
-	for _, entry := range entries {
-		if entry.Name() != drillID && strings.EqualFold(entry.Name(), drillID) {
-			return drillRootError{reason: "alias"}
-		}
-		found = found || entry.Name() == drillID
-	}
-	if !found {
-		return drillRootError{reason: "absent"}
-	}
-	dir, err := c.drillDir(drillID)
-	if err != nil {
-		return drillRootError{reason: "identity_invalid"}
-	}
-	root, err := os.OpenRoot(dir)
-	if err != nil {
-		return drillRootError{reason: "unknown_kind"}
-	}
-	defer func() { _ = root.Close() }()
-	held, err := root.Stat(".")
-	if err != nil {
-		return drillRootError{reason: "unknown_kind"}
-	}
-	kind, record, _ := drillRootClassify(dir, drillID, manifest.InstallationID)
-	switch kind {
-	case "unknown":
-		return drillRootError{reason: "unknown_kind"}
-	case "foreign":
-		return drillRootError{reason: "foreign_owner"}
-	case "declared":
-		switch record.State {
-		case "reserved", "copied", "verified", "stopped":
-		default:
-			return drillRootError{reason: "running"}
-		}
-	}
-	if c.drillRootTest != nil && c.drillRootTest.beforeRemove != nil {
-		c.drillRootTest.beforeRemove(dir)
-	}
-	now, err := os.Lstat(dir)
-	if err != nil || !now.IsDir() || now.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 || !os.SameFile(held, now) {
-		return drillRootError{reason: "boundary_refused"}
-	}
-	f, err := root.Open(".")
-	if err != nil {
-		return drillRootError{reason: "remove_failed"}
-	}
-	names, err := f.Readdirnames(-1)
-	closed := f.Close()
-	if err != nil || closed != nil {
-		return drillRootError{reason: "remove_failed"}
-	}
-	for _, name := range names {
-		if name != drillRootRecordName && root.RemoveAll(name) != nil {
-			return drillRootError{reason: "remove_failed"}
-		}
-	}
-	if kind != "remainder" {
-		if syncCheckpointDirectory(dir) != nil {
-			return drillRootError{reason: "remove_failed"}
-		}
-		if root.Remove(drillRootRecordName) != nil {
-			return drillRootError{reason: "remove_failed"}
-		}
-	}
-	if root.Close() != nil || os.Remove(dir) != nil {
-		return drillRootError{reason: "remove_failed"}
-	}
-	if syncCheckpointDirectory(c.recoveryDir()) != nil {
-		return drillRootError{reason: "remove_failed"}
-	}
-	return nil
 }

@@ -9,11 +9,6 @@ import (
 )
 
 var drillRootPlatformRows = func(*testing.T) {}
-var drillRootSwapParent = func(*testing.T, string, string, string) bool { return false }
-var drillRootLockPayload = func(t *testing.T, _ string) func() {
-	t.Skip("drill removal fixture needs platform support")
-	return nil
-}
 
 func drillRootFixture(t *testing.T) (*Cell, drillRecord) {
 	t.Helper()
@@ -39,43 +34,12 @@ func drillRootPlant(t *testing.T, c *Cell, name string, v drillRecord) string {
 	return dir
 }
 
-func drillRootRefused(t *testing.T, c *Cell, name, reason, message string) {
-	t.Helper()
-	prior, calls := c.drillRootTest, 0
-	c.drillRootTest = &drillRootOperations{beforeRemove: func(string) { calls++ }}
-	defer func() { c.drillRootTest = prior }()
-	before := checkpointTreeState(t, c)
-	drillAssert(t, c.deleteDrillLocked(name) == (drillRootError{reason: reason}) && calls == 0 &&
-		reflect.DeepEqual(before, checkpointTreeState(t, c)), message)
-}
-
 func drillRootWant(t *testing.T, c *Cell, declared, remainder, foreign, unknown int, message string) {
 	t.Helper()
 	before := checkpointTreeState(t, c)
 	l, err := c.drillRootList()
 	drillAssert(t, err == nil && len(l.declared) == declared && len(l.remainder) == remainder &&
 		l.foreign == foreign && l.unknown == unknown && reflect.DeepEqual(before, checkpointTreeState(t, c)), message)
-}
-
-func drillRootBystanders(t *testing.T, c *Cell, v drillRecord) map[string]retainedEntry {
-	t.Helper()
-	state := checkpointTreeState(t, c)
-	prefix := "recovery/" + v.DrillID
-	for name := range state {
-		if name == prefix || strings.HasPrefix(name, prefix+"/") {
-			delete(state, name)
-		}
-	}
-	return state
-}
-
-func drillRootAddBystanders(t *testing.T, c *Cell, v drillRecord) {
-	t.Helper()
-	checkpointPlant(t, c, v.Binding.CheckpointID, v.Binding.CheckpointID, "pg/payload")
-	drillAssert(t, writeAtomicBytes(filepath.Join(c.recoveryDir(), "unknown"), []byte("bystander"), nil) == nil,
-		"cannot prepare the drill root fixture")
-	v.DrillID, v.Binding.InstallationID = "drill_bbbbbbbbbbbbbbbb", "another_installation"
-	drillRootPlant(t, c, v.DrillID, v)
 }
 
 func TestDrillRoot(t *testing.T) {
@@ -88,7 +52,6 @@ func TestDrillRoot(t *testing.T) {
 		drillRootWant(t, c, 1, 0, 0, 0, "drill root accepted an oversize valid prefix")
 		drillAssert(t, writeAtomicBytes(filepath.Join(dir, drillRootRecordName), append(data, ' '), nil) == nil, "cannot prepare the drill root fixture")
 		drillRootWant(t, c, 0, 0, 0, 1, "drill root accepted an oversize valid prefix")
-		drillRootRefused(t, c, v.DrillID, "unknown_kind", "drill root accepted an oversize valid prefix")
 	})
 	t.Run("classify_not_private", func(t *testing.T) {
 		v := drillFixture()
@@ -125,7 +88,6 @@ func TestDrillRoot(t *testing.T) {
 		before := checkpointTreeState(t, c)
 		l, err := c.drillRootList()
 		drillAssert(t, err == nil && l.unknown >= 1 && reflect.DeepEqual(before, checkpointTreeState(t, c)), "drill root alias was not refused")
-		drillRootRefused(t, c, v.DrillID, "alias", "drill root alias was not refused")
 	})
 	t.Run("checkpoint_target", func(t *testing.T) {
 		c, v := drillRootFixture(t)
@@ -134,14 +96,12 @@ func TestDrillRoot(t *testing.T) {
 		drillRootWant(t, c, 0, 0, 0, 0, "drill root accepted a checkpoint target")
 		_, err := c.drillDir(v.Binding.CheckpointID)
 		drillAssert(t, err == (drillRootError{reason: "identity_invalid"}), "drill root accepted a checkpoint target")
-		drillRootRefused(t, c, v.Binding.CheckpointID, "checkpoint_target", "drill root accepted a checkpoint target")
 	})
 	t.Run("foreign_owner", func(t *testing.T) {
 		c, v := drillRootFixture(t)
 		v.Binding.InstallationID = "another_installation"
 		drillRootPlant(t, c, v.DrillID, v)
 		drillRootWant(t, c, 0, 0, 1, 0, "drill root accepted a foreign owner")
-		drillRootRefused(t, c, v.DrillID, "foreign_owner", "drill root accepted a foreign owner")
 	})
 	for _, kind := range []string{"file", "missing", "unparseable", "mismatch", "oversize"} {
 		t.Run("unknown_kind/"+kind, func(t *testing.T) {
@@ -166,7 +126,6 @@ func TestDrillRoot(t *testing.T) {
 			}
 			drillAssert(t, err == nil && c.validateRecovery() == nil, "cannot prepare the drill root fixture")
 			drillRootWant(t, c, 0, 0, 0, 1, "drill root accepted an unknown kind")
-			drillRootRefused(t, c, drillFixture().DrillID, "unknown_kind", "drill root accepted an unknown kind")
 		})
 	}
 	t.Run("remainder", func(t *testing.T) {
@@ -177,124 +136,6 @@ func TestDrillRoot(t *testing.T) {
 		listing, err := c.drillRootList()
 		drillAssert(t, err == nil && reflect.DeepEqual(listing.remainder, []string{v.DrillID}), "drill root remainder was not handled")
 	})
-	drillRootPlatformRows(t)
-}
-
-func TestDeleteDrill(t *testing.T) {
-	t.Run("parent_replaced", func(t *testing.T) {
-		c, v := drillRootFixture(t)
-		v.State = "stopped"
-		dir := drillRootPlant(t, c, v.DrillID, v)
-		target, aside := testPrivateRoot(t), c.path("aside")
-		drillAssert(t, privateDir(filepath.Join(target, "pg"), true) == nil &&
-			testWriteFile(filepath.Join(target, "pg", "payload"), []byte("kept payload"), 0o600) == nil, "cannot prepare the drill root fixture")
-		swapped, calls := false, 0
-		c.drillRootTest = &drillRootOperations{beforeRemove: func(string) { calls++; swapped = drillRootSwapParent(t, dir, aside, target) }}
-		err := c.deleteDrillLocked(v.DrillID)
-		data, readErr := os.ReadFile(filepath.Join(target, "pg", "payload"))
-		drillAssert(t, calls == 1 && readErr == nil && string(data) == "kept payload", "drill delete followed a replaced parent")
-		if swapped {
-			drillAssert(t, err == (drillRootError{reason: "boundary_refused"}), "drill delete followed a replaced parent")
-			record, recordErr := os.ReadFile(filepath.Join(aside, drillRootRecordName))
-			payload, payloadErr := os.ReadFile(filepath.Join(aside, "pg", "payload"))
-			drillAssert(t, recordErr == nil && payloadErr == nil && string(record) == string(drillJSON(t, v)) && string(payload) == "inert payload", "drill delete followed a replaced parent")
-		} else {
-			_, statErr := os.Lstat(dir)
-			drillAssert(t, err == nil && os.IsNotExist(statErr), "drill delete followed a replaced parent")
-		}
-	})
-	t.Run("parent_replaced_directory", func(t *testing.T) {
-		c, v := drillRootFixture(t)
-		v.State = "stopped"
-		dir, aside, swapped := drillRootPlant(t, c, v.DrillID, v), c.path("aside"), false
-		c.drillRootTest = &drillRootOperations{beforeRemove: func(string) {
-			swapped = os.Rename(dir, aside) == nil
-			drillAssert(t, !swapped || (privateDir(dir, true) == nil && testWriteFile(filepath.Join(dir, "kept"), []byte("kept payload"), 0o600) == nil), "cannot prepare the drill root fixture")
-		}}
-		err := c.deleteDrillLocked(v.DrillID)
-		if !swapped {
-			drillAssert(t, err == nil, "drill delete followed a replaced parent")
-			return
-		}
-		kept, keptErr := os.ReadFile(filepath.Join(dir, "kept"))
-		_, recordErr := os.Lstat(filepath.Join(aside, drillRootRecordName))
-		drillAssert(t, err == (drillRootError{reason: "boundary_refused"}) && keptErr == nil && string(kept) == "kept payload" && recordErr == nil, "drill delete followed a replaced parent")
-	})
-	t.Run("late_entry", func(t *testing.T) {
-		c, v := drillRootFixture(t)
-		dir := drillRootPlant(t, c, v.DrillID, v)
-		drillRootAddBystanders(t, c, v)
-		before, calls := drillRootBystanders(t, c, v), 0
-		c.drillRootTest = &drillRootOperations{beforeRemove: func(string) {
-			calls++
-			drillAssert(t, testWriteFile(filepath.Join(dir, "late"), []byte("late payload"), 0o600) == nil, "cannot prepare the drill root fixture")
-		}}
-		drillAssert(t, c.deleteDrillLocked(v.DrillID) == nil && calls == 1 && reflect.DeepEqual(before, drillRootBystanders(t, c, v)), "drill delete left a late entry behind")
-		_, err := os.Lstat(dir)
-		drillAssert(t, os.IsNotExist(err), "drill delete left a late entry behind")
-	})
-	t.Run("journal_before_boundary", func(t *testing.T) {
-		c, v := drillRootFixture(t)
-		drillRootPlant(t, c, v.DrillID, v)
-		drillAssert(t, c.begin("stop") == nil && os.RemoveAll(c.recoveryDir()) == nil && testWriteFile(c.recoveryDir(), []byte("boundary fault"), 0o600) == nil, "cannot prepare the drill root fixture")
-		drillAssert(t, c.validateRecovery() != nil, "cannot prepare the drill root fixture")
-		drillRootRefused(t, c, v.DrillID, "journal_pending", "drill delete ignored a pending journal")
-	})
-	for _, state := range []string{"reserved", "copied", "verified", "launched", "probed", "stopped"} {
-		t.Run("running/"+state, func(t *testing.T) {
-			c, v := drillRootFixture(t)
-			v.State = state
-			dir := drillRootPlant(t, c, v.DrillID, v)
-			if state == "launched" || state == "probed" {
-				drillRootRefused(t, c, v.DrillID, "running", "drill delete skipped the stopped proof")
-			} else {
-				drillAssert(t, c.deleteDrillLocked(v.DrillID) == nil, "drill delete skipped the stopped proof")
-				_, err := os.Lstat(dir)
-				drillAssert(t, os.IsNotExist(err), "drill delete did not remove the drill")
-			}
-		})
-	}
-	t.Run("wrong_id", func(t *testing.T) {
-		c, v := drillRootFixture(t)
-		drillRootPlant(t, c, v.DrillID, v)
-		for _, name := range []string{"", "drill_", strings.ToUpper(v.DrillID), v.DrillID[:21], v.DrillID + "a", "drill_abcdef/hijklmnop", ".."} {
-			drillRootRefused(t, c, name, "identity_invalid", "drill delete accepted a wrong identifier")
-		}
-		drillRootRefused(t, c, "drill_bbbbbbbbbbbbbbbb", "absent", "drill delete accepted a wrong identifier")
-	})
-	t.Run("bystander", func(t *testing.T) {
-		c, v := drillRootFixture(t)
-		dir := drillRootPlant(t, c, v.DrillID, v)
-		drillRootAddBystanders(t, c, v)
-		before := drillRootBystanders(t, c, v)
-		calls := 0
-		c.drillRootTest = &drillRootOperations{beforeRemove: func(string) { calls++ }}
-		drillAssert(t, c.deleteDrillLocked(v.DrillID) == nil && calls == 1 && c.validateRecovery() == nil &&
-			reflect.DeepEqual(before, drillRootBystanders(t, c, v)), "drill delete touched a bystander")
-		_, err := os.Lstat(dir)
-		drillAssert(t, os.IsNotExist(err), "drill delete did not remove the drill")
-	})
-	t.Run("remainder", func(t *testing.T) {
-		c, v := drillRootFixture(t)
-		dir := filepath.Join(c.recoveryDir(), v.DrillID)
-		drillAssert(t, privateDir(c.recoveryDir(), true) == nil && privateDir(dir, true) == nil, "cannot prepare the drill root fixture")
-		drillAssert(t, c.deleteDrillLocked(v.DrillID) == nil, "drill root remainder was not handled")
-		_, err := os.Lstat(dir)
-		drillAssert(t, os.IsNotExist(err), "drill delete did not remove the drill")
-	})
-	t.Run("journal_pending", func(t *testing.T) {
-		c, v := drillRootFixture(t)
-		drillRootPlant(t, c, v.DrillID, v)
-		drillAssert(t, c.begin("stop") == nil, "cannot prepare the drill root fixture")
-		drillRootRefused(t, c, v.DrillID, "journal_pending", "drill delete ignored a pending journal")
-	})
-	t.Run("journal_torn", func(t *testing.T) {
-		c, v := drillRootFixture(t)
-		drillRootPlant(t, c, v.DrillID, v)
-		data := append(retainedRead(t, c, "journal/operations.jsonl"), []byte(`{"operation":`)...)
-		drillAssert(t, writeAtomicBytes(c.path("journal", "operations.jsonl"), data, nil) == nil, "cannot prepare the drill root fixture")
-		drillRootRefused(t, c, v.DrillID, "journal_pending", "drill delete ignored a pending journal")
-	})
 	t.Run("manifest_absent", func(t *testing.T) {
 		c, v := drillRootFixture(t)
 		drillRootPlant(t, c, v.DrillID, v)
@@ -302,40 +143,6 @@ func TestDeleteDrill(t *testing.T) {
 		before := checkpointTreeState(t, c)
 		_, err := c.drillRootList()
 		drillAssert(t, err == (drillRootError{reason: "boundary_refused"}) && reflect.DeepEqual(before, checkpointTreeState(t, c)), "drill root listing was not exact")
-		drillRootRefused(t, c, v.DrillID, "boundary_refused", "drill root listing was not exact")
 	})
-	for index, stage := range []string{"payload", "boundary"} {
-		t.Run("sync_failure/"+stage, func(t *testing.T) {
-			c, v := drillRootFixture(t)
-			drillRootPlant(t, c, v.DrillID, v)
-			original, calls := syncCheckpointDirectory, 0
-			t.Cleanup(func() { syncCheckpointDirectory = original })
-			syncCheckpointDirectory = func(path string) error {
-				calls++
-				if calls == index+1 {
-					return drillRootError{reason: "injected"}
-				}
-				return original(path)
-			}
-			drillAssert(t, c.deleteDrillLocked(v.DrillID) == (drillRootError{reason: "remove_failed"}) && calls == index+1, "drill delete hid a failed removal")
-			drillRootWant(t, c, 1-index, 0, 0, 0, "drill delete lost the record before the payload")
-		})
-	}
-	t.Run("locked_file", func(t *testing.T) {
-		c, v := drillRootFixture(t)
-		dir := drillRootPlant(t, c, v.DrillID, v)
-		drillRootAddBystanders(t, c, v)
-		before := drillRootBystanders(t, c, v)
-		var release func()
-		calls := 0
-		c.drillRootTest = &drillRootOperations{beforeRemove: func(path string) { calls++; release = drillRootLockPayload(t, path) }}
-		drillAssert(t, c.deleteDrillLocked(v.DrillID) == (drillRootError{reason: "remove_failed"}) && calls == 1, "drill delete hid a failed removal")
-		release()
-		drillRootWant(t, c, 1, 0, 1, 0, "drill delete lost the record before the payload")
-		drillAssert(t, reflect.DeepEqual(before, drillRootBystanders(t, c, v)), "drill delete touched a bystander")
-		c.drillRootTest = nil
-		drillAssert(t, c.deleteDrillLocked(v.DrillID) == nil, "drill delete did not remove the drill")
-		_, err := os.Lstat(dir)
-		drillAssert(t, os.IsNotExist(err), "drill delete did not remove the drill")
-	})
+	drillRootPlatformRows(t)
 }
