@@ -365,7 +365,7 @@ func Execute(ctx context.Context, cfg Config, binding Binding, request Request, 
 	serverElided = digest.Elided
 
 	if request.Event == EventSessionStart {
-		contextText, err := renderSelf(digest, cfg.MaximumBytes)
+		contextText, err := renderSelf(digest, cfg.MaximumBytes, request.Runtime)
 		if err != nil {
 			return Result{Attempted: true, Delivery: feature.Delivery, Outcome: OutcomeOutputRejected}, err
 		}
@@ -504,6 +504,7 @@ type contextEnvelope struct {
 	Source                  string                    `json:"source"`
 	Authority               string                    `json:"authority"`
 	Identity                *contextIdentity          `json:"identity,omitempty"`
+	IdentityStatement       string                    `json:"identity_statement,omitempty"`
 	CanonicalFacts          []contextFact             `json:"canonical_facts,omitempty"`
 	NarrativeMemories       []contextMemory           `json:"narrative_memories,omitempty"`
 	FactCapacity            *contextFactCapacity      `json:"fact_capacity,omitempty"`
@@ -603,11 +604,24 @@ type contextAvatarCheckpoint struct {
 	RetryAfter        *time.Time `json:"retry_after,omitempty"`
 }
 
-func renderSelf(digest client.SelfDigest, maximumBytes int) (string, error) {
+// needsSessionIdentity identifies the runtime whose MCP instruction cap leaves no
+// room for the statement. Other runtimes receive it through MCP, never twice.
+func needsSessionIdentity(runtime string) bool {
+	return runtime == transcriptcapture.RuntimeClaudeCode
+}
+
+func renderSelf(digest client.SelfDigest, maximumBytes int, runtime string) (string, error) {
 	envelope := contextEnvelope{
 		Schema: "witself.hydration.v1", Source: "self.show", Authority: advisoryBoundary,
 		Identity: &contextIdentity{Agent: digest.Identity.AgentName, Realm: digest.Identity.RealmName},
 		Elided:   digest.Elided,
+	}
+	if needsSessionIdentity(runtime) {
+		form := IdentityShort
+		if maximumBytes < DefaultMaximumBytes {
+			form = IdentityOneLine
+		}
+		envelope.IdentityStatement = RenderIdentityStatement(digest.Identity.AgentName, "", form)
 	}
 	setFactCapacity(&envelope, digest.FactCapacity, true)
 	setMemoryCapacity(&envelope, digest.MemoryCapacity, true)
@@ -820,6 +834,8 @@ func marshalBounded(envelope contextEnvelope, maximumBytes int) (string, error) 
 	if maximumBytes < 1024 {
 		return "", errors.New("memory hydration maximum bytes must be at least 1024")
 	}
+	withoutStatement := envelope
+	withoutStatement.IdentityStatement = ""
 	const prefix = "WITSELF_AUTOMATIC_CONTEXT_V1\n"
 	for {
 		raw, err := json.Marshal(envelope)
@@ -835,6 +851,10 @@ func marshalBounded(envelope contextEnvelope, maximumBytes int) (string, error) 
 			envelope.NarrativeMemories = envelope.NarrativeMemories[:len(envelope.NarrativeMemories)-1]
 		case len(envelope.CanonicalFacts) > 0:
 			envelope.CanonicalFacts = envelope.CanonicalFacts[:len(envelope.CanonicalFacts)-1]
+		case envelope.IdentityStatement != "":
+			// Replay the original records and elision state without the statement.
+			// If it cannot fit, its attempted delivery must have no byte cost.
+			return marshalBounded(withoutStatement, maximumBytes)
 		case envelope.CheckpointPolicy != "":
 			// Provider-managed instructions carry the same policy. Preserve
 			// dynamic recall status and the authenticated checkpoint pointer first.
