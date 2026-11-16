@@ -196,10 +196,35 @@ func (f *lcFixture) run(t *testing.T, args []string, want int, calls string) lcW
 	} else if receipt.Target != "" || receipt.Presence != "" {
 		t.Fatal("observation attributed to invocation")
 	}
+	var snapshots map[string]json.RawMessage
+	if json.Unmarshal([]byte(raw), &snapshots) != nil {
+		t.Fatal("suppressed field present")
+	}
 	diagnostics := []*lcWireDiagnostic{d}
-	for _, snapshot := range []*lcWireSnapshot{receipt.Before, receipt.After} {
+	for index, snapshot := range []*lcWireSnapshot{receipt.Before, receipt.After} {
 		if snapshot == nil {
 			continue
+		}
+		var fields map[string]json.RawMessage
+		if json.Unmarshal(snapshots[[]string{"before", "after"}[index]], &fields) != nil {
+			t.Fatal("suppressed field present")
+		}
+		if snapshot.Status != "listed" {
+			for key := range fields {
+				if key != "status" && (key != "failure" || snapshot.Status != "unavailable") {
+					t.Fatal("suppressed field present")
+				}
+			}
+		} else {
+			identities := []string{snapshot.InstallationID}
+			for _, entry := range snapshot.Entries {
+				identities = append(identities, entry.InstallationID)
+			}
+			for _, identity := range identities {
+				if !regexp.MustCompile(`^[A-Za-z0-9_-]{0,64}$`).MatchString(identity) {
+					t.Fatal("installation identity differs")
+				}
+			}
 		}
 		diagnostics = append(diagnostics, snapshot.Failure)
 		if !slices.Contains([]string{"listed", "busy", "unowned", "unavailable"}, snapshot.Status) || (snapshot.Failure != nil) != (snapshot.Status == "unavailable") {
@@ -494,6 +519,7 @@ func TestLocalCheckpointErrorObservation(t *testing.T) {
 		before, after := lcListed(), lcListed()
 		before.entries = []localCheckpointSummary{lcEntry()}
 		after.entries = []localCheckpointSummary{lcEntry(), lcEntry()}
+		after.entries[0].complete = false
 		after.entries[1].id = "ckpt_cdefghijklmnopqr"
 		after.entries[0].id = lcOtherID
 		for _, verb := range []string{"create", "delete"} {
@@ -505,6 +531,14 @@ func TestLocalCheckpointErrorObservation(t *testing.T) {
 				}
 				f := &lcFixture{observations: []localCheckpointObservation{before, after}}
 				r := f.run(t, lcArgs(verb), 0, "read,"+verb+",read")
+				if len(r.After.Entries) != 2 {
+					t.Fatal("entry completion differs")
+				}
+				for i, entry := range r.After.Entries {
+					if entry.ID != after.entries[i].id || *entry.Complete != after.entries[i].complete {
+						t.Fatal("entry completion differs")
+					}
+				}
 				if verb == "create" {
 					if r.Target != "" || r.Presence != "" {
 						t.Fatal("observation attributed to invocation")
@@ -607,6 +641,35 @@ func lcDisconnected(sources map[string]string) bool {
 	}
 	return valid && lcModuleDisconnected(sources)
 }
+func lcModuleSources(root string) (module, sources map[string]string, err error) {
+	module, sources = map[string]string{}, map[string]string{}
+	err = filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			if path != root && (strings.HasPrefix(entry.Name(), ".") || slices.Contains([]string{"node_modules", "vendor", "testdata"}, entry.Name())) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		rel := strings.TrimPrefix(filepath.ToSlash(path), filepath.ToSlash(root)+"/")
+		module[rel] = strings.ReplaceAll(string(b), "\r\n", "\n")
+		if filepath.Dir(path) == filepath.Join(root, "cmd", "witself") {
+			sources[entry.Name()] = module[rel]
+		}
+		return nil
+	})
+	return module, sources, err
+}
+
 func TestLocalCheckpointNeverStopsOrRepairs(t *testing.T) {
 	t.Run("recorder", func(t *testing.T) {
 		for verb, calls := range map[string]string{"create": "read,create,read", "inspect": "read", "delete": "read,delete,read"} {
@@ -615,40 +678,30 @@ func TestLocalCheckpointNeverStopsOrRepairs(t *testing.T) {
 		}
 	})
 	t.Run("source-contract", func(t *testing.T) {
-		sources, module := map[string]string{}, map[string]string{}
 		root := filepath.Join("..", "..")
 		if _, err := os.Stat(filepath.Join(root, "go.mod")); err != nil {
 			t.Fatal("module root unavailable")
 		}
-		err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
-			if err != nil {
-				return err
-			}
-			if entry.IsDir() {
-				if path != root && (strings.HasPrefix(entry.Name(), ".") || slices.Contains([]string{"node_modules", "vendor", "testdata"}, entry.Name())) {
-					return filepath.SkipDir
-				}
-				return nil
-			}
-			if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
-				return nil
-			}
-			b, err := os.ReadFile(path)
-			if err != nil {
-				return err
-			}
-			rel := strings.TrimPrefix(filepath.ToSlash(path), filepath.ToSlash(root)+"/")
-			module[rel] = strings.ReplaceAll(string(b), "\r\n", "\n")
-			if filepath.Dir(path) == filepath.Join(root, "cmd", "witself") {
-				sources[entry.Name()] = module[rel]
-			}
-			return nil
-		})
+		module, sources, err := lcModuleSources(root)
 		if err != nil || module["cmd/witself/main.go"] == "" || module["cmd/witself/local_checkpoint_command.go"] == "" || module["internal/localcell/checkpoint.go"] == "" || !lcModuleDisconnected(module) {
 			t.Fatal("module disconnection violated")
 		}
 		if !lcDisconnected(sources) {
 			t.Fatal("command disconnection violated")
+		}
+		if _, _, err := lcModuleSources(filepath.Join(t.TempDir(), "missing")); err == nil {
+			t.Fatal("module walk error swallowed")
+		}
+		fixture := t.TempDir()
+		for _, name := range []string{"kept.v2/a.go", "cmd/witself/b.go", ".hidden/c.go", "vendor/d.go", "node_modules/e.go", "testdata/f.go", "kept.v2/g_test.go", "kept.v2/h.txt"} {
+			path := filepath.Join(fixture, filepath.FromSlash(name))
+			if os.MkdirAll(filepath.Dir(path), 0o700) != nil || os.WriteFile(path, []byte("package fixture\n"), 0o600) != nil {
+				t.Fatal("module walk skip set differs")
+			}
+		}
+		kept, command, err := lcModuleSources(fixture)
+		if err != nil || len(kept) != 2 || kept["kept.v2/a.go"] == "" || kept["cmd/witself/b.go"] == "" || len(command) != 1 || command["b.go"] == "" {
+			t.Fatal("module walk skip set differs")
 		}
 		const handler = "local_checkpoint_command.go"
 		linked := `package main
