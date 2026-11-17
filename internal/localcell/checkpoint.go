@@ -821,24 +821,6 @@ func (c *Cell) witnessCheckpoint(ctx context.Context, checkpointID string, plan 
 	return nil
 }
 
-// discardOwnCheckpoint removes this call's directory only while it has no
-// witness; a present witness is not a failed discard.
-func (c *Cell) discardOwnCheckpoint(checkpointID string) error {
-	dir, err := c.checkpointDir(checkpointID)
-	if err != nil {
-		return err
-	}
-	if _, err := os.Lstat(filepath.Join(dir, checkpointWitnessName)); err == nil {
-		return nil
-	} else if !errors.Is(err, fs.ErrNotExist) {
-		return errCheckpointCopy
-	}
-	if err := os.RemoveAll(dir); err != nil {
-		return errCheckpointCopy
-	}
-	return syncCheckpointDirectory(c.recoveryDir())
-}
-
 // failCheckpoint releases this call's directory before the step's failed line.
 func (c *Cell) failCheckpoint(checkpointID string, cause error) error {
 	_ = c.discardOwnCheckpoint(checkpointID)
@@ -933,6 +915,13 @@ func (c *Cell) deleteCheckpointLocked(_ context.Context, options DeleteCheckpoin
 	if err != nil || !recoveryEntryCanonical(names, options.CheckpointID) {
 		return errCheckpointIdentity
 	}
+	// recovery/ and the checkpoint are held as directories; every removal goes
+	// through them once both names are bound (checkpoint_root.go).
+	recovery, checkpoint, err := c.holdCheckpoint(options.CheckpointID)
+	defer closeCheckpointRoots(recovery, checkpoint)
+	if err != nil {
+		return errCheckpointState
+	}
 	// A purge removed journal/; nothing else is recreated.
 	if err := privateDir(c.path("journal"), true); err != nil {
 		return err
@@ -947,22 +936,8 @@ func (c *Cell) deleteCheckpointLocked(_ context.Context, options DeleteCheckpoin
 		name string
 		run  func() error
 	}{
-		{"unseal", func() error {
-			if _, err := os.Lstat(filepath.Join(dir, checkpointWitnessName)); err == nil {
-				if err := removePrivateFile(filepath.Join(dir, checkpointWitnessName)); err != nil {
-					return err
-				}
-			} else if !errors.Is(err, fs.ErrNotExist) {
-				return err
-			}
-			return syncCheckpointDirectory(dir)
-		}},
-		{"remove", func() error {
-			if err := os.RemoveAll(dir); err != nil {
-				return err
-			}
-			return syncCheckpointDirectory(c.recoveryDir())
-		}},
+		{"unseal", func() error { return c.unsealCheckpointHeld(recovery, checkpoint, options.CheckpointID) }},
+		{"remove", func() error { return c.removeCheckpointHeld(recovery, checkpoint, options.CheckpointID) }},
 	} {
 		if err := c.step("checkpoint_delete", step.name, step.run); errors.Is(err, errInterrupted) {
 			return err

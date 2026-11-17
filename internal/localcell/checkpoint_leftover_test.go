@@ -354,14 +354,14 @@ func TestCheckpointLeftover(t *testing.T) {
 		var once sync.Once
 		var syncs atomic.Int32
 		unblock := func() { once.Do(func() { close(release) }) }
-		original := syncCheckpointDirectory
-		t.Cleanup(func() { syncCheckpointDirectory = original })
-		syncCheckpointDirectory = func(name string) error {
+		original := syncCheckpointRoot
+		t.Cleanup(func() { syncCheckpointRoot = original })
+		syncCheckpointRoot = func(held *os.Root) error {
 			if syncs.Add(1) == 1 {
 				close(entered)
 				<-release
 			}
-			return original(name)
+			return original(held)
 		}
 		f.prefix = retainedRead(t, c, "journal/operations.jsonl")
 		result := StartJoinedTestRunForTest(t, unblock, reinstallContentionBound, func() error {
@@ -434,13 +434,13 @@ func TestCheckpointLeftoverHelperProcess(t *testing.T) {
 		}
 		_ = c.Checkpoint(context.Background(), CheckpointOptions{InstallationID: argument})
 	case "delete":
-		original, syncs := syncCheckpointDirectory, 0
-		t.Cleanup(func() { syncCheckpointDirectory = original })
-		syncCheckpointDirectory = func(name string) error {
+		original, syncs := syncCheckpointRoot, 0
+		t.Cleanup(func() { syncCheckpointRoot = original })
+		syncCheckpointRoot = func(held *os.Root) error {
 			if syncs++; syncs == 1 {
 				block()
 			}
-			return original(name)
+			return original(held)
 		}
 		_ = c.DeleteCheckpoint(context.Background(), DeleteCheckpointOptions{CheckpointID: argument})
 	default:

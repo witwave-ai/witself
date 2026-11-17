@@ -1091,7 +1091,8 @@ func TestCheckpointNameSupported(t *testing.T) {
 // directory is gone (MX5); the unseal syncs the directory once the witness is
 // gone and before anything else is (MX4), and a failed unseal sync is returned.
 func TestCheckpointDirectorySyncOrder(t *testing.T) {
-	if reflect.ValueOf(syncCheckpointDirectory).Pointer() != reflect.ValueOf(syncDirectory).Pointer() {
+	if reflect.ValueOf(syncCheckpointDirectory).Pointer() != reflect.ValueOf(syncDirectory).Pointer() ||
+		reflect.ValueOf(syncCheckpointRoot).Pointer() != reflect.ValueOf(syncRootDirectory).Pointer() {
 		t.Fatal("checkpoint directory sync no longer defaults to syncDirectory")
 	}
 	const target = "ckpt_cccccccccccccccc"
@@ -1099,9 +1100,9 @@ func TestCheckpointDirectorySyncOrder(t *testing.T) {
 	// target directory, and fails the sync of *fail.
 	fixture := func(t *testing.T, fail *string, probe func(string) string) (*retainedFixture, *checkpointRecorder, *[]string) {
 		f, r := checkpointFixture(t, "legacy", false)
-		dir, synced, original := f.cell.path("recovery", target), &[]string{}, syncCheckpointDirectory
+		dir, synced, original, originalRoot := f.cell.path("recovery", target), &[]string{}, syncCheckpointDirectory, syncCheckpointRoot
 		r.nextID = func() (string, error) { return target, nil }
-		t.Cleanup(func() { syncCheckpointDirectory = original })
+		t.Cleanup(func() { syncCheckpointDirectory, syncCheckpointRoot = original, originalRoot })
 		syncCheckpointDirectory = func(name string) error {
 			rel, err := filepath.Rel(f.cell.recoveryDir(), name)
 			if *synced = append(*synced, filepath.ToSlash(rel)+probe(dir)); err != nil || filepath.ToSlash(rel) == *fail {
@@ -1109,6 +1110,7 @@ func TestCheckpointDirectorySyncOrder(t *testing.T) {
 			}
 			return original(name)
 		}
+		syncCheckpointRoot = func(held *os.Root) error { return syncCheckpointDirectory(filepath.Clean(held.Name())) }
 		return f, r, synced
 	}
 	present := func(name string) string {
