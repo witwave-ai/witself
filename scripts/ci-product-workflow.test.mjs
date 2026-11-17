@@ -189,7 +189,7 @@ function assertLocalcellWindowsJob(ci) {
     [
       '$goExit = 1',
       '& {',
-      '  go test -json ./internal/localcell ./internal/runtimeconfig ./internal/tools/localcellharness -count=1 -timeout=20m',
+      '  go test -json ./internal/localcell ./internal/runtimeconfig ./internal/tools/localcellharness -count=1 -timeout=30m',
       '  $script:goExit = $LASTEXITCODE',
       '} | node scripts/ci-go-test-json-check.mjs',
       '$parserExit = $LASTEXITCODE',
@@ -284,7 +284,7 @@ function assertLocalcellUnixJob(ci) {
     'node --test scripts/ci-go-test-json-check.test.mjs',
     [
       'set +e',
-      'go test -json ./internal/localcell ./internal/runtimeconfig ./internal/tools/localcellharness -count=1 -timeout=20m | node scripts/ci-go-test-json-check.mjs',
+      'go test -json ./internal/localcell ./internal/runtimeconfig ./internal/tools/localcellharness -count=1 -timeout=30m | node scripts/ci-go-test-json-check.mjs',
       'test_exits=("${PIPESTATUS[@]}")',
       'set -e',
       'if (( test_exits[0] != 0 || test_exits[1] != 0 )); then exit 1; fi',
