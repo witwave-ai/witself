@@ -521,6 +521,10 @@ func TestWindowsForegroundExitClassifierContract(t *testing.T) {
 							want = fmt.Sprintf(`t.Logf("foreground_exit class=%%s", "%s_budget");`, phase)
 						case "allowance_wait":
 							want = fmt.Sprintf(`t.Logf("foreground_exit class=%%s", "%s_allowance");`, phase)
+							if phase == "readiness" {
+								// A wait the remaining budget capped names the budget, not the host.
+								want = `if capped { t.Logf("foreground_exit class=%s", "readiness_budget_cap"); if iteration == 0 { t.Fatal("foreground synthetic budget exhausted before the derived readiness allowance on first start") }; t.Fatal("foreground synthetic budget exhausted before the derived readiness allowance after restart") };` + want
+							}
 						}
 						if phase == "shutdown" && contract.branch != "parent_wait" && contract.branch != "allowance_wait" {
 							want = "windowsLogForegroundExit(t, command, captured.Bytes());"

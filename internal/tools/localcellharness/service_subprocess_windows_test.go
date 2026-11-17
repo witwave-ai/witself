@@ -74,13 +74,17 @@ func TestWindowsServiceForegroundSubprocessCommands(t *testing.T) {
 	}
 	args := serviceFlags{root: root, timeout: time.Second}.hostArgs()
 	descriptor := localcell.ServiceDescriptor{Adapter: "foreground", DesiredState: "stopped", Payload: localcell.ServicePayload{Host: host, Args: args}}
+	// Preparation does, in process, a small share of the host's startup work.
+	prepared := time.Now()
 	if cell.PrepareService(ctx, descriptor) != nil {
 		t.Logf("foreground_exit class=%s", "fixture_prepare")
 		t.Fatal("cannot prepare synthetic foreground service")
 	}
+	prepare := time.Since(prepared)
 	environment := windowsForegroundHarnessEnvironment(t)
 	// The cold spawn uses the command budget; WaitDelay retains the cleanup reserve.
-	// Only subsequent commands use an allowance calibrated from this spawn.
+	// Later commands and shutdown use an allowance calibrated from this spawn;
+	// each readiness wait also scales the measurements foregroundReadinessAllowance names.
 	baseline := time.Now()
 	command := exec.CommandContext(commandCtx, host, "service", "install", "--root", root)
 	command.Env = environment
@@ -107,6 +111,8 @@ func TestWindowsServiceForegroundSubprocessCommands(t *testing.T) {
 		return command.CombinedOutput()
 	}
 	var oldStart, oldBoot string
+	var firstStart time.Duration
+	commandDeadline, _ := commandCtx.Deadline()
 	for iteration := 0; iteration < 2; iteration++ {
 		command := exec.CommandContext(commandCtx, host, "run", "--root", root)
 		command.Env = environment
@@ -132,11 +138,14 @@ func TestWindowsServiceForegroundSubprocessCommands(t *testing.T) {
 				}
 			}
 		})
-		deadline := time.NewTimer(allowance)
+		// A restart repeats the first start's work; both waits end inside the command deadline.
+		readiness, capped := foregroundReadinessAllowance(allowance, prepare, firstStart, time.Until(commandDeadline))
+		waitStart := time.Now()
+		deadline := time.NewTimer(readiness)
 		ticker := time.NewTicker(20 * time.Millisecond)
 		ready := false
 		for !ready {
-			probeCtx, probeCancel := context.WithTimeout(ctx, 100*time.Millisecond)
+			probeCtx, probeCancel := context.WithTimeout(ctx, foregroundStatusProbe)
 			status, err := cell.Control(probeCtx, "status")
 			probeCancel()
 			if err == nil && status.State == "stopped" {
@@ -178,6 +187,13 @@ func TestWindowsServiceForegroundSubprocessCommands(t *testing.T) {
 				}
 				t.Fatal("foreground readiness exceeded synthetic budget after restart")
 			case <-deadline.C:
+				if capped {
+					t.Logf("foreground_exit class=%s", "readiness_budget_cap")
+					if iteration == 0 {
+						t.Fatal("foreground synthetic budget exhausted before the derived readiness allowance on first start")
+					}
+					t.Fatal("foreground synthetic budget exhausted before the derived readiness allowance after restart")
+				}
 				t.Logf("foreground_exit class=%s", "readiness_allowance")
 				if iteration == 0 {
 					t.Fatal("foreground host did not expose authenticated status within allowance on first start")
@@ -185,6 +201,9 @@ func TestWindowsServiceForegroundSubprocessCommands(t *testing.T) {
 				t.Fatal("foreground host did not expose authenticated status within allowance after restart")
 			case <-ticker.C:
 			}
+		}
+		if iteration == 0 {
+			firstStart = time.Since(waitStart)
 		}
 		deadline.Stop()
 		ticker.Stop()

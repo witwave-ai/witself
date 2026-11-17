@@ -31,6 +31,7 @@ var foregroundSubprocessDiagnosticSites = []struct {
 	{"host_spawn", "cannot start synthetic foreground host", ""},
 	{"cleanup_budget", "foreground cleanup exceeded synthetic budget", ""},
 	{"readiness_budget", "foreground readiness exceeded synthetic budget on first start", "foreground readiness exceeded synthetic budget after restart"},
+	{"readiness_budget_cap", "foreground synthetic budget exhausted before the derived readiness allowance on first start", "foreground synthetic budget exhausted before the derived readiness allowance after restart"},
 	{"readiness_allowance", "foreground host did not expose authenticated status within allowance on first start", "foreground host did not expose authenticated status within allowance after restart"},
 	{"endpoint_binding", "foreground endpoint lost fresh process binding", ""},
 	{"boot_binding_check", "foreground restart lost independent boot binding", ""},
