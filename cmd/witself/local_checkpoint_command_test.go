@@ -675,6 +675,8 @@ func TestLocalCheckpointNeverStopsOrRepairs(t *testing.T) {
 				t.Fatal("package variable in the adapter")
 			case "route":
 				t.Fatal("command disconnection violated")
+			case "entry":
+				t.Fatal("signal context differs from its pinned text")
 			default:
 				t.Fatal("unclassified fence failure")
 			}
@@ -735,7 +737,10 @@ func init() { reviewInvokeCommand() }
 				{handler, "func localCheckpointIdentity", "var _ = usage\nfunc localCheckpointIdentity", "isolation"},
 				{adapter, "func localCheckpointFailed", "var _ = (*localcell.Cell).Stop\nfunc localCheckpointFailed", "allowlist"}, {adapter, "func localCheckpointFailed", "var _ = (*localcell.Cell).Repair\nfunc localCheckpointFailed", "allowlist"},
 				{adapter, "\t\"strings\"\n", "\t\"os/exec\"\n\t\"strings\"\n", "allowlist"}, {adapter, "func localCheckpointFailed", "var _ = exec.CommandContext\nfunc localCheckpointFailed", "allowlist"},
-				{adapter, "\t\"strings\"\n", "\t\"os/signal\"\n\t\"strings\"\n", "allowlist"}, {adapter, "func localCheckpointFailed", "var _ localCheckpointReceipt\nfunc localCheckpointFailed", "references"},
+				{adapter, "\t\"strings\"\n", "\t\"os/user\"\n\t\"strings\"\n", "allowlist"}, {adapter, "func localCheckpointFailed", "var _ localCheckpointReceipt\nfunc localCheckpointFailed", "references"},
+				{adapter, "func localCheckpointFailed", "func localCheckpointProbe() { signal.Reset() }\nfunc localCheckpointFailed", "allowlist"}, {adapter, "\tcontext.AfterFunc(ctx, stop)\n", "", "entry"},
+				{adapter, "func localCheckpointFailed", "func localCheckpointProbe() { _ = syscall.Kill }\nfunc localCheckpointFailed", "allowlist"},
+				{adapter, "failure := localcell.ClassifyCheckpointFailure(err)\n", "failure := localcell.ClassifyCheckpointFailure(err)\n\t_ = syscall.SIGTERM\n", "allowlist"},
 				{adapter, "func localCheckpointFailed", "var _ = run\nfunc localCheckpointFailed", "references"}, {adapter, "func localCheckpointFailed", "func checkpointHelper() {}\nfunc localCheckpointFailed", "prefix"},
 				{adapter, "func localCheckpointFailed", "func init() {}\nfunc localCheckpointFailed", "init"}, {"route.go", "", "package main\n\nvar _ = localCheckpointRun\n", "outside"},
 				{"main.go", "import (\n", "import (\n\t\"github.com/witwave-ai/witself/internal/localcell\"\n", "outside"}, {"unrelated.go", "", "package main\n\nvar mode, status, timeout string\n", ""},

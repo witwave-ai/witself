@@ -1351,7 +1351,7 @@ func TestCheckpointReleasedCallerContract(t *testing.T) {
 		const construct = "\tcell, err := localcell.New(localcell.Config{Root: r.root, Binaries: localcell.Binaries{PostgresDir: r.pgbin}, Timeout: r.timeout})\n"
 		const callbacksFor = "func localCheckpointCallbacksFor(mode localCheckpointMode, open func(localCheckpointMode, localCheckpointRequest) (localCheckpointCell, error)) localCheckpointCallbacks {\n"
 		const readOpen = callbacksFor + "\tread := func(ctx context.Context, r localCheckpointRequest) (localCheckpointObservation, localCheckpointFailure) {\n\t\tcell, err := open(mode, r)\n"
-		const opener, imports = "func localCheckpointNamespace() func(localCheckpointMode, localCheckpointRequest) (localCheckpointCell, error) {\n\treturn localCheckpointOpen\n}\n\n", "\t\"strings\"\n\n\t\"github.com/witwave-ai/witself/internal/localcell\"\n)\n"
+		const opener, imports = "func localCheckpointNamespace() func(localCheckpointMode, localCheckpointRequest) (localCheckpointCell, error) {\n\treturn localCheckpointOpen\n}\n\n", "\t\"syscall\"\n\n\t\"github.com/witwave-ai/witself/internal/localcell\"\n)\n"
 		for _, row := range []struct{ name, file, before, after, want string }{
 			{"guard-removed", adapter, guard, "", "open"},
 			{"guard-after-construction", adapter, guard + construct, construct + guard, "open"},

@@ -4,7 +4,10 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 
 	"github.com/witwave-ai/witself/internal/localcell"
 )
@@ -18,10 +21,11 @@ import (
 // localCheckpointOpen constructs once per callback invocation, after the
 // cold-v1 guard. --timeout budgets that context; Inspect and DeleteCheckpoint
 // ignore it, so it is no wall-clock bound, and an absolute binary path proves
-// no authenticity. An interrupted process is a crash that leaves journal state
-// for Repair, which this command never runs. A stdout failure mid-receipt can
-// leave a truncated line, after which the handler prints only its fixed
-// stderr line.
+// no authenticity. A first signal cancels the context; a killed process leaves
+// its operation open for the next admitted create or delete to close; a torn
+// journal tail still needs Repair, which this command never runs. A stdout
+// failure mid-receipt can leave a truncated line, after which the handler
+// prints only its fixed stderr line.
 type localCheckpointMode string
 
 // localCheckpointColdV1 is the only mode that constructs a Cell.
@@ -105,4 +109,16 @@ func localCheckpointRun(ctx context.Context, args []string, open func(localCheck
 		mode = localCheckpointColdV1
 	}
 	return localCheckpointCommand(ctx, args, localCheckpointCallbacksFor(mode, open), stdout, stderr)
+}
+
+// localCheckpointSignals makes the command's context; nothing in production
+// calls it yet. The first SIGINT, SIGTERM or SIGHUP cancels it (on Windows,
+// Ctrl-C and Ctrl-Break arrive as os.Interrupt; closing the console, logoff
+// and shutdown as SIGTERM). AfterFunc then runs stop, which restores the
+// default, so a further signal ends the process as before; one that arrives
+// before stop has run is absorbed.
+func localCheckpointSignals() (context.Context, context.CancelFunc) {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+	context.AfterFunc(ctx, stop)
+	return ctx, stop
 }
