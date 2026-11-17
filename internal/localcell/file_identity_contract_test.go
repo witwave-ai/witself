@@ -21,6 +21,7 @@ type fileIdentityCount struct {
 }
 
 var fileIdentityExpected = map[string]fileIdentityCount{
+	"checkpoint_root.go":                 {2, 0},
 	"drill_root.go":                      {2, 0},
 	"installer_principal_credentials.go": {3, 1},
 	"service_launchd.go":                 {4, 0},

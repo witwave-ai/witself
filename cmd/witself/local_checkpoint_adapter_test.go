@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -14,6 +15,7 @@ import (
 	"io/fs"
 	"maps"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"reflect"
@@ -39,12 +41,14 @@ func (e lcaError) As(target any) bool {
 	return e.cleanup && reflect.TypeOf(target).Elem().Name() == "checkpointCleanupError"
 }
 
-// lcaCell is every Cell its run's open returns. Inspect replays reads in
-// order (the last repeats) and fails read number failRead; calls are recorded.
+// lcaCell is every Cell its run's open returns, except open number failOpen,
+// which fails. Inspect replays reads in order (the last repeats) and fails
+// read number failRead; calls are recorded.
 type lcaCell struct {
 	t                 *testing.T
 	reads             []localcell.Inspection
 	failRead          int
+	failOpen          int
 	readErr, mutation error
 	golden            string
 	calls             []string
@@ -85,10 +89,13 @@ func (c *lcaCell) run(t *testing.T, args []string, want int, calls string) lcWir
 	c.t, c.calls = t, nil
 	opened := 0
 	receipt := lcaRun(t, args, func(mode localCheckpointMode, _ localCheckpointRequest) (localCheckpointCell, error) {
-		if mode != localCheckpointColdV1 {
+		if mode != "cold-v1" {
 			t.Fatal("adapter opened a cell without the selector")
 		}
-		opened++
+		if opened++; opened == c.failOpen {
+			c.calls = append(c.calls, "unconstructed")
+			return nil, lcaError{}
+		}
 		return c, nil
 	}, want, c.golden)
 	if strings.Join(c.calls, ",") != calls {
@@ -101,8 +108,7 @@ func (c *lcaCell) run(t *testing.T, args []string, want int, calls string) lcWir
 }
 
 // lcaRun drives localCheckpointRun once and checks the raw receipt: a set
-// golden equals stdout, stderr is empty, no sentinel, one LF-terminated line,
-// no key repeated at any depth, the closed projection and its disclosures.
+// golden equals stdout, stderr is empty, and lcaReceipt holds.
 func lcaRun(t *testing.T, args []string, open func(localCheckpointMode, localCheckpointRequest) (localCheckpointCell, error), want int, golden string) (receipt lcWireReceipt) {
 	t.Helper()
 	var out, errOut bytes.Buffer
@@ -116,6 +122,13 @@ func lcaRun(t *testing.T, args []string, open func(localCheckpointMode, localChe
 	if errOut.Len() != 0 {
 		t.Fatal("adapter wrote to stderr")
 	}
+	return lcaReceipt(t, raw)
+}
+
+// lcaReceipt checks a raw receipt: no sentinel, one LF-terminated line, no key
+// repeated at any depth, the closed projection and its disclosures.
+func lcaReceipt(t *testing.T, raw string) (receipt lcWireReceipt) {
+	t.Helper()
 	if strings.Contains(raw, lcSentinel) {
 		t.Fatal("adapter receipt carries a sentinel")
 	}
@@ -216,9 +229,19 @@ func (f lcImporter) Import(path string) (*types.Package, error) { return f(path)
 // Closed allowlists: the handler's package-level standard objects; the
 // adapter's imports, selector and composite-key names, and handler names.
 var lcHandlerUses = []string{"context.Context", "context.WithTimeout", "encoding/json.NewEncoder", "errors.New", "flag.ContinueOnError", "flag.NewFlagSet", "io.Discard", "io.WriteString", "io.Writer", "path/filepath.IsAbs", "regexp.MustCompile", "strings.Trim", "time.Duration", "time.ParseDuration", "time.Second", "time.Time"}
-var lcAdapterImports = []string{"context", "errors", "io", "os", "strings", "github.com/witwave-ai/witself/internal/localcell"}
+var lcAdapterImports = []string{"context", "errors", "io", "os", "os/signal", "strings", "syscall", "github.com/witwave-ai/witself/internal/localcell"}
 var lcAdapterNames = []string{"Binaries", "Bytes", "Checkpoint", "CheckpointID", "CheckpointListing", "CheckpointOptions", "CheckpointUnknown", "Checkpoints", "Class", "ClassifyCheckpointFailure", "CleanupIncomplete", "Complete", "Config", "ContainsRune", "Context", "CreatedAt", "DeleteCheckpoint", "DeleteCheckpointOptions", "ID", "Inspect", "Inspection", "InstallationID", "Manifest", "New", "PostgresDir", "Reason", "Root", "Timeout", "Writer", "checkpointID", "entries", "installationID", "installationPresent", "pgbin", "root", "status", "timeout", "unknown"}
 var lcAdapterHandler = []string{"localCheckpointCommand", "localCheckpointParse", "localCheckpointCallbacks", "localCheckpointRequest", "localCheckpointFailure", "localCheckpointObservation", "localCheckpointSummary"}
+
+// Signal names and objects, only inside localCheckpointSignals (pinned text).
+var lcSignalNames = []string{"AfterFunc", "Background", "CancelFunc", "Interrupt", "NotifyContext", "SIGHUP", "SIGTERM"}
+var lcSignalObjects = []string{"context.AfterFunc", "context.Background", "context.CancelFunc", "os.Interrupt", "os/signal.NotifyContext", "syscall.SIGHUP", "syscall.SIGTERM"}
+
+const lcSignalsEntry = `func localCheckpointSignals() (context.Context, context.CancelFunc) {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+	context.AfterFunc(ctx, stop)
+	return ctx, stop
+}`
 
 // lcCheck type-checks files as package main, importing only admitted paths.
 func lcCheck(files []*ast.File, admit func(string) bool) (*types.Scope, map[*ast.Ident]types.Object, []types.Error) {
@@ -290,10 +313,33 @@ func lcFence(module map[string]string) map[string]bool {
 				fail("outside", ok && strings.HasPrefix(ident.Name, "localCheckpoint"))
 				return true
 			})
-			fail("outside", path.Dir(name) == "cmd/witself" && slices.ContainsFunc(file.Imports, func(spec *ast.ImportSpec) bool { return spec.Path.Value == strconv.Quote(cell) }))
+			fail("outside", path.Dir(name) == "cmd/witself" && slices.ContainsFunc(file.Imports, func(spec *ast.ImportSpec) bool {
+				value, err := strconv.Unquote(spec.Path.Value)
+				return err != nil || value == cell
+			}))
 		}
 	}
-	// (e) The adapter's imports, selectors and composite keys are closed.
+	// (e) The adapter's imports, selectors and composite keys are closed; signal
+	// names and objects lie only in localCheckpointSignals, whose text is pinned.
+	signals := slices.IndexFunc(files[adapter].Decls, func(decl ast.Decl) bool {
+		function, ok := decl.(*ast.FuncDecl)
+		object := scope.Lookup("localCheckpointSignals")
+		return ok && object != nil && function.Name.Pos() == object.Pos()
+	})
+	inside := func(pos token.Pos) bool {
+		return signals >= 0 && files[adapter].Decls[signals].Pos() <= pos && pos < files[adapter].Decls[signals].End()
+	}
+	if fail("entry", signals < 0); signals >= 0 {
+		start, end := lcFset.Position(files[adapter].Decls[signals].Pos()).Offset, lcFset.Position(files[adapter].Decls[signals].End()).Offset
+		fail("entry", strings.ReplaceAll(module[adapter][start:end], "\r\n", "\n") != lcSignalsEntry)
+	}
+	for ident, object := range uses {
+		if lcFset.File(ident.Pos()).Name() == adapter && object.Pkg() != nil {
+			name := object.Pkg().Path() + "." + object.Name()
+			confined := object.Pkg().Path() == "os/signal" || object.Pkg().Path() == "syscall" || slices.Contains(lcSignalObjects, name)
+			fail("allowlist", confined && (!inside(ident.Pos()) || !slices.Contains(lcSignalObjects, name)))
+		}
+	}
 	for _, spec := range files[adapter].Imports {
 		value, err := strconv.Unquote(spec.Path.Value)
 		fail("allowlist", err != nil || spec.Name != nil || !slices.Contains(lcAdapterImports, value))
@@ -301,18 +347,22 @@ func lcFence(module map[string]string) map[string]bool {
 	ast.Inspect(files[adapter], func(node ast.Node) bool {
 		switch node := node.(type) {
 		case *ast.SelectorExpr:
-			fail("allowlist", !slices.Contains(lcAdapterNames, node.Sel.Name))
+			fail("allowlist", !slices.Contains(lcAdapterNames, node.Sel.Name) && (!inside(node.Pos()) || !slices.Contains(lcSignalNames, node.Sel.Name)))
 		case *ast.KeyValueExpr:
 			key, ok := node.Key.(*ast.Ident)
 			fail("allowlist", !ok || !slices.Contains(lcAdapterNames, key.Name))
 		}
 		return true
 	})
-	// (f) Neither file declares init. (g) run and usage, both present, hold
-	// no folded string constant equal to local or containing checkpoint.
+	// (f) Neither file declares init, and the adapter declares no package
+	// variable, whose initializer would run before main. (g) run and usage,
+	// both present, hold no folded string constant equal to local or
+	// containing checkpoint.
 	for _, decl := range append(slices.Clone(files[handler].Decls), files[adapter].Decls...) {
 		function, ok := decl.(*ast.FuncDecl)
 		fail("init", ok && function.Name.Name == "init")
+		general, ok := decl.(*ast.GenDecl)
+		fail("variable", ok && general.Tok == token.VAR && lcFset.File(decl.Pos()).Name() == adapter)
 	}
 	routes := 0
 	for _, decl := range files["cmd/witself/main.go"].Decls {
@@ -335,10 +385,11 @@ func TestLocalCheckpointAdapter(t *testing.T) {
 	t.Run("disabled-direct", func(t *testing.T) {
 		parent, root := lcaRoot(t)
 		before, pgbin := lcaTree(t, parent), filepath.Join(parent, "bin")
+		// The literal, never the constant it guards, is the expectation.
 		for _, r := range []localCheckpointRequest{{root: root, pgbin: pgbin}, {root: root + "\x00", pgbin: pgbin}, {root: root, pgbin: pgbin + "\x00"}} {
-			for _, mode := range []localCheckpointMode{"", "cold-v", "cold-v1 ", "COLD-V1", localCheckpointColdV1} {
+			for _, mode := range []localCheckpointMode{"", "cold-v", "cold-v1 ", "COLD-V1", "cold-v1"} {
 				cell, err := localCheckpointOpen(mode, r)
-				if (err == nil) != (mode == localCheckpointColdV1 && r.root == root && r.pgbin == pgbin) || (cell == nil) == (err == nil) {
+				if (err == nil) != (mode == "cold-v1" && r.root == root && r.pgbin == pgbin) || (cell == nil) == (err == nil) {
 					t.Fatal("adapter construction differs from the selector")
 				}
 			}
@@ -352,9 +403,22 @@ func TestLocalCheckpointAdapter(t *testing.T) {
 		after.Checkpoints = []localcell.CheckpointSummary{lcaSummary(lcID, true), lcaSummary(lcOtherID, true)}
 		cell := &lcaCell{reads: []localcell.Inspection{lcaListed(), after}, golden: `{"operation":"create","outcome":"succeeded","before":{"status":"listed","installation_id":"installation_A","count":0,"unknown_count":0},"after":{"status":"listed","installation_id":"installation_A","count":2,"unknown_count":0,"entries":[{"id":"ckpt_abcdefghijklmnop","installation_id":"installation_A","complete":true,"verification":"not_performed"},{"id":"ckpt_bcdefghijklmnopq","installation_id":"installation_A","complete":true,"verification":"not_performed"}]},"verification":"not_performed","notice":"NOTICE"}`}
 		cell.run(t, lcArgs("create"), 0, "read,create "+lcIdentity+",read")
-		for _, mode := range []localCheckpointMode{localCheckpointColdV1, ""} {
-			if callbacks := localCheckpointCallbacksFor(mode, localCheckpointOpen); callbacks.create == nil || callbacks.read == nil || callbacks.delete == nil {
+		(&lcaCell{failOpen: 2, golden: `{"operation":"create","outcome":"failed","failure":{"class":"local_checkpoint_operation_failed","cleanup_incomplete":false},"before":{"status":"listed","installation_id":"installation_A","count":0,"unknown_count":0},"after":{"status":"listed","installation_id":"installation_A","count":0,"unknown_count":0},"verification":"not_performed","notice":"NOTICE"}`}).run(t, lcArgs("create"), 1, "read,unconstructed,read")
+		for _, mode := range []localCheckpointMode{localCheckpointColdV1, "", "cold-v"} {
+			var opened []localCheckpointMode
+			callbacks := localCheckpointCallbacksFor(mode, func(selected localCheckpointMode, _ localCheckpointRequest) (localCheckpointCell, error) {
+				opened = append(opened, selected)
+				return nil, lcaError{}
+			})
+			if callbacks.create == nil || callbacks.read == nil || callbacks.delete == nil {
 				t.Fatal("adapter callback missing")
+			}
+			_, failure := callbacks.read(t.Context(), localCheckpointRequest{})
+			if failure.err == nil || callbacks.create(t.Context(), localCheckpointRequest{}).err == nil || callbacks.delete(t.Context(), localCheckpointRequest{}).err == nil {
+				t.Fatal("adapter callback hid a failed construction")
+			}
+			if !slices.Equal(opened, []localCheckpointMode{mode, mode, mode}) {
+				t.Fatal("adapter opened a cell with another mode")
 			}
 		}
 	})
@@ -362,13 +426,15 @@ func TestLocalCheckpointAdapter(t *testing.T) {
 		parent, root := lcaRoot(t)
 		before, args := lcaTree(t, parent), []string{"inspect", "--checkpoint-mode=cold-v1", "--root=" + root}
 		lcaRun(t, args, localCheckpointOpen, 0, `{"operation":"inspect","outcome":"succeeded","after":{"status":"listed","count":0,"unknown_count":0},"verification":"not_performed","notice":"NOTICE"}`)
+		unavailable := `{"operation":"inspect","outcome":"refused","failure":FAILURE,"after":{"status":"unavailable","failure":FAILURE},"verification":"not_performed","notice":"NOTICE"}`
+		lcaRun(t, lcReplace(args, "root", filepath.Join(parent, "missing", "root")), localCheckpointOpen, 1, strings.ReplaceAll(unavailable, "FAILURE", `{"class":"local_checkpoint_operation_failed","cleanup_incomplete":false}`))
 		if !maps.Equal(before, lcaTree(t, parent)) {
 			t.Fatal("inspect changed the real root")
 		}
-		if lcaPrivateFile(filepath.Join(root, ".owner.lock"), nil) != nil || lcaPrivateDir(filepath.Join(root, "recovery")) != nil || os.WriteFile(filepath.Join(root, "recovery", "stray"), nil, 0o644) != nil {
+		stray := filepath.Join(root, "recovery", "stray")
+		if lcaPrivateFile(filepath.Join(root, ".owner.lock"), nil) != nil || lcaPrivateDir(filepath.Join(root, "recovery")) != nil || os.WriteFile(stray, nil, 0o644) != nil || os.Chmod(stray, 0o644) != nil {
 			t.Fatal("cannot plant a refused recovery entry")
 		}
-		unavailable := `{"operation":"inspect","outcome":"refused","failure":FAILURE,"after":{"status":"unavailable","failure":FAILURE},"verification":"not_performed","notice":"NOTICE"}`
 		lcaRun(t, args, localCheckpointOpen, 1, strings.ReplaceAll(unavailable, "FAILURE", `{"class":"local_checkpoint_state_unsupported","reason":"descendant_refused","cleanup_incomplete":false}`))
 		listed := lcaListed()
 		listed.Manifest.Database, listed.Manifest.Role, listed.Manifest.AccountID, listed.Manifest.ServerVersion = lcSentinel, lcSentinel, lcSentinel, lcSentinel
@@ -389,6 +455,35 @@ func TestLocalCheckpointAdapter(t *testing.T) {
 		if lcaUniqueKeys(json.NewDecoder(strings.NewReader(`{"after":{"count":0,"count":1}}`))) {
 			t.Fatal("repeated receipt key admitted")
 		}
+		// Three entries, a fake's and then real ones: inspect lists each, opens
+		// once, calls no mutation, takes no lock and leaves every one in place.
+		// The third is planted after the fake's run: a re-entered read sees two.
+		parent, root = lcaRoot(t)
+		args, many := lcReplace(args, "root", root), localcell.Inspection{CheckpointListing: "listed"}
+		plant := func(id string) {
+			if lcaPrivateDir(filepath.Join(root, "recovery", id)) != nil || lcaPrivateFile(filepath.Join(root, "recovery", id, "inventory.json"), []byte("{}")) != nil {
+				t.Fatal("cannot plant three checkpoints")
+			}
+		}
+		if lcaPrivateFile(filepath.Join(root, ".owner.lock"), nil) != nil || lcaPrivateDir(filepath.Join(root, "recovery")) != nil {
+			t.Fatal("cannot plant three checkpoints")
+		}
+		for _, id := range []string{lcID, lcOtherID, "ckpt_cdefghijklmnopqr"} {
+			many.Checkpoints = append(many.Checkpoints, lcaSummary(id, false))
+		}
+		plant(lcID)
+		plant(lcOtherID)
+		before, golden := lcaTree(t, parent), `{"operation":"inspect","outcome":"succeeded","after":{"status":"listed","count":3,"unknown_count":0,"entries":[{"id":"ckpt_abcdefghijklmnop","complete":false,"verification":"not_performed"},{"id":"ckpt_bcdefghijklmnopq","complete":false,"verification":"not_performed"},{"id":"ckpt_cdefghijklmnopqr","complete":false,"verification":"not_performed"}]},"verification":"not_performed","notice":"NOTICE"}`
+		(&lcaCell{reads: []localcell.Inspection{many}, golden: golden}).run(t, args, 0, "read")
+		if !maps.Equal(before, lcaTree(t, parent)) {
+			t.Fatal("inspect changed the real root")
+		}
+		plant("ckpt_cdefghijklmnopqr")
+		before = lcaTree(t, parent)
+		lcaRun(t, args, localCheckpointOpen, 0, golden)
+		if !maps.Equal(before, lcaTree(t, parent)) {
+			t.Fatal("inspect changed the real root")
+		}
 	})
 	t.Run("exact-delete", func(t *testing.T) {
 		present, consent := lcaListed(), lcArgs("delete")
@@ -407,6 +502,8 @@ func TestLocalCheckpointAdapter(t *testing.T) {
 				t.Fatal("delete presence differs from the after-read")
 			}
 		}
+		listed := `{"status":"listed","installation_id":"installation_A","count":1,"unknown_count":0,"entries":[{"id":"ckpt_abcdefghijklmnop","installation_id":"installation_A","complete":true,"verification":"not_performed"}]}`
+		(&lcaCell{reads: []localcell.Inspection{present}, failOpen: 2, golden: `{"operation":"delete","outcome":"failed","failure":{"class":"local_checkpoint_operation_failed","cleanup_incomplete":false},"before":` + listed + `,"after":` + listed + `,"target":"ckpt_abcdefghijklmnop","presence":"present","verification":"not_performed","notice":"NOTICE"}`}).run(t, consent, 1, "read,unconstructed,read")
 		for _, args := range [][]string{consent[:3], append(slices.Clone(consent), "--checkpoint-id="+lcID), append(slices.Clone(consent), "--checkpoint-id="+lcOtherID)} {
 			(&lcaCell{}).run(t, args, 2, "")
 		}
@@ -473,4 +570,140 @@ func TestLocalCheckpointAdapter(t *testing.T) {
 			t.Fatal("fenced delete changed checkpoint, journal or manifest bytes")
 		}
 	})
+}
+
+// lcsCell: the verb's own call writes blocked and waits for the cancellation
+// (else unsignalled after 20 s); then create fails, and inspect and delete
+// succeed, as the API does. second-exits writes cancelled and holds.
+type lcsCell struct{ verb, call string }
+
+func (c *lcsCell) wait(ctx context.Context, call string) {
+	if call != c.call {
+		return
+	}
+	_, _ = io.WriteString(os.Stderr, "blocked\n")
+	select {
+	case <-ctx.Done():
+	case <-time.After(20 * time.Second):
+		_, _ = io.WriteString(os.Stderr, "unsignalled\n")
+		return
+	}
+	if c.verb == "second-exits" {
+		_, _ = io.WriteString(os.Stderr, "cancelled\n")
+		time.Sleep(20 * time.Second)
+	}
+}
+
+func (c *lcsCell) Inspect(ctx context.Context) (localcell.Inspection, error) {
+	c.wait(ctx, "inspect")
+	listed := lcaListed()
+	if c.verb == "delete" && c.call != "" {
+		listed.Checkpoints = []localcell.CheckpointSummary{lcaSummary(lcID, true)}
+	}
+	return listed, nil
+}
+
+func (c *lcsCell) Checkpoint(ctx context.Context, _ localcell.CheckpointOptions) error {
+	c.wait(ctx, "create")
+	return errors.New("checkpoint cancelled")
+}
+
+func (c *lcsCell) DeleteCheckpoint(ctx context.Context, _ localcell.DeleteCheckpointOptions) error {
+	c.wait(ctx, "delete")
+	c.call = ""
+	return nil
+}
+
+// TestLocalCheckpointSignalHelperProcess is TestLocalCheckpointSignal's child
+// when its last two arguments are local-checkpoint-signal-helper and a verb.
+func TestLocalCheckpointSignalHelperProcess(_ *testing.T) {
+	if len(os.Args) < 3 || os.Args[len(os.Args)-2] != "local-checkpoint-signal-helper" {
+		return
+	}
+	cell := &lcsCell{verb: os.Args[len(os.Args)-1], call: strings.Replace(os.Args[len(os.Args)-1], "second-exits", "create", 1)}
+	ctx, stop := localCheckpointSignals()
+	code := localCheckpointRun(ctx, lcArgs(cell.call), func(localCheckpointMode, localCheckpointRequest) (localCheckpointCell, error) { return cell, nil }, os.Stdout, os.Stderr)
+	stop()
+	os.Exit(code)
+}
+
+// TestLocalCheckpointSignal signals the command child once its call blocks: it
+// ends on its own with one clean receipt; for second-exits a signal repeated
+// every 50 ms (at most 10 s) ends it by that signal, with no receipt.
+func TestLocalCheckpointSignal(t *testing.T) {
+	for _, verb := range []string{"create", "delete", "inspect", "second-exits"} {
+		t.Run(verb, func(t *testing.T) {
+			for _, name := range lcsNames {
+				t.Run(name, func(t *testing.T) {
+					ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+					defer cancel()
+					child := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestLocalCheckpointSignalHelperProcess$", "--", "local-checkpoint-signal-helper", verb)
+					// A coverage build writes its data on exit, else a warning to stderr.
+					child.Env = []string{"WITSELF_HOME=" + t.TempDir(), "DSH_HOME=" + t.TempDir(), "GOCOVERDIR=" + os.Getenv("GOCOVERDIR")}
+					var stdout bytes.Buffer
+					child.Stdout = &stdout
+					stderr, err := child.StderrPipe()
+					if err != nil || lcsStart(child, name) != nil {
+						t.Fatal("cannot start the signal helper")
+					}
+					t.Cleanup(func() {
+						_ = child.Process.Kill()
+						_ = child.Wait()
+					})
+					reader := bufio.NewReader(stderr)
+					if line, err := reader.ReadString('\n'); err != nil || line != "blocked\n" {
+						t.Fatal("the signal helper did not block in its call")
+					}
+					if lcsSend(child.Process, name) != nil {
+						t.Fatal("cannot signal the signal helper")
+					}
+					if verb == "second-exits" {
+						if line, err := reader.ReadString('\n'); err != nil || line != "cancelled\n" {
+							t.Fatal("the first signal did not cancel the call")
+						}
+					}
+					// The rest of stderr must be empty. The child is not reaped while
+					// signals are sent, so its identifier cannot name another process.
+					ended := make(chan bool, 1)
+					go func() {
+						rest, err := io.ReadAll(reader)
+						ended <- err == nil && len(rest) == 0
+					}()
+					var clean bool
+					for deadline, done := time.Now().Add(10*time.Second), false; !done; {
+						select {
+						case clean = <-ended:
+							done = true
+						case <-time.After(50 * time.Millisecond):
+							if time.Now().After(deadline) {
+								t.Fatal("the signalled command did not end within its bound")
+							}
+							if verb == "second-exits" {
+								_ = lcsSend(child.Process, name)
+							}
+						}
+					}
+					_ = child.Wait()
+					if verb == "second-exits" {
+						if !clean || stdout.Len() != 0 || !lcsEndedBy(child.ProcessState, name) {
+							t.Fatal("a further signal did not end the command by that signal")
+						}
+						return
+					}
+					if !clean || child.ProcessState.ExitCode() != map[string]int{"create": 1}[verb] {
+						t.Fatal("the signalled command did not end on its own")
+					}
+					r := lcaReceipt(t, stdout.String())
+					switch {
+					case verb == "create" && (r.Outcome != "failed" || r.Failure == nil || r.Failure.Class != "local_checkpoint_operation_failed" || r.After == nil || r.After.Status != "listed"):
+						t.Fatal("a signalled create did not fail with its after-read")
+					case verb == "delete" && (r.Outcome != "succeeded" || r.Failure != nil || r.Target != lcID || r.Before == nil || r.Before.Count == nil || *r.Before.Count != 1 || r.Presence != "absent"):
+						t.Fatal("a signalled delete did not finish with its after-read")
+					case verb == "inspect" && (r.Outcome != "succeeded" || r.After == nil || r.After.Status != "listed"):
+						t.Fatal("a signalled inspect did not list")
+					}
+				})
+			}
+		})
+	}
 }

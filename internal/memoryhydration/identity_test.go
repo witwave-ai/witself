@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/witwave-ai/witself/internal/client"
 	"github.com/witwave-ai/witself/internal/transcriptcapture"
@@ -43,6 +44,8 @@ func TestIdentityStatementNames(t *testing.T) {
 		{"backtick", "a`b", false}, {"brace", "a{b", false}, {"close_brace", "a}b", false}, {"newline", "a\nb", false}, {"tab", "a\tb", false},
 		{"leading", " a", false}, {"trailing", "a ", false}, {"spaces", "a  b", false}, {"unicode", "Férn 葉", true},
 		{"modifier", "aʰ", false}, {"punctuation", ".-_ .", false}, {"digit", "7", true}, {"maximum", strings.Repeat("a", 48), true},
+		{"filler", "\u3164", false}, {"fillers", "\u115f\u1160 \uffa0", false}, {"filler_punctuation", "\u3164.\u3164", false},
+		{"filler_and_letter", "a\u3164b", true}, {"hangul", "\ud55c\uae00", true},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			if ValidIdentityName(row.value) != row.valid {
@@ -246,10 +249,9 @@ func TestIdentityStatementMeasurements(t *testing.T) {
 	for _, n := range []int{5, 48} {
 		for _, form := range []IdentityForm{IdentityShort, IdentityOneLine} {
 			statement := RenderIdentityStatement(strings.Repeat("a", n), "", form)
-			field, _ := json.Marshal(struct {
-				Statement string `json:"identity_statement"`
-			}{statement})
-			t.Logf("name_bytes=%d form=%d raw_bytes=%d JSON_field_bytes=%d", n, form, len(statement), len(field)-2)
+			withField, _ := json.Marshal(contextEnvelope{IdentityStatement: statement})
+			withoutField, _ := json.Marshal(contextEnvelope{})
+			t.Logf("name_bytes=%d form=%d raw_bytes=%d marginal_envelope_bytes=%d", n, form, len(statement), len(withField)-len(withoutField))
 		}
 	}
 	d := client.SelfDigest{Identity: exactIdentity(), PrimaryFacts: []client.SelfFact{{Value: strings.Repeat("f", 1000)}}}
@@ -274,4 +276,68 @@ func TestIdentityStatementMeasurements(t *testing.T) {
 		t.Fatal("expected one least salient memory displaced")
 	}
 	t.Logf("default budget baseline_bytes=%d with_bytes=%d memories_without=%d memories_with=%d facts_without=%d facts_with=%d", len(baseline), len(with), len(a.NarrativeMemories), len(b.NarrativeMemories), len(a.CanonicalFacts), len(b.CanonicalFacts))
+}
+
+func TestIdentityStatementHookLimit(t *testing.T) {
+	limit := maximumClaudeHookOutputCharacters
+	// A hook is limited when it takes one character and refuses limit+1.
+	limited := func(runtime string) bool {
+		_, one := HookOutput(runtime, EventSessionStart, "a")
+		_, over := HookOutput(runtime, EventSessionStart, strings.Repeat("a", limit+1))
+		return one == nil && over != nil
+	}
+	if !limited(transcriptcapture.RuntimeClaudeCode) || limited(transcriptcapture.RuntimeCodex) {
+		t.Fatal("hook fixture no longer separates a limited runtime")
+	}
+	for _, wide := range []string{"a", "\u00e9", "\u8449", "\U0001f33f"} {
+		for _, over := range []int{0, 1} {
+			for _, runtime := range transcriptcapture.SupportedRuntimes() {
+				t.Run(fmt.Sprintf("%s_width%d_over%d", runtime, len(wide), over), func(t *testing.T) {
+					d := client.SelfDigest{Identity: exactIdentity(), MemoryCheckpoint: &client.SelfMemoryCheckpoint{Pending: true, RequestID: "fixture", RequestGeneration: 1}}
+					d.PrimaryFacts = []client.SelfFact{{ID: "fixture", Name: "fixture/name", Value: strings.Repeat(wide, 1500)}}
+					probe, err := renderSelf(d, MaximumContextBytes, runtime)
+					if err != nil {
+						t.Fatal(err)
+					}
+					// ASCII padding gives the untrimmed envelope exactly limit+over code points.
+					d.PrimaryFacts[0].Value = strings.Repeat(wide, 1500) + strings.Repeat("a", limit+over-utf8.RuneCountInString(probe))
+					for _, b := range []int{1024, DefaultMaximumBytes, limit - 1, limit, limit + 1, MaximumContextBytes} {
+						text, err := renderSelf(d, b, runtime)
+						byteBounded, byteErr := marshalBounded(selfEnvelope(d, b, runtime), b)
+						if err != nil || byteErr != nil {
+							t.Fatalf("render failed at budget %d: %v %v", b, err, byteErr)
+						}
+						e := identityEnvelope(t, text)
+						if !limited(runtime) || utf8.RuneCountInString(byteBounded) <= limit {
+							if text != byteBounded {
+								t.Fatalf("hook-acceptable context changed at budget %d", b)
+							}
+						} else if utf8.RuneCountInString(text) > limit || !e.Elided || b == MaximumContextBytes && (len(e.CanonicalFacts) != 0 || e.IdentityStatement == "") {
+							t.Fatalf("over-limit context was not trimmed at budget %d", b)
+						}
+						if _, hookErr := HookOutput(runtime, EventSessionStart, text); limited(runtime) && hookErr != nil {
+							t.Fatalf("limited hook refused the context at budget %d", b)
+						}
+						if alone, _ := marshalHookBounded(selfEnvelope(d, b, transcriptcapture.RuntimeCodex), b, limit); limited(runtime) && e.IdentityStatement == "" && text != alone {
+							t.Fatalf("statement-free context differs at budget %d", b)
+						}
+						if b == MaximumContextBytes && (utf8.RuneCountInString(byteBounded) != limit+over || len(wide) > 1 && len(byteBounded) <= limit) {
+							t.Fatal("fixture is not at the hook boundary")
+						}
+					}
+				})
+			}
+		}
+	}
+	t.Run("statement_replay", func(t *testing.T) {
+		d := client.SelfDigest{Identity: exactIdentity(), MemoryCheckpoint: &client.SelfMemoryCheckpoint{Pending: true, RequestID: "fixture", RequestGeneration: 1}}
+		probe, _ := renderSelf(d, MaximumContextBytes, transcriptcapture.RuntimeCodex)
+		// Without the statement the envelope still exceeds the limit by one code point.
+		d.Identity.RealmName += strings.Repeat("r", limit+1-utf8.RuneCountInString(probe))
+		text, err := renderSelf(d, MaximumContextBytes, transcriptcapture.RuntimeClaudeCode)
+		alone, aloneErr := marshalHookBounded(selfEnvelope(d, MaximumContextBytes, transcriptcapture.RuntimeCodex), MaximumContextBytes, limit)
+		if err != nil || aloneErr != nil || text != alone || utf8.RuneCountInString(text) > limit || identityEnvelope(t, text).CheckpointPolicy != "" {
+			t.Fatal("statement replay is not held to the hook limit")
+		}
+	})
 }

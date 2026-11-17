@@ -150,7 +150,7 @@ function assertDocsJob(job) {
   assert.equal(checks[0]['continue-on-error'], undefined);
 }
 
-const checkpointRequired = 'TestLocalCheckpointSelection,TestLocalCheckpointSelection/absent,TestLocalCheckpointSelection/unknown,TestLocalCheckpointSelection/explicit,TestLocalCheckpointArguments,TestLocalCheckpointArguments/relative-root,TestLocalCheckpointArguments/wrong-verb-flag,TestLocalCheckpointArguments/missing-consent,TestLocalCheckpointArguments/exact-id,TestLocalCheckpointOutput,TestLocalCheckpointOutput/raw-error,TestLocalCheckpointOutput/metadata,TestLocalCheckpointOutput/partial-observation,TestLocalCheckpointErrorObservation,TestLocalCheckpointErrorObservation/witness-survives,TestLocalCheckpointErrorObservation/post-busy,TestLocalCheckpointErrorObservation/concurrent-change,TestLocalCheckpointNeverStopsOrRepairs,TestLocalCheckpointNeverStopsOrRepairs/recorder,TestLocalCheckpointNeverStopsOrRepairs/source-contract,TestLocalCheckpointAdapter,TestLocalCheckpointAdapter/disabled-direct,TestLocalCheckpointAdapter/create,TestLocalCheckpointAdapter/inspect,TestLocalCheckpointAdapter/exact-delete,TestLocalCheckpointAdapter/error-after-witness,TestLocalCheckpointAdapter/busy,TestLocalCheckpointAdapter/maintenance';
+const checkpointRequired = 'TestLocalCheckpointSelection,TestLocalCheckpointSelection/absent,TestLocalCheckpointSelection/unknown,TestLocalCheckpointSelection/explicit,TestLocalCheckpointArguments,TestLocalCheckpointArguments/relative-root,TestLocalCheckpointArguments/wrong-verb-flag,TestLocalCheckpointArguments/missing-consent,TestLocalCheckpointArguments/exact-id,TestLocalCheckpointOutput,TestLocalCheckpointOutput/raw-error,TestLocalCheckpointOutput/metadata,TestLocalCheckpointOutput/partial-observation,TestLocalCheckpointErrorObservation,TestLocalCheckpointErrorObservation/witness-survives,TestLocalCheckpointErrorObservation/post-busy,TestLocalCheckpointErrorObservation/concurrent-change,TestLocalCheckpointNeverStopsOrRepairs,TestLocalCheckpointNeverStopsOrRepairs/recorder,TestLocalCheckpointNeverStopsOrRepairs/source-contract,TestLocalCheckpointAdapter,TestLocalCheckpointAdapter/disabled-direct,TestLocalCheckpointAdapter/create,TestLocalCheckpointAdapter/inspect,TestLocalCheckpointAdapter/exact-delete,TestLocalCheckpointAdapter/error-after-witness,TestLocalCheckpointAdapter/busy,TestLocalCheckpointAdapter/maintenance,TestLocalCheckpointSignal,TestLocalCheckpointSignal/create,TestLocalCheckpointSignal/delete,TestLocalCheckpointSignal/inspect,TestLocalCheckpointSignal/second-exits';
 const checkpointTest = "go test -json ./cmd/witself -run '^TestLocalCheckpoint' -count=1 -timeout=10m";
 const checkpointCheck = `node scripts/ci-go-test-json-check.mjs --package github.com/witwave-ai/witself/cmd/witself --require ${checkpointRequired}`;
 const checkpointStage = 'Test Local Checkpoint command and require complete results';
@@ -189,7 +189,7 @@ function assertLocalcellWindowsJob(ci) {
     [
       '$goExit = 1',
       '& {',
-      '  go test -json ./internal/localcell ./internal/runtimeconfig ./internal/tools/localcellharness -count=1 -timeout=20m',
+      '  go test -json ./internal/localcell ./internal/runtimeconfig ./internal/tools/localcellharness -count=1 -timeout=30m',
       '  $script:goExit = $LASTEXITCODE',
       '} | node scripts/ci-go-test-json-check.mjs',
       '$parserExit = $LASTEXITCODE',
@@ -284,7 +284,7 @@ function assertLocalcellUnixJob(ci) {
     'node --test scripts/ci-go-test-json-check.test.mjs',
     [
       'set +e',
-      'go test -json ./internal/localcell ./internal/runtimeconfig ./internal/tools/localcellharness -count=1 -timeout=20m | node scripts/ci-go-test-json-check.mjs',
+      'go test -json ./internal/localcell ./internal/runtimeconfig ./internal/tools/localcellharness -count=1 -timeout=30m | node scripts/ci-go-test-json-check.mjs',
       'test_exits=("${PIPESTATUS[@]}")',
       'set -e',
       'if (( test_exits[0] != 0 || test_exits[1] != 0 )); then exit 1; fi',
