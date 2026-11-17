@@ -39,12 +39,14 @@ func (e lcaError) As(target any) bool {
 	return e.cleanup && reflect.TypeOf(target).Elem().Name() == "checkpointCleanupError"
 }
 
-// lcaCell is every Cell its run's open returns. Inspect replays reads in
-// order (the last repeats) and fails read number failRead; calls are recorded.
+// lcaCell is every Cell its run's open returns, except open number failOpen,
+// which fails. Inspect replays reads in order (the last repeats) and fails
+// read number failRead; calls are recorded.
 type lcaCell struct {
 	t                 *testing.T
 	reads             []localcell.Inspection
 	failRead          int
+	failOpen          int
 	readErr, mutation error
 	golden            string
 	calls             []string
@@ -88,7 +90,10 @@ func (c *lcaCell) run(t *testing.T, args []string, want int, calls string) lcWir
 		if mode != localCheckpointColdV1 {
 			t.Fatal("adapter opened a cell without the selector")
 		}
-		opened++
+		if opened++; opened == c.failOpen {
+			c.calls = append(c.calls, "unconstructed")
+			return nil, lcaError{}
+		}
 		return c, nil
 	}, want, c.golden)
 	if strings.Join(c.calls, ",") != calls {
@@ -290,7 +295,10 @@ func lcFence(module map[string]string) map[string]bool {
 				fail("outside", ok && strings.HasPrefix(ident.Name, "localCheckpoint"))
 				return true
 			})
-			fail("outside", path.Dir(name) == "cmd/witself" && slices.ContainsFunc(file.Imports, func(spec *ast.ImportSpec) bool { return spec.Path.Value == strconv.Quote(cell) }))
+			fail("outside", path.Dir(name) == "cmd/witself" && slices.ContainsFunc(file.Imports, func(spec *ast.ImportSpec) bool {
+				value, err := strconv.Unquote(spec.Path.Value)
+				return err != nil || value == cell
+			}))
 		}
 	}
 	// (e) The adapter's imports, selectors and composite keys are closed.
@@ -308,11 +316,15 @@ func lcFence(module map[string]string) map[string]bool {
 		}
 		return true
 	})
-	// (f) Neither file declares init. (g) run and usage, both present, hold
-	// no folded string constant equal to local or containing checkpoint.
+	// (f) Neither file declares init, and the adapter declares no package
+	// variable, whose initializer would run before main. (g) run and usage,
+	// both present, hold no folded string constant equal to local or
+	// containing checkpoint.
 	for _, decl := range append(slices.Clone(files[handler].Decls), files[adapter].Decls...) {
 		function, ok := decl.(*ast.FuncDecl)
 		fail("init", ok && function.Name.Name == "init")
+		general, ok := decl.(*ast.GenDecl)
+		fail("variable", ok && general.Tok == token.VAR && lcFset.File(decl.Pos()).Name() == adapter)
 	}
 	routes := 0
 	for _, decl := range files["cmd/witself/main.go"].Decls {
@@ -352,9 +364,22 @@ func TestLocalCheckpointAdapter(t *testing.T) {
 		after.Checkpoints = []localcell.CheckpointSummary{lcaSummary(lcID, true), lcaSummary(lcOtherID, true)}
 		cell := &lcaCell{reads: []localcell.Inspection{lcaListed(), after}, golden: `{"operation":"create","outcome":"succeeded","before":{"status":"listed","installation_id":"installation_A","count":0,"unknown_count":0},"after":{"status":"listed","installation_id":"installation_A","count":2,"unknown_count":0,"entries":[{"id":"ckpt_abcdefghijklmnop","installation_id":"installation_A","complete":true,"verification":"not_performed"},{"id":"ckpt_bcdefghijklmnopq","installation_id":"installation_A","complete":true,"verification":"not_performed"}]},"verification":"not_performed","notice":"NOTICE"}`}
 		cell.run(t, lcArgs("create"), 0, "read,create "+lcIdentity+",read")
-		for _, mode := range []localCheckpointMode{localCheckpointColdV1, ""} {
-			if callbacks := localCheckpointCallbacksFor(mode, localCheckpointOpen); callbacks.create == nil || callbacks.read == nil || callbacks.delete == nil {
+		(&lcaCell{failOpen: 2, golden: `{"operation":"create","outcome":"failed","failure":{"class":"local_checkpoint_operation_failed","cleanup_incomplete":false},"before":{"status":"listed","installation_id":"installation_A","count":0,"unknown_count":0},"after":{"status":"listed","installation_id":"installation_A","count":0,"unknown_count":0},"verification":"not_performed","notice":"NOTICE"}`}).run(t, lcArgs("create"), 1, "read,unconstructed,read")
+		for _, mode := range []localCheckpointMode{localCheckpointColdV1, "", "cold-v"} {
+			var opened []localCheckpointMode
+			callbacks := localCheckpointCallbacksFor(mode, func(selected localCheckpointMode, _ localCheckpointRequest) (localCheckpointCell, error) {
+				opened = append(opened, selected)
+				return nil, lcaError{}
+			})
+			if callbacks.create == nil || callbacks.read == nil || callbacks.delete == nil {
 				t.Fatal("adapter callback missing")
+			}
+			_, failure := callbacks.read(t.Context(), localCheckpointRequest{})
+			if failure.err == nil || callbacks.create(t.Context(), localCheckpointRequest{}).err == nil || callbacks.delete(t.Context(), localCheckpointRequest{}).err == nil {
+				t.Fatal("adapter callback hid a failed construction")
+			}
+			if !slices.Equal(opened, []localCheckpointMode{mode, mode, mode}) {
+				t.Fatal("adapter opened a cell with another mode")
 			}
 		}
 	})
@@ -362,13 +387,15 @@ func TestLocalCheckpointAdapter(t *testing.T) {
 		parent, root := lcaRoot(t)
 		before, args := lcaTree(t, parent), []string{"inspect", "--checkpoint-mode=cold-v1", "--root=" + root}
 		lcaRun(t, args, localCheckpointOpen, 0, `{"operation":"inspect","outcome":"succeeded","after":{"status":"listed","count":0,"unknown_count":0},"verification":"not_performed","notice":"NOTICE"}`)
+		unavailable := `{"operation":"inspect","outcome":"refused","failure":FAILURE,"after":{"status":"unavailable","failure":FAILURE},"verification":"not_performed","notice":"NOTICE"}`
+		lcaRun(t, lcReplace(args, "root", filepath.Join(parent, "missing", "root")), localCheckpointOpen, 1, strings.ReplaceAll(unavailable, "FAILURE", `{"class":"local_checkpoint_operation_failed","cleanup_incomplete":false}`))
 		if !maps.Equal(before, lcaTree(t, parent)) {
 			t.Fatal("inspect changed the real root")
 		}
-		if lcaPrivateFile(filepath.Join(root, ".owner.lock"), nil) != nil || lcaPrivateDir(filepath.Join(root, "recovery")) != nil || os.WriteFile(filepath.Join(root, "recovery", "stray"), nil, 0o644) != nil {
+		stray := filepath.Join(root, "recovery", "stray")
+		if lcaPrivateFile(filepath.Join(root, ".owner.lock"), nil) != nil || lcaPrivateDir(filepath.Join(root, "recovery")) != nil || os.WriteFile(stray, nil, 0o644) != nil || os.Chmod(stray, 0o644) != nil {
 			t.Fatal("cannot plant a refused recovery entry")
 		}
-		unavailable := `{"operation":"inspect","outcome":"refused","failure":FAILURE,"after":{"status":"unavailable","failure":FAILURE},"verification":"not_performed","notice":"NOTICE"}`
 		lcaRun(t, args, localCheckpointOpen, 1, strings.ReplaceAll(unavailable, "FAILURE", `{"class":"local_checkpoint_state_unsupported","reason":"descendant_refused","cleanup_incomplete":false}`))
 		listed := lcaListed()
 		listed.Manifest.Database, listed.Manifest.Role, listed.Manifest.AccountID, listed.Manifest.ServerVersion = lcSentinel, lcSentinel, lcSentinel, lcSentinel
@@ -407,6 +434,8 @@ func TestLocalCheckpointAdapter(t *testing.T) {
 				t.Fatal("delete presence differs from the after-read")
 			}
 		}
+		listed := `{"status":"listed","installation_id":"installation_A","count":1,"unknown_count":0,"entries":[{"id":"ckpt_abcdefghijklmnop","installation_id":"installation_A","complete":true,"verification":"not_performed"}]}`
+		(&lcaCell{reads: []localcell.Inspection{present}, failOpen: 2, golden: `{"operation":"delete","outcome":"failed","failure":{"class":"local_checkpoint_operation_failed","cleanup_incomplete":false},"before":` + listed + `,"after":` + listed + `,"target":"ckpt_abcdefghijklmnop","presence":"present","verification":"not_performed","notice":"NOTICE"}`}).run(t, consent, 1, "read,unconstructed,read")
 		for _, args := range [][]string{consent[:3], append(slices.Clone(consent), "--checkpoint-id="+lcID), append(slices.Clone(consent), "--checkpoint-id="+lcOtherID)} {
 			(&lcaCell{}).run(t, args, 2, "")
 		}
