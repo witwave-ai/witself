@@ -674,9 +674,9 @@ func TestLocalCheckpointNeverStopsOrRepairs(t *testing.T) {
 			case "variable":
 				t.Fatal("package variable in the adapter")
 			case "route":
-				t.Fatal("command disconnection violated")
+				t.Fatal("command route or help line differs from its pin")
 			case "entry":
-				t.Fatal("signal context differs from its pinned text")
+				t.Fatal("an entry function differs from its pinned text")
 			default:
 				t.Fatal("unclassified fence failure")
 			}
@@ -749,6 +749,12 @@ func init() { reviewInvokeCommand() }
 				{adapter, "err = cell.DeleteCheckpoint(", "_ = cell.(interface{ Stop(context.Context) error }).Stop(ctx)\n\t\t\terr = cell.DeleteCheckpoint(", "allowlist"}, {adapter, "err = cell.DeleteCheckpoint(", "_ = cell.(interface{ Repair(context.Context) error }).Repair(ctx)\n\t\t\terr = cell.DeleteCheckpoint(", "allowlist"},
 				{handler, "import (\n", "import (\n _ \"os/exec\"\n", "isolation"}, {adapter, "PostgresDir: r.pgbin}", "PostgresDir: r.pgbin, Server: r.pgbin}", "allowlist"},
 				{"main.go", "func usage(w io.Writer) {", "func usageRenamed(w io.Writer) {\n _ = \"witself local checkpoint\"", "route"}, {"other.go", "", "package main\n\nimport cellpkg `github.com/witwave-ai/witself/internal/localcell`\n\nvar _ = (*cellpkg.Cell).Stop\n", "outside"},
+				{"main.go", "\tcase \"local\":\n", "\tcase \"local\", \"lcl\":\n", "route"}, {"main.go", "\tcase \"local\":\n", "\tcase \"lcl\":\n\t\treturn localCheckpointNamespace(args[1:])\n\tcase \"local\":\n", "outside"},
+				{"main.go", "\tcliout.Line(w, \"  witself help", "\tcliout.Line(w, \"" + lcHelp + "\")\n\tcliout.Line(w, \"  witself help", "route"}, {"main.go", "func usage(w io.Writer) {", "func usage(w io.Writer) {\n\t_ = localCheckpointNamespace", "outside"},
+				{"main.go", "\t\"os\"\n", "\t\"os\"\n\t\"os/signal\"\n", "route"}, {adapter, "localCheckpointRun(ctx, args[1:],", "localCheckpointRun(ctx, append(args[1:], \"--checkpoint-mode=cold-v1\"),", "entry"},
+				{adapter, "ctx, stop := localCheckpointSignals()", "_, stop := localCheckpointSignals()\n\tctx := context.Background()", "entry"}, {adapter, "err = cell.DeleteCheckpoint(", "_ = os.Stdout\n\t\t\terr = cell.DeleteCheckpoint(", "allowlist"},
+				{adapter, "err = cell.DeleteCheckpoint(", "_, _ = localCheckpointSignals()\n\t\t\terr = cell.DeleteCheckpoint(", "references"},
+				{"main.go", "\tcase \"local\":\n", "\tcase \"lcl\":\n\t\t_ = \"local\"\n", "route"}, {"main.go", "localCheckpointNamespace(args[1:])", "localCheckpointNamespace(args)", "route"},
 			} {
 				input := map[string]string{}
 				for name, source := range base {

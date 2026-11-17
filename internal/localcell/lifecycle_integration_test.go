@@ -34,6 +34,7 @@ func TestRealLifecycle(t *testing.T) {
 	t.Run("InstallerPrincipals", func(t *testing.T) { testInstallerPrincipalsNative(t, binaries) })
 	t.Run("RetainedReinstall", func(t *testing.T) { testRetainedReinstallNative(t, binaries) })
 	t.Run("Checkpoint", func(t *testing.T) { testCheckpointNative(t, binaries) })
+	t.Run("CheckpointCommand", func(t *testing.T) { testCheckpointCommandNative(t, binaries) })
 }
 
 func postgresBinariesPresent(directory string) bool {

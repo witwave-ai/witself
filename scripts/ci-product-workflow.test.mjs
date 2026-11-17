@@ -150,7 +150,7 @@ function assertDocsJob(job) {
   assert.equal(checks[0]['continue-on-error'], undefined);
 }
 
-const checkpointRequired = 'TestLocalCheckpointSelection,TestLocalCheckpointSelection/absent,TestLocalCheckpointSelection/unknown,TestLocalCheckpointSelection/explicit,TestLocalCheckpointArguments,TestLocalCheckpointArguments/relative-root,TestLocalCheckpointArguments/wrong-verb-flag,TestLocalCheckpointArguments/missing-consent,TestLocalCheckpointArguments/exact-id,TestLocalCheckpointOutput,TestLocalCheckpointOutput/raw-error,TestLocalCheckpointOutput/metadata,TestLocalCheckpointOutput/partial-observation,TestLocalCheckpointErrorObservation,TestLocalCheckpointErrorObservation/witness-survives,TestLocalCheckpointErrorObservation/post-busy,TestLocalCheckpointErrorObservation/concurrent-change,TestLocalCheckpointNeverStopsOrRepairs,TestLocalCheckpointNeverStopsOrRepairs/recorder,TestLocalCheckpointNeverStopsOrRepairs/source-contract,TestLocalCheckpointAdapter,TestLocalCheckpointAdapter/disabled-direct,TestLocalCheckpointAdapter/create,TestLocalCheckpointAdapter/inspect,TestLocalCheckpointAdapter/exact-delete,TestLocalCheckpointAdapter/error-after-witness,TestLocalCheckpointAdapter/busy,TestLocalCheckpointAdapter/maintenance,TestLocalCheckpointSignal,TestLocalCheckpointSignal/create,TestLocalCheckpointSignal/delete,TestLocalCheckpointSignal/inspect,TestLocalCheckpointSignal/second-exits';
+const checkpointRequired = 'TestLocalCheckpointSelection,TestLocalCheckpointSelection/absent,TestLocalCheckpointSelection/unknown,TestLocalCheckpointSelection/explicit,TestLocalCheckpointArguments,TestLocalCheckpointArguments/relative-root,TestLocalCheckpointArguments/wrong-verb-flag,TestLocalCheckpointArguments/missing-consent,TestLocalCheckpointArguments/exact-id,TestLocalCheckpointOutput,TestLocalCheckpointOutput/raw-error,TestLocalCheckpointOutput/metadata,TestLocalCheckpointOutput/partial-observation,TestLocalCheckpointErrorObservation,TestLocalCheckpointErrorObservation/witness-survives,TestLocalCheckpointErrorObservation/post-busy,TestLocalCheckpointErrorObservation/concurrent-change,TestLocalCheckpointNeverStopsOrRepairs,TestLocalCheckpointNeverStopsOrRepairs/recorder,TestLocalCheckpointNeverStopsOrRepairs/source-contract,TestLocalCheckpointAdapter,TestLocalCheckpointAdapter/disabled-direct,TestLocalCheckpointAdapter/create,TestLocalCheckpointAdapter/inspect,TestLocalCheckpointAdapter/exact-delete,TestLocalCheckpointAdapter/error-after-witness,TestLocalCheckpointAdapter/busy,TestLocalCheckpointAdapter/maintenance,TestLocalCheckpointSignal,TestLocalCheckpointSignal/create,TestLocalCheckpointSignal/delete,TestLocalCheckpointSignal/inspect,TestLocalCheckpointSignal/second-exits,TestLocalCheckpointDispatch,TestLocalCheckpointDispatch/disabled,TestLocalCheckpointDispatch/enabled';
 const checkpointTest = "go test -json ./cmd/witself -run '^TestLocalCheckpoint' -count=1 -timeout=10m";
 const checkpointCheck = `node scripts/ci-go-test-json-check.mjs --package github.com/witwave-ai/witself/cmd/witself --require ${checkpointRequired}`;
 const checkpointStage = 'Test Local Checkpoint command and require complete results';
@@ -201,7 +201,7 @@ function assertLocalcellWindowsJob(ci) {
       "$proofJSON = Join-Path $env:RUNNER_TEMP 'lc-pg16\\proof.json'",
       "go test -json ./internal/localcell -run '^TestRealLifecycle$' -count=1 -timeout=15m > $proofJSON 2>&1",
       '$goExit = $LASTEXITCODE',
-      'node scripts/ci-go-test-json-check.mjs --input $proofJSON --diagnose --require TestRealLifecycle,TestRealLifecycle/InstallStartRestartRemove,TestRealLifecycle/TwoCellsAreIndependent,TestRealLifecycle/InterruptedStartRepair,TestRealLifecycle/WaitsForReadiness,TestRealLifecycle/InstallerPrincipals,TestRealLifecycle/RetainedReinstall,TestRealLifecycle/Checkpoint',
+      'node scripts/ci-go-test-json-check.mjs --input $proofJSON --diagnose --require TestRealLifecycle,TestRealLifecycle/InstallStartRestartRemove,TestRealLifecycle/TwoCellsAreIndependent,TestRealLifecycle/InterruptedStartRepair,TestRealLifecycle/WaitsForReadiness,TestRealLifecycle/InstallerPrincipals,TestRealLifecycle/RetainedReinstall,TestRealLifecycle/Checkpoint,TestRealLifecycle/CheckpointCommand',
       '$parserExit = $LASTEXITCODE',
       'if ($goExit -ne 0 -or $parserExit -ne 0) { exit 1 }',
     ].join('\n'),
@@ -256,7 +256,7 @@ const unixPlatforms = [
   {platform: 'macos-arm64', runner: 'macos-15'},
   {platform: 'macos-intel', runner: 'macos-15-intel'},
 ];
-const lifecycleRequired = 'TestRealLifecycle,TestRealLifecycle/InstallStartRestartRemove,TestRealLifecycle/TwoCellsAreIndependent,TestRealLifecycle/InterruptedStartRepair,TestRealLifecycle/WaitsForReadiness,TestRealLifecycle/InstallerPrincipals,TestRealLifecycle/RetainedReinstall,TestRealLifecycle/Checkpoint';
+const lifecycleRequired = 'TestRealLifecycle,TestRealLifecycle/InstallStartRestartRemove,TestRealLifecycle/TwoCellsAreIndependent,TestRealLifecycle/InterruptedStartRepair,TestRealLifecycle/WaitsForReadiness,TestRealLifecycle/InstallerPrincipals,TestRealLifecycle/RetainedReinstall,TestRealLifecycle/Checkpoint,TestRealLifecycle/CheckpointCommand';
 
 function assertLocalcellUnixJob(ci) {
   const label = 'localcell-unix';
@@ -1386,6 +1386,7 @@ const mutations = [
     [',TestRealLifecycle/InstallerPrincipals', '', 'omits installer principals child'],
     [',TestRealLifecycle/RetainedReinstall', '', 'omits retained reinstall child'],
     [',TestRealLifecycle/Checkpoint', '', 'omits checkpoint child'],
+    [',TestRealLifecycle/CheckpointCommand', '', 'omits checkpoint command child'],
     [' --diagnose', '', 'omits diagnostics'],
     [' --input "$proof_json"', '', 'does not read captured JSON'],
     [' > "$proof_json" 2>&1', '', 'prints raw Go output'],
@@ -1431,6 +1432,7 @@ const mutations = [
   ['Windows proof omits installer principals child', data => { const step = data['ci.yml'].jobs['localcell-windows'].steps.find(step => step.name === 'Prove native PostgreSQL sixteen lifecycle'); step.run = step.run.replace(',TestRealLifecycle/InstallerPrincipals', ''); }],
   ['Windows proof omits retained reinstall child', data => { const step = data['ci.yml'].jobs['localcell-windows'].steps.find(step => step.name === 'Prove native PostgreSQL sixteen lifecycle'); step.run = step.run.replace(',TestRealLifecycle/RetainedReinstall', ''); }],
   ['Windows proof omits checkpoint child', data => { const step = data['ci.yml'].jobs['localcell-windows'].steps.find(step => step.name === 'Prove native PostgreSQL sixteen lifecycle'); step.run = step.run.replace(',TestRealLifecycle/Checkpoint', ''); }],
+  ['Windows proof omits checkpoint command child', data => { const step = data['ci.yml'].jobs['localcell-windows'].steps.find(step => step.name === 'Prove native PostgreSQL sixteen lifecycle'); step.run = step.run.replace(',TestRealLifecycle/CheckpointCommand', ''); }],
   ['Windows proof ignores native exit', data => { const step = data['ci.yml'].jobs['localcell-windows'].steps.find(step => step.name === 'Prove native PostgreSQL sixteen lifecycle'); step.run = step.run.replace('$goExit -ne 0 -or ', ''); }],
   ['Windows proof ignores parser exit', data => { const step = data['ci.yml'].jobs['localcell-windows'].steps.find(step => step.name === 'Prove native PostgreSQL sixteen lifecycle'); step.run = step.run.replace(' -or $parserExit -ne 0', ''); }],
   ['Windows proof omits bounded diagnostics', data => { const step = data['ci.yml'].jobs['localcell-windows'].steps.find(step => step.name === 'Prove native PostgreSQL sixteen lifecycle'); step.run = step.run.replace(' --diagnose', ''); }],

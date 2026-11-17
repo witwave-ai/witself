@@ -1645,7 +1645,7 @@
         },
         "entitlement_policy": {
           "state": "conditional",
-          "summary": "Lifecycle and explicit service foundations remain opt-in and dark. Local routes and console trust are implemented separately; standalone policy, operator bootstrap and enrollment authority remain product gates.",
+          "summary": "Lifecycle and explicit service foundations remain opt-in and dark; the released CLI reaches only cold checkpoint create, inspect and delete, per call with an explicit selector. Local routes and console trust are implemented separately; standalone policy, operator bootstrap and enrollment authority remain product gates.",
           "evidence": [
             "docs/research/local-cell/implementation-plan.md"
           ]
@@ -1672,7 +1672,7 @@
         },
         "recovery": {
           "state": "conditional",
-          "summary": "Journal repair and failed-start rollback preserve PostgreSQL data. Start preflights each component and retries an attributable bind conflict once within the readiness budget. Bounded migration cancellation and opt-in worker restart landed; systemd and launchd adapters exist. Only explicit purge removes data.",
+          "summary": "Journal repair and failed-start rollback preserve PostgreSQL data. Start preflights each component and retries an attributable bind conflict once within the readiness budget. Bounded migration cancellation and opt-in worker restart landed; systemd and launchd adapters exist. Only explicit purge removes live data.",
           "evidence": [
             "internal/localcell/lifecycle.go",
             "internal/localcell/lifecycle_integration_test.go",

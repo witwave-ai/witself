@@ -12,8 +12,8 @@ import (
 	"time"
 )
 
-// This disconnected command accepts only adapter-owned projections. F4 owns
-// construction and released dispatch. A timeout budgets context cooperation;
+// The adapter connects this command to the released witself local checkpoint
+// route; it takes only adapter-owned projections. A timeout budgets cooperation;
 // it cannot promise cancellation of filesystem work or binary authenticity.
 type localCheckpointRequest struct {
 	operation, root, pgbin, installationID, checkpointID string

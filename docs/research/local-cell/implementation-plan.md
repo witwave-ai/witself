@@ -1267,8 +1267,9 @@ rollback, restore and D9 remain pending; until D1 and D2.1 exist, a different
 build refuses with `local_reinstall_version_mismatch` and the data stays
 retained. This is no M4/M5 completion or supported-offering claim.
 
-LC-S7D2E0, LC-S7D2E1 and LC-S7D2E2 add dark cold checkpoints; no released
-command reaches them. `Checkpoint` copies the PGDATA, `manifest.json` and
+LC-S7D2E0, LC-S7D2E1 and LC-S7D2E2 add cold checkpoints; the released
+`witself local checkpoint create|inspect|delete` reaches them, opt-in per call,
+and no other released command does. `Checkpoint` copies the PGDATA, `manifest.json` and
 retained custody (the bootstrap password, plus the six role credentials in a
 selected layout) of the installation named by its exact identity from
 `Inspect`, byte for byte, into a new `recovery/<id>/`. It re-reads every copy
@@ -1310,7 +1311,8 @@ passwords, which count toward the limit. W1 uses synthetic files written by a
 restricted-token child with real inherited ACLs; real PostgreSQL files are
 copied on Windows only by the
 native proof. LC-S7D2E2 requires that PostgreSQL 16 proof,
-`TestRealLifecycle/Checkpoint`, on all five CI rows. Drill, restore, rollback,
+`TestRealLifecycle/Checkpoint`, on all five CI rows, and the released command's
+proof, `TestRealLifecycle/CheckpointCommand`, is required on all five too. Drill, restore, rollback,
 update wiring and D9 remain pending; this is no M4/M5 completion or
 supported-offering claim.
 
