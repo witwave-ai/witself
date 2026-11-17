@@ -6312,14 +6312,12 @@ On Linux and macOS, `create` writes its copy by pathname: a same-user process
 renaming a directory inside the cell during the copy can make the private copy,
 password files included, land outside the cell while `create` reports success.
 Such a process can already read those files. There, a same-user process that
-puts a FIFO at one of these names after the command's checks can make it wait
-while it holds the cell lock: the database directory `pg/` (`create`); a
-directory the command syncs after creating or changing it, such as the cell
-root, `journal/`, `recovery/` or the new checkpoint and its subdirectories
-(`create`, and `delete` in a purged root); and `journal/operations.jsonl` while
-`create` or `delete` appends to it. `inspect` opens none of these. The first
-signal does not end such a wait; a signal after the window above does, leaving
-what a kill leaves. A FIFO put at `pg/global/pg_control` after `create` has
+puts a FIFO at `journal/operations.jsonl` after the command's checks can make
+`create` or `delete` wait, while it holds the cell lock, when it appends to
+the journal. `inspect` does not append. The first signal does not end such a
+wait; a signal after the window above does, leaving what a kill leaves. A FIFO
+put at the database directory `pg/`, or at a directory the command syncs after
+creating or changing it, is refused at once and is not waited on. A FIFO put at `pg/global/pg_control` after `create` has
 planned its copy makes its `pg_controldata` run wait instead, also under the
 cell lock, until `--timeout` runs out or the first signal ends that wait. There
 too, a link put inside the database directory during
