@@ -222,7 +222,8 @@ func TestCheckpointLeftover(t *testing.T) {
 			t.Fatal("deleting another checkpoint changed the orphan")
 		}
 	})
-	for _, kind := range []string{"install", "start", "stop", "remove", "reinstall", "cleanup-only", "repair-step", "torn-open", "torn-only", "cleanup-and-leftover"} {
+	for _, kind := range []string{"install", "start", "stop", "remove", "reinstall", "cleanup-only", "repair-step", "torn-open", "torn-only", "cleanup-and-leftover",
+		"repair-step-delete", "torn-open-delete", "cleanup-and-leftover-create"} {
 		t.Run("foreign/"+kind, func(t *testing.T) {
 			f, r, ids := leftoverFixture(t, "legacy", 1)
 			c := f.cell
@@ -241,6 +242,11 @@ func TestCheckpointLeftover(t *testing.T) {
 				},
 				"torn-open":            func() error { return errors.Join(c.begin("checkpoint"), torn()) },
 				"cleanup-and-leftover": func() error { return errors.Join(c.begin("checkpoint_delete"), cleanup()) },
+				"repair-step-delete": func() error {
+					return errors.Join(c.begin("checkpoint_delete"), c.journal("checkpoint_delete", "revert_stop", "started"))
+				},
+				"torn-open-delete":            func() error { return errors.Join(c.begin("checkpoint_delete"), torn()) },
+				"cleanup-and-leftover-create": func() error { return errors.Join(c.begin("checkpoint"), cleanup()) },
 			}[kind]
 			if plant == nil {
 				plant = func() error { return c.begin(kind) }
@@ -383,8 +389,14 @@ func TestCheckpointLeftover(t *testing.T) {
 		if inspection, err := other.Inspect(t.Context()); err != nil || inspection.CheckpointListing != "busy" || !reflect.DeepEqual(held, retainedSnapshot(t, c)) {
 			t.Fatal("inspection of a live deletion was not busy and read only")
 		}
-		if unblock(); <-result != nil {
-			t.Fatal("the released deletion did not succeed")
+		unblock()
+		select {
+		case err := <-result:
+			if err != nil {
+				t.Fatal("the released deletion did not succeed")
+			}
+		case <-time.After(reinstallContentionBound):
+			t.Fatal("the released deletion did not return")
 		}
 		retainedAssertRecords(t, f, checkpointDeleteRecords)
 	})

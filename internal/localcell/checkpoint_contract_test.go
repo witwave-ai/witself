@@ -363,7 +363,7 @@ func checkpointSourceContract(sources map[string]string) []string {
 					switch {
 					case member == "checkpointComplete":
 						failures["verifier_shortcut"] = true
-					case member == "begin" || member == "step" || member == "closeCheckpointFailure" || strings.Contains(strings.ToLower(member), "journal"):
+					case member == "begin" || member == "step" || member == "closeCheckpointFailure" || member == "closeCheckpointLeftover" || strings.Contains(strings.ToLower(member), "journal"):
 						failures["verifier_journal"] = true
 					case slices.Contains([]string{"Remove", "RemoveAll", "removePrivateFile", "discardOwnCheckpoint", "deleteCheckpointLocked", "DeleteCheckpoint"}, member):
 						failures["verifier_remove"] = true
@@ -585,6 +585,7 @@ func TestCheckpointSourceContract(t *testing.T) {
 		{"verifier_syncs", "checkpoint_verify.go", verifyTail, "func checkpointVerifySync(f *os.File) { _ = syncFile(f) }\n\n" + verifyTail, "verifier_write"},
 		{"verifier_removes", "checkpoint_verify.go", verifyTail, "func checkpointVerifyRemove() { _ = os.Remove(\"\") }\n\n" + verifyTail, "verifier_remove"},
 		{"verifier_journals", "checkpoint_verify.go", verifyTail, "func checkpointVerifyJournal(c *Cell) { _ = c.begin(\"checkpoint\") }\n\n" + verifyTail, "verifier_journal"},
+		{"verifier_closes_leftover", "checkpoint_verify.go", verifyTail, "func checkpointVerifyClose(c *Cell) { _ = c.closeCheckpointLeftover() }\n\n" + verifyTail, "verifier_journal"},
 		{"verifier_shortcut", "checkpoint_verify.go", verifyTail, "func checkpointVerifyShortcut() { _, _ = checkpointComplete(\"\", \"\") }\n\n" + verifyTail, "verifier_shortcut"},
 		{"verifier_called_elsewhere", "checkpoint.go", tail, "func checkpointVerifyCaller(c *Cell) { _, _ = c.verifyCheckpoint(nil, nil, \"\") }\n\n" + tail, "verifier_called:checkpoint.go:checkpointVerifyCaller"},
 		{"helper_return", "checkpoint_verify.go", verifyTail, "func reviewPath(dir string) string { return filepath.Join(dir, checkpointWitnessName) }\nfunc reviewRead(dir string) { _, _ = os.Open(reviewPath(dir)) }\n\n" + verifyTail, "document_reference:checkpointWitnessName:checkpoint_verify.go:reviewPath"},
