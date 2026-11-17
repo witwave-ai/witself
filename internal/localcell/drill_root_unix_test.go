@@ -113,6 +113,27 @@ func init() {
 					"drill delete blocked on a planted fifo")
 			})
 		}
+		t.Run("fifo_recovery", func(t *testing.T) {
+			// The recovery open is directory only: a FIFO at the name is refused, never opened.
+			c, v := drillRootFixture(t)
+			drillRootPlant(t, c, v.DrillID, v)
+			aside, writers := c.path("aside"), make(chan *os.File, 1)
+			defer func() {
+				close(writers)
+				for writer := range writers {
+					_ = writer.Close()
+				}
+			}()
+			prepared := errors.New("stage not reached")
+			drillRootAt(c, "open", 1, func() { prepared = drillRootFifo(c.recoveryDir(), aside, true, false, writers) })
+			err := drillRootWatchdog(t, c, v.DrillID, func() {
+				if writer, err := os.OpenFile(c.recoveryDir(), os.O_WRONLY|syscall.O_NONBLOCK, 0); err == nil {
+					writers <- writer
+				}
+			})
+			drillAssert(t, prepared == nil && err == (drillRootError{reason: "boundary_refused"}) && drillRootKept(t, filepath.Join(aside, v.DrillID), v),
+				"drill delete blocked on a planted fifo")
+		})
 	}
 	drillRootPlatformRows = func(t *testing.T) {
 		t.Run("link", func(t *testing.T) {

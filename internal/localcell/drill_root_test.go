@@ -377,6 +377,16 @@ func TestDeleteDrill(t *testing.T) {
 		drillAssert(t, c.deleteDrillLocked(v.DrillID) == nil && drillRootGone(c, v.DrillID), "drill delete left a late entry behind")
 		drillAssert(t, calls["sweep"] == 3 && calls["directory"] == 2, "drill delete broke the stage order")
 	})
+	t.Run("late_record", func(t *testing.T) {
+		// After the record removal the directory loop's sweep removes every spelling of it.
+		c, v := drillRootFixture(t)
+		dir := drillRootPlant(t, c, v.DrillID, v)
+		calls := drillRootAt(c, "directory", 1, func() {
+			drillAssert(t, testWriteFile(filepath.Join(dir, drillRootRecordName), []byte("late payload"), 0o600) == nil, "cannot prepare the drill root fixture")
+		})
+		drillAssert(t, c.deleteDrillLocked(v.DrillID) == nil && drillRootGone(c, v.DrillID) && calls["directory"] == 2,
+			"drill delete left a late record behind")
+	})
 	for _, stage := range []string{"sweep", "directory"} {
 		t.Run(stage+"_bound", func(t *testing.T) {
 			c, v := drillRootFixture(t)

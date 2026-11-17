@@ -230,7 +230,9 @@ func drillRootSweep(drill *os.Root, keepRecord bool) (int, error) {
 // put at the drill's name between them is removed instead if it is a file, a
 // link or an empty directory, never anything with content and nothing outside
 // recovery/. A final sync failure leaves the target absent, so a retry answers
-// absent. No journal entry is written.
+// absent. No journal entry is written. Once the record is gone, one late entry
+// that a sweep cannot remove, added once, is enough to leave a directory that
+// retries refuse, as is a writer that keeps adding entries past every bound.
 func (c *Cell) deleteDrillLocked(drillID string) error {
 	if checkpointIDPattern.MatchString(drillID) {
 		return drillRootError{reason: "checkpoint_target"}
