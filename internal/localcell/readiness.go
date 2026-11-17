@@ -131,9 +131,11 @@ const maxReadinessDiagnostic = 256
 
 // Component output may contain arbitrary values. Only recognized, reconstructed
 // value-free diagnostics may cross into caller errors or durable journals.
-// Restrict reading to this launch and a bounded tail, never an entire log.
+// Restrict reading to this launch and a bounded tail, never an entire log. The
+// log opens without waiting and a link at its name is refused, so a FIFO or a
+// link swapped in during the readiness wait yields no diagnostic.
 func (c *Cell) lastValueFreeDiagnostic(component string, offset int64) string {
-	f, err := openPrivateFile(c.path("logs", component+".log"), os.O_RDONLY, 0)
+	f, err := openPrivateReader(c.path("logs", component+".log"))
 	if err != nil {
 		return ""
 	}

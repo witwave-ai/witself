@@ -767,7 +767,7 @@ func (c *Cell) processStateWithRecord(component string) (ProcessState, ProcessRe
 
 func (c *Cell) postmaster() (int, error) {
 	invalid := errors.New("invalid PostgreSQL process record")
-	data, err := readRegular(openPostgresReader, func(info os.FileInfo) bool { return info.Size() <= 8192 }, c.path("pg", "postmaster.pid"),
+	data, err := readRegular(openPostgresReader, postmasterBounded, c.path("pg", "postmaster.pid"),
 		invalid, invalid, errors.New("cannot read PostgreSQL process record"))
 	if errors.Is(err, os.ErrNotExist) {
 		return 0, nil
@@ -788,6 +788,9 @@ func (c *Cell) postmaster() (int, error) {
 	}
 	return pid, nil
 }
+
+// postmasterBounded is the size both reads of postmaster.pid accept.
+func postmasterBounded(info os.FileInfo) bool { return info.Size() <= 8192 }
 
 func (c *Cell) verifyAll() error {
 	pgPID, err := c.postmaster()
@@ -835,9 +838,12 @@ func (c *Cell) recoverPostgresRecord() error {
 		}
 		return nil
 	}
-	data, err := readPostgresFile(c.path("pg", "postmaster.pid"))
+	// The re-read opens as the first read does: without waiting, refusing a
+	// link at the name and within the same bound. Every failure is one cause.
+	unreadable := fixedCause("cannot read PostgreSQL recovery identity")
+	data, err := readRegular(openPostgresReader, postmasterBounded, c.path("pg", "postmaster.pid"), unreadable, unreadable, unreadable)
 	if err != nil {
-		return fixedCause("cannot read PostgreSQL recovery identity")
+		return unreadable
 	}
 	lines := postmasterLines(data)
 	if len(lines) < 3 || filepath.Clean(lines[1]) != c.path("pg") || lines[0] != strconv.Itoa(pid) {
