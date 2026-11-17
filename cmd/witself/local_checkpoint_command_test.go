@@ -671,6 +671,8 @@ func TestLocalCheckpointNeverStopsOrRepairs(t *testing.T) {
 				t.Fatal("adapter import or selector outside the allowlist")
 			case "init":
 				t.Fatal("init function in handler or adapter")
+			case "variable":
+				t.Fatal("package variable in the adapter")
 			case "route":
 				t.Fatal("command disconnection violated")
 			default:
@@ -737,6 +739,11 @@ func init() { reviewInvokeCommand() }
 				{adapter, "func localCheckpointFailed", "var _ = run\nfunc localCheckpointFailed", "references"}, {adapter, "func localCheckpointFailed", "func checkpointHelper() {}\nfunc localCheckpointFailed", "prefix"},
 				{adapter, "func localCheckpointFailed", "func init() {}\nfunc localCheckpointFailed", "init"}, {"route.go", "", "package main\n\nvar _ = localCheckpointRun\n", "outside"},
 				{"main.go", "import (\n", "import (\n\t\"github.com/witwave-ai/witself/internal/localcell\"\n", "outside"}, {"unrelated.go", "", "package main\n\nvar mode, status, timeout string\n", ""},
+				{adapter, "func localCheckpointFailed", "var _ = func() error { cell, _ := localcell.New(localcell.Config{}); return cell.DeleteCheckpoint(nil, localcell.DeleteCheckpointOptions{}) }()\nfunc localCheckpointFailed", "variable"}, {adapter, "func localCheckpointFailed", "var _ = func() error { cell, _ := localCheckpointOpen(localCheckpointColdV1, localCheckpointRequest{}); return cell.Checkpoint(nil, localcell.CheckpointOptions{}) }()\nfunc localCheckpointFailed", "variable"},
+				{adapter, "func localCheckpointFailed", "var localCheckpointCreate = localCheckpointCell.Checkpoint\nfunc localCheckpointFailed", "variable"}, {adapter, "func localCheckpointFailed", "var localCheckpointUnguarded = func(_ localCheckpointMode, r localCheckpointRequest) (localCheckpointCell, error) { return localcell.New(localcell.Config{Root: r.root}) }\nfunc localCheckpointFailed", "variable"},
+				{adapter, "err = cell.DeleteCheckpoint(", "_ = cell.(interface{ Stop(context.Context) error }).Stop(ctx)\n\t\t\terr = cell.DeleteCheckpoint(", "allowlist"}, {adapter, "err = cell.DeleteCheckpoint(", "_ = cell.(interface{ Repair(context.Context) error }).Repair(ctx)\n\t\t\terr = cell.DeleteCheckpoint(", "allowlist"},
+				{handler, "import (\n", "import (\n _ \"os/exec\"\n", "isolation"}, {adapter, "PostgresDir: r.pgbin}", "PostgresDir: r.pgbin, Server: r.pgbin}", "allowlist"},
+				{"main.go", "func usage(w io.Writer) {", "func usageRenamed(w io.Writer) {\n _ = \"witself local checkpoint\"", "route"}, {"other.go", "", "package main\n\nimport cellpkg `github.com/witwave-ai/witself/internal/localcell`\n\nvar _ = (*cellpkg.Cell).Stop\n", "outside"},
 			} {
 				input := map[string]string{}
 				for name, source := range base {
