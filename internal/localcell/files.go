@@ -293,7 +293,8 @@ func syncDirectory(path string) error {
 	if runtime.GOOS == "windows" {
 		return nil // File data is flushed; directory fsync has no portable Windows API.
 	}
-	d, err := os.Open(path)
+	// The name, a separator and a dot resolve only a directory; anything else fails unopened, so nothing waits.
+	d, err := os.Open(path + string(filepath.Separator) + ".")
 	if err != nil {
 		return errors.New("cannot open local cell directory for sync")
 	}
