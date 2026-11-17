@@ -720,20 +720,149 @@ func checkpointWiringSources(t *testing.T, root string) map[string]string {
 	return sources
 }
 
-// Dark until E2: no production code of the module outside this package reaches
-// the checkpoint API. Only a later, explicitly specified slice may change this.
-func TestCheckpointAPIUnwired(t *testing.T) {
+// checkpointReleasedCaller reports, by label, how sources keyed by slash path
+// depart from the released caller contract: the command adapter is the only
+// production file that reaches the checkpoint API, and nothing else in the
+// module references its two entry points. Sources are read with LF endings.
+func checkpointReleasedCaller(sources map[string]string) []string {
+	const adapter = "cmd/witself/local_checkpoint_adapter.go"
+	failures := map[string]bool{"adapter_missing": true}
+	for _, name := range checkpointAPIWired(sources) {
+		failures["caller:"+name] = name != adapter
+	}
+	for name, source := range sources {
+		source = strings.ReplaceAll(source, "\r\n", "\n")
+		fset := token.NewFileSet()
+		file, err := parser.ParseFile(fset, name, source, 0)
+		if err != nil {
+			failures["parse:"+name] = true
+			continue
+		}
+		ast.Inspect(file, func(node ast.Node) bool {
+			ident, ok := node.(*ast.Ident)
+			failures["reference:"+name] = failures["reference:"+name] || name != adapter && ok && (ident.Name == "localCheckpointOpen" || ident.Name == "localCheckpointCallbacksFor")
+			return true
+		})
+		if name == adapter {
+			failures["adapter_missing"] = false
+			maps.Copy(failures, checkpointAdapterFlow(file, func(node ast.Node) string {
+				return source[fset.Position(node.Pos()).Offset:fset.Position(node.End()).Offset]
+			}))
+		}
+	}
+	var result []string
+	for label, failed := range failures {
+		if failed {
+			result = append(result, label)
+		}
+	}
+	slices.Sort(result)
+	return result
+}
+
+// checkpointAdapterOpen and checkpointAdapterRun are the reviewed adapter
+// entry points: localCheckpointOpen returns before constructing a Cell unless
+// mode is cold-v1, and localCheckpointRun assigns the mode it passes on only
+// from localCheckpointParse's verdict.
+const checkpointAdapterOpen = `func localCheckpointOpen(mode localCheckpointMode, r localCheckpointRequest) (localCheckpointCell, error) {
+	if mode != localCheckpointColdV1 || strings.ContainsRune(r.root, 0) || strings.ContainsRune(r.pgbin, 0) {
+		return nil, errors.New("local checkpoint construction refused")
+	}
+	cell, err := localcell.New(localcell.Config{Root: r.root, Binaries: localcell.Binaries{PostgresDir: r.pgbin}, Timeout: r.timeout})
+	if err != nil {
+		return nil, err
+	}
+	return cell, nil
+}`
+const checkpointAdapterRun = `func localCheckpointRun(ctx context.Context, args []string, open func(localCheckpointMode, localCheckpointRequest) (localCheckpointCell, error), stdout, stderr io.Writer) int {
+	var mode localCheckpointMode
+	if _, refusal := localCheckpointParse(args); refusal == "" {
+		mode = localCheckpointColdV1
+	}
+	return localCheckpointCommand(ctx, args, localCheckpointCallbacksFor(mode, open), stdout, stderr)
+}`
+
+// checkpointAdapterCalls is every reach, by enclosing function and call text,
+// of the API methods, localcell.New, open, the callbacks' mode and the entry
+// points: one Cell, each method once from ctx and the exact consent, and the
+// selected mode passed to every open.
+var checkpointAdapterCalls = []string{
+	"localCheckpointCallbacksFor cell.Checkpoint(ctx, localcell.CheckpointOptions{InstallationID: r.installationID})",
+	"localCheckpointCallbacksFor cell.DeleteCheckpoint(ctx, localcell.DeleteCheckpointOptions{CheckpointID: r.checkpointID})",
+	"localCheckpointCallbacksFor cell.Inspect(ctx)",
+	"localCheckpointCallbacksFor mode", "localCheckpointCallbacksFor mode", "localCheckpointCallbacksFor mode",
+	"localCheckpointCallbacksFor open(mode, r)", "localCheckpointCallbacksFor open(mode, r)", "localCheckpointCallbacksFor open(mode, r)",
+	"localCheckpointOpen localcell.New(localcell.Config{Root: r.root, Binaries: localcell.Binaries{PostgresDir: r.pgbin}, Timeout: r.timeout})",
+	"localCheckpointRun localCheckpointCallbacksFor(mode, open)",
+}
+
+// checkpointAdapterFlow checks the adapter against the reviewed entry points
+// and calls. Only the release may add one localCheckpointOpen reference,
+// inside localCheckpointNamespace.
+func checkpointAdapterFlow(file *ast.File, text func(ast.Node) string) map[string]bool {
+	failed, calls, got := map[string]bool{"open": true, "run": true}, map[ast.Node]*ast.CallExpr{}, []string{}
+	ast.Inspect(file, func(node ast.Node) bool {
+		if call, ok := node.(*ast.CallExpr); ok {
+			calls[call.Fun] = call
+		}
+		return true
+	})
+	for _, decl := range file.Decls {
+		function, ok := decl.(*ast.FuncDecl)
+		if !ok || function.Body == nil {
+			continue
+		}
+		failed["open"] = failed["open"] && (function.Name.Name != "localCheckpointOpen" || text(function) != checkpointAdapterOpen)
+		failed["run"] = failed["run"] && (function.Name.Name != "localCheckpointRun" || text(function) != checkpointAdapterRun)
+		ast.Inspect(function.Body, func(node ast.Node) bool {
+			site := ""
+			switch node := node.(type) {
+			case *ast.SelectorExpr:
+				if x, ok := node.X.(*ast.Ident); slices.Contains([]string{"Inspect", "Checkpoint", "DeleteCheckpoint"}, node.Sel.Name) || ok && x.Name == "localcell" && node.Sel.Name == "New" {
+					site = text(node)
+				}
+			case *ast.Ident:
+				if node.Name == "localCheckpointOpen" || node.Name == "localCheckpointCallbacksFor" || node.Name == "open" && calls[node] != nil || node.Name == "mode" && function.Name.Name == "localCheckpointCallbacksFor" {
+					site = node.Name
+				}
+			}
+			if call := calls[node]; site != "" && call != nil {
+				site = text(call)
+			}
+			if site != "" {
+				got = append(got, function.Name.Name+" "+site)
+			}
+			return true
+		})
+	}
+	if index := slices.Index(got, "localCheckpointNamespace localCheckpointOpen"); index >= 0 {
+		got = slices.Delete(got, index, index+1)
+	}
+	slices.Sort(got)
+	failed["calls"] = !slices.Equal(got, slices.Sorted(slices.Values(checkpointAdapterCalls)))
+	return failed
+}
+
+// The command adapter is the checkpoint API's only production caller, and only
+// its cold-v1 selector reaches the API. Darkness stays for every other caller.
+func TestCheckpointReleasedCallerContract(t *testing.T) {
+	const adapter = "cmd/witself/local_checkpoint_adapter.go"
 	sources := checkpointWiringSources(t, "../..")
-	if _, read := sources["cmd/witself-server/main.go"]; !read {
-		t.Fatal("the checkpoint wiring contract did not read a known importer of the package")
-	}
-	if wired := checkpointAPIWired(sources); len(wired) != 0 {
-		t.Fatalf("the checkpoint API is reachable from production code: %v", wired)
-	}
+	t.Run("allowed-adapter", func(t *testing.T) {
+		if _, read := sources["cmd/witself-server/main.go"]; !read {
+			t.Fatal("the checkpoint wiring contract did not read a known importer of the package")
+		}
+		if wired := checkpointAPIWired(sources); !slices.Equal(wired, []string{adapter}) {
+			t.Fatalf("the checkpoint API callers are %v, want only the command adapter", wired)
+		}
+		if failures := checkpointReleasedCaller(sources); len(failures) != 0 {
+			t.Fatalf("the released caller contract reported %v", failures)
+		}
+	})
 	const importing = "package main\n\nimport (\n\t\"context\"\n\n\t\"github.com/witwave-ai/witself/internal/localcell\"\n)\n\nvar _ context.Context\n\n"
 	const call = importing + "func run(ctx context.Context, cell *localcell.Cell) error { return cell.Checkpoint(ctx, localcell.CheckpointOptions{}) }\n"
 	const fixture = "cmd/witself-fixture/main.go"
-	for _, row := range []struct {
+	rows := []struct {
 		name  string
 		files map[string]string
 		want  []string
@@ -747,17 +876,68 @@ func TestCheckpointAPIUnwired(t *testing.T) {
 		{"root-level-package", map[string]string{"wiring.go": call}, []string{"wiring.go"}},
 		{"outside-the-walk", map[string]string{".tools/main.go": call, "node_modules/x/main.go": call, "vendor/x/main.go": call, "cmd/witself-fixture/testdata/main.go": call,
 			"internal/localcell/wiring.go": call, "cmd/witself-fixture/main_test.go": call}, nil},
-	} {
-		t.Run(row.name, func(t *testing.T) {
-			root := t.TempDir()
-			for name, source := range row.files {
-				if os.MkdirAll(filepath.Join(root, path.Dir(name)), 0o700) != nil || os.WriteFile(filepath.Join(root, name), []byte(source), 0o600) != nil {
-					t.Fatal("cannot write a checkpoint wiring fixture")
-				}
-			}
-			if got := checkpointAPIWired(checkpointWiringSources(t, root)); !slices.Equal(got, row.want) {
-				t.Fatalf("checkpoint wiring fixture %s reported %v", row.name, got)
-			}
-		})
+		{"other-command-file", map[string]string{adapter: sources[adapter], "cmd/witself/other.go": "package main\n\nfunc other(cell localCheckpointCell) error { return cell.Checkpoint(nil, localcell.CheckpointOptions{}) }\n"}, []string{adapter, "cmd/witself/other.go"}},
+		{"adapter-name-elsewhere", map[string]string{adapter: sources[adapter], "cmd/other/local_checkpoint_adapter.go": call}, []string{"cmd/other/local_checkpoint_adapter.go", adapter}},
+		{"main-method-value", map[string]string{adapter: sources[adapter], "cmd/witself/main.go": importing + "var _ = (*localcell.Cell).Checkpoint\n"}, []string{adapter, "cmd/witself/main.go"}},
 	}
+	t.Run("other-caller", func(t *testing.T) {
+		for _, row := range rows {
+			t.Run(row.name, func(t *testing.T) {
+				root := t.TempDir()
+				for name, source := range row.files {
+					if os.MkdirAll(filepath.Join(root, path.Dir(name)), 0o700) != nil || os.WriteFile(filepath.Join(root, name), []byte(source), 0o600) != nil {
+						t.Fatal("cannot write a checkpoint wiring fixture")
+					}
+				}
+				fixtures := checkpointWiringSources(t, root)
+				if got := checkpointAPIWired(fixtures); !slices.Equal(got, row.want) {
+					t.Fatalf("checkpoint wiring fixture %s reported %v", row.name, got)
+				}
+				released := checkpointReleasedCaller(fixtures)
+				for _, name := range row.want {
+					if name != adapter && !slices.Contains(released, "caller:"+name) {
+						t.Fatalf("checkpoint wiring fixture %s did not report caller %s", row.name, name)
+					}
+				}
+			})
+		}
+	})
+	t.Run("bypass-selector", func(t *testing.T) {
+		main, err := os.ReadFile("../../cmd/witself/main.go")
+		if err != nil {
+			t.Fatal("cannot read the command's main source")
+		}
+		input := maps.Clone(sources)
+		input["cmd/witself/main.go"] = string(main)
+		if failures := checkpointReleasedCaller(input); len(failures) != 0 {
+			t.Fatalf("the released caller contract reported %v", failures)
+		}
+		const guard = "\tif mode != localCheckpointColdV1 || strings.ContainsRune(r.root, 0) || strings.ContainsRune(r.pgbin, 0) {\n\t\treturn nil, errors.New(\"local checkpoint construction refused\")\n\t}\n"
+		const construct = "\tcell, err := localcell.New(localcell.Config{Root: r.root, Binaries: localcell.Binaries{PostgresDir: r.pgbin}, Timeout: r.timeout})\n"
+		for _, row := range []struct{ name, file, before, after, want string }{
+			{"guard-removed", adapter, guard, "", "open"},
+			{"guard-after-construction", adapter, guard + construct, construct + guard, "open"},
+			{"second-construction", adapter, "\treturn cell, nil\n}", "\t_, _ = localcell.New(localcell.Config{Root: r.root})\n\treturn cell, nil\n}", "calls"},
+			{"mode-forced", adapter, "\tvar mode localCheckpointMode\n", "\tmode := localCheckpointColdV1\n", "run"},
+			{"mode-forced-at-open", adapter, "open(mode, r)\n\t\tif err == nil {\n\t\t\terr = cell.Checkpoint", "open(localCheckpointColdV1, r)\n\t\tif err == nil {\n\t\t\terr = cell.Checkpoint", "calls"},
+			{"consent-replaced", adapter, "CheckpointID: r.checkpointID", "CheckpointID: \"latest\"", "calls"},
+			{"open-referenced", adapter, "localCheckpointCallbacksFor(mode, open)", "localCheckpointCallbacksFor(mode, localCheckpointOpen)", "calls"},
+			{"run-opens", "cmd/witself/main.go", "func run(args []string) int {\n", "func run(args []string) int {\n\t_, _ = localCheckpointOpen(localCheckpointColdV1, localCheckpointRequest{})\n", "reference:cmd/witself/main.go"},
+			{"run-selects", "cmd/witself/main.go", "func run(args []string) int {\n", "func run(args []string) int {\n\t_ = localCheckpointCallbacksFor(localCheckpointColdV1, nil)\n", "reference:cmd/witself/main.go"},
+		} {
+			t.Run(row.name, func(t *testing.T) {
+				source := strings.ReplaceAll(input[row.file], "\r\n", "\n")
+				if strings.Count(source, row.before) != 1 {
+					t.Fatal("caller contract mutation anchor is not unique")
+				}
+				for _, ending := range []string{"\n", "\r\n"} {
+					mutated := maps.Clone(input)
+					mutated[row.file] = strings.ReplaceAll(strings.Replace(source, row.before, row.after, 1), "\n", ending)
+					if failures := checkpointReleasedCaller(mutated); !slices.Contains(failures, row.want) {
+						t.Fatalf("caller contract mutation %s (%q endings) reported %v, want %s", row.name, ending, failures, row.want)
+					}
+				}
+			})
+		}
+	})
 }
