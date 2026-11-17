@@ -217,7 +217,7 @@ func (a *launchdAgentAdapter) ownedPlist(d ServiceDescriptor, want []byte) (os.F
 	if a.owned == nil || !a.owned(path, info) {
 		return nil, serviceSystemdError(ErrServiceOwnershipConflict, "plist_file:owner", "not_current_uid")
 	}
-	file, err := os.Open(path)
+	file, err := openPlainReader(path)
 	if err != nil {
 		return nil, a.commandError(ErrServiceOwnershipConflict, "plist_file:open", err, d.Root)
 	}

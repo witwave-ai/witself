@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
+	"io"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -76,6 +77,13 @@ func servicePrivateRecord(path string) error {
 		return errors.New("service_record_not_private")
 	}
 	return nil
+}
+
+// openServiceRecord is servicePrivateRecord decided on the handle openRegularBy
+// opened without waiting; a private file that cannot be opened returns open.
+func openServiceRecord(path string, open error) (*os.File, error) {
+	notPrivate := errors.New("service_record_not_private")
+	return openRegularBy(openPrivateReader, func(info os.FileInfo) bool { return privatePassword(path, info) }, path, notPrivate, notPrivate, open)
 }
 
 // ServiceDescriptor reads the current fence and revalidates installation identity.
@@ -210,13 +218,15 @@ func (c *Cell) serviceControlSecret() (string, error) {
 	if err := privateDir(c.path("service"), false); err != nil {
 		return "", err
 	}
-	path := c.path("service", "control.secret")
-	if err := servicePrivateRecord(path); err != nil {
+	invalid := errors.New("service_control_secret_invalid")
+	f, err := openServiceRecord(c.path("service", "control.secret"), invalid)
+	if err != nil {
 		return "", err
 	}
-	b, err := readPrivateFile(path)
+	defer func() { _ = f.Close() }()
+	b, err := io.ReadAll(f)
 	if err != nil || len(b) != 43 {
-		return "", errors.New("service_control_secret_invalid")
+		return "", invalid
 	}
 	if decoded, err := base64.RawURLEncoding.DecodeString(string(b)); err != nil || len(decoded) != 32 {
 		return "", errors.New("service_control_secret_invalid")

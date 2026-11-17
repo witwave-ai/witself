@@ -108,7 +108,15 @@ func (c *Cell) layout() error {
 // os.ErrNotExist when absent, else inspect, irregular (a refused link too) or
 // open. Nothing is read on that path.
 func openRegular(path string, inspect, irregular, open error) (*os.File, error) {
-	f, err := openPrivateReader(path)
+	return openRegularBy(openPrivateReader, nil, path, inspect, irregular, open)
+}
+
+// openRegularBy is openRegular through openReader, a per-OS open that never
+// waits either (openPostgresReader below pg/). A reader whose check before the
+// open also bounded the size or required privacy passes it as accept, which
+// judges the same stat on both paths: a regular file it refuses is irregular.
+func openRegularBy(openReader func(string) (*os.File, error), accept func(os.FileInfo) bool, path string, inspect, irregular, open error) (*os.File, error) {
+	f, err := openReader(path)
 	if err != nil {
 		info, err := os.Lstat(path)
 		switch {
@@ -116,16 +124,34 @@ func openRegular(path string, inspect, irregular, open error) (*os.File, error) 
 			return nil, os.ErrNotExist
 		case err != nil:
 			return nil, inspect
-		case !info.Mode().IsRegular():
+		case !regularFile(info, accept):
 			return nil, irregular
 		}
 		return nil, open
 	}
-	if info, err := f.Stat(); err != nil || !info.Mode().IsRegular() {
+	if info, err := f.Stat(); err != nil || !regularFile(info, accept) {
 		_ = f.Close()
 		return nil, irregular
 	}
 	return f, nil
+}
+
+func regularFile(info os.FileInfo, accept func(os.FileInfo) bool) bool {
+	return info.Mode().IsRegular() && (accept == nil || accept(info))
+}
+
+// readRegular reads all of what openRegularBy opened; a failed read is open.
+func readRegular(openReader func(string) (*os.File, error), accept func(os.FileInfo) bool, path string, inspect, irregular, open error) ([]byte, error) {
+	f, err := openRegularBy(openReader, accept, path, inspect, irregular, open)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	data, err := io.ReadAll(f)
+	if err != nil {
+		return nil, open
+	}
+	return data, nil
 }
 
 func readJSON(path string, dst any) error {

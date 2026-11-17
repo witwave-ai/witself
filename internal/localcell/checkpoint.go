@@ -178,7 +178,7 @@ func (c *Cell) checkpointOps() checkpointOperations {
 		ops.publish = publishPrivateFile
 	}
 	if ops.open == nil {
-		ops.open = func(name string) (*os.File, error) { return openPrivateFile(name, os.O_RDONLY, 0) }
+		ops.open = openPrivateReader
 	}
 	if ops.transient == nil {
 		ops.transient = runtimeconfig.WindowsPrivateTransient
@@ -391,11 +391,9 @@ func (c *Cell) admitCheckpoint(ctx context.Context, options CheckpointOptions, o
 	if _, err := os.Lstat(c.path("pg", "postmaster.pid")); !errors.Is(err, fs.ErrNotExist) {
 		return nil, errCheckpointState
 	}
-	// As postmaster() does, read only after Lstat proves a small regular file.
-	if info, err := os.Lstat(c.path("pg", "PG_VERSION")); err != nil || !info.Mode().IsRegular() || info.Size() > 64 {
-		return nil, errCheckpointSource
-	}
-	if version, err := readPostgresFile(c.path("pg", "PG_VERSION")); err != nil || strings.TrimSuffix(string(version), "\n") != "16" {
+	// As postmaster() does, the opened handle proves a small regular file before
+	// the read; nothing waits on what stands at the name. Every failure refuses.
+	if version, err := readRegular(openPostgresReader, func(info os.FileInfo) bool { return info.Size() <= 64 }, c.path("pg", "PG_VERSION"), errCheckpointSource, errCheckpointSource, errCheckpointSource); err != nil || strings.TrimSuffix(string(version), "\n") != "16" {
 		return nil, errCheckpointSource
 	}
 	if err := c.validateRecovery(); err != nil {
@@ -548,18 +546,19 @@ func (p *checkpointPlan) need() uint64 {
 var syncCheckpointDirectory = syncDirectory
 
 // openCheckpointEntry opens one planned file read-only: PGDATA through the
-// confined source opener, the manifest and custody as private files.
+// confined source opener, the manifest and custody as private readers. None
+// waits on what stands at the name; copyFile decides the handle before a read.
 func (c *Cell) openCheckpointEntry(entry checkpointEntry, open func(string) (*os.File, error)) (*os.File, error) {
 	if !entry.custody && entry.path != "manifest.json" {
 		return open(strings.TrimPrefix(entry.path, "pg/"))
 	}
 	source, err := c.credentialPath(entry.purpose)
 	if !entry.custody {
-		return openPrivateFile(c.path("manifest.json"), os.O_RDONLY, 0)
+		return openPrivateReader(c.path("manifest.json"))
 	} else if err != nil {
 		return nil, err
 	}
-	return openPrivateFile(source, os.O_RDONLY, 0)
+	return openPrivateReader(source)
 }
 
 // copyCheckpoint copies the plan in order into a new directory: each file of
@@ -720,6 +719,14 @@ func (c *Cell) inventoryCheckpoint(ctx context.Context, checkpointID string, pla
 				copied, err = ops.open(filepath.Join(dir, filepath.FromSlash(entry.path)))
 				return err
 			})
+			// The copy's handle is decided before a byte is read: a FIFO with a
+			// writer held would park the hash.
+			if err == nil {
+				if info, statErr := copied.Stat(); statErr != nil || !info.Mode().IsRegular() || info.Size() != entry.size {
+					_ = copied.Close()
+					err = errCheckpointWitness
+				}
+			}
 			if err != nil {
 				if ctx.Err() != nil {
 					return fail(errCheckpointCopy)
@@ -800,6 +807,12 @@ func (c *Cell) witnessCheckpoint(ctx context.Context, checkpointID string, plan 
 	defer release()
 	live, err := open("global/pg_control")
 	if err != nil {
+		return errCheckpointWitness
+	}
+	// The opened handle is decided before a byte is read: a FIFO with a writer
+	// held would park the hash.
+	if info, err := live.Stat(); err != nil || !info.Mode().IsRegular() || info.Size() != plan.entries[index].size {
+		_ = live.Close()
 		return errCheckpointWitness
 	}
 	digest, size, err := checkpointHash(live)

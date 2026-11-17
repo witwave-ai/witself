@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -232,7 +233,15 @@ func (a *systemdUserAdapter) ownedUnit(d ServiceDescriptor, want []byte) (bool, 
 	if a.owned == nil || !a.owned(path, info) {
 		return false, serviceSystemdError(ErrServiceOwnershipConflict, "unit_file:owner", "not_current_uid")
 	}
-	data, err := os.ReadFile(path)
+	file, err := openPlainReader(path)
+	if err != nil {
+		return false, a.commandError(ErrServiceOwnershipConflict, "unit_file:read", err, d.Root)
+	}
+	defer func() { _ = file.Close() }()
+	if opened, err := file.Stat(); err != nil || !regularFile(opened, nil) {
+		return false, serviceSystemdError(ErrServiceOwnershipConflict, "unit_file:type", "not_regular")
+	}
+	data, err := io.ReadAll(file)
 	if err != nil {
 		return false, a.commandError(ErrServiceOwnershipConflict, "unit_file:read", err, d.Root)
 	}

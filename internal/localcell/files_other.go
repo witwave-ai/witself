@@ -20,6 +20,11 @@ func openPrivateReader(path string) (*os.File, error) {
 	return os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, 0)
 }
 
+// A file below pg/ and a service manager file outside the root open the same
+// way here; only Windows needs their different guarded or plain opens.
+func openPostgresReader(path string) (*os.File, error) { return openPrivateReader(path) }
+func openPlainReader(path string) (*os.File, error)    { return openPrivateReader(path) }
+
 func readPrivateFile(path string) ([]byte, error) { return os.ReadFile(path) }
 
 func createPrivateTemp(dir string) (*os.File, error) { return os.CreateTemp(dir, ".pending-*") }

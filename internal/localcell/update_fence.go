@@ -33,9 +33,10 @@ func (c *Cell) readMaintenanceFence() (*maintenanceFence, error) {
 }
 
 func readMaintenanceFenceJSON(path string, dst any) error {
-	f, err := openPrivateFile(path, os.O_RDONLY, 0)
+	refused := errors.New("cannot open local cell record")
+	f, err := openRegular(path, refused, refused, refused)
 	if err != nil {
-		return errors.New("cannot open local cell record")
+		return refused
 	}
 	defer func() { _ = f.Close() }()
 	return decodeMaintenanceFence(f, dst)

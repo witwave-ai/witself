@@ -766,17 +766,14 @@ func (c *Cell) processStateWithRecord(component string) (ProcessState, ProcessRe
 }
 
 func (c *Cell) postmaster() (int, error) {
-	path := c.path("pg", "postmaster.pid")
-	info, err := os.Lstat(path)
+	invalid := errors.New("invalid PostgreSQL process record")
+	data, err := readRegular(openPostgresReader, func(info os.FileInfo) bool { return info.Size() <= 8192 }, c.path("pg", "postmaster.pid"),
+		invalid, invalid, errors.New("cannot read PostgreSQL process record"))
 	if errors.Is(err, os.ErrNotExist) {
 		return 0, nil
 	}
-	if err != nil || !info.Mode().IsRegular() || info.Size() > 8192 {
-		return 0, errors.New("invalid PostgreSQL process record")
-	}
-	data, err := readPostgresFile(path)
 	if err != nil {
-		return 0, errors.New("cannot read PostgreSQL process record")
+		return 0, err
 	}
 	if pid, handled, err := c.pendingPostmasterPID(data); handled || err != nil {
 		return pid, err
