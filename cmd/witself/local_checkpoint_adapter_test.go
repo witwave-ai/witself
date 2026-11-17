@@ -87,7 +87,7 @@ func (c *lcaCell) run(t *testing.T, args []string, want int, calls string) lcWir
 	c.t, c.calls = t, nil
 	opened := 0
 	receipt := lcaRun(t, args, func(mode localCheckpointMode, _ localCheckpointRequest) (localCheckpointCell, error) {
-		if mode != localCheckpointColdV1 {
+		if mode != "cold-v1" {
 			t.Fatal("adapter opened a cell without the selector")
 		}
 		if opened++; opened == c.failOpen {
@@ -347,10 +347,11 @@ func TestLocalCheckpointAdapter(t *testing.T) {
 	t.Run("disabled-direct", func(t *testing.T) {
 		parent, root := lcaRoot(t)
 		before, pgbin := lcaTree(t, parent), filepath.Join(parent, "bin")
+		// The literal, never the constant it guards, is the expectation.
 		for _, r := range []localCheckpointRequest{{root: root, pgbin: pgbin}, {root: root + "\x00", pgbin: pgbin}, {root: root, pgbin: pgbin + "\x00"}} {
-			for _, mode := range []localCheckpointMode{"", "cold-v", "cold-v1 ", "COLD-V1", localCheckpointColdV1} {
+			for _, mode := range []localCheckpointMode{"", "cold-v", "cold-v1 ", "COLD-V1", "cold-v1"} {
 				cell, err := localCheckpointOpen(mode, r)
-				if (err == nil) != (mode == localCheckpointColdV1 && r.root == root && r.pgbin == pgbin) || (cell == nil) == (err == nil) {
+				if (err == nil) != (mode == "cold-v1" && r.root == root && r.pgbin == pgbin) || (cell == nil) == (err == nil) {
 					t.Fatal("adapter construction differs from the selector")
 				}
 			}
@@ -415,6 +416,35 @@ func TestLocalCheckpointAdapter(t *testing.T) {
 		}
 		if lcaUniqueKeys(json.NewDecoder(strings.NewReader(`{"after":{"count":0,"count":1}}`))) {
 			t.Fatal("repeated receipt key admitted")
+		}
+		// Three entries, a fake's and then real ones: inspect lists each, opens
+		// once, calls no mutation, takes no lock and leaves every one in place.
+		// The third is planted after the fake's run: a re-entered read sees two.
+		parent, root = lcaRoot(t)
+		args, many := lcReplace(args, "root", root), localcell.Inspection{CheckpointListing: "listed"}
+		plant := func(id string) {
+			if lcaPrivateDir(filepath.Join(root, "recovery", id)) != nil || lcaPrivateFile(filepath.Join(root, "recovery", id, "inventory.json"), []byte("{}")) != nil {
+				t.Fatal("cannot plant three checkpoints")
+			}
+		}
+		if lcaPrivateFile(filepath.Join(root, ".owner.lock"), nil) != nil || lcaPrivateDir(filepath.Join(root, "recovery")) != nil {
+			t.Fatal("cannot plant three checkpoints")
+		}
+		for _, id := range []string{lcID, lcOtherID, "ckpt_cdefghijklmnopqr"} {
+			many.Checkpoints = append(many.Checkpoints, lcaSummary(id, false))
+		}
+		plant(lcID)
+		plant(lcOtherID)
+		before, golden := lcaTree(t, parent), `{"operation":"inspect","outcome":"succeeded","after":{"status":"listed","count":3,"unknown_count":0,"entries":[{"id":"ckpt_abcdefghijklmnop","complete":false,"verification":"not_performed"},{"id":"ckpt_bcdefghijklmnopq","complete":false,"verification":"not_performed"},{"id":"ckpt_cdefghijklmnopqr","complete":false,"verification":"not_performed"}]},"verification":"not_performed","notice":"NOTICE"}`
+		(&lcaCell{reads: []localcell.Inspection{many}, golden: golden}).run(t, args, 0, "read")
+		if !maps.Equal(before, lcaTree(t, parent)) {
+			t.Fatal("inspect changed the real root")
+		}
+		plant("ckpt_cdefghijklmnopqr")
+		before = lcaTree(t, parent)
+		lcaRun(t, args, localCheckpointOpen, 0, golden)
+		if !maps.Equal(before, lcaTree(t, parent)) {
+			t.Fatal("inspect changed the real root")
 		}
 	})
 	t.Run("exact-delete", func(t *testing.T) {

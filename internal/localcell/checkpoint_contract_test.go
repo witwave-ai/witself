@@ -836,19 +836,25 @@ const checkpointAdapterRun = `func localCheckpointRun(ctx context.Context, args 
 }`
 
 // checkpointAdapterCalls is every reach, by enclosing function and call text,
-// of the API methods, localcell.New, open, the callbacks' mode and the entry
-// points: one Cell, each method once from ctx and the exact consent, and the
-// selected mode passed to every open. A reach outside every function is
-// listed under package, so none may occur there.
+// of the API methods, localcell.New, open, the callbacks' mode and closures and
+// the entry points: one Cell, each method once from ctx and the exact consent,
+// the selected mode passed to every open, and no callback that reaches an
+// entry point or another callback. A reach outside every function is listed
+// under package, so none may occur there.
 var checkpointAdapterCalls = []string{
 	"localCheckpointCallbacksFor cell.Checkpoint(ctx, localcell.CheckpointOptions{InstallationID: r.installationID})",
 	"localCheckpointCallbacksFor cell.DeleteCheckpoint(ctx, localcell.DeleteCheckpointOptions{CheckpointID: r.checkpointID})",
 	"localCheckpointCallbacksFor cell.Inspect(ctx)",
 	"localCheckpointCallbacksFor mode", "localCheckpointCallbacksFor mode", "localCheckpointCallbacksFor mode",
 	"localCheckpointCallbacksFor open(mode, r)", "localCheckpointCallbacksFor open(mode, r)", "localCheckpointCallbacksFor open(mode, r)",
+	"localCheckpointCallbacksFor create", "localCheckpointCallbacksFor create", "localCheckpointCallbacksFor read", "localCheckpointCallbacksFor read", "localCheckpointCallbacksFor remove", "localCheckpointCallbacksFor remove",
 	"localCheckpointOpen localcell.New(localcell.Config{Root: r.root, Binaries: localcell.Binaries{PostgresDir: r.pgbin}, Timeout: r.timeout})",
 	"localCheckpointRun localCheckpointCallbacksFor(mode, open)",
+	"localCheckpointRun localCheckpointCommand(ctx, args, localCheckpointCallbacksFor(mode, open), stdout, stderr)",
 }
+
+// checkpointAdapterRelease is F4b's planned call inside localCheckpointNamespace.
+const checkpointAdapterRelease = "localCheckpointRun(context.Background(), args[1:], localCheckpointOpen, os.Stdout, os.Stderr)"
 
 // checkpointAdapterMembers closes, over the whole adapter file, the local cell
 // package members it may name and the fields, methods and composite keys it
@@ -859,8 +865,9 @@ var checkpointAdapterMembers = []string{"localcell.Binaries", "localcell.Checkpo
 
 // checkpointAdapterFlow checks every declaration of the adapter, not only
 // function bodies, against the reviewed entry points, calls and members. Only
-// the release may add one localCheckpointOpen reference, inside
-// localCheckpointNamespace.
+// the release may add, inside localCheckpointNamespace, one localCheckpointOpen
+// reference and the planned call. A selector on a local that shadows an import
+// fails members.
 func checkpointAdapterFlow(file *ast.File, text func(ast.Node) string) map[string]bool {
 	failed, calls, got, packages := map[string]bool{"open": true, "run": true}, map[ast.Node]*ast.CallExpr{}, []string{}, map[string]string{}
 	for _, spec := range file.Imports {
@@ -874,7 +881,9 @@ func checkpointAdapterFlow(file *ast.File, text func(ast.Node) string) map[strin
 			calls[node.Fun] = node
 		case *ast.SelectorExpr:
 			member = "." + node.Sel.Name
-			if x, ok := node.X.(*ast.Ident); ok && packages[x.Name] == "github.com/witwave-ai/witself/internal/localcell" {
+			if x, ok := node.X.(*ast.Ident); ok && x.Obj != nil && packages[x.Name] != "" {
+				member = "shadowed " + x.Name
+			} else if ok && packages[x.Name] == "github.com/witwave-ai/witself/internal/localcell" {
 				member = "localcell" + member
 			} else if ok && packages[x.Name] != "" {
 				member = ""
@@ -906,7 +915,8 @@ func checkpointAdapterFlow(file *ast.File, text func(ast.Node) string) map[strin
 					site = text(node)
 				}
 			case *ast.Ident:
-				if node.Name == "localCheckpointOpen" || node.Name == "localCheckpointCallbacksFor" || node.Name == "open" && (calls[node] != nil || name == "localCheckpointCallbacksFor") || node.Name == "mode" && name == "localCheckpointCallbacksFor" {
+				if slices.Contains([]string{"localCheckpointOpen", "localCheckpointCallbacksFor", "localCheckpointRun", "localCheckpointCommand", "localCheckpointNamespace"}, node.Name) ||
+					node.Name == "open" && (calls[node] != nil || name == "localCheckpointCallbacksFor") || slices.Contains([]string{"mode", "create", "read", "remove"}, node.Name) && name == "localCheckpointCallbacksFor" {
 					site = node.Name
 				}
 			}
@@ -920,6 +930,9 @@ func checkpointAdapterFlow(file *ast.File, text func(ast.Node) string) map[strin
 		})
 	}
 	if index := slices.Index(got, "localCheckpointNamespace localCheckpointOpen"); index >= 0 {
+		got = slices.Delete(got, index, index+1)
+	}
+	if index := slices.Index(got, "localCheckpointNamespace "+checkpointAdapterRelease); index >= 0 {
 		got = slices.Delete(got, index, index+1)
 	}
 	slices.Sort(got)
@@ -1000,6 +1013,7 @@ func TestCheckpointReleasedCallerContract(t *testing.T) {
 		const construct = "\tcell, err := localcell.New(localcell.Config{Root: r.root, Binaries: localcell.Binaries{PostgresDir: r.pgbin}, Timeout: r.timeout})\n"
 		const callbacksFor = "func localCheckpointCallbacksFor(mode localCheckpointMode, open func(localCheckpointMode, localCheckpointRequest) (localCheckpointCell, error)) localCheckpointCallbacks {\n"
 		const readOpen = callbacksFor + "\tread := func(ctx context.Context, r localCheckpointRequest) (localCheckpointObservation, localCheckpointFailure) {\n\t\tcell, err := open(mode, r)\n"
+		const opener, imports = "func localCheckpointNamespace() func(localCheckpointMode, localCheckpointRequest) (localCheckpointCell, error) {\n\treturn localCheckpointOpen\n}\n\n", "\t\"strings\"\n\n\t\"github.com/witwave-ai/witself/internal/localcell\"\n)\n"
 		for _, row := range []struct{ name, file, before, after, want string }{
 			{"guard-removed", adapter, guard, "", "open"},
 			{"guard-after-construction", adapter, guard + construct, construct + guard, "open"},
@@ -1024,6 +1038,13 @@ func TestCheckpointReleasedCallerContract(t *testing.T) {
 			{"process-helper", adapter, "func localCheckpointFailed(", "func localCheckpointHelper() { localcell.DispatchProcessHelper() }\n\nfunc localCheckpointFailed(", "members"},
 			{"config-key", adapter, "func localCheckpointFailed(", "func localCheckpointJobs() localcell.Config { return localcell.Config{Jobs: nil} }\n\nfunc localCheckpointFailed(", "members"},
 			{"dot-import", adapter, "\t\"strings\"\n", "\t\"strings\"\n\t. \"github.com/witwave-ai/witself/internal/localcell\"\n", "members"},
+			{"namespace-reentry-from-read", adapter, readOpen, opener + readOpen + "\t\t_ = localCheckpointRun(ctx, []string{\"delete\"}, localCheckpointNamespace(), nil, nil)\n", "calls"},
+			{"namespace-opener-in-read", adapter, readOpen, opener + readOpen + "\t\t_, _ = localCheckpointNamespace()(localCheckpointColdV1, r)\n", "calls"},
+			{"command-from-read", adapter, readOpen, readOpen + "\t\t_ = localCheckpointCommand(ctx, []string{\"delete\"}, localCheckpointCallbacks{}, nil, nil)\n", "calls"},
+			{"read-wrapped-with-remove", adapter, "{create, read, remove}\n", "{create, func(ctx context.Context, r localCheckpointRequest) (localCheckpointObservation, localCheckpointFailure) {\n\t\tif o, f := read(ctx, r); len(o.entries) <= 2 {\n\t\t\treturn o, f\n\t\t}\n\t\treturn localCheckpointObservation{}, remove(ctx, r)\n\t}, remove}\n", "calls"},
+			{"release-forces-mode", adapter, imports, "\t\"os\"\n" + imports + "\nfunc localCheckpointNamespace(args []string) int {\n\treturn " + strings.Replace(checkpointAdapterRelease, "args[1:]", "append(args[1:], \"--checkpoint-mode=cold-v1\")", 1) + "\n}\n", "calls"},
+			{"stop-shadowed", adapter, "err = cell.DeleteCheckpoint(", "if strings, ok := cell.(interface{ Stop(context.Context) error }); ok {\n\t\t\t\t_ = strings.Stop(ctx)\n\t\t\t}\n\t\t\terr = cell.DeleteCheckpoint(", "members"},
+			{"localcell-shadowed", adapter, "err = cell.DeleteCheckpoint(", "if localcell, ok := cell.(interface{ Config() error }); ok {\n\t\t\t\t_ = localcell.Config()\n\t\t\t}\n\t\t\terr = cell.DeleteCheckpoint(", "members"},
 		} {
 			t.Run(row.name, func(t *testing.T) {
 				source := strings.ReplaceAll(input[row.file], "\r\n", "\n")
