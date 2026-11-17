@@ -301,6 +301,9 @@ func (c *Cell) checkpointLocked(ctx context.Context, options CheckpointOptions) 
 	if _, statErr := os.Lstat(dir); err != nil || dirErr != nil || !errors.Is(statErr, fs.ErrNotExist) {
 		return errCheckpointAllocation
 	}
+	if err := c.closeCheckpointLeftover(); err != nil {
+		return err
+	}
 	if err := c.begin("checkpoint"); err != nil {
 		return err
 	}
@@ -322,7 +325,8 @@ func (c *Cell) checkpointLocked(ctx context.Context, options CheckpointOptions) 
 		{"inventory", func() error { return c.inventoryCheckpoint(ctx, checkpointID, plan, ops, &budget) }},
 		{"witness", func() error { return c.witnessCheckpoint(ctx, checkpointID, plan, ops) }},
 	} {
-		// A crash leaves the operation open for Repair and discards nothing.
+		// A crash leaves the operation open and discards nothing; Repair or the next
+		// admitted Checkpoint or DeleteCheckpoint closes it.
 		if err := c.step("checkpoint", step.name, step.run); errors.Is(err, errInterrupted) {
 			return err
 		} else if err != nil {
@@ -354,7 +358,7 @@ func (c *Cell) admitCheckpoint(ctx context.Context, options CheckpointOptions, o
 	}
 	if progress, err := c.readJournal(); err != nil {
 		return nil, err
-	} else if progress.pending != nil || progress.tornTail {
+	} else if (progress.pending != nil || progress.tornTail) && !checkpointLeftover(progress) {
 		return nil, errCheckpointState
 	}
 	if err := c.checkpointCold(); err != nil {
@@ -863,6 +867,37 @@ func (c *Cell) closeCheckpointFailure(operation string, stepErr error, discarded
 	return checkpointCleanupError{cause: stepErr}
 }
 
+// checkpointLeftover recognises the only open operation the verbs close: their
+// own kind at a step they write, with no torn tail; all else refuses as before.
+func checkpointLeftover(progress journalProgress) bool {
+	pending := progress.pending
+	if pending == nil || progress.tornTail {
+		return false
+	}
+	switch pending.Operation {
+	case "checkpoint":
+		return slices.Contains([]string{"operation", "copy", "inventory", "witness"}, pending.Step)
+	case "checkpoint_delete":
+		return slices.Contains([]string{"operation", "unseal", "remove"}, pending.Step)
+	}
+	return false
+}
+
+// closeCheckpointLeftover, under the verb's lock after its admission, appends
+// only operation/done to such a leftover; a recorded cleanup refuses unwritten.
+func (c *Cell) closeCheckpointLeftover() error {
+	progress, err := c.readJournal()
+	if err != nil || !checkpointLeftover(progress) {
+		return err
+	}
+	if cleanup, err := c.cleanupInterruption(); err != nil {
+		return err
+	} else if cleanup != nil {
+		return errCheckpointState
+	}
+	return c.journal(progress.pending.Operation, "operation", "done")
+}
+
 func (c *Cell) deleteCheckpointLocked(_ context.Context, options DeleteCheckpointOptions) error {
 	// The identifier's shape is checked before any filesystem access.
 	if !checkpointIDPattern.MatchString(options.CheckpointID) {
@@ -870,7 +905,7 @@ func (c *Cell) deleteCheckpointLocked(_ context.Context, options DeleteCheckpoin
 	}
 	if progress, err := c.readJournal(); err != nil {
 		return err
-	} else if progress.pending != nil || progress.tornTail {
+	} else if (progress.pending != nil || progress.tornTail) && !checkpointLeftover(progress) {
 		return errCheckpointState
 	}
 	if err := c.checkpointCold(); err != nil {
@@ -900,6 +935,9 @@ func (c *Cell) deleteCheckpointLocked(_ context.Context, options DeleteCheckpoin
 	}
 	// A purge removed journal/; nothing else is recreated.
 	if err := privateDir(c.path("journal"), true); err != nil {
+		return err
+	}
+	if err := c.closeCheckpointLeftover(); err != nil {
 		return err
 	}
 	if err := c.begin("checkpoint_delete"); err != nil {
