@@ -1,6 +1,6 @@
 ---
 name: codex-delegation
-description: Delegates bounded implementation, investigation, or review work to Codex (GPT-6 Astra via the official OpenAI Codex plugin for Claude Code) in an isolated worktree while Claude keeps architecture, verification, integration, and merge ownership. Use for an independently testable implementation slice, a root-cause investigation, a test-gap search, or an adversarial second opinion on a diff.
+description: Delegates bounded implementation, investigation, or review work to Codex (GPT-6.2 Astra via the official OpenAI Codex plugin for Claude Code) in an isolated worktree while Claude keeps architecture, verification, integration, and merge ownership. Use for an independently testable implementation slice, a root-cause investigation, a test-gap search, or an adversarial second opinion on a diff.
 user-invocable: true
 ---
 
@@ -15,7 +15,7 @@ or launcher any more; do not invent one.
 
 ## Prerequisites (once per machine)
 
-- Codex CLI with the app server (`codex app-server --help` works; 0.153.3+ — the floor `gpt-6-astra` needs),
+- Codex CLI with the app server (`codex app-server --help` works; current enough that `codex debug models` lists `gpt-6.2-astra`, which 0.167.2 and 0.169.0 do),
   logged in (`codex login status`).
 - Plugin installed: `claude plugin marketplace add openai/codex-plugin-cc`
   then `claude plugin install codex@openai-codex`. Verify with
@@ -73,12 +73,13 @@ Prefer the smallest lane that answers the question.
    `status <job-id>` (use `--wait`) and read `result <job-id>`.
 
    **Model and reasoning depth — use the deepest available.** The model and
-   reasoning effort default to `~/.codex/config.toml` (`model = "gpt-6-astra"`,
-   the highest model; `model_reasoning_effort = "ultra"`, the deepest level).
+   reasoning effort default to `~/.codex/config.toml` (`model = "gpt-6.2-astra"`,
+   the project's Codex model; `model_reasoning_effort = "ultra"`, the deepest level).
    The full effort ladder is `minimal < low < medium < high < xhigh < max <
-   ultra`; `gpt-6-astra` supports and runs `ultra` and requires codex-cli
-   0.153.3 or newer (older CLIs get a 400 "requires a newer version of Codex"
-   from the API, so keep `npm install -g @openai/codex@latest` current). Do NOT pass `--effort`:
+   ultra`; `gpt-6.2-astra` supports and runs `ultra` (`codex debug models` lists
+   it with that level on codex-cli 0.167.2 and 0.169.0; an older CLI can get a
+   400 "requires a newer version of Codex" from the API, so keep
+   `npm install -g @openai/codex@latest` current). Do NOT pass `--effort`:
    the plugin's `--effort` flag only accepts up to `xhigh`, so passing it would
    *cap* a job below the config's `ultra` default. Leaving it unset makes the
    companion send `effort: null`, which inherits `ultra` from config. Only pass
@@ -96,7 +97,7 @@ Prefer the smallest lane that answers the question.
 
 ## Slice protocol with the self-review folded in (2026-09-04)
 
-With GPT-6 Astra, an ordinary implementation slice runs as one unit through
+With GPT-6.2 Astra, an ordinary implementation slice runs as one unit through
 `~/.witself/handoff/codex-slice.sh WORKTREE TASKFILE [FOCUS]`: the write task,
 then a read-only adversarial review of the working tree, then — only when the
 review reports high or medium findings — a `--resume-last` fix task and a
