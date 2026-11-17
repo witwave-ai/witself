@@ -196,6 +196,10 @@ func TestDeleteCheckpointHeld(t *testing.T) {
 			heldAt(c, row.at, func() { heldMove(t, name, moved); checkpointWrite(t, c, row.moved, "placed at the name") })
 			if err := heldDelete(t, c); row.step == "" {
 				heldRefused(t, f, err, "local_checkpoint_state_unsupported", nil)
+				// The class and reason, read on Linux, of a delete whose directory is not a directory.
+				if ClassifyCheckpointFailure(err) != (CheckpointFailure{Class: "local_checkpoint_state_unsupported", Reason: ""}) {
+					t.Fatal("a held deletion refused a file at a name with another class or reason")
+				}
 			} else {
 				heldFailed(t, f, err, row.step)
 			}

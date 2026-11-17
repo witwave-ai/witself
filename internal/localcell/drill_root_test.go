@@ -199,6 +199,22 @@ func TestDrillRoot(t *testing.T) {
 			drillRootRefused(t, c, drillFixture().DrillID, "unknown_kind", "drill root accepted an unknown kind")
 		})
 	}
+	// The same file put at the drill's name after admission, at the open stage
+	// where the Unix row fifo_name plants its FIFO: the held open refuses it.
+	t.Run("unknown_kind/file_name", func(t *testing.T) {
+		c, v := drillRootFixture(t)
+		dir, aside := drillRootPlant(t, c, v.DrillID, v), c.path("aside")
+		var planted map[string]retainedEntry
+		calls := drillRootAt(c, "open", 1, func() {
+			drillAssert(t, os.Rename(dir, aside) == nil && writeAtomicBytes(dir, []byte("private regular file"), nil) == nil,
+				"cannot prepare the drill root fixture")
+			planted = checkpointTreeState(t, c)
+		})
+		err := c.deleteDrillLocked(v.DrillID)
+		data, readErr := os.ReadFile(dir)
+		drillAssert(t, err == (drillRootError{reason: "unknown_kind"}) && calls["sweep"] == 0 && reflect.DeepEqual(planted, checkpointTreeState(t, c)) &&
+			drillRootKept(t, aside, v) && readErr == nil && string(data) == "private regular file", "drill delete removed or followed a file put at the drill name")
+	})
 	t.Run("remainder", func(t *testing.T) {
 		c, v := drillRootFixture(t)
 		drillAssert(t, privateDir(c.recoveryDir(), true) == nil && privateDir(filepath.Join(c.recoveryDir(), v.DrillID), true) == nil,
@@ -326,6 +342,22 @@ func TestDeleteDrill(t *testing.T) {
 		})
 		drillAssert(t, c.deleteDrillLocked(v.DrillID) == (drillRootError{reason: "boundary_refused"}) &&
 			drillRootKept(t, filepath.Join(moved, v.DrillID), v), "drill delete followed a replaced recovery")
+	})
+	// A private file put at recovery's name at the open stage, where the Unix row
+	// fifo_recovery plants its FIFO: refused, nothing removed.
+	t.Run("file_recovery", func(t *testing.T) {
+		c, v := drillRootFixture(t)
+		drillRootPlant(t, c, v.DrillID, v)
+		moved := c.path("moved")
+		var planted map[string]retainedEntry
+		calls := drillRootAt(c, "open", 1, func() {
+			drillAssert(t, os.Rename(c.recoveryDir(), moved) == nil && testWriteFile(c.recoveryDir(), []byte("boundary fault"), 0o600) == nil,
+				"cannot prepare the drill root fixture")
+			planted = checkpointTreeState(t, c)
+		})
+		drillAssert(t, c.deleteDrillLocked(v.DrillID) == (drillRootError{reason: "boundary_refused"}) && calls["sweep"] == 0 &&
+			reflect.DeepEqual(planted, checkpointTreeState(t, c)) && drillRootKept(t, filepath.Join(moved, v.DrillID), v),
+			"drill delete followed a file put at the recovery name")
 	})
 	t.Run("name_replaced", func(t *testing.T) {
 		c, v := drillRootFixture(t)

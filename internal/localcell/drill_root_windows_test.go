@@ -4,6 +4,7 @@ package localcell
 
 import (
 	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 
@@ -45,6 +46,24 @@ func init() {
 			c, v := drillRootFixture(t)
 			drillRootPlant(t, c, v.DrillID, v)
 			drillAssert(t, validatePrivateTree(c.cfg.Root) == nil, "drill root listing was not exact")
+		})
+	}
+	drillRootPlatformDeleteRows = func(t *testing.T) {
+		// Where the Unix row name_linked plants a link: the drill's name replaced at
+		// the first sweep by a junction to a directory holding a sentinel.
+		t.Run("name_junction", func(t *testing.T) {
+			c, v := drillRootFixture(t)
+			dir, aside, outside := drillRootPlant(t, c, v.DrillID, v), filepath.Join(c.recoveryDir(), "aside"), testPrivateRoot(t)
+			drillAssert(t, testWriteFile(filepath.Join(outside, "sentinel"), []byte("outside sentinel"), 0o600) == nil, "cannot prepare the drill root fixture")
+			drillRootAt(c, "sweep", 1, func() {
+				drillAssert(t, os.Rename(dir, aside) == nil, "cannot prepare the drill root fixture")
+				createTestJunction(t, dir, outside)
+			})
+			err := c.deleteDrillLocked(v.DrillID)
+			sentinel, readErr := os.ReadFile(filepath.Join(outside, "sentinel"))
+			_, nameErr := os.Lstat(dir)
+			drillAssert(t, err == (drillRootError{reason: "boundary_refused"}) && drillRootKept(t, aside, v) && readErr == nil &&
+				string(sentinel) == "outside sentinel" && nameErr == nil, "drill delete followed a junction at the drill name")
 		})
 	}
 }
