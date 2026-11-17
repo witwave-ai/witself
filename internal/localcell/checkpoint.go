@@ -18,6 +18,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf16"
 	"unicode/utf8"
@@ -311,6 +312,8 @@ func (c *Cell) checkpointLocked(ctx context.Context, options CheckpointOptions) 
 		return errInterrupted
 	}
 	created := false
+	// The failed create's one cleanup; later calls reuse the first call's result.
+	discard := sync.OnceValue(func() error { return c.discardOwnCheckpoint(checkpointID) })
 	budget := checkpointRetryBudget{limit: checkpointRetryFloor}
 	for _, entry := range plan.entries {
 		if !entry.directory {
@@ -321,8 +324,8 @@ func (c *Cell) checkpointLocked(ctx context.Context, options CheckpointOptions) 
 		name string
 		run  func() error
 	}{
-		{"copy", func() error { return c.copyCheckpoint(ctx, checkpointID, plan, &created, ops, &budget) }},
-		{"inventory", func() error { return c.inventoryCheckpoint(ctx, checkpointID, plan, ops, &budget) }},
+		{"copy", func() error { return c.copyCheckpoint(ctx, checkpointID, plan, &created, discard, ops, &budget) }},
+		{"inventory", func() error { return c.inventoryCheckpoint(ctx, checkpointID, plan, discard, ops, &budget) }},
 		{"witness", func() error { return c.witnessCheckpoint(ctx, checkpointID, plan, ops) }},
 	} {
 		// A crash leaves the operation open and discards nothing; Repair or the next
@@ -330,7 +333,7 @@ func (c *Cell) checkpointLocked(ctx context.Context, options CheckpointOptions) 
 		if err := c.step("checkpoint", step.name, step.run); errors.Is(err, errInterrupted) {
 			return err
 		} else if err != nil {
-			discarded := !created || c.discardOwnCheckpoint(checkpointID) == nil
+			discarded := !created || discard() == nil
 			return c.closeCheckpointFailure("checkpoint", err, discarded, ops.beforeClose)
 		}
 	}
@@ -562,7 +565,7 @@ func (c *Cell) openCheckpointEntry(entry checkpointEntry, open func(string) (*os
 // copyCheckpoint copies the plan in order into a new directory: each file of
 // exactly its planned size through a SHA-256 tee into a private temporary
 // published once. A failure removes the directory before the failed line.
-func (c *Cell) copyCheckpoint(ctx context.Context, checkpointID string, plan *checkpointPlan, created *bool, ops checkpointOperations, budget *checkpointRetryBudget) error {
+func (c *Cell) copyCheckpoint(ctx context.Context, checkpointID string, plan *checkpointPlan, created *bool, discard func() error, ops checkpointOperations, budget *checkpointRetryBudget) error {
 	dir, err := c.checkpointDir(checkpointID)
 	if err != nil {
 		return err
@@ -575,7 +578,7 @@ func (c *Cell) copyCheckpoint(ctx context.Context, checkpointID string, plan *ch
 		return errCheckpointCopy
 	}
 	*created = true
-	fail := func(cause error) error { return c.failCheckpoint(checkpointID, cause) }
+	fail := func(cause error) error { _ = discard(); return cause }
 	if err := privateDir(dir, true); err != nil {
 		return fail(errCheckpointCopy)
 	}
@@ -678,12 +681,12 @@ type checkpointInventory struct {
 
 // inventoryCheckpoint proves the tree is exactly the plan and every copy has
 // its copy-time size and digest, then publishes the sorted inventory.
-func (c *Cell) inventoryCheckpoint(ctx context.Context, checkpointID string, plan *checkpointPlan, ops checkpointOperations, budget *checkpointRetryBudget) error {
+func (c *Cell) inventoryCheckpoint(ctx context.Context, checkpointID string, plan *checkpointPlan, discard func() error, ops checkpointOperations, budget *checkpointRetryBudget) error {
 	dir, err := c.checkpointDir(checkpointID)
 	if err != nil {
 		return err
 	}
-	fail := func(cause error) error { return c.failCheckpoint(checkpointID, cause) }
+	fail := func(cause error) error { _ = discard(); return cause }
 	planned := make(map[string]bool, len(plan.entries))
 	for _, entry := range plan.entries {
 		planned[entry.path] = entry.directory
@@ -819,12 +822,6 @@ func (c *Cell) witnessCheckpoint(ctx context.Context, checkpointID string, plan 
 		return errCheckpointCopy
 	}
 	return nil
-}
-
-// failCheckpoint releases this call's directory before the step's failed line.
-func (c *Cell) failCheckpoint(checkpointID string, cause error) error {
-	_ = c.discardOwnCheckpoint(checkpointID)
-	return cause
 }
 
 // closeCheckpointFailure closes a failed operation unless the journal ends in

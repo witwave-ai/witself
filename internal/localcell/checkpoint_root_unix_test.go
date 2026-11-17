@@ -78,5 +78,53 @@ func init() {
 			heldFailed(t, f, heldDelete(t, c), "remove")
 			heldSame(t, kept)
 		})
+		// The same at the final bind: the emptied target stays in the moved tree.
+		t.Run("recovery_linked_directory", func(t *testing.T) {
+			f, c := heldFixture(t)
+			outside, moved := heldOutside(t), c.path("moved")
+			kept := heldTrees{outside: heldTree(t, outside)}
+			heldAt(c, "directory", func() { heldMove(t, c.recoveryDir(), moved); drillRootLink(t, c.recoveryDir(), outside) })
+			heldFailed(t, f, heldDelete(t, c), "remove")
+			heldSame(t, kept)
+			if entries, err := os.ReadDir(c.path("moved", heldTarget)); err != nil || len(entries) != 0 {
+				t.Fatal("a held deletion removed its target through a moved recovery directory")
+			}
+		})
+		// The failed create's name a link, its directory moved aside: a dangling
+		// link is removed itself, one escaping recovery/ is left and incomplete.
+		for name, target := range map[string]string{"discard_dangling_link": "missing", "discard_escaping_link": "/"} {
+			t.Run(name, func(t *testing.T) {
+				kept := heldTrees{}
+				c, failure := heldDiscard(t, func(c *Cell) {
+					heldAt(c, "hold", func() {
+						heldMove(t, c.path("recovery", heldTarget), c.path("aside"))
+						kept[c.path("aside")] = heldTree(t, c.path("aside"))
+						drillRootLink(t, c.path("recovery", heldTarget), target)
+					})
+				})
+				if _, err := os.Lstat(c.path("recovery", heldTarget)); failure.CleanupIncomplete == (target == "missing") || errors.Is(err, os.ErrNotExist) != (target == "missing") {
+					t.Fatal("a failed checkpoint mishandled a link at its name")
+				}
+				heldSame(t, kept)
+			})
+		}
+		// The name as a link to a kept checkpoint is not this call's kept directory.
+		t.Run("discard_kept_linked", func(t *testing.T) {
+			kept := heldTrees{}
+			_, failure := heldDiscard(t, func(c *Cell) {
+				heldAt(c, "hold", func() {
+					if testMkdir(c.path("recovery", heldOther), 0o700) != nil ||
+						testWriteFile(c.path("recovery", heldOther, checkpointWitnessName), []byte("kept witness"), 0o600) != nil {
+						t.Fatal("cannot prepare the kept checkpoint")
+					}
+					heldMove(t, c.path("recovery", heldTarget), c.path("aside"))
+					drillRootLink(t, c.path("recovery", heldTarget), heldOther)
+					kept[c.recoveryDir()] = heldTree(t, c.recoveryDir())
+				})
+			})
+			if heldSame(t, kept); !failure.CleanupIncomplete {
+				t.Fatal("a failed checkpoint reported a linked kept checkpoint as its own")
+			}
+		})
 	}
 }

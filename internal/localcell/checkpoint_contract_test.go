@@ -215,10 +215,73 @@ var checkpointRootMethods = []string{"Open", "Create", "OpenFile", "OpenRoot", "
 	"Write", "WriteAt", "WriteString", "Truncate"}
 var checkpointRootCalls = map[string]int{"os.OpenRoot(c.recoveryDir() + checkpointRootHere)": 1,
 	"recovery.OpenRoot(checkpointID + checkpointRootHere)": 1, `recovery.Stat(".")`: 1, "os.Lstat(c.recoveryDir())": 1,
-	"os.SameFile(recoveryHeld, recoveryNow)": 1, `checkpoint.Stat(".")`: 1, "recovery.Lstat(checkpointID)": 1,
+	"os.SameFile(recoveryHeld, recoveryNow)": 1, `checkpoint.Stat(".")`: 1, "recovery.Lstat(checkpointID)": 2,
 	"os.SameFile(checkpointHeld, checkpointNow)": 1, "checkpoint.Remove(checkpointWitnessName)": 1, "checkpoint.Lstat(checkpointWitnessName)": 1,
-	`checkpoint.Open(".")`: 1, "listing.Close()": 1, "checkpoint.RemoveAll(names[index])": 1, "recovery.Remove(checkpointID)": 1,
+	`checkpoint.Open(".")`: 1, "listing.Close()": 1, "checkpoint.RemoveAll(names[index])": 1, "recovery.Remove(checkpointID)": 2,
 	`held.Open(".")`: 1, "handle.Close()": 1, "checkpoint.Close()": 1, "recovery.Close()": 1}
+
+// checkpoint_root.go imports only checkpointRootImports, none renamed, names of
+// a package only checkpointRootMembers, calls besides typed root calls (f) only
+// checkpointRootCallees, and names other declarations only as checkpointRootNames.
+var checkpointRootImports = []string{"errors", "io/fs", "os", "path/filepath", "runtime"}
+var checkpointRootMembers = map[string][]string{"errors": {"Is", "New"}, "fs": {"ErrNotExist", "ModeSymlink"}, "filepath": {"Separator"},
+	"os": {"Lstat", "OpenRoot", "Root", "SameFile"}, "runtime": {"GOOS"}}
+var checkpointRootCallees = []string{"c.checkpointStage", "c.checkpointTest.beforeStep", "c.recoveryDir", "c.checkpointDir", "c.holdCheckpoint",
+	"c.checkpointRootsBound", "c.removeCheckpointHeld", "closeCheckpointRoots", "syncCheckpointRoot", "handle.Sync",
+	"listing.Readdirnames", "left.Mode", "string"}
+var checkpointRootNames = []string{"Cell", "checkpointWitnessName", "errCheckpointCopy"}
+
+// checkpointRootClosed applies the closed lists above to checkpoint_root.go.
+func checkpointRootClosed(parsed map[string]*ast.File, failures map[string]bool) {
+	methods := map[string]bool{}
+	for _, file := range parsed {
+		for _, declaration := range file.Decls {
+			if function, ok := declaration.(*ast.FuncDecl); ok && function.Recv != nil {
+				methods[function.Name.Name] = true
+			}
+		}
+	}
+	file, isPackage := parsed["checkpoint_root.go"], func(base ast.Expr) bool { identifier, ok := base.(*ast.Ident); return ok && identifier.Obj == nil }
+	for _, spec := range file.Imports {
+		if path := checkpointLiteral(spec.Path); spec.Name != nil || !slices.Contains(checkpointRootImports, path) {
+			failures["checkpoint_root_import:"+path] = true
+		}
+	}
+	for _, declaration := range file.Decls {
+		owner, parts, functions := "", map[ast.Node]bool{}, map[ast.Node]bool{}
+		if function, ok := declaration.(*ast.FuncDecl); ok {
+			owner = function.Name.Name
+		}
+		// A parent is visited first: a call marks its function, a selector its parts.
+		ast.Inspect(declaration, func(node ast.Node) bool {
+			switch node := node.(type) {
+			case *ast.SelectorExpr:
+				if parts[node.X], parts[node.Sel] = true, true; isPackage(node.X) {
+					if !slices.Contains(checkpointRootMembers[types.ExprString(node.X)], node.Sel.Name) {
+						failures["checkpoint_root_member:"+owner+":"+types.ExprString(node)] = true
+					}
+				} else if methods[node.Sel.Name] && !functions[node] {
+					failures["checkpoint_root_name:"+owner+":"+types.ExprString(node)] = true
+				}
+			case *ast.CallExpr:
+				functions[node.Fun] = true
+				selector, typed := node.Fun.(*ast.SelectorExpr)
+				if typed {
+					typed = isPackage(selector.X) || slices.Contains(checkpointRootMethods, selector.Sel.Name)
+				}
+				if _, literal := node.Fun.(*ast.FuncLit); !literal && !typed && !slices.Contains(checkpointRootCallees, types.ExprString(node.Fun)) {
+					failures["checkpoint_root_callee:"+owner+":"+types.ExprString(node.Fun)] = true
+				}
+			case *ast.Ident:
+				if node.Obj == nil && !parts[node] && !functions[node] && !slices.Contains(checkpointRootNames, node.Name) &&
+					slices.ContainsFunc(slices.Collect(maps.Values(parsed)), func(other *ast.File) bool { return other.Scope.Lookup(node.Name) != nil }) {
+					failures["checkpoint_root_name:"+owner+":"+node.Name] = true
+				}
+			}
+			return true
+		})
+	}
+}
 
 // checkpointSystemSelectors are the only syscall, unix and windows selectors.
 var checkpointSystemSelectors = map[string][]string{"checkpoint_unix.go": {"syscall.Statfs_t", "syscall.Statfs", "syscall.Stat_t"},
@@ -312,6 +375,7 @@ func checkpointHeldContract(parsed map[string]*ast.File, failures map[string]boo
 			failures["checkpoint_root_uses:"+name+":"+identifier] = !rootFile && uses[identifier] != map[string]int{"checkpoint.go": 4}[name] // (g)
 		}
 	}
+	checkpointRootClosed(parsed, failures)
 }
 
 // checkpointSourceContract returns every failed C7 check over production
@@ -773,7 +837,7 @@ func TestCheckpointSourceContract(t *testing.T) {
 		{"root_method_value", "checkpoint_root.go", rootTail, "func checkpointRootProbe(r *os.Root) { remove := r.Remove; _ = remove }\n\n" + rootTail, "checkpoint_root_selector:r.Remove"},
 		{"root_alias", "checkpoint_root.go", rootTail, "func checkpointRootProbe(r *os.Root) { alias := r; _ = alias.RemoveAll(\"pg\") }\n\n" + rootTail, "checkpoint_root_call:alias.RemoveAll(\"pg\")"},
 		{"root_write", "checkpoint_root.go", rootTail, "func checkpointRootProbe(r *os.Root) { _ = r.WriteFile(\"late\", nil, 0o600) }\n\n" + rootTail, "checkpoint_root_call:r.WriteFile(\"late\", nil, 0o600)"},
-		{"final_remove_recursive", "checkpoint_root.go", "recovery.Remove(checkpointID)", "recovery.RemoveAll(checkpointID)", "checkpoint_root_call:recovery.RemoveAll(checkpointID)"},
+		{"final_remove_recursive", "checkpoint_root.go", "if err := recovery.Remove(checkpointID); err != nil {", "if err := recovery.RemoveAll(checkpointID); err != nil {", "checkpoint_root_call:recovery.RemoveAll(checkpointID)"},
 		{"recovery_open_plain", "checkpoint_root.go", "os.OpenRoot(c.recoveryDir() + checkpointRootHere)", "os.OpenRoot(c.recoveryDir())", "checkpoint_root_call:os.OpenRoot(c.recoveryDir())"},
 		{"checkpoint_open_plain", "checkpoint_root.go", "recovery.OpenRoot(checkpointID + checkpointRootHere)", "recovery.OpenRoot(checkpointID)", "checkpoint_root_call:recovery.OpenRoot(checkpointID)"},
 		{"held_identity_from_path", "checkpoint_root.go", "recoveryHeld, err := recovery.Stat(\".\")", "recoveryHeld, err := os.Lstat(c.recoveryDir())", "checkpoint_root_call:os.Lstat(c.recoveryDir())"},
@@ -820,6 +884,50 @@ func TestCheckpointSourceContract(t *testing.T) {
 				}
 				if failures := checkpointSourceContract(input); !slices.Contains(failures, "pathname_removal:checkpoint.go:removeProbe") {
 					t.Fatalf("checkpoint contract reported %v, want pathname_removal:checkpoint.go:removeProbe", failures)
+				}
+			}
+		})
+	}
+	// The review's fifteen admitted seeds and four more shapes, each planted in
+	// checkpoint_root.go, with what a seed needs declared in files.go.
+	const seed, removeProbe = "func checkpointRootSeed(", "func (c *Cell) removeProbe(name string) error { return os.Remove(name) }"
+	root, files, spool := [2]string{"checkpoint_root.go", rootTail}, [2]string{"files.go", "func syncDirectory("}, "(c *Cell) { root, _ := runtimeconfig.OpenSpoolRoot(c.cfg.Root); closeCheckpointRoots(root, nil) }"
+	for _, row := range []struct {
+		name, want string
+		edits      [][3]string // file, anchor, text put before the anchor
+	}{
+		{"closed_service_endpoint", "callee:checkpointRootSeed:c.removeServiceControlEndpoint", [][3]string{{root[0], root[1], seed + "c *Cell) error { return c.removeServiceControlEndpoint() }"}}},
+		{"closed_owned_endpoint", "callee:checkpointRootSeed:c.removeOwnedServiceControlEndpoint", [][3]string{{root[0], root[1], seed + "c *Cell) error { return c.removeOwnedServiceControlEndpoint(serviceControlEndpointRecord{}) }"}}},
+		{"closed_spool_import", "import:github.com/witwave-ai/witself/internal/runtimeconfig", [][3]string{{root[0], "\"errors\"", "\"github.com/witwave-ai/witself/internal/runtimeconfig\""}, {root[0], root[1], seed + spool[1:]}}},
+		{"closed_spool_member", "member:checkpointRootSeed:runtimeconfig.OpenSpoolRoot", [][3]string{{root[0], root[1], seed + spool[1:]}}},
+		{"closed_alias_wrapper", "callee:checkpointRootSeed:cell.removeProbe", [][3]string{{files[0], files[1], removeProbe}, {root[0], root[1], seed + "c *Cell) error { cell := c; return cell.removeProbe(c.recoveryDir()) }"}}},
+		{"closed_alias_endpoint", "callee:checkpointRootSeed:cell.removeServiceControlEndpoint", [][3]string{{root[0], root[1], seed + "c *Cell) error { cell := c; return cell.removeServiceControlEndpoint() }"}}},
+		{"closed_expression_wrapper", "callee:checkpointRootSeed:(*Cell).removeProbe", [][3]string{{files[0], files[1], removeProbe}, {root[0], root[1], seed + "c *Cell) error { return (*Cell).removeProbe(c, c.recoveryDir()) }"}}},
+		{"closed_expression_endpoint", "callee:checkpointRootSeed:(*Cell).removeServiceControlEndpoint", [][3]string{{root[0], root[1], seed + "c *Cell) error { return (*Cell).removeServiceControlEndpoint(c) }"}}},
+		{"closed_two_level_wrapper", "callee:checkpointRootSeed:c.removeProbe", [][3]string{{files[0], files[1], "func (c *Cell) removeProbe(name string) error { return c.removeProbeInner(name) }\n\nfunc (c *Cell) removeProbeInner(name string) error { return os.Remove(name) }"}, {root[0], root[1], seed + "c *Cell) error { return c.removeProbe(c.recoveryDir()) }"}}},
+		{"closed_variable_elsewhere", "callee:checkpointRootSeed:removeProbe", [][3]string{{files[0], files[1], "var removeProbe = removePrivateFile"}, {root[0], root[1], seed + "c *Cell) error { return removeProbe(c.recoveryDir()) }"}}},
+		{"closed_root_to_helper", "callee:checkpointRootSeed:emptyProbe", [][3]string{{files[0], files[1], "func emptyProbe(root *os.Root) error { return root.RemoveAll(\"pg\") }"}, {root[0], root[1], seed + "recovery *os.Root) error { return emptyProbe(recovery) }"}}},
+		{"closed_helper_opens_root", "callee:checkpointRootSeed:c.openProbe", [][3]string{{files[0], files[1], "func (c *Cell) openProbe() error { root, _ := os.OpenRoot(c.cfg.Root); return root.RemoveAll(\"pg\") }"}, {root[0], root[1], seed + "c *Cell) error { return c.openProbe() }"}}},
+		{"closed_adapter_method", "callee:checkpointRootSeed:a.removeCreatedUnit", [][3]string{{root[0], root[1], seed + "a *systemdUserAdapter) { a.removeCreatedUnit(ServiceDescriptor{}, nil) }"}}},
+		{"closed_journal", "callee:checkpointRootSeed:c.journal", [][3]string{{root[0], root[1], seed + "c *Cell) error { return c.journal(\"checkpoint\", \"copy\", \"done\") }"}}},
+		{"closed_begin", "callee:checkpointRootSeed:c.begin", [][3]string{{root[0], root[1], seed + "c *Cell) error { return c.begin(\"checkpoint\") }"}}},
+		{"closed_pathname_sync", "callee:checkpointRootSeed:syncCheckpointDirectory", [][3]string{{root[0], root[1], seed + "c *Cell) error { return syncCheckpointDirectory(c.recoveryDir()) }"}}},
+		{"closed_method_value", "name:checkpointRootSeed:c.removeServiceControlEndpoint", [][3]string{{root[0], root[1], seed + "c *Cell) { remove := c.removeServiceControlEndpoint; _ = remove }"}}},
+		{"closed_function_value", "name:checkpointRootSeed:syncDirectory", [][3]string{{root[0], root[1], seed + ") { sync := syncDirectory; _ = sync }"}}},
+		{"closed_import_renamed", "import:errors", [][3]string{{root[0], "\"errors\"", "xerrors \"errors\""}}},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			for _, ending := range []string{"\n", "\r\n"} {
+				input := maps.Clone(sources)
+				for _, edit := range row.edits {
+					source := strings.ReplaceAll(input[edit[0]], "\r\n", "\n")
+					if strings.Count(source, edit[1]) != 1 {
+						t.Fatal("checkpoint contract mutation anchor is not unique")
+					}
+					input[edit[0]] = strings.ReplaceAll(strings.Replace(source, edit[1], edit[2]+"\n\n"+edit[1], 1), "\n", ending)
+				}
+				if failures := checkpointSourceContract(input); !slices.Contains(failures, "checkpoint_root_"+row.want) {
+					t.Fatalf("checkpoint contract reported %v, want checkpoint_root_%s", failures, row.want)
 				}
 			}
 		})

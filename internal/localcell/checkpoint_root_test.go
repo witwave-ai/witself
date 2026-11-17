@@ -68,7 +68,7 @@ func heldTree(t *testing.T, dir string) map[string]retainedEntry {
 func heldSame(t *testing.T, kept heldTrees) {
 	t.Helper()
 	for dir, tree := range kept {
-		if !reflect.DeepEqual(tree, heldTree(t, dir)) {
+		if _, err := os.Lstat(dir); err != nil || !reflect.DeepEqual(tree, heldTree(t, dir)) {
 			t.Fatal("a held deletion changed a kept tree")
 		}
 	}
@@ -279,6 +279,48 @@ func TestDeleteCheckpointHeld(t *testing.T) {
 		})
 		if !failure.CleanupIncomplete || string(retainedRead(t, c, "recovery/"+heldTarget)) != "placed at the name" {
 			t.Fatal("a failed checkpoint removed the file put at its name, or reported the discard")
+		}
+	})
+	// The cleanup removes once: the live database fixture renamed onto the name at
+	// its sweep or after its removal and sync, or linked there then, stays; incomplete.
+	for _, at := range []string{"sweep", "synced", "linked"} {
+		t.Run("discard_swap_"+at, func(t *testing.T) {
+			original, kept := syncCheckpointRoot, heldTrees{}
+			t.Cleanup(func() { syncCheckpointRoot = original })
+			_, failure := heldDiscard(t, func(c *Cell) {
+				name := c.path("recovery", heldTarget)
+				if kept[name] = heldTree(t, c.path("pg")); at == "sweep" {
+					heldAt(c, at, func() { heldMove(t, name, c.path("aside")); heldMove(t, c.path("pg"), name) })
+					return
+				}
+				syncCheckpointRoot = func(held *os.Root) error {
+					err := original(held)
+					if syncCheckpointRoot = original; err == nil && at == "synced" {
+						heldMove(t, c.path("pg"), name)
+					} else if err == nil {
+						kept = heldTrees{c.path("pg"): kept[name]}
+						drillRootLink(t, name, c.path("pg"))
+					}
+					return err
+				}
+			})
+			if heldSame(t, kept); !failure.CleanupIncomplete {
+				t.Fatal("a failed checkpoint reported the discard of a directory renamed onto its name")
+			}
+		})
+	}
+	// recovery/ linked to the cell root, where the name is absent.
+	t.Run("discard_recovery_root", func(t *testing.T) {
+		kept := heldTrees{}
+		_, failure := heldDiscard(t, func(c *Cell) {
+			heldAt(c, "hold", func() {
+				heldMove(t, c.recoveryDir(), c.path("moved"))
+				kept[c.path("moved")] = heldTree(t, c.path("moved"))
+				drillRootLink(t, c.recoveryDir(), c.cfg.Root)
+			})
+		})
+		if heldSame(t, kept); !failure.CleanupIncomplete {
+			t.Fatal("a failed checkpoint reported its discard through a recovery link to the cell root")
 		}
 	})
 	heldPlatformRows(t)
