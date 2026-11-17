@@ -42,9 +42,15 @@ var checkpointReaders = []string{"os.Lstat", "os.OpenRoot", "filepath.WalkDir", 
 	"runtimeconfig.WindowsPrivatePostgresOpen", "c.command"}
 
 // checkpointWaitingReaders are the readers that wait on what they open; (j)
-// refuses each name in checkpointWaitingFiles, called or not.
-var checkpointWaitingReaders = []string{"openPrivateFile", "readPrivateFile", "readPostgresFile", "os.Open", "os.ReadFile"}
+// refuses each in checkpointWaitingFiles, called or not, as spelled or as
+// declared: an import's member under any local or dot name by its package.
+var checkpointWaitingReaders = []string{"openPrivateFile", "readPrivateFile", "readPostgresFile", "os.Open", "os.ReadFile", "os.OpenInRoot", "os.DirFS",
+	"ioutil.ReadFile", "fs.ReadFile"}
 var checkpointWaitingFiles = []string{"checkpoint.go", "checkpoint_unix.go"}
+
+// checkpointSourceRootCalls are the only uses (j) admits of the name that
+// checkpoint_unix.go assigns its PGDATA root os.OpenRoot(c.path("pg")).
+var checkpointSourceRootCalls = []string{"root.OpenFile(filepath.FromSlash(rel), os.O_RDONLY | syscall.O_NONBLOCK, 0)", "root.Close()"}
 
 // drillRootCalls are the only calls drill_root.go makes on a root receiver, by
 // method, argument text and exact count.
@@ -440,22 +446,58 @@ func checkpointHeldContract(parsed map[string]*ast.File, failures map[string]boo
 	checkpointRootClosed(parsed, failures)
 }
 
+// checkpointWaitingReader is the waiting reader node names, else "": as spelled,
+// or as declared, an import's member under any local or dot name by the import
+// path's last element. A selector marks its name in parts before the name is
+// visited, so a member name never resolves alone.
+func checkpointWaitingReader(file *ast.File, parts map[*ast.Ident]bool, node ast.Node) string {
+	var names []string
+	qualifier, member := "", ""
+	switch node := node.(type) {
+	case *ast.SelectorExpr:
+		parts[node.Sel], names, member = true, []string{types.ExprString(node)}, node.Sel.Name
+		if base, ok := node.X.(*ast.Ident); ok && base.Obj == nil {
+			qualifier = base.Name
+		}
+	case *ast.Ident:
+		if names = []string{node.Name}; !parts[node] {
+			qualifier, member = ".", node.Name
+		}
+	}
+	for _, spec := range file.Imports {
+		declared, local := path.Base(checkpointLiteral(spec.Path)), path.Base(checkpointLiteral(spec.Path))
+		if spec.Name != nil {
+			local = spec.Name.Name
+		}
+		if qualifier != "" && local == qualifier {
+			names = append(names, declared+"."+member)
+		}
+	}
+	for _, name := range names {
+		if slices.Contains(checkpointWaitingReaders, name) {
+			return name
+		}
+	}
+	return ""
+}
+
 // checkpointWaitingContract is rule (j): checkpointWaitingFiles name no waiting
-// reader, called or not, and checkpoint.go gives the inventory's default open,
-// by assignment or as a checkpointOperations key, only as openPrivateReader.
+// reader, called or not, checkpoint.go gives the inventory's default open, by
+// assignment or as a checkpointOperations key, only as openPrivateReader, and
+// checkpoint_unix.go uses its PGDATA root only as checkpointSourceRootCalls.
 func checkpointWaitingContract(parsed map[string]*ast.File, failures map[string]bool) {
 	defaults := 0
 	for _, name := range checkpointWaitingFiles {
 		if parsed[name] == nil {
 			continue
 		}
+		parts := map[*ast.Ident]bool{}
 		ast.Inspect(parsed[name], func(node ast.Node) bool {
 			var opened []string
+			if reader := checkpointWaitingReader(parsed[name], parts, node); reader != "" {
+				failures["waiting_reader:"+name+":"+reader] = true
+			}
 			switch node := node.(type) {
-			case *ast.SelectorExpr, *ast.Ident:
-				if text := types.ExprString(node.(ast.Expr)); slices.Contains(checkpointWaitingReaders, text) {
-					failures["waiting_reader:"+name+":"+text] = true
-				}
 			case *ast.AssignStmt:
 				for index, target := range node.Lhs {
 					if types.ExprString(target) == "ops.open" && len(node.Rhs) == len(node.Lhs) {
@@ -481,6 +523,37 @@ func checkpointWaitingContract(parsed map[string]*ast.File, failures map[string]
 		})
 	}
 	failures["waiting_reader:checkpoint.go:ops.open"] = failures["waiting_reader:checkpoint.go:ops.open"] || defaults == 0
+	// Each os.OpenRoot(c.path("pg")) is assigned to a name used only as the
+	// receiver of checkpointSourceRootCalls: another method, a method value, an
+	// alias or an argument fails.
+	if file := parsed["checkpoint_unix.go"]; file != nil {
+		const open = `os.OpenRoot(c.path("pg"))`
+		roots, handled, calls, unassigned := map[any]bool{}, map[ast.Node]bool{}, map[ast.Node]string{}, 0
+		ast.Inspect(file, func(node ast.Node) bool {
+			switch node := node.(type) {
+			case *ast.AssignStmt:
+				if root, ok := node.Lhs[0].(*ast.Ident); ok && root.Obj != nil && len(node.Rhs) == 1 && types.ExprString(node.Rhs[0]) == open {
+					roots[root.Obj], handled[root], unassigned = true, true, unassigned-1
+				}
+			case *ast.CallExpr:
+				if calls[node.Fun] = types.ExprString(node); calls[node.Fun] == open {
+					unassigned++
+				}
+			case *ast.SelectorExpr:
+				if root, ok := node.X.(*ast.Ident); ok && root.Obj != nil && roots[root.Obj] {
+					if handled[root] = true; !slices.Contains(checkpointSourceRootCalls, calls[node]) {
+						failures["pgdata_root_use:checkpoint_unix.go:"+types.ExprString(node)] = true
+					}
+				}
+			case *ast.Ident:
+				if node.Obj != nil && roots[node.Obj] && !handled[node] {
+					failures["pgdata_root_use:checkpoint_unix.go:"+node.Name] = true
+				}
+			}
+			return true
+		})
+		failures["pgdata_root_unassigned:checkpoint_unix.go"] = unassigned != 0
+	}
 }
 
 // checkpointSourceContract returns every failed C7 check over production
@@ -891,6 +964,15 @@ func TestCheckpointSourceContract(t *testing.T) {
 		{"pg_version_other_opener", "checkpoint.go", "readRegular(openPostgresReader,", "readRegular(openPlainReader,", "live_path_not_read:checkpoint.go:pg"},
 		{"waiting_reader_value", "checkpoint.go", tail, "func checkpointProbe() { read := os.ReadFile; _ = read }\n\n" + tail, "waiting_reader:checkpoint.go:os.ReadFile"},
 		{"waiting_reader_unix", "checkpoint_unix.go", "func validateRecoveryObject(", "func checkpointProbe(name string) { _, _ = os.Open(name) }\n\nfunc validateRecoveryObject(", "waiting_reader:checkpoint_unix.go:os.Open"},
+		// (j) by declaration (LC-READERS-3R G1): other blocking opens, a renamed or dot import, and any use of the PGDATA root but its two calls.
+		{"waiting_reader_open_in_root", "checkpoint.go", tail, "func checkpointProbe(c *Cell) { _, _ = os.OpenInRoot(c.cfg.Root, \"pg\") }\n\n" + tail, "waiting_reader:checkpoint.go:os.OpenInRoot"},
+		{"waiting_reader_dirfs", "checkpoint.go", tail, "func checkpointProbe(dir string) { _, _ = os.DirFS(dir).Open(\"x\") }\n\n" + tail, "waiting_reader:checkpoint.go:os.DirFS"},
+		{"waiting_reader_renamed_import", "checkpoint.go", "internal/runtimeconfig\"\n)", "internal/runtimeconfig\"\n\tiu \"io/ioutil\"\n)\n\nvar checkpointProbe = iu.ReadFile", "waiting_reader:checkpoint.go:ioutil.ReadFile"},
+		{"waiting_reader_dot_import", "checkpoint.go", "internal/runtimeconfig\"\n)", "internal/runtimeconfig\"\n\t. \"io/fs\"\n)\n\nfunc checkpointProbe(fsys FS) { _, _ = ReadFile(fsys, \"x\") }", "waiting_reader:checkpoint.go:fs.ReadFile"},
+		{"checkpoint_root_open_method", "checkpoint_unix.go", "return root.OpenFile(filepath.FromSlash(rel), os.O_RDONLY|syscall.O_NONBLOCK, 0)", "if f, err := root.Open(filepath.FromSlash(rel)); err == nil { _ = f.Close() }\n\t\treturn root.OpenFile(filepath.FromSlash(rel), os.O_RDONLY|syscall.O_NONBLOCK, 0)", "pgdata_root_use:checkpoint_unix.go:root.Open"},
+		{"checkpoint_root_read_value", "checkpoint_unix.go", "func() { _ = root.Close() }", "func() { read := root.ReadFile; _ = read; _ = root.Close() }", "pgdata_root_use:checkpoint_unix.go:root.ReadFile"},
+		{"checkpoint_root_alias", "checkpoint_unix.go", "func() { _ = root.Close() }", "func() { alias := root; _, _ = alias.Open(\"PG_VERSION\"); _ = root.Close() }", "pgdata_root_use:checkpoint_unix.go:root"},
+		{"checkpoint_root_unassigned", "checkpoint_unix.go", "func validateRecoveryObject(", "func checkpointProbe(c *Cell) (*os.Root, error) { return os.OpenRoot(c.path(\"pg\")) }\n\nfunc validateRecoveryObject(", "pgdata_root_unassigned:checkpoint_unix.go"},
 		{"nonblock_selector_elsewhere", "checkpoint_windows.go", "func validateRecoveryObject(", "func checkpointProbe() int { return syscall.O_NONBLOCK }\n\nfunc validateRecoveryObject(", "system_call:checkpoint_windows.go:syscall.O_NONBLOCK"},
 		{"checkpoint_openroot", "checkpoint.go", tail, "func checkpointProbe(c *Cell) { _, _ = os.OpenRoot(c.recoveryDir()) }\n\n" + tail, "forbidden_call:checkpoint.go:os.OpenRoot"},
 		{"drill_checkpoint_writer", "drill_root.go", drillTail, "func drillRootProbe(c *Cell) { dir, _ := c.checkpointDir(\"\"); _ = syncCheckpointDirectory(dir) }\n\n" + drillTail, "writer_root:drill_root.go:syncCheckpointDirectory"},
