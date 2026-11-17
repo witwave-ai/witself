@@ -101,20 +101,38 @@ func (c *Cell) layout() error {
 	return nil
 }
 
-func readJSON(path string, dst any) error {
-	info, err := os.Lstat(path)
+// openRegular opens path through openPrivateReader, which never waits on what
+// it opens and never follows a link at the last element, and returns the handle
+// only once the handle's own stat shows a regular file, before any byte is read.
+// A failed open is classified by Lstat as the check before the open used to be:
+// os.ErrNotExist when absent, else inspect, irregular (a refused link too) or
+// open. Nothing is read on that path.
+func openRegular(path string, inspect, irregular, open error) (*os.File, error) {
+	f, err := openPrivateReader(path)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return os.ErrNotExist
+		info, err := os.Lstat(path)
+		switch {
+		case errors.Is(err, os.ErrNotExist):
+			return nil, os.ErrNotExist
+		case err != nil:
+			return nil, inspect
+		case !info.Mode().IsRegular():
+			return nil, irregular
 		}
-		return errors.New("cannot inspect local cell record")
+		return nil, open
 	}
-	if !info.Mode().IsRegular() {
-		return errors.New("local cell record must be a regular file")
+	if info, err := f.Stat(); err != nil || !info.Mode().IsRegular() {
+		_ = f.Close()
+		return nil, irregular
 	}
-	f, err := openPrivateFile(path, os.O_RDONLY, 0)
+	return f, nil
+}
+
+func readJSON(path string, dst any) error {
+	f, err := openRegular(path, errors.New("cannot inspect local cell record"),
+		errors.New("local cell record must be a regular file"), errors.New("cannot open local cell record"))
 	if err != nil {
-		return errors.New("cannot open local cell record")
+		return err
 	}
 	defer func() { _ = f.Close() }()
 	decoder := json.NewDecoder(io.LimitReader(f, 1<<20))
@@ -346,19 +364,15 @@ func (p journalProgress) installComplete(manifests ...*Manifest) bool {
 // records and all other corruption remain fail-closed.
 func (c *Cell) readJournal() (journalProgress, error) {
 	var progress journalProgress
-	path := c.path("journal", "operations.jsonl")
-	info, err := os.Lstat(path)
+	invalid := errors.New("invalid local cell journal")
+	f, err := openRegular(c.path("journal", "operations.jsonl"), invalid, invalid, errors.New("cannot read local cell journal"))
 	if errors.Is(err, os.ErrNotExist) {
 		progress.pending, err = c.cleanupInterruption()
 		progress.cleanupOnly = progress.pending != nil
 		return progress, err
 	}
-	if err != nil || !info.Mode().IsRegular() {
-		return progress, errors.New("invalid local cell journal")
-	}
-	f, err := openPrivateFile(path, os.O_RDONLY, 0)
 	if err != nil {
-		return progress, errors.New("cannot read local cell journal")
+		return progress, err
 	}
 	defer func() { _ = f.Close() }()
 	reader := bufio.NewReaderSize(f, 64*1024)
@@ -529,18 +543,14 @@ type updateJournalEntry struct {
 // readers continue to reject update entries and never reconcile update records.
 func (c *Cell) readUpdateJournal() (journalProgress, error) {
 	var progress journalProgress
-	path := c.path("journal", "operations.jsonl")
-	info, err := os.Lstat(path)
+	invalid := errors.New("invalid local cell journal")
+	f, err := openRegular(c.path("journal", "operations.jsonl"), invalid, invalid, errors.New("cannot read local cell journal"))
 	if errors.Is(err, os.ErrNotExist) {
 		progress.pending, err = c.cleanupInterruption()
 		return progress, err
 	}
-	if err != nil || !info.Mode().IsRegular() {
-		return progress, errors.New("invalid local cell journal")
-	}
-	f, err := openPrivateFile(path, os.O_RDONLY, 0)
 	if err != nil {
-		return progress, errors.New("cannot read local cell journal")
+		return progress, err
 	}
 	defer func() { _ = f.Close() }()
 	reader := bufio.NewReaderSize(f, 64*1024)
