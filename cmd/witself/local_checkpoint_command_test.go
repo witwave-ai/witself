@@ -664,7 +664,7 @@ func TestLocalCheckpointNeverStopsOrRepairs(t *testing.T) {
 			case "prefix":
 				t.Fatal("reserved prefix violated")
 			case "outside":
-				t.Fatal("reserved name or local cell import outside the two files")
+				t.Fatal("reserved name, local cell import or run caller outside its pinned place")
 			case "references":
 				t.Fatal("adapter references outside its closed set")
 			case "allowlist":
@@ -674,7 +674,7 @@ func TestLocalCheckpointNeverStopsOrRepairs(t *testing.T) {
 			case "variable":
 				t.Fatal("package variable in the adapter")
 			case "route":
-				t.Fatal("command route or help line differs from its pin")
+				t.Fatal("command route, help line or signal import differs from its pin")
 			case "entry":
 				t.Fatal("an entry function differs from its pinned text")
 			default:
@@ -709,7 +709,7 @@ func init() { reviewInvokeCommand() }
 `
 		base := map[string]string{}
 		for name, source := range module {
-			if name == "cmd/witself/main.go" || strings.Contains(source, "localCheckpoint") || strings.Contains(source, "witself/internal/localcell\"") {
+			if name == "cmd/witself/main.go" || name == "cmd/witself/dashboard.go" || strings.Contains(source, "localCheckpoint") || strings.Contains(source, "witself/internal/localcell\"") {
 				base[name] = source
 			}
 		}
@@ -755,6 +755,14 @@ func init() { reviewInvokeCommand() }
 				{adapter, "ctx, stop := localCheckpointSignals()", "_, stop := localCheckpointSignals()\n\tctx := context.Background()", "entry"}, {adapter, "err = cell.DeleteCheckpoint(", "_ = os.Stdout\n\t\t\terr = cell.DeleteCheckpoint(", "allowlist"},
 				{adapter, "err = cell.DeleteCheckpoint(", "_, _ = localCheckpointSignals()\n\t\t\terr = cell.DeleteCheckpoint(", "references"},
 				{"main.go", "\tcase \"local\":\n", "\tcase \"lcl\":\n\t\t_ = \"local\"\n", "route"}, {"main.go", "localCheckpointNamespace(args[1:])", "localCheckpointNamespace(args)", "route"},
+				// LC-S7D2F4B2R G-1 (MB, MA3) and G-2 (MA2) as the review wrote them, then variants.
+				{"main.go", "\tos.Exit(run(args))\n", "\tif len(args) > 2 && args[0] == \"local\" && args[2] == \"delete\" && !strings.Contains(strings.Join(args, \" \"), \"checkpoint-mode\") {\n\t\targs = append(args, \"--checkpoint-mode=cold-v1\")\n\t}\n\tos.Exit(run(args))\n", "route"},
+				{"main.go", "\tos.Exit(run(args))\n", "\tif len(args) > 0 && args[0] == \"lcl\" {\n\t\targs[0] = \"local\"\n\t}\n\tos.Exit(run(args))\n", "route"},
+				{"dashboard.go", "\tswitch args[0] {\n\tcase \"serve\":\n", "\tif args[0] == \"local\" {\n\t\treturn run(args)\n\t}\n\tswitch args[0] {\n\tcase \"serve\":\n", "outside"},
+				{"main.go", "func run(args []string) int {", "const lclWord = \"local\"\n\nfunc run(args []string) int {", "route"}, {"run_value.go", "", "package main\n\nvar _ = run\n", "outside"},
+				{"main.go", "\tcase \"local\":\n", "\tcase \"lcl\":\n\t\treturn (run)(append([]string{os.Args[1]}, args[1:]...))\n\tcase \"local\":\n", "outside"},
+				{"signals.go", "", "package main\n\nimport sig `os/signal`\n\nvar _ = sig.Reset\n", "route"},
+				{"run_local.go", "", "package main\n\nfunc lcRunLocal(run []string) int {\n\tfor _, run := range run {\n\t\t_ = run\n\t}\n\tfield := struct{ run int }{run: len(run)}\n\treturn field.run\n}\n\nfunc lcRunDefined() string {\n\trun := \"x\"\n\treturn run\n}\n", ""},
 			} {
 				input := map[string]string{}
 				for name, source := range base {

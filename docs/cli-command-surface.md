@@ -6169,13 +6169,15 @@ passwords below `recovery/`, at most two complete ones. It never installs,
 starts, stops, repairs, restores or removes a cell. `create` admits only a
 stopped database (no live recorded component, no `pg/postmaster.pid`, a
 `pg_controldata` state of `shut down`) and starts no program but
-`pg_controldata` from `--pgbin`, at admission and before its witness. `witself
-local` with anything but `checkpoint` prints a fixed usage line on standard
-error and exits 2.
+`pg_controldata` from `--pgbin`, at admission and before its witness. `delete`
+likewise refuses while a recorded component is live
+(`local_checkpoint_state_unsupported`). `witself local` with anything but
+`checkpoint` prints a fixed usage line on standard error and exits 2.
 
 Every call must carry `--checkpoint-mode=cold-v1`; without it, or with another
 value, it refuses with `local_checkpoint_command_disabled`, exit 2, touching
-nothing. No environment variable, configuration or discovery selects it.
+nothing in the root. No environment variable, configuration or discovery
+selects it.
 `--root` is the cell root's absolute path. `--timeout` (positive, default `30s`)
 budgets `create`'s cooperative checks and each `pg_controldata` run; `inspect`
 and `delete` ignore it, a consented `delete` proceeds after it is spent, and it
@@ -6209,11 +6211,14 @@ verifies, restores, drills or rolls back.
 An `inspect` that lists exits 0 (`succeeded`). A `busy` cell (another operation
 holds it) or an `unowned` one (`recovery/` but no owner lock) is `refused`,
 exit 1, with no `failure`: never a sign that there are no checkpoints. A read
-error is `refused`, exit 1, with a class and a reason; unsafe listing metadata
+error is `refused`, exit 1, with a class; most carry no reason, which comes
+only with `local_checkpoint_state_unsupported` (below). Unsafe listing metadata
 is `refused`, exit 1, `local_checkpoint_metadata_unsupported`. A `create` or
 `delete` whose first observation does not list is refused alike; an after-read
 that is `busy`, `unowned` or unsafe makes it exit 1 even after a successful
-change. Other classes: `local_checkpoint_state_unsupported`,
+change, but one that fails with a read error does not: the successful change
+exits 0 with `after.status: unavailable` (for `delete`, `presence: unknown`).
+Other classes: `local_checkpoint_state_unsupported`,
 `local_checkpoint_source_unsupported`, `local_checkpoint_storage_insufficient`,
 `local_checkpoint_limit_reached`, `local_checkpoint_incomplete`,
 `local_checkpoint_witness_mismatch`, `local_checkpoint_copy_failed`,
@@ -6223,18 +6228,25 @@ other failure. Reasons: `boundary_unreadable`, `boundary_noncanonical`,
 `boundary_not_private`, `descendant_refused`, `tree_unreadable` and
 `unknown_entries`.
 
-An object at or below `recovery/` that is not private, or not a plain file or
-directory, makes all three verbs refuse with `local_checkpoint_state_unsupported`
-and a reason, changing nothing. The command never repairs, re-permissions,
-moves or removes it: make it private or move it out by hand, then retry. A
-private entry there that is not a checkpoint blocks only `create`
-(`unknown_entries`).
+A `recovery/` that is itself a link, not a directory or not private makes all
+three verbs refuse with `local_cell_layout_refused` and no reason. An object
+below it that is not private, or not a plain file or directory, makes them
+refuse with `local_checkpoint_state_unsupported` and a reason, unless the cell
+is `busy` or `unowned`, which they report instead. Either way nothing changes.
+The command never repairs, re-permissions, moves or removes such an object:
+make it private or move it out by hand, then retry. A private entry there that
+is not a checkpoint blocks only `create` (`unknown_entries`).
 
 Every receipt carries this notice:
 
 > Checkpoint journal history may remain, including after purged-root delete; another purge does not prune it. Older readers may refuse that history; downgrade compatibility is unsupported.
 
-A `delete` in a purged root recreates `journal/` and keeps that history; a later
+Before it looks for its target, a `delete` whose first observation lists
+creates whichever of `.owner.lock`, `run/` and `run/operation.lock` is missing.
+In a private directory that never was a cell it creates them there before it
+finds no such checkpoint (`failed`, `local_checkpoint_identity_mismatch`,
+exit 1) and leaves them. In a purged root it recreates `run/` and
+`run/operation.lock` as well as `journal/`, and keeps that history; a later
 purge does not prune it, and an older Witself build may refuse it.
 
 ### Interruptions and leftovers
@@ -6307,18 +6319,24 @@ root, `journal/`, `recovery/` or the new checkpoint and its subdirectories
 (`create`, and `delete` in a purged root); and `journal/operations.jsonl` while
 `create` or `delete` appends to it. `inspect` opens none of these. The first
 signal does not end such a wait; a signal after the window above does, leaving
-what a kill leaves. There too, a link put inside the database directory during
+what a kill leaves. A FIFO put at `pg/global/pg_control` after `create` has
+planned its copy makes its `pg_controldata` run wait instead, also under the
+cell lock, until `--timeout` runs out or the first signal ends that wait. There
+too, a link put inside the database directory during
 the copy is followed, but only within it; one put at the manifest, a kept
 password file or a copy being inventoried is refused.
 
 On Linux, if another process holds a write lease on a database file from
 before `create` starts, `create` is refused at once instead of waiting for the
 lease to end: on `PG_VERSION` with `local_checkpoint_source_unsupported` before
-anything is journaled, on any other database file with
+anything is journaled, on any other copied file except `global/pg_control` with
 `local_checkpoint_copy_failed`, its partial copy removed and its operation
-closed. The refused open asks the holder to let go; retrying after it has done
-so succeeds. Nothing ordinary holds such a lease on the files of a stopped
-database.
+closed. A lease on `global/pg_control` is different: `pg_controldata` waits on
+it until `--timeout` ends the run (`local_checkpoint_operation_failed`, nothing
+journaled) or the system breaks the lease (`/proc/sys/fs/lease-break-time`, 45
+seconds by default) and `create` goes on; the first signal ends that wait. The
+refused open asks the holder to let go; retrying after it has done so succeeds.
+Nothing ordinary holds such a lease on the files of a stopped database.
 
 On Windows, `delete` also removes a checkpoint whose witness file is read-only,
 has been replaced by an empty directory, or changed after `delete` checked the

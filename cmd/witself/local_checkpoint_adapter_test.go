@@ -233,6 +233,9 @@ var lcAdapterImports = []string{"context", "errors", "io", "os", "os/signal", "s
 var lcAdapterNames = []string{"Binaries", "Bytes", "Checkpoint", "CheckpointID", "CheckpointListing", "CheckpointOptions", "CheckpointUnknown", "Checkpoints", "Class", "ClassifyCheckpointFailure", "CleanupIncomplete", "Complete", "Config", "ContainsRune", "Context", "CreatedAt", "DeleteCheckpoint", "DeleteCheckpointOptions", "ID", "Inspect", "Inspection", "InstallationID", "Manifest", "New", "PostgresDir", "Reason", "Root", "Timeout", "Writer", "checkpointID", "entries", "installationID", "installationPresent", "pgbin", "root", "status", "timeout", "unknown"}
 var lcAdapterHandler = []string{"localCheckpointCommand", "localCheckpointParse", "localCheckpointCallbacks", "localCheckpointRequest", "localCheckpointFailure", "localCheckpointObservation", "localCheckpointSummary"}
 
+// The command sources that may import os/signal, closed (LC-S7D2F4B2R G-3).
+var lcSignalFiles = []string{"dashboard.go", "local_checkpoint_adapter.go", "memory_curator_auto.go", "tui.go", "tui_console_child.go"}
+
 // Signal names and objects, only inside localCheckpointSignals (pinned text).
 var lcSignalNames = []string{"AfterFunc", "Background", "CancelFunc", "Interrupt", "NotifyContext", "SIGHUP", "SIGTERM"}
 var lcSignalObjects = []string{"context.AfterFunc", "context.Background", "context.CancelFunc", "os.Interrupt", "os/signal.NotifyContext", "syscall.SIGHUP", "syscall.SIGTERM"}
@@ -342,6 +345,74 @@ func lcFence(module map[string]string) map[string]bool {
 		}
 	}
 	fail("outside", reserved != 1)
+	// run's one caller is main in main.go: every other bare run in a command
+	// source is a declaration, a field or key, or a value of a local that its
+	// declaration defines. Only lcSignalFiles may import os/signal.
+	calls := 0
+	for name, source := range module {
+		file, err := files[name], error(nil)
+		if path.Dir(name) != "cmd/witself" {
+			continue
+		} else if file == nil {
+			file, err = parser.ParseFile(lcFset, name, source, parser.SkipObjectResolution)
+		}
+		if fail("outside", err != nil); err != nil {
+			continue
+		}
+		fail("route", !slices.Contains(lcSignalFiles, path.Base(name)) && slices.ContainsFunc(file.Imports, func(spec *ast.ImportSpec) bool {
+			value, err := strconv.Unquote(spec.Path.Value)
+			return err != nil || value == "os/signal"
+		}))
+		for _, decl := range file.Decls {
+			function, _ := decl.(*ast.FuncDecl)
+			named, called, local := map[*ast.Ident]bool{}, map[*ast.Ident]bool{}, false
+			ast.Inspect(decl, func(node ast.Node) bool {
+				var defines []*ast.Ident
+				switch node := node.(type) {
+				case *ast.SelectorExpr:
+					named[node.Sel] = true
+				case *ast.KeyValueExpr:
+					key, _ := node.Key.(*ast.Ident)
+					named[key] = true
+				case *ast.CallExpr:
+					fun, _ := ast.Unparen(node.Fun).(*ast.Ident)
+					called[fun] = true
+				case *ast.Field:
+					defines = node.Names
+				case *ast.ValueSpec:
+					defines = node.Names
+				case *ast.AssignStmt:
+					for _, lhs := range node.Lhs {
+						if ident, ok := lhs.(*ast.Ident); ok && node.Tok == token.DEFINE {
+							defines = append(defines, ident)
+						}
+					}
+				case *ast.RangeStmt:
+					for _, expr := range []ast.Expr{node.Key, node.Value} {
+						if ident, ok := expr.(*ast.Ident); ok && node.Tok == token.DEFINE {
+							defines = append(defines, ident)
+						}
+					}
+				}
+				for _, ident := range defines {
+					named[ident], local = true, local || ident.Name == "run"
+				}
+				return true
+			})
+			ast.Inspect(decl, func(node ast.Node) bool {
+				switch ident, ok := node.(*ast.Ident); {
+				case !ok || ident.Name != "run" || named[ident] || function != nil && ident == function.Name:
+				case called[ident]:
+					calls++
+					fail("outside", function == nil || function.Recv != nil || function.Name.Name != "main" || name != "cmd/witself/main.go")
+				default:
+					fail("outside", !local)
+				}
+				return true
+			})
+		}
+	}
+	fail("outside", calls != 1)
 	// (e) Imports, selectors and composite keys are closed; each entry's names
 	// and objects lie in it alone; the signal context's one use is the namespace.
 	decls := make([]ast.Decl, len(lcEntries))
@@ -394,7 +465,8 @@ func lcFence(module map[string]string) map[string]bool {
 	// variable, whose initializer would run before main. (g) main.go imports
 	// no os/signal or syscall; run and usage each hold one folded constant equal
 	// to local or containing checkpoint: the sole literal of one case whose body
-	// is the pinned route, and the pinned help line.
+	// is the pinned route, and the pinned help line. main and main.go's
+	// package-level declarations hold none (LC-S7D2F4B2R G-1).
 	for _, decl := range append(slices.Clone(files[handler].Decls), files[adapter].Decls...) {
 		function, ok := decl.(*ast.FuncDecl)
 		fail("init", ok && function.Name.Name == "init")
@@ -406,7 +478,7 @@ func lcFence(module map[string]string) map[string]bool {
 	}
 	routes, clauses, found := 0, 0, map[string][]string{}
 	for _, decl := range files["cmd/witself/main.go"].Decls {
-		if function, ok := decl.(*ast.FuncDecl); ok && function.Recv == nil && function.Body != nil && (function.Name.Name == "run" || function.Name.Name == "usage") {
+		if function, ok := decl.(*ast.FuncDecl); ok && function.Recv == nil && function.Body != nil && slices.Contains([]string{"run", "usage", "main"}, function.Name.Name) {
 			routes++
 			ast.Inspect(function.Body, func(node ast.Node) bool {
 				if value, constant := lcStringConstant(node); constant && (value == "local" || strings.Contains(value, "checkpoint")) {
@@ -423,9 +495,15 @@ func lcFence(module map[string]string) map[string]bool {
 				}
 				return true
 			})
+		} else if general, ok := decl.(*ast.GenDecl); ok && general.Tok != token.IMPORT {
+			ast.Inspect(general, func(node ast.Node) bool {
+				value, constant := lcStringConstant(node)
+				fail("route", constant && (value == "local" || strings.Contains(value, "checkpoint")))
+				return true
+			})
 		}
 	}
-	fail("route", routes != 2 || clauses != 1 || !slices.Equal(found["run"], []string{"local"}) || !slices.Equal(found["usage"], []string{lcHelp}))
+	fail("route", routes != 3 || clauses != 1 || found["main"] != nil || !slices.Equal(found["run"], []string{"local"}) || !slices.Equal(found["usage"], []string{lcHelp}))
 	return failed
 }
 

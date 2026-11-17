@@ -2,6 +2,7 @@ package localcell_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -12,9 +13,11 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/witwave-ai/witself/internal/localcell"
 )
@@ -61,6 +64,31 @@ func (s *checkpointCommandSnapshot) listed(installation string) map[string]bool 
 	return entries
 }
 
+// checkpointCommandKeys reads one JSON value and refuses a repeated key or one
+// with a byte outside a-z and _, which encoding/json would accept or fold.
+func checkpointCommandKeys(decoder *json.Decoder) bool {
+	token, err := decoder.Token()
+	if err != nil || (token != json.Delim('{') && token != json.Delim('[')) {
+		return err == nil
+	}
+	seen := map[string]bool{}
+	for decoder.More() {
+		if token == json.Delim('{') {
+			key, err := decoder.Token()
+			name, ok := key.(string)
+			if err != nil || !ok || seen[name] || strings.Trim(name, "abcdefghijklmnopqrstuvwxyz_") != "" {
+				return false
+			}
+			seen[name] = true
+		}
+		if !checkpointCommandKeys(decoder) {
+			return false
+		}
+	}
+	_, err = decoder.Token()
+	return err == nil
+}
+
 // testCheckpointCommandNative proves the released command on a real PostgreSQL
 // 16 cell (legacy layout): a CLI built once from this checkout runs with the
 // parent environment and fresh homes that stay empty. New identifiers come from
@@ -83,7 +111,9 @@ func testCheckpointCommandNative(t *testing.T, binaries localcell.Binaries) {
 	command := func(want int, args ...string) (receipt checkpointCommandReceipt) {
 		t.Helper()
 		var stdout, stderr bytes.Buffer
-		cmd := exec.CommandContext(ctx, cli, args...)
+		bounded, cancel := context.WithTimeout(ctx, 2*time.Minute) // a hung call fails, so cleanup still runs
+		defer cancel()
+		cmd := exec.CommandContext(bounded, cli, args...)
 		cmd.Env, cmd.Stdout, cmd.Stderr = append(os.Environ(), homes...), &stdout, &stderr
 		code, err := 0, cmd.Run()
 		captured = append(append(captured, stdout.Bytes()...), stderr.Bytes()...)
@@ -104,9 +134,9 @@ func testCheckpointCommandNative(t *testing.T, binaries localcell.Binaries) {
 		}
 		decoder := json.NewDecoder(bytes.NewReader(stdout.Bytes()))
 		decoder.DisallowUnknownFields()
-		if stderr.Len() != 0 || bytes.Count(stdout.Bytes(), []byte("\n")) != 1 || !bytes.HasSuffix(stdout.Bytes(), []byte("\n")) ||
-			decoder.Decode(&receipt) != nil || decoder.Decode(new(any)) != io.EOF || receipt.Verification != "not_performed" || receipt.Notice != checkpointCommandNotice {
-			t.Fatal("a released checkpoint receipt is not one framed unverified line with its notice")
+		if stderr.Len() != 0 || bytes.Count(stdout.Bytes(), []byte("\n")) != 1 || !bytes.HasSuffix(stdout.Bytes(), []byte("\n")) || !checkpointCommandKeys(json.NewDecoder(bytes.NewReader(stdout.Bytes()))) ||
+			decoder.Decode(&receipt) != nil || decoder.Decode(new(any)) != io.EOF || receipt.Verification != "not_performed" || receipt.Notice != checkpointCommandNotice || receipt.Operation != args[2] {
+			t.Fatal("a released checkpoint receipt is not one framed unverified line of its operation with its notice")
 		}
 		return receipt
 	}
@@ -128,10 +158,14 @@ func testCheckpointCommandNative(t *testing.T, binaries localcell.Binaries) {
 	if cell.Stop(ctx) != nil {
 		t.Fatal("cannot stop the command proof cell")
 	}
-	// Step 2: without the selector, and the namespace alone, nothing changes.
+	// Step 2: without the selector each verb, and the namespace alone, change
+	// nothing; the real main runs each call (LC-S7D2F4B2R G-1).
 	tree := checkpointNativeTree(t, root, ".")
-	if r := command(2, "local", "checkpoint", "inspect", "--root="+root); r.Failure == nil || r.Failure.Class != "local_checkpoint_command_disabled" {
-		t.Fatal("an unselected inspect was not refused as disabled")
+	for _, args := range [][]string{create[:5], {"local", "checkpoint", "inspect"}, {"local", "checkpoint", "delete", "--checkpoint-id=ckpt_aaaaaaaaaaaaaaaa"}} {
+		if r := command(2, append(slices.Clip(args), "--root="+root)...); r.Outcome != "refused" || r.Failure == nil ||
+			r.Failure.Class != "local_checkpoint_command_disabled" || r.Before != nil || r.After != nil || r.Target != "" {
+			t.Fatal("an unselected create, inspect or delete was not refused as disabled")
+		}
 	}
 	command(2, "local")
 	command(2, "local", "bogus")
@@ -157,7 +191,7 @@ func testCheckpointCommandNative(t *testing.T, binaries localcell.Binaries) {
 	}
 	// Step 5: a third create is refused at the limit; listing and journal stay.
 	before, prefix := checkpointNativeListed(t, cell), checkpointNativeRead(t, journal)
-	if r := command(1, create...); r.Failure == nil || r.Failure.Class != "local_checkpoint_limit_reached" ||
+	if r := command(1, create...); r.Outcome != "failed" || r.Failure == nil || r.Failure.Class != "local_checkpoint_limit_reached" ||
 		!maps.Equal(before, checkpointNativeListed(t, cell)) || !bytes.Equal(prefix, checkpointNativeRead(t, journal)) {
 		t.Fatal("a third create was not refused at the limit unchanged")
 	}
