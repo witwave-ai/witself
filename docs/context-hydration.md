@@ -233,7 +233,9 @@ model-visible output contract:
    `unavailable` needs attention, so ordinary capacity stays low-profile.
    Only the runtime with a capped MCP instruction channel (`claude-code`)
    receives the optional `identity_statement` here, on session start only;
-   other runtimes receive the statement through MCP instructions. Its name is
+   other runtimes receive the statement through the MCP instructions of the
+   `full` and `read-only` profiles, and through neither channel with a
+   curator profile, whose instructions never carry it. Its name is
    the authenticated self digest's agent name, after installed-binding verification.
    It uses the short form at budgets of at least 8 KiB and the one-line form below.
    Budget trimming removes narratives, then facts, then the statement before any
@@ -260,7 +262,11 @@ model-visible output contract:
 
 The executor defaults to a two-second deadline, an 8 KiB context envelope,
 eight salient self memories, and six recall hits. Its intrinsic ceilings are
-five seconds, 16 KiB, and 20 candidates; a caller cannot raise them. The lexical
+five seconds, 16 KiB, and 20 candidates; a caller cannot raise them. When the
+runtime's hook caps context length, the session-start envelope is also held to
+that cap in code points, so a caller's budget above it trims the envelope in
+the usual order instead of losing the whole context (prompt hydration keeps
+only its byte budget). The lexical
 keyword-OR query is capped at 12 distinct terms and 768 bytes. No prompt, query,
 digest, memory value, or token is persisted in the local hydration ledger.
 

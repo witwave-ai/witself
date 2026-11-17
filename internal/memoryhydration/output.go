@@ -10,6 +10,15 @@ import (
 
 const maximumClaudeHookOutputCharacters = 10_000
 
+// hookCharacterLimit is the most code points of context the runtime's hook
+// accepts (HookOutput's own check); zero means its hook output has no limit.
+func hookCharacterLimit(runtime string) int {
+	if runtime == transcriptcapture.RuntimeClaudeCode {
+		return maximumClaudeHookOutputCharacters
+	}
+	return 0
+}
+
 // HookOutput encodes model-visible context in the exact output shape supported
 // by the runtime/event pair. Unsupported pairs return an error rather than
 // emitting fields that a runtime would silently ignore.
