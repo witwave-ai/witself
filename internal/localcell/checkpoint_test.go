@@ -1091,23 +1091,29 @@ func TestCheckpointNameSupported(t *testing.T) {
 // directory is gone (MX5); the unseal syncs the directory once the witness is
 // gone and before anything else is (MX4), and a failed unseal sync is returned.
 func TestCheckpointDirectorySyncOrder(t *testing.T) {
-	if reflect.ValueOf(syncCheckpointDirectory).Pointer() != reflect.ValueOf(syncDirectory).Pointer() {
+	if reflect.ValueOf(syncCheckpointDirectory).Pointer() != reflect.ValueOf(syncDirectory).Pointer() ||
+		reflect.ValueOf(syncCheckpointRoot).Pointer() != reflect.ValueOf(syncRootDirectory).Pointer() {
 		t.Fatal("checkpoint directory sync no longer defaults to syncDirectory")
 	}
 	const target = "ckpt_cccccccccccccccc"
 	// fixture logs each sync as its slash path below recovery/ plus probe of the
-	// target directory, and fails the sync of *fail.
+	// target directory, and fails the sync of *fail; seams prefixes each by seam.
+	var seams []string
 	fixture := func(t *testing.T, fail *string, probe func(string) string) (*retainedFixture, *checkpointRecorder, *[]string) {
 		f, r := checkpointFixture(t, "legacy", false)
-		dir, synced, original := f.cell.path("recovery", target), &[]string{}, syncCheckpointDirectory
-		r.nextID = func() (string, error) { return target, nil }
-		t.Cleanup(func() { syncCheckpointDirectory = original })
-		syncCheckpointDirectory = func(name string) error {
+		dir, synced, original, originalRoot := f.cell.path("recovery", target), &[]string{}, syncCheckpointDirectory, syncCheckpointRoot
+		r.nextID, seams = func() (string, error) { return target, nil }, nil
+		t.Cleanup(func() { syncCheckpointDirectory, syncCheckpointRoot = original, originalRoot })
+		record := func(seam, name string, sync func() error) error {
 			rel, err := filepath.Rel(f.cell.recoveryDir(), name)
-			if *synced = append(*synced, filepath.ToSlash(rel)+probe(dir)); err != nil || filepath.ToSlash(rel) == *fail {
+			if *synced, seams = append(*synced, filepath.ToSlash(rel)+probe(dir)), append(seams, seam+filepath.ToSlash(rel)); err != nil || filepath.ToSlash(rel) == *fail {
 				return errors.New("synthetic directory sync failure")
 			}
-			return original(name)
+			return sync()
+		}
+		syncCheckpointDirectory = func(name string) error { return record("path:", name, func() error { return original(name) }) }
+		syncCheckpointRoot = func(held *os.Root) error {
+			return record("root:", filepath.Clean(held.Name()), func() error { return originalRoot(held) })
 		}
 		return f, r, synced
 	}
@@ -1133,8 +1139,34 @@ func TestCheckpointDirectorySyncOrder(t *testing.T) {
 		f, r, synced := fixture(t, new(string), present)
 		r.after = func(dir string) { checkpointRewrite(t, filepath.Join(dir, "pg", "base", "1", "1259")) }
 		if err := f.cell.Checkpoint(t.Context(), checkpointOptions(f)); !checkpointSameError(err, "local_checkpoint_witness_mismatch") ||
-			!slices.Contains(*synced, ".-") || slices.Contains(*synced, ".+") {
+			!slices.Contains(*synced, ".-") || slices.Contains(*synced, ".+") || !slices.Contains(seams, "root:.") || slices.Contains(seams, "path:.") {
 			t.Fatal("the discard did not sync recovery/ after removing its directory")
+		}
+	})
+	// A cleanup whose name is already empty syncs recovery/ through the held root.
+	t.Run("discard_absent", func(t *testing.T) {
+		f, r, synced := fixture(t, new(string), present)
+		r.after = func(dir string) { checkpointRewrite(t, filepath.Join(dir, "pg", "base", "1", "1259")) }
+		heldAt(f.cell, "hold", func() { heldMove(t, f.cell.path("recovery", target), f.cell.path("aside")) })
+		err := f.cell.Checkpoint(t.Context(), checkpointOptions(f))
+		if !checkpointSameError(err, "local_checkpoint_witness_mismatch") || ClassifyCheckpointFailure(err).CleanupIncomplete ||
+			!slices.Contains(seams, "root:.") || !slices.Contains(*synced, ".-") || slices.Contains(seams, "path:.") {
+			t.Fatal("an emptied cleanup name did not sync recovery through the held root alone")
+		}
+	})
+	t.Run("discard_unsynced", func(t *testing.T) {
+		f, r, _ := fixture(t, &[]string{"."}[0], present)
+		r.after = func(dir string) { checkpointRewrite(t, filepath.Join(dir, "pg", "base", "1", "1259")) }
+		if err := f.cell.Checkpoint(t.Context(), checkpointOptions(f)); !ClassifyCheckpointFailure(err).CleanupIncomplete {
+			t.Fatal("a cleanup whose recovery sync failed reported its discard")
+		}
+	})
+	t.Run("discard_absent_unsynced", func(t *testing.T) {
+		f, r, _ := fixture(t, &[]string{"."}[0], present)
+		r.after = func(dir string) { checkpointRewrite(t, filepath.Join(dir, "pg", "base", "1", "1259")) }
+		heldAt(f.cell, "hold", func() { heldMove(t, f.cell.path("recovery", target), f.cell.path("aside")) })
+		if err := f.cell.Checkpoint(t.Context(), checkpointOptions(f)); !ClassifyCheckpointFailure(err).CleanupIncomplete {
+			t.Fatal("an emptied cleanup name whose recovery sync failed reported its discard")
 		}
 	})
 	for _, fail := range []string{"", target} {
@@ -1152,11 +1184,14 @@ func TestCheckpointDirectorySyncOrder(t *testing.T) {
 			if c.Checkpoint(t.Context(), checkpointOptions(f)) != nil {
 				t.Fatal("cannot prepare the checkpoint")
 			}
-			unsealed, *synced, armed = tree(dir), nil, fail
+			unsealed, *synced, armed, seams = tree(dir), nil, fail, nil
 			delete(unsealed, checkpointWitnessName)
 			err := c.DeleteCheckpoint(t.Context(), DeleteCheckpointOptions{CheckpointID: target})
 			if fail == "" && (err != nil || !slices.Equal(*synced, []string{target + " unsealed", ". gone"})) {
 				t.Fatal("deletion did not sync its directory once the witness was gone and before anything else was, then recovery/ once it was removed")
+			}
+			if !slices.Equal(seams, []string{"root:" + target, "root:."}[:min(len(seams), 2)]) {
+				t.Fatal("a deletion synced a directory other than through its held root")
 			}
 			// A failed unseal sync is returned, closes the operation and leaves the data in place without its witness.
 			if p, journalErr := c.readJournal(); fail != "" && (!checkpointSameError(err, "local cell checkpoint_delete: unseal failed") ||
