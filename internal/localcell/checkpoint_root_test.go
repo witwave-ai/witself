@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"runtime"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -109,16 +110,24 @@ func heldFailed(t *testing.T, f *retainedFixture, err error, step string) {
 }
 
 // heldDiscard runs a Checkpoint of heldTarget whose copy is byte-flipped after
-// the copy, so it fails and discards its own directory; arm runs first.
-func heldDiscard(t *testing.T, arm func(*Cell)) (*Cell, CheckpointFailure) {
+// the copy, so it fails and discards its own directory; arm runs first. A step
+// "copy" fails the copy step instead (a publish fails), "witness" the witness
+// step (the second control reading moved).
+func heldDiscard(t *testing.T, arm func(*Cell), step ...string) (*Cell, CheckpointFailure) {
 	t.Helper()
 	f, r := checkpointFixture(t, "legacy", false)
 	r.nextID = func() (string, error) { return heldTarget, nil }
 	r.after = func(dir string) { checkpointRewrite(t, filepath.Join(dir, "pg", "base", "1", "1259")) }
+	want, moved := "local_checkpoint_witness_mismatch", checkpointSyntheticControl
+	if moved.CheckpointLSN = "0/1548FC0"; slices.Contains(step, "copy") {
+		want, f.cell.checkpointTest.publish = "local_checkpoint_copy_failed", func(string, string) error { return errors.New("synthetic publish failure") }
+	} else if slices.Contains(step, "witness") {
+		r.after, r.readings = func(string) {}, []pgControlData{checkpointSyntheticControl, moved}
+	}
 	arm(f.cell)
 	err := f.cell.Checkpoint(t.Context(), checkpointOptions(f))
-	if !checkpointSameError(err, "local_checkpoint_witness_mismatch") {
-		t.Fatal("the failed checkpoint did not report its witness mismatch")
+	if !checkpointSameError(err, want) {
+		t.Fatal("the failed checkpoint did not report its fixed failure cause")
 	}
 	return f.cell, ClassifyCheckpointFailure(err)
 }
@@ -283,8 +292,10 @@ func TestDeleteCheckpointHeld(t *testing.T) {
 	})
 	// The cleanup removes once: the live database fixture renamed onto the name at
 	// its sweep or after its removal and sync, or linked there then, stays; incomplete.
-	for _, at := range []string{"sweep", "synced", "linked"} {
-		t.Run("discard_swap_"+at, func(t *testing.T) {
+	// The same when the copy or the witness step fails.
+	for _, row := range []string{"sweep", "synced", "linked", "sweep_copy", "synced_copy", "sweep_witness", "synced_witness"} {
+		t.Run("discard_swap_"+row, func(t *testing.T) {
+			at, step, _ := strings.Cut(row, "_")
 			original, kept := syncCheckpointRoot, heldTrees{}
 			t.Cleanup(func() { syncCheckpointRoot = original })
 			_, failure := heldDiscard(t, func(c *Cell) {
@@ -303,7 +314,7 @@ func TestDeleteCheckpointHeld(t *testing.T) {
 					}
 					return err
 				}
-			})
+			}, step)
 			if heldSame(t, kept); !failure.CleanupIncomplete {
 				t.Fatal("a failed checkpoint reported the discard of a directory renamed onto its name")
 			}
@@ -321,6 +332,36 @@ func TestDeleteCheckpointHeld(t *testing.T) {
 		})
 		if heldSame(t, kept); !failure.CleanupIncomplete {
 			t.Fatal("a failed checkpoint reported its discard through a recovery link to the cell root")
+		}
+	})
+	// recovery/ moved away at the cleanup's hold, left absent or a private file put
+	// at its name: not held, so incomplete, the moved tree kept.
+	for _, put := range []string{"absent", "file"} {
+		t.Run("discard_recovery_"+put, func(t *testing.T) {
+			kept := heldTrees{}
+			_, failure := heldDiscard(t, func(c *Cell) {
+				heldAt(c, "hold", func() {
+					heldMove(t, c.recoveryDir(), c.path("moved"))
+					if kept[c.path("moved")] = heldTree(t, c.path("moved")); put == "file" {
+						checkpointWrite(t, c, "recovery", "placed at the name")
+					}
+				})
+			})
+			if heldSame(t, kept); !failure.CleanupIncomplete {
+				t.Fatal("a failed checkpoint reported its discard without holding its recovery directory")
+			}
+		})
+	}
+	// An identifier that is not a checkpoint's opens and removes nothing.
+	t.Run("identifier", func(t *testing.T) {
+		_, c := heldFixture(t)
+		before := checkpointTreeState(t, c)
+		recovery, checkpoint, err := c.holdCheckpoint(".")
+		held, target, heldErr := c.holdCheckpoint(heldTarget)
+		defer closeCheckpointRoots(held, target)
+		if recovery != nil || checkpoint != nil || !errors.Is(err, errCheckpointIdentity) || heldErr != nil ||
+			!errors.Is(c.removeCheckpointHeld(held, target, "."), errCheckpointIdentity) || !reflect.DeepEqual(before, checkpointTreeState(t, c)) {
+			t.Fatal("a held root helper accepted an identifier that is not a checkpoint's")
 		}
 	})
 	heldPlatformRows(t)

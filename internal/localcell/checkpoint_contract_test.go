@@ -222,14 +222,52 @@ var checkpointRootCalls = map[string]int{"os.OpenRoot(c.recoveryDir() + checkpoi
 
 // checkpoint_root.go imports only checkpointRootImports, none renamed, names of
 // a package only checkpointRootMembers, calls besides typed root calls (f) only
-// checkpointRootCallees, and names other declarations only as checkpointRootNames.
+// checkpointRootCallees, each by the declaration of its first identifier, assigns
+// only to identifiers, and names other declarations only as checkpointRootNames.
 var checkpointRootImports = []string{"errors", "io/fs", "os", "path/filepath", "runtime"}
 var checkpointRootMembers = map[string][]string{"errors": {"Is", "New"}, "fs": {"ErrNotExist", "ModeSymlink"}, "filepath": {"Separator"},
 	"os": {"Lstat", "OpenRoot", "Root", "SameFile"}, "runtime": {"GOOS"}}
-var checkpointRootCallees = []string{"c.checkpointStage", "c.checkpointTest.beforeStep", "c.recoveryDir", "c.checkpointDir", "c.holdCheckpoint",
-	"c.checkpointRootsBound", "c.removeCheckpointHeld", "closeCheckpointRoots", "syncCheckpointRoot", "handle.Sync",
-	"listing.Readdirnames", "left.Mode", "string"}
+var checkpointRootCallees = map[string]string{"c.checkpointStage": "receiver", "c.checkpointTest.beforeStep": "receiver", "c.recoveryDir": "receiver",
+	"c.checkpointDir": "receiver", "c.holdCheckpoint": "receiver", "c.checkpointRootsBound": "receiver", "c.removeCheckpointHeld": "receiver",
+	"closeCheckpointRoots": "package", "syncCheckpointRoot": "package", "string": "universe", "handle.Sync": `held.Open(".")`,
+	"listing.Readdirnames": `checkpoint.Open(".")`, "left.Mode": "recovery.Lstat(checkpointID)"}
 var checkpointRootNames = []string{"Cell", "checkpointWitnessName", "errCheckpointCopy"}
+
+// checkpointRootReceivers are the declarations, besides an *os.Root field, of a
+// typed root call's receiver; "(ast: <nil>)" is a later name of a multi-value one.
+var checkpointRootReceivers = []string{"c.holdCheckpoint(checkpointID)", "(ast: <nil>)", `checkpoint.Open(".")`, `held.Open(".")`}
+
+// checkpointRootDeclared is how the first operand of expression is declared:
+// "universe", "package" (checkpoint_root.go's scope), "receiver" (the enclosing
+// *Cell method's, never assigned), else its type if a field, then every value
+// assigned to it; an operand that is not an identifier is its own text.
+func checkpointRootDeclared(parsed map[string]*ast.File, declaration ast.Decl, expression ast.Expr) string {
+	for selector, ok := expression.(*ast.SelectorExpr); ok; selector, ok = expression.(*ast.SelectorExpr) {
+		expression = selector.X
+	}
+	identifier, ok := expression.(*ast.Ident)
+	declared, values := "", checkpointAssignments(parsed["checkpoint_root.go"])
+	switch {
+	case !ok:
+		return types.ExprString(expression)
+	case identifier.Obj == nil && slices.ContainsFunc(slices.Collect(maps.Values(parsed)), func(file *ast.File) bool { return file.Scope.Lookup(identifier.Name) != nil }):
+		return "elsewhere"
+	case identifier.Obj == nil:
+		return "universe"
+	case parsed["checkpoint_root.go"].Scope.Lookup(identifier.Name) == identifier.Obj:
+		return "package"
+	}
+	if field, ok := identifier.Obj.Decl.(*ast.Field); ok {
+		declared = types.ExprString(field.Type)
+		if function, _ := declaration.(*ast.FuncDecl); function != nil && function.Recv != nil && function.Recv.List[0] == field && declared == "*Cell" && len(values[identifier.Obj]) == 0 {
+			return "receiver"
+		}
+	}
+	for _, value := range values[identifier.Obj] {
+		declared = strings.TrimSpace(declared + " " + types.ExprString(value))
+	}
+	return declared
+}
 
 // checkpointRootClosed applies the closed lists above to checkpoint_root.go.
 func checkpointRootClosed(parsed map[string]*ast.File, failures map[string]bool) {
@@ -269,9 +307,27 @@ func checkpointRootClosed(parsed map[string]*ast.File, failures map[string]bool)
 				if typed {
 					typed = isPackage(selector.X) || slices.Contains(checkpointRootMethods, selector.Sel.Name)
 				}
-				if _, literal := node.Fun.(*ast.FuncLit); !literal && !typed && !slices.Contains(checkpointRootCallees, types.ExprString(node.Fun)) {
-					failures["checkpoint_root_callee:"+owner+":"+types.ExprString(node.Fun)] = true
+				if typed && !isPackage(selector.X) {
+					declared := checkpointRootDeclared(parsed, declaration, selector.X)
+					failures["checkpoint_root_receiver:"+owner+":"+types.ExprString(node.Fun)+"="+declared] = !strings.HasPrefix(declared, "*os.Root") &&
+						!slices.Contains(checkpointRootReceivers, declared)
 				}
+				_, literal := node.Fun.(*ast.FuncLit)
+				callee := types.ExprString(node.Fun)
+				if want, listed := checkpointRootCallees[callee]; !literal && !typed && !listed {
+					failures["checkpoint_root_callee:"+owner+":"+callee] = true
+				} else if listed && !typed {
+					declared := checkpointRootDeclared(parsed, declaration, node.Fun)
+					failures["checkpoint_root_declared:"+owner+":"+callee+"="+declared] = declared != want
+				}
+			case *ast.AssignStmt:
+				for _, target := range node.Lhs {
+					if _, plain := target.(*ast.Ident); !plain {
+						failures["checkpoint_root_assign:"+owner+":"+types.ExprString(target)] = true
+					}
+				}
+			case *ast.RangeStmt:
+				failures["checkpoint_root_assign:"+owner+":range"] = failures["checkpoint_root_assign:"+owner+":range"] || node.Tok == token.ASSIGN
 			case *ast.Ident:
 				if node.Obj == nil && !parts[node] && !functions[node] && !slices.Contains(checkpointRootNames, node.Name) &&
 					slices.ContainsFunc(slices.Collect(maps.Values(parsed)), func(other *ast.File) bool { return other.Scope.Lookup(node.Name) != nil }) {
@@ -891,6 +947,8 @@ func TestCheckpointSourceContract(t *testing.T) {
 	// The review's fifteen admitted seeds and four more shapes, each planted in
 	// checkpoint_root.go, with what a seed needs declared in files.go.
 	const seed, removeProbe = "func checkpointRootSeed(", "func (c *Cell) removeProbe(name string) error { return os.Remove(name) }"
+	const removeAs, removeBody = "func (c *Cell) ", "(name string) error { return os.Remove(name) }"
+	const heldSeed = `recovery, checkpoint, _ := c.holdCheckpoint("ckpt_aaaaaaaaaaaaaaaa"); return c.removeCheckpointHeld(recovery, checkpoint, "ckpt_aaaaaaaaaaaaaaaa")`
 	root, files, spool := [2]string{"checkpoint_root.go", rootTail}, [2]string{"files.go", "func syncDirectory("}, "(c *Cell) { root, _ := runtimeconfig.OpenSpoolRoot(c.cfg.Root); closeCheckpointRoots(root, nil) }"
 	for _, row := range []struct {
 		name, want string
@@ -915,6 +973,22 @@ func TestCheckpointSourceContract(t *testing.T) {
 		{"closed_method_value", "name:checkpointRootSeed:c.removeServiceControlEndpoint", [][3]string{{root[0], root[1], seed + "c *Cell) { remove := c.removeServiceControlEndpoint; _ = remove }"}}},
 		{"closed_function_value", "name:checkpointRootSeed:syncDirectory", [][3]string{{root[0], root[1], seed + ") { sync := syncDirectory; _ = sync }"}}},
 		{"closed_import_renamed", "import:errors", [][3]string{{root[0], "\"errors\"", "xerrors \"errors\""}}},
+		// The re-review's seven seeds: an allowed callee spelled through an alias, a
+		// parameter or a field, or through a c that is not the method's receiver.
+		{"closed_alias_sync", "declared:checkpointRootSeed:handle.Sync=c", [][3]string{{files[0], files[1], removeAs + "Sync" + removeBody}, {root[0], root[1], seed + "c *Cell) error { handle := c; return handle.Sync(c.recoveryDir()) }"}}},
+		{"closed_alias_readdirnames", "declared:checkpointRootSeed:listing.Readdirnames=c", [][3]string{{files[0], files[1], removeAs + "Readdirnames" + removeBody}, {root[0], root[1], seed + "c *Cell) error { listing := c; return listing.Readdirnames(c.recoveryDir()) }"}}},
+		{"closed_alias_mode", "declared:checkpointRootSeed:left.Mode=c", [][3]string{{files[0], files[1], removeAs + "Mode" + removeBody}, {root[0], root[1], seed + "c *Cell) error { left := c; return left.Mode(c.recoveryDir()) }"}}},
+		{"closed_parameter_sync", "declared:checkpointRootSeed:handle.Sync=*Cell", [][3]string{{files[0], files[1], removeAs + "Sync" + removeBody}, {root[0], root[1], seed + "c, handle *Cell) error { return handle.Sync(c.recoveryDir()) }"}}},
+		{"closed_field_sync", "declared:checkpointRootSeed:handle.Sync=c.seedProbe", [][3]string{{files[0], files[1], "type checkpointSeedProbe struct{}\n\nfunc (checkpointSeedProbe) Sync" + removeBody},
+			{"types.go", "\tcheckpointTest           *checkpointOperations", "\tseedProbe                checkpointSeedProbe"}, {root[0], root[1], seed + "c *Cell) error { handle := c.seedProbe; return handle.Sync(c.recoveryDir()) }"}}},
+		{"closed_cell_value", "declared:checkpointRootSeed:c.holdCheckpoint=&zero", [][3]string{{root[0], root[1], seed + ") error { var zero Cell; c := &zero; " + heldSeed + " }"}}},
+		{"closed_cell_shadowed", "declared:checkpointRootSeed:c.holdCheckpoint=&other", [][3]string{{root[0], root[1], seed + "c *Cell) error { other := *c; other.cfg.Root = string(filepath.Separator) + \"tmp\"; { c := &other; " + heldSeed + " } }"}}},
+		// The receiver itself reassigned, or written through.
+		{"closed_receiver_assigned", "declared:checkpointRootSeed:c.recoveryDir=*Cell other", [][3]string{{root[0], root[1], "func (c *Cell) checkpointRootSeed(other *Cell) string { c = other; return c.recoveryDir() }"}}},
+		{"closed_receiver_written", "assign:checkpointRootSeed:c.cfg.Root", [][3]string{{root[0], root[1], "func (c *Cell) checkpointRootSeed() { c.cfg.Root = \"tmp\" }"}}},
+		{"closed_range_written", "assign:checkpointRootSeed:range", [][3]string{{root[0], root[1], "func (c *Cell) checkpointRootSeed() { for _, c.cfg.Root = range []string{\"tmp\"} {} }"}}},
+		// A typed root call's receiver that is not a root nor an opened directory.
+		{"closed_typed_alias", "receiver:checkpointRootSeed:listing.Close=c", [][3]string{{files[0], files[1], "func (c *Cell) Close() error { _ = os.Remove(c.path(\"seed-absent\")); return nil }"}, {root[0], root[1], "func (c *Cell) checkpointRootSeed() error { listing := c; return listing.Close() }"}}},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			for _, ending := range []string{"\n", "\r\n"} {

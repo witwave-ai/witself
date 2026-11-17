@@ -46,8 +46,12 @@ func (c *Cell) checkpointStage(stage string) {
 }
 
 // holdCheckpoint opens recovery/ and then the checkpoint directory below it as
-// roots, each as a directory only; recovery is returned whenever it opened.
+// roots, each as a directory only; recovery is returned whenever it opened. An
+// identifier checkpointDir refuses opens nothing.
 func (c *Cell) holdCheckpoint(checkpointID string) (recovery, checkpoint *os.Root, err error) {
+	if _, err = c.checkpointDir(checkpointID); err != nil {
+		return nil, nil, err
+	}
 	c.checkpointStage("hold")
 	recovery, err = os.OpenRoot(c.recoveryDir() + checkpointRootHere)
 	if err != nil {
@@ -106,8 +110,11 @@ func (c *Cell) unsealCheckpointHeld(recovery, checkpoint *os.Root, checkpointID 
 // re-check and the remove are two calls: an object another process puts at the
 // exact name between them is removed instead if it is a file, a link or an
 // empty directory; a directory with content is refused; nothing outside the
-// held recovery/ is reached.
+// held recovery/ is reached. An identifier checkpointDir refuses removes nothing.
 func (c *Cell) removeCheckpointHeld(recovery, checkpoint *os.Root, checkpointID string) error {
+	if _, err := c.checkpointDir(checkpointID); err != nil {
+		return err
+	}
 	c.checkpointStage("sweep")
 	if !c.checkpointRootsBound(recovery, checkpoint, checkpointID) {
 		return errCheckpointRootMoved

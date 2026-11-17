@@ -126,5 +126,24 @@ func init() {
 				t.Fatal("a failed checkpoint reported a linked kept checkpoint as its own")
 			}
 		})
+		// recovery/ replaced after the cleanup's removal and sync, a private file at
+		// the name in the new one: incomplete, the file kept.
+		t.Run("discard_recovery_replaced", func(t *testing.T) {
+			original := syncCheckpointRoot
+			t.Cleanup(func() { syncCheckpointRoot = original })
+			c, failure := heldDiscard(t, func(c *Cell) {
+				syncCheckpointRoot = func(held *os.Root) error {
+					err := original(held)
+					if syncCheckpointRoot = original; errors.Join(err, os.Rename(c.recoveryDir(), c.path("moved")), testMkdir(c.recoveryDir(), 0o700)) != nil {
+						t.Fatal("cannot replace the recovery directory")
+					}
+					checkpointWrite(t, c, "recovery/"+heldTarget, "placed at the name")
+					return nil
+				}
+			})
+			if !failure.CleanupIncomplete || string(retainedRead(t, c, "recovery/"+heldTarget)) != "placed at the name" {
+				t.Fatal("a failed checkpoint reported its discard after its recovery directory was replaced")
+			}
+		})
 	}
 }

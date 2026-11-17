@@ -1161,6 +1161,14 @@ func TestCheckpointDirectorySyncOrder(t *testing.T) {
 			t.Fatal("a cleanup whose recovery sync failed reported its discard")
 		}
 	})
+	t.Run("discard_absent_unsynced", func(t *testing.T) {
+		f, r, _ := fixture(t, &[]string{"."}[0], present)
+		r.after = func(dir string) { checkpointRewrite(t, filepath.Join(dir, "pg", "base", "1", "1259")) }
+		heldAt(f.cell, "hold", func() { heldMove(t, f.cell.path("recovery", target), f.cell.path("aside")) })
+		if err := f.cell.Checkpoint(t.Context(), checkpointOptions(f)); !ClassifyCheckpointFailure(err).CleanupIncomplete {
+			t.Fatal("an emptied cleanup name whose recovery sync failed reported its discard")
+		}
+	})
 	for _, fail := range []string{"", target} {
 		t.Run("unseal/sync-fails="+strconv.FormatBool(fail != ""), func(t *testing.T) {
 			var unsealed map[string]retainedEntry
