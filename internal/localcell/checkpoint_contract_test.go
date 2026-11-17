@@ -22,7 +22,7 @@ import (
 var checkpointFiles = []string{"checkpoint.go", "checkpoint_unix.go", "checkpoint_windows.go", "checkpoint_other.go", "checkpoint_verify.go", "drill_root.go"}
 
 // checkpointForbiddenOS are calls the checkpoint files may not make (C7(e));
-// os.RemoveAll is counted by (a) and os.OpenRoot is the Unix opener's alone.
+// os.RemoveAll is counted by (a); os.OpenRoot is the Unix opener's and the drill root's.
 var checkpointForbiddenOS = []string{"os.Create", "os.CreateTemp", "os.WriteFile", "os.Mkdir", "os.MkdirAll", "os.OpenFile",
 	"os.Rename", "os.Remove", "os.Truncate", "os.Chmod", "os.Chown", "os.Chtimes", "os.Link", "os.Symlink",
 	"exec.Command", "exec.CommandContext"}
@@ -36,6 +36,71 @@ var checkpointForbiddenHelpers = []string{"makePassword", "makePrincipalPassword
 // filepath.Rel is pure path arithmetic.
 var checkpointReaders = []string{"os.Lstat", "os.OpenRoot", "filepath.WalkDir", "filepath.Rel", "readPostgresFile", "openPrivateFile",
 	"runtimeconfig.WindowsPrivatePostgresOpen", "c.command"}
+
+// drillRootCalls are the only calls drill_root.go makes on a root receiver, by
+// method, argument text and exact count.
+var drillRootCalls = map[string][]string{"Stat": {`"."`}, "Lstat": {"drillID"}, "Open": {`"."`},
+	"OpenFile": {"drillRootRecordName, os.O_RDONLY | syscall.O_NONBLOCK, 0"}, "OpenRoot": {"drillID + drillRootHere"},
+	"RemoveAll": {"name"}, "Remove": {"drillRootRecordName", "drillID"}, "Close": {""}}
+var drillRootCounts = map[string]int{"Stat": 2, "Lstat": 1, "Open": 2, "OpenFile": 1, "OpenRoot": 1, "RemoveAll": 1, "Remove": 2, "Close": 2}
+
+// drillRootReceivers are drill_root.go's identifiers assigned once from
+// os.OpenRoot or a root receiver's OpenRoot, and its *os.Root parameters;
+// deferred holds every node inside a defer statement.
+func drillRootReceivers(file *ast.File, values map[any][]ast.Expr) (receivers map[any]bool, deferred map[ast.Node]bool) {
+	receivers, deferred = map[any]bool{}, map[ast.Node]bool{}
+	ast.Inspect(file, func(node ast.Node) bool {
+		switch node := node.(type) {
+		case *ast.FuncType:
+			for _, field := range node.Params.List {
+				for _, identifier := range field.Names {
+					if identifier.Obj != nil && types.ExprString(field.Type) == "*os.Root" {
+						receivers[identifier.Obj] = true
+					}
+				}
+			}
+		case *ast.DeferStmt:
+			ast.Inspect(node, func(inner ast.Node) bool { deferred[inner] = true; return true })
+		}
+		return true
+	})
+	for changed := true; changed; {
+		changed = false
+		for object, assigned := range values {
+			call, ok := assigned[0].(*ast.CallExpr)
+			if !ok || len(assigned) != 1 || receivers[object] {
+				continue
+			}
+			selector, _ := call.Fun.(*ast.SelectorExpr)
+			if selector != nil && selector.Sel.Name == "OpenRoot" && (types.ExprString(selector.X) == "os" || drillRootReceiver(receivers, selector.X)) {
+				receivers[object], changed = true, true
+			}
+		}
+	}
+	return receivers, deferred
+}
+
+func drillRootReceiver(receivers map[any]bool, expression ast.Expr) bool {
+	identifier, ok := expression.(*ast.Ident)
+	return ok && identifier.Obj != nil && receivers[identifier.Obj]
+}
+
+// drillRootIdentity is the one call assigned to an identity operand, with a
+// root receiver spelled "root".
+func drillRootIdentity(values map[any][]ast.Expr, receivers map[any]bool, expression ast.Expr) string {
+	identifier, ok := expression.(*ast.Ident)
+	if !ok || identifier.Obj == nil || len(values[identifier.Obj]) != 1 {
+		return ""
+	}
+	call, ok := values[identifier.Obj][0].(*ast.CallExpr)
+	if !ok {
+		return ""
+	}
+	if selector, ok := call.Fun.(*ast.SelectorExpr); ok && drillRootReceiver(receivers, selector.X) {
+		return "root." + strings.TrimPrefix(types.ExprString(call), types.ExprString(selector.X)+".")
+	}
+	return types.ExprString(call)
+}
 
 func checkpointLiteral(node ast.Node) string {
 	if literal, ok := node.(*ast.BasicLit); ok && literal.Kind == token.STRING {
@@ -184,10 +249,15 @@ func checkpointSourceContract(sources map[string]string) []string {
 		"checkpointWitnessName:checkpoint_verify.go:checkpointVerifyPath": 1, "checkpointInventoryName:checkpoint_verify.go:checkpointVerifyPath": 1,
 		"checkpointWitnessName:checkpoint_verify.go:checkpointVerifyTree": 1, "checkpointInventoryName:checkpoint_verify.go:checkpointVerifyTree": 1,
 	}
-	witnessSpellings, inventorySpellings, journalCreates, inspectSummaries := 0, 0, 0, 0
+	witnessSpellings, inventorySpellings, journalCreates, inspectSummaries, drillHooks, drillOpenRoots := 0, 0, 0, 0, 0, 0
+	drillRootCalled := map[string]int{}
 	for name, file := range parsed {
 		checkpointFile := slices.Contains(checkpointFiles, name)
 		values, read := checkpointAssignments(file), map[ast.Node]bool{}
+		receivers, deferred := map[any]bool{}, map[ast.Node]bool{}
+		if name == "drill_root.go" {
+			receivers, deferred = drillRootReceivers(file, values)
+		}
 		selectorNames, readOnlyOpens := map[*ast.Ident]bool{}, map[ast.Node]bool{}
 		var markRead func([]ast.Expr)
 		markRead = func(arguments []ast.Expr) {
@@ -254,7 +324,7 @@ func checkpointSourceContract(sources map[string]string) []string {
 					if checkpointFile && name != "drill_root.go" && origin == "drill_root.go" {
 						failures["drill_reference:"+name+":"+identifier.Name] = true
 					}
-					if name == "drill_root.go" && origin != "drill_root.go" && !slices.Contains([]string{"recoveryDir", "validateRecovery"}, identifier.Name) {
+					if name == "drill_root.go" && origin != "drill_root.go" && !slices.Contains([]string{"recoveryDir", "validateRecovery", "checkpointIDPattern"}, identifier.Name) {
 						failures["drill_checkpoint_reference:"+name+":"+identifier.Name] = true
 					}
 				}
@@ -263,6 +333,8 @@ func checkpointSourceContract(sources map[string]string) []string {
 					// and summary type in types.go, and from Inspect.
 					switch {
 					case name == "types.go" && (identifier.Name == "checkpointOperations" || identifier.Name == "CheckpointSummary"):
+					case name == "types.go" && identifier.Name == "drillRootOperations":
+						drillHooks++
 					case name == "lifecycle.go" && identifier.Name == "checkpointSummaries" && owner == "Inspect":
 						inspectSummaries++
 					default:
@@ -307,8 +379,35 @@ func checkpointSourceContract(sources map[string]string) []string {
 					return true
 				}
 				function := types.ExprString(call.Fun)
-				if selector, ok := call.Fun.(*ast.SelectorExpr); ok && name == "drill_root.go" && (selector.Sel.Name == "RemoveAll" || selector.Sel.Name == "Remove") && types.ExprString(selector.X) != "os" {
+				if selector, ok := call.Fun.(*ast.SelectorExpr); ok && name == "drill_root.go" && drillRootReceiver(receivers, selector.X) {
+					// (b) a root call is typed by method, argument text and count.
+					var arguments []string
+					for _, argument := range call.Args {
+						arguments = append(arguments, types.ExprString(argument))
+					}
+					if allowed, known := drillRootCalls[selector.Sel.Name]; !known {
+						failures["drill_root_method:"+selector.Sel.Name] = true
+					} else if !slices.Contains(allowed, strings.Join(arguments, ", ")) {
+						failures["drill_root_call:"+selector.Sel.Name] = true
+					}
+					drillRootCalled[selector.Sel.Name]++
+					failures["drill_root_close"] = failures["drill_root_close"] || selector.Sel.Name == "Close" && !deferred[call]
+				} else if ok && name == "drill_root.go" && (selector.Sel.Name == "RemoveAll" || selector.Sel.Name == "Remove") && types.ExprString(selector.X) != "os" {
 					failures["forbidden_call:"+name+":"+function] = true
+				}
+				if name == "drill_root.go" && function == "os.OpenRoot" {
+					// (c) the one pathname root holds recovery/ as a directory only.
+					drillOpenRoots++
+					if len(call.Args) != 1 || types.ExprString(call.Args[0]) != "c.recoveryDir() + drillRootHere" {
+						failures["drill_call_target:os.OpenRoot"] = true
+					}
+				}
+				// (d) a held identity comes from a root handle, a current one from
+				// recovery/ or the drill's name without following its last element.
+				if name == "drill_root.go" && (function == "os.Stat" || function == "os.Lstat" && (len(call.Args) != 1 || types.ExprString(call.Args[0]) != "c.recoveryDir()") ||
+					function == "os.SameFile" && (len(call.Args) != 2 || drillRootIdentity(values, receivers, call.Args[0]) != `root.Stat(".")` ||
+						!slices.Contains([]string{"os.Lstat(c.recoveryDir())", "root.Lstat(drillID)"}, drillRootIdentity(values, receivers, call.Args[1])))) {
+					failures["drill_identity:"+owner] = true
 				}
 				if function == "os.RemoveAll" {
 					// (a) each checkpoint deletion targets a local checkpointDir value.
@@ -334,11 +433,17 @@ func checkpointSourceContract(sources map[string]string) []string {
 				if !checkpointFile {
 					return true
 				}
-				if slices.Contains(checkpointForbiddenOS, function) || (function == "os.OpenRoot" && name != "checkpoint_unix.go") {
+				if slices.Contains(checkpointForbiddenOS, function) || (function == "os.OpenRoot" && name != "checkpoint_unix.go" && name != "drill_root.go") {
 					failures["forbidden_call:"+name+":"+function] = true
 				}
-				if strings.HasSuffix(function, ".OpenFile") && function != "os.OpenFile" && (len(call.Args) != 3 || types.ExprString(call.Args[1]) != "os.O_RDONLY") {
-					failures["root_open_not_read_only:"+name] = true
+				// (e) a root open is read-only; the drill record's alone is also non-blocking.
+				if flags := ""; strings.HasSuffix(function, ".OpenFile") && function != "os.OpenFile" {
+					if len(call.Args) == 3 {
+						flags = types.ExprString(call.Args[1])
+					}
+					if flags != "os.O_RDONLY" && (name != "drill_root.go" || flags != "os.O_RDONLY | syscall.O_NONBLOCK") {
+						failures["root_open_not_read_only:"+name] = true
+					}
 				}
 				// (b) each writer's path is rooted in a checkpointDir value, or is
 				// exactly recovery/ (create or sync) or journal/ (one create).
@@ -391,6 +496,10 @@ func checkpointSourceContract(sources map[string]string) []string {
 	for name, count := range removals {
 		failures["removeall_count:"+name] = count != map[string]int{"checkpoint.go": 2, "lifecycle.go": 3, "drill_root.go": 0}[name]
 	}
+	for method, count := range drillRootCounts {
+		failures["drill_root_count:"+method] = drillRootCalled[method] != count
+	}
+	failures["drill_call_count:os.OpenRoot"], failures["drill_hook_count"] = drillOpenRoots != 1, drillHooks != 1
 	failures["journal_create_count"], failures["witness_name_spelling"], failures["inspect_summaries"] = journalCreates != 1, witnessSpellings != 1, inspectSummaries != 1
 	var result []string
 	for failure, failed := range failures {
@@ -418,12 +527,30 @@ func TestCheckpointSourceContract(t *testing.T) {
 	const verifyTail = "func (c *Cell) verifyCheckpoint("
 	const drillTail = "const drillRootRecordName"
 	mutations := []mutation{
-		{"drill_openroot", "drill_root.go", drillTail, "func drillRootProbe(c *Cell) { dir, _ := c.drillDir(\"\"); _, _ = os.OpenRoot(dir) }\n\n" + drillTail, "forbidden_call:drill_root.go:os.OpenRoot"},
+		{"drill_openroot", "drill_root.go", drillTail, "func drillRootProbe(c *Cell) { dir, _ := c.drillDir(\"\"); _, _ = os.OpenRoot(dir) }\n\n" + drillTail, "drill_call_target:os.OpenRoot"},
 		{"drill_remove", "drill_root.go", drillTail, "func drillRootProbe(c *Cell) { dir, _ := c.drillDir(\"\"); _ = os.Remove(dir) }\n\n" + drillTail, "forbidden_call:drill_root.go:os.Remove"},
-		{"drill_root_removeall", "drill_root.go", drillTail, "func drillRootProbe(root *os.Root) { _ = root.RemoveAll(\"pg\") }\n\n" + drillTail, "forbidden_call:drill_root.go:root.RemoveAll"},
-		{"drill_root_remove", "drill_root.go", drillTail, "func drillRootProbe(root *os.Root) { _ = root.Remove(drillRootRecordName) }\n\n" + drillTail, "forbidden_call:drill_root.go:root.Remove"},
+		{"drill_root_removeall", "drill_root.go", drillTail, "func drillRootProbe(root *os.Root) { _ = root.RemoveAll(\"pg\") }\n\n" + drillTail, "drill_root_call:RemoveAll"},
+		{"drill_root_remove", "drill_root.go", drillTail, "func drillRootProbe(root *os.Root) { _ = root.Remove(drillRootRecordName) }\n\n" + drillTail, "drill_root_count:Remove"},
 		{"drill_recovery_sync", "drill_root.go", drillTail, "func drillRootProbe(c *Cell) { _ = syncDirectory(c.recoveryDir()) }\n\n" + drillTail, "writer_root:drill_root.go:syncDirectory"},
 		{"drill_checkpoint_sync", "drill_root.go", drillTail, "func drillRootProbe() { _ = syncCheckpointDirectory }\n\n" + drillTail, "drill_checkpoint_reference:drill_root.go:syncCheckpointDirectory"},
+		{"drill_second_openroot", "drill_root.go", drillTail, "func drillRootProbe(c *Cell) { _, _ = os.OpenRoot(c.recoveryDir() + drillRootHere) }\n\n" + drillTail, "drill_call_count:os.OpenRoot"},
+		{"drill_openroot_plain", "drill_root.go", "os.OpenRoot(c.recoveryDir() + drillRootHere)", "os.OpenRoot(c.recoveryDir())", "drill_call_target:os.OpenRoot"},
+		{"drill_child_openroot_plain", "drill_root.go", "recovery.OpenRoot(drillID + drillRootHere)", "recovery.OpenRoot(drillID)", "drill_root_call:OpenRoot"},
+		{"drill_identity_from_lstat", "drill_root.go", "drillHeld, err := drill.Stat(\".\")", "drillHeld, err := recovery.Lstat(drillID)", "drill_identity:drillRootBound"},
+		{"drill_identity_follows", "drill_root.go", "drillNow, nowErr := recovery.Lstat(drillID)", "drillNow, nowErr := recovery.Stat(drillID)", "drill_identity:drillRootBound"},
+		{"drill_recovery_identity_path", "drill_root.go", "recoveryHeld, err := recovery.Stat(\".\")", "recoveryHeld, err := os.Lstat(c.recoveryDir())", "drill_identity:drillRootBound"},
+		{"drill_final_removeall", "drill_root.go", "recovery.Remove(drillID)", "recovery.RemoveAll(drillID)", "drill_root_count:RemoveAll"},
+		{"drill_remove_other", "drill_root.go", "drill.Remove(drillRootRecordName)", "drill.Remove(\"pg\")", "drill_root_call:Remove"},
+		{"drill_root_write", "drill_root.go", "defer func() { _ = drill.Close() }()", "defer func() { _ = drill.Close() }(); _ = drill.WriteFile(drillRootRecordName, nil, 0o600)", "drill_root_method:WriteFile"},
+		{"drill_root_rename", "drill_root.go", "defer func() { _ = recovery.Close() }()", "defer func() { _ = recovery.Close() }(); _ = recovery.Rename(drillID, \"aside\")", "drill_root_method:Rename"},
+		{"drill_root_mkdir", "drill_root.go", drillTail, "func drillRootProbe(r *os.Root) { _ = r.Mkdir(\"late\", 0o700) }\n\n" + drillTail, "drill_root_method:Mkdir"},
+		{"drill_record_open_write", "drill_root.go", "drill.OpenFile(drillRootRecordName, os.O_RDONLY|syscall.O_NONBLOCK, 0)", "drill.OpenFile(drillRootRecordName, os.O_RDWR|syscall.O_NONBLOCK, 0)", "root_open_not_read_only:drill_root.go"},
+		{"drill_unclosed_root", "drill_root.go", "defer func() { _ = drill.Close() }()", "", "drill_root_count:Close"},
+		{"drill_close_not_deferred", "drill_root.go", "defer func() { _ = drill.Close() }()", "_ = drill.Close()", "drill_root_close"},
+		{"drill_alias_remove", "drill_root.go", drillTail, "func drillRootProbe(r *os.Root) { alias := r; _ = alias.RemoveAll(\"pg\") }\n\n" + drillTail, "forbidden_call:drill_root.go:alias.RemoveAll"},
+		{"drill_second_hook", "types.go", "type Cell struct {", "var drillRootHookProbe *drillRootOperations\n\n" + "type Cell struct {", "drill_hook_count"},
+		{"drill_checkpoint_sync_reference", "drill_root.go", "if drillRootSync(recovery) != nil {", "if syncCheckpointDirectory(c.recoveryDir()) != nil {", "drill_checkpoint_reference:drill_root.go:syncCheckpointDirectory"},
+		{"checkpoint_root_open_nonblock", "checkpoint_unix.go", "root.OpenFile(filepath.FromSlash(rel), os.O_RDONLY, 0)", "root.OpenFile(filepath.FromSlash(rel), os.O_RDONLY|syscall.O_NONBLOCK, 0)", "root_open_not_read_only:checkpoint_unix.go"},
 		{"checkpoint_openroot", "checkpoint.go", tail, "func checkpointProbe(c *Cell) { _, _ = os.OpenRoot(c.recoveryDir()) }\n\n" + tail, "forbidden_call:checkpoint.go:os.OpenRoot"},
 		{"drill_checkpoint_writer", "drill_root.go", drillTail, "func drillRootProbe(c *Cell) { dir, _ := c.checkpointDir(\"\"); _ = syncCheckpointDirectory(dir) }\n\n" + drillTail, "writer_root:drill_root.go:syncCheckpointDirectory"},
 		{"drill_third_removeall", "drill_root.go", drillTail, "func drillRootProbe(c *Cell) { dir, _ := c.drillDir(\"\"); _ = os.RemoveAll(dir) }\n\n" + drillTail, "removeall_count:drill_root.go"},
