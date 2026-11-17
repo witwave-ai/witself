@@ -28,6 +28,10 @@ func openPrivateFile(path string, flags int, _ os.FileMode) (*os.File, error) {
 	return runtimeconfig.WindowsPrivateOpenFile(path, flags)
 }
 
+// openPrivateReader is the guarded open: no FIFO can stand at a file-system
+// name here, and it opens a link at the last element as itself and refuses it.
+func openPrivateReader(path string) (*os.File, error) { return openPrivateFile(path, os.O_RDONLY, 0) }
+
 func readPrivateFile(path string) ([]byte, error) {
 	f, err := openPrivateFile(path, os.O_RDONLY, 0)
 	if err != nil {

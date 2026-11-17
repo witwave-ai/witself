@@ -2,13 +2,22 @@
 
 package localcell
 
-import "os"
+import (
+	"os"
+	"syscall"
+)
 
 // Preserve the existing Unix filesystem operations and permission checks.
 func makePrivateDir(path string) error { return os.Mkdir(path, 0o700) }
 
 func openPrivateFile(path string, flags int, mode os.FileMode) (*os.File, error) {
 	return os.OpenFile(path, flags, mode)
+}
+
+// openPrivateReader opens path read-only without waiting on what stands at the
+// name, so a FIFO opens at once, and refuses a link at its last element.
+func openPrivateReader(path string) (*os.File, error) {
+	return os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, 0)
 }
 
 func readPrivateFile(path string) ([]byte, error) { return os.ReadFile(path) }
