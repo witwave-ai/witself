@@ -57,7 +57,8 @@ type lcWireDiagnostic struct {
 	CleanupIncomplete *bool  `json:"cleanup_incomplete"`
 }
 
-var lcClasses = []string{"local_checkpoint_state_unsupported", "local_checkpoint_identity_mismatch", "local_checkpoint_source_unsupported", "local_checkpoint_storage_insufficient", "local_checkpoint_limit_reached", "local_checkpoint_incomplete", "local_checkpoint_witness_mismatch", "local_checkpoint_copy_failed", "local_maintenance_fence_active", "local_cell_locked", "local_checkpoint_interrupted", "local_cell_layout_refused", "local_checkpoint_operation_failed", "local_checkpoint_metadata_unsupported", "local_checkpoint_command_disabled", "local_checkpoint_arguments_invalid", "local_checkpoint_confirmation_required"}
+var lcFailureClasses = []string{"local_checkpoint_state_unsupported", "local_checkpoint_identity_mismatch", "local_checkpoint_source_unsupported", "local_checkpoint_storage_insufficient", "local_checkpoint_limit_reached", "local_checkpoint_incomplete", "local_checkpoint_witness_mismatch", "local_checkpoint_copy_failed", "local_maintenance_fence_active", "local_cell_locked", "local_checkpoint_interrupted", "local_cell_layout_refused", "local_checkpoint_operation_failed"}
+var lcClasses = append(slices.Clone(lcFailureClasses), "local_checkpoint_metadata_unsupported", "local_checkpoint_command_disabled", "local_checkpoint_arguments_invalid", "local_checkpoint_confirmation_required")
 var lcReasons = []string{"", "boundary_unreadable", "boundary_noncanonical", "boundary_not_private", "descendant_refused", "tree_unreadable", "unknown_entries"}
 
 type lcBrokenWriter struct{}
@@ -163,8 +164,20 @@ func (f *lcFixture) run(t *testing.T, args []string, want int, calls string) lcW
 	if (code == 0 && (receipt.Outcome != "succeeded" || d != nil)) || (receipt.Outcome == "failed" && (code != 1 || d == nil)) {
 		t.Fatal("receipt outcome differs")
 	}
-	if code == 2 && (receipt.Outcome != "refused" || d == nil || !slices.Contains([]string{"local_checkpoint_command_disabled", "local_checkpoint_arguments_invalid", "local_checkpoint_confirmation_required", "local_checkpoint_identity_mismatch"}, d.Class) || d.Reason != "" || d.CleanupIncomplete == nil || *d.CleanupIncomplete || receipt.After != nil) {
+	if code == 2 && receipt.Outcome != "refused" {
+		t.Fatal("refusal outcome differs")
+	}
+	if code == 2 && (d == nil || !slices.Contains([]string{"local_checkpoint_command_disabled", "local_checkpoint_arguments_invalid", "local_checkpoint_confirmation_required", "local_checkpoint_identity_mismatch"}, d.Class)) {
 		t.Fatal("receipt refusal differs")
+	}
+	if code == 2 && d.Reason != "" {
+		t.Fatal("refusal reason present")
+	}
+	if code == 2 && (d.CleanupIncomplete == nil || *d.CleanupIncomplete) {
+		t.Fatal("refusal cleanup differs")
+	}
+	if code == 2 && receipt.After != nil {
+		t.Fatal("refusal after-read present")
 	}
 	mutated := slices.Contains(f.calls, "create") || slices.Contains(f.calls, "delete")
 	if mutated {
@@ -176,7 +189,13 @@ func (f *lcFixture) run(t *testing.T, args []string, want int, calls string) lcW
 		if op == "inspect" && code == 0 {
 			outcome = "succeeded"
 		}
-		if receipt.Outcome != outcome || (receipt.Before != nil) != ((op == "create" || op == "delete") && len(f.calls) > 0) || (receipt.After != nil) != (op == "inspect" && len(f.calls) == 1) {
+		if receipt.Outcome != outcome {
+			t.Fatal("unmutated outcome differs")
+		}
+		if (receipt.Before != nil) != ((op == "create" || op == "delete") && len(f.calls) > 0) {
+			t.Fatal("before-read presence differs")
+		}
+		if (receipt.After != nil) != (op == "inspect" && len(f.calls) == 1) {
 			t.Fatal("observation presence differs")
 		}
 	}
@@ -227,15 +246,20 @@ func (f *lcFixture) run(t *testing.T, args []string, want int, calls string) lcW
 			}
 		}
 		diagnostics = append(diagnostics, snapshot.Failure)
-		if !slices.Contains([]string{"listed", "busy", "unowned", "unavailable"}, snapshot.Status) || (snapshot.Failure != nil) != (snapshot.Status == "unavailable") {
+		if !slices.Contains([]string{"listed", "busy", "unowned", "unavailable"}, snapshot.Status) {
 			t.Fatal("snapshot status differs")
+		}
+		if (snapshot.Failure != nil) != (snapshot.Status == "unavailable") {
+			t.Fatal("snapshot failure presence differs")
 		}
 		if snapshot.Status != "listed" {
 			if snapshot.InstallationID != "" || snapshot.Count != nil || snapshot.UnknownCount != nil || len(snapshot.Entries) != 0 {
 				t.Fatal("partial observation escaped")
 			}
-		} else if snapshot.Count == nil || *snapshot.Count != len(snapshot.Entries) || snapshot.UnknownCount == nil || *snapshot.UnknownCount < 0 {
+		} else if snapshot.Count == nil || *snapshot.Count != len(snapshot.Entries) {
 			t.Fatal("snapshot counts differ")
+		} else if snapshot.UnknownCount == nil || *snapshot.UnknownCount < 0 {
+			t.Fatal("snapshot unknown count differs")
 		}
 		for _, entry := range snapshot.Entries {
 			if !regexp.MustCompile(`^ckpt_[a-z2-7]{16}$`).MatchString(entry.ID) || entry.Verification != "not_performed" || entry.Complete == nil {
@@ -395,7 +419,7 @@ func lcAfter(t *testing.T, snapshot *lcWireSnapshot, status, class, reason strin
 }
 func TestLocalCheckpointOutput(t *testing.T) {
 	t.Run("raw-error", func(t *testing.T) {
-		classes := lcClasses[:13]
+		classes := lcFailureClasses
 		reasons := lcReasons
 		for _, class := range classes {
 			for _, reason := range reasons {
@@ -581,66 +605,6 @@ func lcStringConstant(n ast.Node) (string, bool) {
 	return "", false
 }
 
-// Fence references in both directions, including wrappers and function values.
-func lcDisconnected(sources map[string]string) bool {
-	files, owners := map[string]*ast.File{}, map[string]string{}
-	const handler = "local_checkpoint_command.go"
-	for name, source := range sources {
-		f, err := parser.ParseFile(token.NewFileSet(), name, source, 0)
-		if err != nil {
-			return false
-		}
-		files[name] = f
-		for symbol := range f.Scope.Objects {
-			owners[symbol] = name
-		}
-	}
-	valid := files[handler] != nil && files["main.go"] != nil
-	for name, f := range files {
-		inside := name == handler
-		if inside {
-			for _, imp := range f.Imports {
-				p, _ := strconv.Unquote(imp.Path.Value)
-				if !slices.Contains([]string{"context", "encoding/json", "errors", "flag", "io", "path/filepath", "regexp", "strings", "time"}, p) {
-					return false
-				}
-			}
-		}
-		var visit func(ast.Node) bool
-		visit = func(n ast.Node) bool {
-			switch n := n.(type) {
-			case *ast.FuncDecl:
-				if inside && n.Name.Name == "init" {
-					valid = false
-				}
-				if name == "main.go" && (n.Name.Name == "run" || n.Name.Name == "usage") {
-					ast.Inspect(n.Body, func(child ast.Node) bool {
-						if value, ok := lcStringConstant(child); ok {
-							if value == "local" || strings.Contains(value, "checkpoint") {
-								valid = false
-							}
-						}
-						return true
-					})
-				}
-			case *ast.SelectorExpr:
-				if inside && slices.Contains([]string{"Cell", "Checkpoint", "DeleteCheckpoint", "Inspect", "Stop", "Repair", "Start", "Install", "Remove", "Command", "CommandContext", "StartProcess", "ForkExec", "Syscall", "Glob", "Walk", "WalkDir", "EvalSymlinks"}, n.Sel.Name) {
-					valid = false
-				}
-				// Visit the receiver, not selector member names as package symbols.
-				ast.Inspect(n.X, visit)
-				return false
-			case *ast.Ident:
-				if owner := owners[n.Name]; n != f.Name && owner != "" && inside != (owner == handler) {
-					valid = false
-				}
-			}
-			return true
-		}
-		ast.Inspect(f, visit)
-	}
-	return valid && lcModuleDisconnected(sources)
-}
 func lcModuleSources(root string) (module, sources map[string]string, err error) {
 	module, sources = map[string]string{}, map[string]string{}
 	err = filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
@@ -682,12 +646,36 @@ func TestLocalCheckpointNeverStopsOrRepairs(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(root, "go.mod")); err != nil {
 			t.Fatal("module root unavailable")
 		}
-		module, sources, err := lcModuleSources(root)
-		if err != nil || module["cmd/witself/main.go"] == "" || module["cmd/witself/local_checkpoint_command.go"] == "" || module["internal/localcell/checkpoint.go"] == "" || !lcModuleDisconnected(module) {
-			t.Fatal("module disconnection violated")
+		module, _, err := lcModuleSources(root)
+		if err != nil {
+			t.Fatal("module walk failed")
 		}
-		if !lcDisconnected(sources) {
-			t.Fatal("command disconnection violated")
+		for _, name := range []string{"cmd/witself/main.go", "cmd/witself/local_checkpoint_command.go", "cmd/witself/local_checkpoint_adapter.go", "internal/localcell/checkpoint.go"} {
+			if module[name] == "" {
+				t.Fatal("known module source missing")
+			}
+		}
+		for failure := range lcFence(module) {
+			switch failure {
+			case "linkname":
+				t.Fatal("module disconnection violated")
+			case "isolation":
+				t.Fatal("handler isolation violated")
+			case "prefix":
+				t.Fatal("reserved prefix violated")
+			case "outside":
+				t.Fatal("reserved name or local cell import outside the two files")
+			case "references":
+				t.Fatal("adapter references outside its closed set")
+			case "allowlist":
+				t.Fatal("adapter import or selector outside the allowlist")
+			case "init":
+				t.Fatal("init function in handler or adapter")
+			case "route":
+				t.Fatal("command disconnection violated")
+			default:
+				t.Fatal("unclassified fence failure")
+			}
 		}
 		if _, _, err := lcModuleSources(filepath.Join(t.TempDir(), "missing")); err == nil {
 			t.Fatal("module walk error swallowed")
@@ -703,7 +691,7 @@ func TestLocalCheckpointNeverStopsOrRepairs(t *testing.T) {
 		if err != nil || len(kept) != 2 || kept["kept.v2/a.go"] == "" || kept["cmd/witself/b.go"] == "" || len(command) != 1 || command["b.go"] == "" {
 			t.Fatal("module walk skip set differs")
 		}
-		const handler = "local_checkpoint_command.go"
+		const handler, adapter = "local_checkpoint_command.go", "local_checkpoint_adapter.go"
 		linked := `package main
 import("context"; "io"; "time"; _ "unsafe")
 type reviewRequest struct { operation, root, pgbin, installationID, checkpointID string; timeout time.Duration }
@@ -715,42 +703,61 @@ type reviewCallbacks struct { create func(context.Context, reviewRequest) review
 func reviewInvokeCommand() int { return reviewLinkedCommand(context.Background(), nil, reviewCallbacks{}, io.Discard, io.Discard) }
 func init() { reviewInvokeCommand() }
 `
+		base := map[string]string{}
+		for name, source := range module {
+			if name == "cmd/witself/main.go" || strings.Contains(source, "localCheckpoint") || strings.Contains(source, "witself/internal/localcell\"") {
+				base[name] = source
+			}
+		}
 		for _, newline := range []string{"\n", "\r\n"} {
-			for _, row := range []struct{ file, old, replacement string }{
-				{"linked.go", "", linked},
-				{handler, "func localCheckpointCommand", "//go:" + "linkname localCheckpointCommand\nfunc localCheckpointCommand"},
-				{"internal/example/linked.go", "", strings.Replace(linked, "package main", "package example", 1)},
-				{"main.go", "func run(args []string) int {", "func run(args []string) int {\n _ = \"check\" + \"point\""},
-				{"main.go", "func run(args []string) int {", "func run(args []string) int {\n _ = \"loc\" + \"al\""},
-				{"main.go", "func usage(w io.Writer) {", "func usage(w io.Writer) {\n _ = (\"check\" + (\"po\" + \"int\"))"},
-				{handler, "import (\n", "import (\n alias \"github.com/witwave-ai/witself/internal/localcell\"\n"},
-				{handler, "import (\n", "import (\n . \"github.com/witwave-ai/witself/internal/localcell\"\n"},
-				{handler, "import (\n", "import (\n runner \"os/exec\"\n"},
-				{handler, "func localCheckpointIdentity", "var _ = cell.Stop\nfunc localCheckpointIdentity"}, {handler, "func localCheckpointIdentity", "var _ = cell.Repair\nfunc localCheckpointIdentity"},
-				{handler, "func localCheckpointIdentity", "var _ = runner.Command\nfunc localCheckpointIdentity"}, {handler, "func localCheckpointIdentity", "var _ = os.StartProcess\nfunc localCheckpointIdentity"},
-				{handler, "func localCheckpointIdentity", "var _ = localcell.Cell{}\nfunc localCheckpointIdentity"}, {handler, "func localCheckpointIdentity", "var _ = run\nfunc localCheckpointIdentity"},
-				{handler, "func localCheckpointIdentity", "var _ = filepath.Walk\nfunc localCheckpointIdentity"},
-				{handler, "func localCheckpointIdentity", "var _ = (run).arbitrary\nfunc localCheckpointIdentity"},
-				{handler, "func localCheckpointIdentity", "func init() {}\nfunc localCheckpointIdentity"},
-				{"main.go", "func run(args []string) int {", "func run(args []string) int {\n _ = localCheckpointCommand"},
-				{"main.go", "func run(args []string) int {", "func run(args []string) int {\n _ = localCheckpointCallbacks{}"},
-				{"main.go", "func run(args []string) int {", "func run(args []string) int {\n _ = \"local\""},
-				{"main.go", "func usage(w io.Writer) {", "func usage(w io.Writer) {\n _ = \"witself local checkpoint\""},
+			for _, row := range []struct{ file, old, replacement, want string }{
+				{"linked.go", "", linked, "linkname"},
+				{handler, "func localCheckpointCommand", "//go:" + "linkname localCheckpointCommand\nfunc localCheckpointCommand", "linkname"},
+				{"internal/example/linked.go", "", strings.Replace(linked, "package main", "package example", 1), "linkname"},
+				{"main.go", "func run(args []string) int {", "func run(args []string) int {\n _ = \"check\" + \"point\"", "route"},
+				{"main.go", "func run(args []string) int {", "func run(args []string) int {\n _ = \"loc\" + \"al\"", "route"},
+				{"main.go", "func usage(w io.Writer) {", "func usage(w io.Writer) {\n _ = (\"check\" + (\"po\" + \"int\"))", "route"},
+				{handler, "import (\n", "import (\n alias \"github.com/witwave-ai/witself/internal/localcell\"\n", "isolation"},
+				{handler, "import (\n", "import (\n . \"github.com/witwave-ai/witself/internal/localcell\"\n", "isolation"},
+				{handler, "import (\n", "import (\n runner \"os/exec\"\n", "isolation"},
+				{handler, "func localCheckpointIdentity", "var _ = cell.Stop\nfunc localCheckpointIdentity", "isolation"}, {handler, "func localCheckpointIdentity", "var _ = cell.Repair\nfunc localCheckpointIdentity", "isolation"},
+				{handler, "func localCheckpointIdentity", "var _ = runner.Command\nfunc localCheckpointIdentity", "isolation"}, {handler, "func localCheckpointIdentity", "var _ = os.StartProcess\nfunc localCheckpointIdentity", "isolation"},
+				{handler, "func localCheckpointIdentity", "var _ = localcell.Cell{}\nfunc localCheckpointIdentity", "isolation"}, {handler, "func localCheckpointIdentity", "var _ = run\nfunc localCheckpointIdentity", "isolation"},
+				{handler, "func localCheckpointIdentity", "var _ = filepath.Walk\nfunc localCheckpointIdentity", "isolation"},
+				{handler, "func localCheckpointIdentity", "var _ = (run).arbitrary\nfunc localCheckpointIdentity", "isolation"},
+				{handler, "func localCheckpointIdentity", "func init() {}\nfunc localCheckpointIdentity", "init"},
+				{"main.go", "func run(args []string) int {", "func run(args []string) int {\n _ = localCheckpointCommand", "outside"},
+				{"main.go", "func run(args []string) int {", "func run(args []string) int {\n _ = localCheckpointCallbacks{}", "outside"},
+				{"main.go", "func run(args []string) int {", "func run(args []string) int {\n _ = \"local\"", "route"},
+				{"main.go", "func usage(w io.Writer) {", "func usage(w io.Writer) {\n _ = \"witself local checkpoint\"", "route"},
+				{handler, "func localCheckpointIdentity", "var _ = usage\nfunc localCheckpointIdentity", "isolation"},
+				{adapter, "func localCheckpointFailed", "var _ = (*localcell.Cell).Stop\nfunc localCheckpointFailed", "allowlist"}, {adapter, "func localCheckpointFailed", "var _ = (*localcell.Cell).Repair\nfunc localCheckpointFailed", "allowlist"},
+				{adapter, "\t\"strings\"\n", "\t\"os/exec\"\n\t\"strings\"\n", "allowlist"}, {adapter, "func localCheckpointFailed", "var _ = exec.CommandContext\nfunc localCheckpointFailed", "allowlist"},
+				{adapter, "\t\"strings\"\n", "\t\"os/signal\"\n\t\"strings\"\n", "allowlist"}, {adapter, "func localCheckpointFailed", "var _ localCheckpointReceipt\nfunc localCheckpointFailed", "references"},
+				{adapter, "func localCheckpointFailed", "var _ = run\nfunc localCheckpointFailed", "references"}, {adapter, "func localCheckpointFailed", "func checkpointHelper() {}\nfunc localCheckpointFailed", "prefix"},
+				{adapter, "func localCheckpointFailed", "func init() {}\nfunc localCheckpointFailed", "init"}, {"route.go", "", "package main\n\nvar _ = localCheckpointRun\n", "outside"},
+				{"main.go", "import (\n", "import (\n\t\"github.com/witwave-ai/witself/internal/localcell\"\n", "outside"}, {"unrelated.go", "", "package main\n\nvar mode, status, timeout string\n", ""},
 			} {
-				copySources := map[string]string{}
-				for name, source := range sources {
-					copySources[name] = strings.ReplaceAll(source, "\n", newline)
+				input := map[string]string{}
+				for name, source := range base {
+					input[name] = strings.ReplaceAll(source, "\n", newline)
 				}
-				original := strings.ReplaceAll(copySources[row.file], "\r\n", "\n")
+				file := row.file
+				if !strings.Contains(file, "/") {
+					file = "cmd/witself/" + file
+				}
+				original := strings.ReplaceAll(input[file], "\r\n", "\n")
 				changed := strings.Replace(original, row.old, row.replacement, 1)
 				if changed == original {
 					t.Fatal("source mutation did not apply")
 				}
-				copySources[row.file] = strings.ReplaceAll(changed, "\n", newline)
-				if _, err := parser.ParseFile(token.NewFileSet(), row.file, copySources[row.file], 0); err != nil {
+				input[file] = strings.ReplaceAll(changed, "\n", newline)
+				if _, err := parser.ParseFile(token.NewFileSet(), file, input[file], 0); err != nil {
 					t.Fatal("source mutation is invalid")
 				}
-				if (strings.Contains(row.file, "/") && lcModuleDisconnected(map[string]string{row.file: copySources[row.file]})) || (!strings.Contains(row.file, "/") && lcDisconnected(copySources)) {
+				if failures := lcFence(input); row.want == "" && len(failures) != 0 {
+					t.Fatal("unrelated declaration rejected")
+				} else if row.want != "" && !failures[row.want] {
 					t.Fatal("source mutation escaped fence")
 				}
 			}
