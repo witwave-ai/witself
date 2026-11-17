@@ -30,7 +30,8 @@ var checkpointForbiddenOS = []string{"os.Create", "os.CreateTemp", "os.WriteFile
 // checkpointForbiddenHelpers mint credentials, run PostgreSQL, stop, remove or
 // change service intent (C7(c)).
 var checkpointForbiddenHelpers = []string{"makePassword", "makePrincipalPasswords", "pgCommand", "databaseCommand", "startPostgres",
-	"startServicePostgres", "stopAll", "retainRemoval", "finishRemoval", "setServiceDesiredStateLocked"}
+	"startServicePostgres", "stopAll", "retainRemoval", "finishRemoval", "setServiceDesiredStateLocked", "Repair", "ownExisting",
+	"discardJournalTail", "stopSelected", "signalTerminate", "stopPostgres", "terminateWindowsPending"}
 
 // checkpointReaders may receive a path below pg/ or run/, or the manifest;
 // filepath.Rel is pure path arithmetic.
@@ -572,6 +573,7 @@ func TestCheckpointSourceContract(t *testing.T) {
 		{"witness_second_spelling", "checkpoint.go", tail, "var checkpointSeal = \"witness.json\"\n\n" + tail, "witness_name_spelling"},
 		{"recovery_dir_elsewhere", "lifecycle.go", "\tif err := c.checkpointSummaries(lock, &result); err != nil {", "\t_ = c.recoveryDir()\n\tif err := c.checkpointSummaries(lock, &result); err != nil {", "reference:lifecycle.go:recoveryDir"},
 		{"second_inspect_reference", "lifecycle.go", "\tif err := c.checkpointSummaries(lock, &result); err != nil {", "\t_ = c.checkpointSummaries(lock, &result)\n\tif err := c.checkpointSummaries(lock, &result); err != nil {", "inspect_summaries"},
+		{"inspect_closes_leftover", "lifecycle.go", "\tif err := c.checkpointSummaries(lock, &result); err != nil {", "\t_ = c.closeCheckpointLeftover()\n\tif err := c.checkpointSummaries(lock, &result); err != nil {", "reference:lifecycle.go:closeCheckpointLeftover"},
 		{"summaries_outside_inspect", "lifecycle.go", "func (c *Cell) finishRemoval(", "func (c *Cell) listRecovery() { _ = c.checkpointSummaries(nil, &Inspection{}) }\n\nfunc (c *Cell) finishRemoval(", "reference:lifecycle.go:checkpointSummaries"},
 		{"checkpoint_called_elsewhere", "reinstall.go", "func (c *Cell) reinstallBoundary(", "func (c *Cell) reinstallCheckpoint() { _ = c.Checkpoint(nil, CheckpointOptions{}) }\n\nfunc (c *Cell) reinstallBoundary(", "reference:reinstall.go:Checkpoint"},
 		{"call_os.OpenRoot_off_unix", "checkpoint_other.go", "func validateRecoveryObject(", "func checkpointCall() { os.OpenRoot(\"\") }\n\nfunc validateRecoveryObject(", "forbidden_call:checkpoint_other.go:os.OpenRoot"},

@@ -67,6 +67,13 @@
 // The inventory and witness record digests that a later check can use to detect
 // accidental corruption or truncation, not a same-user rewrite. Nothing verifies
 // a kept checkpoint yet, and Inspect can list a damaged one as complete.
+// An interrupted Checkpoint or DeleteCheckpoint leaves its journal operation
+// open; the next Checkpoint or DeleteCheckpoint whose admission passes closes
+// it with operation/done just before starting its own, under its own lock, and
+// stops, signals, starts and deletes nothing. A witness-less directory stays
+// until DeleteCheckpoint names it. Any other open operation, a torn journal
+// tail, and a checkpoint record that Repair has begun still refuse both until
+// Repair.
 // Windows transient refusals while publishing a copied file or reopening it
 // for re-hashing use the shared 2 s retry budget and 25–200 ms backoff, bounded
 // also by 10 s plus 100 ms per planned file in cumulative requested sleep and

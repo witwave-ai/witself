@@ -146,14 +146,12 @@ func TestPurgedCheckpointJournal(t *testing.T) {
 			t.Fatal("crash checkpoint state differs")
 		}
 		preserved(t, c, ids, before)
-		for _, id := range ids {
-			held := checkpointTreeState(t, c)
-			if !errors.Is(c.DeleteCheckpoint(t.Context(), DeleteCheckpointOptions{CheckpointID: id}), errCheckpointState) {
-				t.Fatal("pending deletion did not refuse another deletion")
-			}
-			if !reflect.DeepEqual(held, checkpointTreeState(t, c)) {
-				t.Fatal("pending deletion refusal changed the tree")
-			}
+		held := checkpointTreeState(t, c)
+		if !errors.Is(c.DeleteCheckpoint(t.Context(), DeleteCheckpointOptions{CheckpointID: "ckpt_zzzzzzzzzzzzzzzz"}), errCheckpointIdentity) {
+			t.Fatal("pending deletion did not refuse an absent identifier")
+		}
+		if !reflect.DeepEqual(held, checkpointTreeState(t, c)) {
+			t.Fatal("pending deletion refusal changed the tree")
 		}
 		return c, ids
 	}
