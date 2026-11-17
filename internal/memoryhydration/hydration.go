@@ -611,6 +611,10 @@ func needsSessionIdentity(runtime string) bool {
 }
 
 func renderSelf(digest client.SelfDigest, maximumBytes int, runtime string) (string, error) {
+	return marshalHookBounded(selfEnvelope(digest, maximumBytes, runtime), maximumBytes, hookCharacterLimit(runtime))
+}
+
+func selfEnvelope(digest client.SelfDigest, maximumBytes int, runtime string) contextEnvelope {
 	envelope := contextEnvelope{
 		Schema: "witself.hydration.v1", Source: "self.show", Authority: advisoryBoundary,
 		Identity: &contextIdentity{Agent: digest.Identity.AgentName, Realm: digest.Identity.RealmName},
@@ -652,7 +656,7 @@ func renderSelf(digest client.SelfDigest, maximumBytes int, runtime string) (str
 			Tags: boundedTags(memory.Tags), Salience: memory.Salience, Sensitive: memory.Sensitive, Source: memory.Source,
 		})
 	}
-	return marshalBounded(envelope, maximumBytes)
+	return envelope
 }
 
 func renderRecall(
@@ -831,6 +835,14 @@ func setCheckpoint(envelope *contextEnvelope, checkpoint *client.SelfMemoryCheck
 }
 
 func marshalBounded(envelope contextEnvelope, maximumBytes int) (string, error) {
+	return marshalHookBounded(envelope, maximumBytes, 0)
+}
+
+// marshalHookBounded also holds the context to a positive characterLimit,
+// counted in code points as HookOutput counts them, so a limited hook gets a
+// trimmed context instead of none. A context never has more code points than
+// bytes, so the limit changes nothing when maximumBytes is at or below it.
+func marshalHookBounded(envelope contextEnvelope, maximumBytes, characterLimit int) (string, error) {
 	if maximumBytes < 1024 {
 		return "", errors.New("memory hydration maximum bytes must be at least 1024")
 	}
@@ -842,8 +854,9 @@ func marshalBounded(envelope contextEnvelope, maximumBytes int) (string, error) 
 		if err != nil {
 			return "", fmt.Errorf("encode memory hydration context: %w", err)
 		}
-		if len(prefix)+len(raw) <= maximumBytes {
-			return prefix + string(raw), nil
+		text := prefix + string(raw)
+		if len(text) <= maximumBytes && (characterLimit <= 0 || utf8.RuneCountInString(text) <= characterLimit) {
+			return text, nil
 		}
 		envelope.Elided = true
 		switch {
@@ -854,7 +867,7 @@ func marshalBounded(envelope contextEnvelope, maximumBytes int) (string, error) 
 		case envelope.IdentityStatement != "":
 			// Replay the original records and elision state without the statement.
 			// If it cannot fit, its attempted delivery must have no byte cost.
-			return marshalBounded(withoutStatement, maximumBytes)
+			return marshalHookBounded(withoutStatement, maximumBytes, characterLimit)
 		case envelope.CheckpointPolicy != "":
 			// Provider-managed instructions carry the same policy. Preserve
 			// dynamic recall status and the authenticated checkpoint pointer first.

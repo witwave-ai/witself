@@ -39,15 +39,18 @@ func ValidIdentityName(name string) bool {
 	if len(name) < 1 || len(name) > 48 || strings.HasPrefix(name, " ") || strings.HasSuffix(name, " ") || strings.Contains(name, "  ") {
 		return false
 	}
-	hasLetterOrDigit := false
+	hasVisibleLetterOrDigit := false
 	for _, r := range name {
 		if unicode.Is(unicode.Lm, r) {
 			return false
 		}
-		hasLetterOrDigit = hasLetterOrDigit || unicode.IsLetter(r) || unicode.IsDigit(r)
+		// The default-ignorable letters (the Hangul fillers) render as nothing,
+		// so a name needs at least one other letter or digit to show.
+		hasVisibleLetterOrDigit = hasVisibleLetterOrDigit ||
+			((unicode.IsLetter(r) || unicode.IsDigit(r)) && !unicode.Is(unicode.Other_Default_Ignorable_Code_Point, r))
 		if !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != ' ' && r != '.' && r != '-' && r != '_' {
 			return false
 		}
 	}
-	return hasLetterOrDigit
+	return hasVisibleLetterOrDigit
 }
