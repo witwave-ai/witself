@@ -106,11 +106,7 @@ func (c *Cell) readServiceControlEndpointRecord() (endpoint serviceControlEndpoi
 	if privateDir(c.path("service"), false) != nil {
 		return serviceControlEndpointRecord{}, serviceEndpointRefused("record")
 	}
-	path := c.path("service", "control-endpoint.json")
-	if servicePrivateRecord(path) != nil {
-		return serviceControlEndpointRecord{}, serviceEndpointRefused("record")
-	}
-	f, err := openPrivateFile(path, os.O_RDONLY, 0)
+	f, err := openServiceRecord(c.path("service", "control-endpoint.json"), serviceEndpointRefused("record"))
 	if err != nil {
 		return serviceControlEndpointRecord{}, serviceEndpointRefused("record")
 	}

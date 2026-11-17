@@ -22,6 +22,11 @@ func readPostgresFile(path string) ([]byte, error) {
 	return runtimeconfig.WindowsPrivatePostgresRead(filepath.Dir(path), path)
 }
 
+// openPostgresReader is readPostgresFile's guarded open without the read.
+func openPostgresReader(path string) (*os.File, error) {
+	return runtimeconfig.WindowsPrivatePostgresOpen(filepath.Dir(path), path)
+}
+
 func postgresPendingRegular(root, path string) bool {
 	return runtimeconfig.WindowsPrivatePostgresValidate(root, path, false) == nil
 }

@@ -434,7 +434,7 @@ func TestServiceFailureSiteSourceContract(t *testing.T) {
 // new raw filesystem/lifecycle return cannot pass merely because its function
 // still contains the old reviewed wrapper somewhere else.
 func TestServiceFailureSiteProducerInventory(t *testing.T) {
-	producers := strings.Fields(`privateDir servicePrivateRecord openPrivateFile readPrivateFile readJSON readManifest writeAtomic writeAtomicBytes removePrivateFile validateRoot validatePrivate validatePrivateTree validateRootPath openLockFile serviceControlSecret ServiceDescriptor readServiceDescriptor serviceDescriptorForOwner readServiceDescriptorForOwner PrepareService New readServiceControlSecret readServiceControlEndpointRecord readServiceControlEndpointWithBoot readServiceControlEndpoint publishServiceControlEndpoint publishServiceControlEndpointWithBoot removeOwnedServiceControlEndpoint refreshOwnedServiceControlEndpoint removeServiceControlEndpoint listenServiceControl dialServiceControl serveServiceControl serveServiceControlForPlatform Control Run load save tick step call command Repair Stop Start SetServiceDesiredState RepairService setServiceFaulted bindServiceProcessBoot bindServiceProcessBootWithReader reconcileServiceBoot reconcileServiceBootWithReader reconcileOldBoot writeServiceDescriptor own newSupervisor acquireLease acquireServiceLease acquireServiceLeaseWithBoot stopServiceChildren ServiceHealth hook operation retryServiceContention publishServiceLease serviceMaintenanceObservation observeServiceMaintenance observeServiceMaintenanceInto resumeServiceStartup failAfterMaintenanceObservation projectedStatus holdMaintenance serviceMaintenanceOnly`)
+	producers := strings.Fields(`privateDir servicePrivateRecord openPrivateFile readPrivateFile openRegular openRegularBy readRegular openServiceRecord readJSON readManifest writeAtomic writeAtomicBytes removePrivateFile validateRoot validatePrivate validatePrivateTree validateRootPath openLockFile serviceControlSecret ServiceDescriptor readServiceDescriptor serviceDescriptorForOwner readServiceDescriptorForOwner PrepareService New readServiceControlSecret readServiceControlEndpointRecord readServiceControlEndpointWithBoot readServiceControlEndpoint publishServiceControlEndpoint publishServiceControlEndpointWithBoot removeOwnedServiceControlEndpoint refreshOwnedServiceControlEndpoint removeServiceControlEndpoint listenServiceControl dialServiceControl serveServiceControl serveServiceControlForPlatform Control Run load save tick step call command Repair Stop Start SetServiceDesiredState RepairService setServiceFaulted bindServiceProcessBoot bindServiceProcessBootWithReader reconcileServiceBoot reconcileServiceBootWithReader reconcileOldBoot writeServiceDescriptor own newSupervisor acquireLease acquireServiceLease acquireServiceLeaseWithBoot stopServiceChildren ServiceHealth hook operation retryServiceContention publishServiceLease serviceMaintenanceObservation observeServiceMaintenance observeServiceMaintenanceInto resumeServiceStartup failAfterMaintenanceObservation projectedStatus holdMaintenance serviceMaintenanceOnly`)
 	selected := make(map[string]bool)
 	for _, producer := range producers {
 		selected[producer] = true
@@ -478,7 +478,7 @@ func TestServiceFailureSiteProducerInventory(t *testing.T) {
 			"publishServiceControlEndpoint":         "publishServiceControlEndpointWithBoot",
 			"publishServiceControlEndpointWithBoot": "ServiceDescriptor readJSON servicePrivateRecord writeAtomic",
 			"readServiceControlEndpoint":            "readServiceControlEndpointWithBoot",
-			"readServiceControlEndpointRecord":      "openPrivateFile privateDir servicePrivateRecord",
+			"readServiceControlEndpointRecord":      "openServiceRecord privateDir",
 			"readServiceControlEndpointWithBoot":    "ServiceDescriptor readJSON readServiceControlEndpointRecord servicePrivateRecord",
 			"refreshOwnedServiceControlEndpoint":    "readServiceControlEndpointRecord writeAtomic",
 			"removeOwnedServiceControlEndpoint":     "readServiceControlEndpointRecord removePrivateFile",
@@ -501,10 +501,11 @@ func TestServiceFailureSiteProducerInventory(t *testing.T) {
 			"RepairService":                 "Repair ServiceDescriptor SetServiceDesiredState own stopServiceChildren writeServiceDescriptor",
 			"ServiceDescriptor":             "readServiceDescriptor validateRoot",
 			"serviceDescriptorForOwner":     "readServiceDescriptorForOwner validateRoot",
+			"openServiceRecord":             "openRegularBy",
 			"readServiceDescriptor":         "readServiceDescriptorForOwner",
 			"readServiceDescriptorForOwner": "privateDir readJSON readManifest servicePrivateRecord",
 			"SetServiceDesiredState":        "own",
-			"serviceControlSecret":          "privateDir readPrivateFile servicePrivateRecord",
+			"serviceControlSecret":          "openServiceRecord privateDir",
 			"serviceStartFence":             "ServiceDescriptor",
 			"setServiceDesiredStateLocked":  "ServiceDescriptor writeServiceDescriptor",
 			"setServiceFaulted":             "ServiceDescriptor own writeServiceDescriptor",

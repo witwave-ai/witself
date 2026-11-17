@@ -257,13 +257,10 @@ func (c *Cell) readDerivedUpdateRecord(id string) (*updateRecord, bool, error) {
 	if !validUpdateOperationID(id) || c.validateRoot(false) != nil {
 		return nil, false, errUpdatePartialState
 	}
-	if err := servicePrivateRecord(c.updateRecordPath(id)); errors.Is(err, os.ErrNotExist) {
+	f, err := openServiceRecord(c.updateRecordPath(id), errUpdatePartialState)
+	if errors.Is(err, os.ErrNotExist) {
 		return nil, true, nil
 	} else if err != nil {
-		return nil, false, errUpdatePartialState
-	}
-	f, err := openPrivateFile(c.updateRecordPath(id), os.O_RDONLY, 0)
-	if err != nil {
 		return nil, false, errUpdatePartialState
 	}
 	defer func() { _ = f.Close() }()

@@ -189,14 +189,12 @@ func (c *Cell) reinstallAvailable(m *Manifest, progress journalProgress) error {
 	if _, err := os.Lstat(c.path("pg")); err != nil || c.validatePostgresDirectory() != nil {
 		return errReinstallState
 	}
-	// As postmaster() does, read only after Lstat proves a small regular file:
-	// a FIFO cannot block the lock holder and a symlink is never followed.
-	path := c.path("pg", "PG_VERSION")
-	info, err := os.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() || info.Size() > 64 {
-		return errReinstallState
-	}
-	version, err := readPostgresFile(path)
+	// As postmaster() does, read only after the opened handle proves a small
+	// regular file: the open never waits, so a FIFO at the name, even one renamed
+	// in after any earlier check, cannot block the lock holder, and a symlink at
+	// the name is refused, never followed.
+	version, err := readRegular(openPostgresReader, func(info os.FileInfo) bool { return info.Size() <= 64 }, c.path("pg", "PG_VERSION"),
+		errReinstallState, errReinstallState, errReinstallState)
 	if err != nil {
 		return errReinstallState
 	}

@@ -32,6 +32,10 @@ func openPrivateFile(path string, flags int, _ os.FileMode) (*os.File, error) {
 // name here, and it opens a link at the last element as itself and refuses it.
 func openPrivateReader(path string) (*os.File, error) { return openPrivateFile(path, os.O_RDONLY, 0) }
 
+// openPlainReader keeps os.Open for a service manager file outside the root,
+// which the guarded open would refuse; no FIFO can stand at its name here.
+func openPlainReader(path string) (*os.File, error) { return os.Open(path) }
+
 func readPrivateFile(path string) ([]byte, error) {
 	f, err := openPrivateFile(path, os.O_RDONLY, 0)
 	if err != nil {

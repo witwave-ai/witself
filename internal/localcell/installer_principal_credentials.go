@@ -31,7 +31,8 @@ const (
 const installerMigratorRole = "witself_sync_migrator"
 
 // openPrincipalCredentialFile permits replacement tests at the inspected-file open boundary.
-var openPrincipalCredentialFile = openPrivateFile
+// Its read open never waits on what it opens; the handle checks then decide.
+var openPrincipalCredentialFile = func(path string, _ int, _ os.FileMode) (*os.File, error) { return openPrivateReader(path) }
 
 var principalCredentialPurposes = [...]credentialPurpose{
 	credentialServer, credentialWorker, credentialMaintenance,
