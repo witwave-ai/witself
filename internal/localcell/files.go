@@ -140,6 +140,30 @@ func regularFile(info os.FileInfo, accept func(os.FileInfo) bool) bool {
 	return info.Mode().IsRegular() && (accept == nil || accept(info))
 }
 
+// openRegularWriter opens path through openPrivateWriter, which never waits on
+// what it opens and refuses a link at the last element, and returns a regular
+// file checked on its handle before any byte is written, in blocking mode. A
+// failed open is irregular when Lstat shows what is not a regular file at the
+// name, else failed: an absent name too is a refusal, never success.
+func openRegularWriter(path string, flags int, mode os.FileMode, irregular, failed error) (*os.File, error) {
+	f, err := openPrivateWriter(path, flags, mode)
+	if err != nil {
+		if info, err := os.Lstat(path); err == nil && !info.Mode().IsRegular() {
+			return nil, irregular
+		}
+		return nil, failed
+	}
+	if info, err := f.Stat(); err != nil || !info.Mode().IsRegular() {
+		_ = f.Close()
+		return nil, irregular
+	}
+	if err := blockingWriter(f); err != nil {
+		_ = f.Close()
+		return nil, failed
+	}
+	return f, nil
+}
+
 // readRegular reads all of what openRegularBy opened; a failed read is open.
 func readRegular(openReader func(string) (*os.File, error), accept func(os.FileInfo) bool, path string, inspect, irregular, open error) ([]byte, error) {
 	f, err := openRegularBy(openReader, accept, path, inspect, irregular, open)
@@ -327,17 +351,18 @@ func (c *Cell) journal(operation, step, state string) error {
 // in place for Repair, as if the process had stopped right after the append.
 func (c *Cell) journalCause(operation, step, state, cause string) error {
 	path := c.path("journal", "operations.jsonl")
+	irregular := errors.New("local cell journal must be a regular file")
 	info, err := os.Lstat(path)
 	if err == nil && !info.Mode().IsRegular() {
-		return errors.New("local cell journal must be a regular file")
+		return irregular
 	}
 	// Only an absent pathname can be created by the open below; an existing one
 	// never reports not-exist. Journal writers hold the root operation lock, so
 	// nothing else creates or unlinks the file between this Lstat and the open.
 	created := errors.Is(err, os.ErrNotExist)
-	f, err := openPrivateFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
+	f, err := openRegularWriter(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600, irregular, errors.New("cannot open local cell journal"))
 	if err != nil {
-		return errors.New("cannot open local cell journal")
+		return err
 	}
 	defer func() { _ = f.Close() }()
 	data, err := json.Marshal(journalEntry{Operation: operation, Step: step, State: state, At: time.Now().UTC(), Cause: cause})
@@ -476,9 +501,10 @@ func (c *Cell) discardJournalTail(progress journalProgress) error {
 	if !progress.tornTail {
 		return nil
 	}
-	f, err := openPrivateFile(c.path("journal", "operations.jsonl"), os.O_WRONLY, 0)
+	torn := errors.New("cannot open torn local cell journal")
+	f, err := openRegularWriter(c.path("journal", "operations.jsonl"), os.O_WRONLY, 0, torn, torn)
 	if err != nil {
-		return errors.New("cannot open torn local cell journal")
+		return err
 	}
 	defer func() { _ = f.Close() }()
 	if err := f.Truncate(progress.durableBytes); err != nil {

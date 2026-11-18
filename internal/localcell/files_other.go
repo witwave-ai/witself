@@ -20,6 +20,28 @@ func openPrivateReader(path string) (*os.File, error) {
 	return os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, 0)
 }
 
+// openPrivateWriter opens path for writing without waiting on what stands at
+// the name, so a FIFO with no reader or a leased file fails at once, and
+// refuses a link at its last element.
+func openPrivateWriter(path string, flags int, mode os.FileMode) (*os.File, error) {
+	return os.OpenFile(path, flags|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, mode)
+}
+
+// blockingWriter clears openPrivateWriter's non-blocking flag: today's open
+// leaves a regular file blocking (os/file_unix.go:204-223), and Fd would not
+// clear a caller's flag for a child (os/file_unix.go:75-82).
+func blockingWriter(f *os.File) error {
+	raw, err := f.SyscallConn()
+	if err != nil {
+		return err
+	}
+	var cleared error
+	if err := raw.Control(func(fd uintptr) { cleared = syscall.SetNonblock(int(fd), false) }); err != nil {
+		return err
+	}
+	return cleared
+}
+
 // A file below pg/ and a service manager file outside the root open the same
 // way here; only Windows needs their different guarded or plain opens.
 func openPostgresReader(path string) (*os.File, error) { return openPrivateReader(path) }
