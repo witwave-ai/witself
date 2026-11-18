@@ -3,11 +3,16 @@ package localcell
 import (
 	"errors"
 	"go/ast"
+	"go/build"
 	"go/parser"
 	"go/token"
 	"go/types"
+	"io"
+	"maps"
+	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -73,6 +78,34 @@ func locklessDirs(t *testing.T, c *Cell, names ...string) *Cell {
 		}
 	}
 	return c
+}
+
+// locklessStale plants a stale pg/postmaster.pid, which the admission refuses.
+func locklessStale(t *testing.T, c *Cell) *Cell {
+	checkpointWrite(t, c, "pg/postmaster.pid", strconv.Itoa(checkpointUnallocatedPID)+"\n"+c.path("pg")+"\n1\n")
+	return c
+}
+
+// locklessStandIn points pg_controldata at a copy of this test binary, which
+// runs as the stand-in (dispatchCheckpointControlHelper) and claims one call-N
+// name in the returned directory per real run, each with a stopped reading.
+func locklessStandIn(t *testing.T, c *Cell) string {
+	t.Helper()
+	dir, d, reading := testPrivateRoot(t), checkpointSyntheticControl, ""
+	for index, value := range []string{d.ControlVersion, d.CatalogVersion, d.SystemIdentifier, d.State, d.CheckpointLSN} {
+		reading += checkpointControlKeys[index] + ": " + value + "\n"
+	}
+	source, err := os.Open(os.Args[0])
+	target, createErr := openPrivateFile(filepath.Join(dir, executable("pg_controldata")), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o700)
+	if err = errors.Join(err, createErr); err == nil {
+		_, err = io.Copy(target, source)
+		err = errors.Join(err, target.Close(), source.Close())
+	}
+	step := map[string]string{"Out": reading}
+	if c.cfg.Binaries.PostgresDir = dir; err != nil || writeAtomic(filepath.Join(dir, "checkpoint-control-script.json"), []map[string]string{step, step, step}, nil) != nil {
+		t.Fatal("cannot prepare the stand-in control program")
+	}
+	return dir
 }
 
 // locklessCall runs one verb directly, without the command's before-read.
@@ -158,6 +191,9 @@ func TestCheckpointLocklessRefusal(t *testing.T) {
 		{"purged/one", "delete_absent", identity, purged(true)},
 		{"hand_made/no_owner_lock/delete_absent", "delete_absent", identity, without(false, ".owner.lock", "run/operation.lock")},
 		{"hand_made/no_run_lock/delete_absent", "delete_absent", identity, without(true, "run/operation.lock")},
+		{"hand_made/no_owner_lock/create", "create", state, func(t *testing.T) *Cell {
+			return locklessStale(t, without(false, ".owner.lock", "run/operation.lock")(t))
+		}},
 	}
 	for _, cut := range []string{"run", "journal"} {
 		for _, layout := range []string{"legacy", "selected"} {
@@ -225,6 +261,38 @@ func TestCheckpointLocklessWork(t *testing.T) {
 			t.Fatal("purged-root delete wrote other names than before")
 		}
 	})
+}
+
+// The real control program runs exactly twice for an admitted dry-path create
+// (no owner lock, no run lock) and never for one its dry admission refuses.
+func TestCheckpointLocklessControlRuns(t *testing.T) {
+	for _, row := range []struct {
+		name, want string
+		runs       int
+	}{{"admitted", "", 2}, {"refused", "local_checkpoint_state_unsupported", 0}} {
+		t.Run(row.name, func(t *testing.T) {
+			c, r := locklessStopped(t, "legacy", false)
+			for _, name := range []string{".owner.lock", "run/operation.lock"} {
+				if removePrivateFile(c.path(filepath.FromSlash(name))) != nil {
+					t.Fatal("cannot remove a lockless fixture lock")
+				}
+			}
+			if r.production = true; row.want != "" {
+				locklessStale(t, c)
+			}
+			// A race-built stand-in launches slowly: each run may use the test's deadline.
+			if deadline, ok := t.Deadline(); ok {
+				c.cfg.Timeout = time.Until(deadline)
+			}
+			dir := locklessStandIn(t, c)
+			err := locklessCall(t, c, "create")
+			entries, readErr := os.ReadDir(dir)
+			runs := len(slices.DeleteFunc(entries, func(entry os.DirEntry) bool { return !strings.HasPrefix(entry.Name(), "call-") }))
+			if readErr != nil || runs != row.runs || (err == nil) != (row.want == "") || (err != nil && !checkpointSameError(err, row.want)) {
+				t.Fatal("dry-path create ran the real control program otherwise")
+			}
+		})
+	}
 }
 
 // Deferrals reach own(false) and keep its writes: a fence beside a missing name
@@ -331,13 +399,21 @@ var locklessOrder = []string{`os.Lstat(c.path(".owner.lock"))`, `os.Lstat(c.path
 	`acquireLock(c.cfg.Root, false)`, `defer held.Close()`, `c.validateRoot(false)`, `os.Lstat(c.path("journal", "maintenance.json"))`,
 	`os.Lstat(c.recoveryDir())`, `admit()`}
 
-var locklessWriters = []string{"own", "ownExisting", "layout", "begin", "step", "journal", "journalCause", "makePrivateDir",
-	"openLockFile", "lockFile", "writeAtomic", "writeAtomicBytes", "createPrivateTemp", "publishPrivateFile", "syncDirectory",
-	"holdCheckpoint", "closeCheckpointLeftover", "maintenanceFenceAllows", "readMaintenanceFence", "classifyOwnershipFailure"}
+// locklessCallees closes what each dry function may call, resolved by type: a
+// function or method by its full name, a builtin, or the parameter admit. No
+// package variable, field or other local is called, nothing unresolved is, and
+// no function or package variable holding one is named as a value.
+var locklessCallees = map[string][]string{
+	"refuseBeforeLockNames": {"os.Lstat", "errors.Is", "localcell.acquireLock", "(*localcell.operationLock).Close", "(*localcell.Cell).path",
+		"(*localcell.Cell).validateRoot", "(*localcell.Cell).recoveryDir", "param admit"},
+	"admitCheckpointDry": {"errors.Is", "(*localcell.Cell).checkpointOps", "(*localcell.Cell).admitCheckpoint"},
+	"admitDeleteCheckpoint": {"os.Lstat", "os.ReadDir", "errors.Is", "localcell.privateDir", "localcell.checkpointLeftover",
+		"localcell.recoveryEntryCanonical", "(*localcell.Cell).readJournal", "(*localcell.Cell).checkpointCold", "(*localcell.Cell).validateRecovery",
+		"(*localcell.Cell).checkpointDir", "(*localcell.Cell).recoveryDir", "(*regexp.Regexp).MatchString", "(io/fs.DirEntry).Name", "append", "len", "make"},
+}
 
-// The os calls each dry function may make; admitDeleteCheckpoint keeps the
-// exact-spelling listing (os.ReadDir) it carries unchanged from the locked path.
-var locklessReads = map[string][]string{"refuseBeforeLockNames": {"Lstat"}, "admitCheckpointDry": {"Lstat"}, "admitDeleteCheckpoint": {"Lstat", "ReadDir"}}
+// The dry create's one control boundary, exactly: it returns the sentinel.
+const locklessSentinel = `ops.control = func(context.Context) (pgControlData, error) { return pgControlData{}, errCheckpointDryAdmitted }`
 
 // locklessCalls lists outermost call texts in source order; a function
 // literal's body is read in place and a deferred call is marked.
@@ -373,12 +449,71 @@ func locklessAllCalls(fn *ast.FuncDecl) []*ast.CallExpr {
 	return calls
 }
 
-// locklessContract returns the keys checkpoint.go's dry admission violates.
-func locklessContract(sources map[string]string) []string {
-	file, err := parser.ParseFile(token.NewFileSet(), "checkpoint.go", strings.ReplaceAll(sources["checkpoint.go"], "\r\n", "\n"), 0)
-	if err != nil {
-		return []string{"parse:checkpoint.go"}
+// locklessClosed reports whether fn calls only allowed callees, privateDir
+// only with false, and names no function or package function variable else.
+func locklessClosed(info *types.Info, fn *ast.FuncDecl, allowed []string) bool {
+	closed, callees := fn != nil, map[*ast.Ident]bool{}
+	for _, call := range locklessAllCalls(fn) {
+		fun, name := ast.Unparen(call.Fun), ""
+		if _, literal := fun.(*ast.FuncLit); literal {
+			continue
+		} else if selector, ok := fun.(*ast.SelectorExpr); ok {
+			fun = selector.Sel
+		}
+		identifier, _ := fun.(*ast.Ident)
+		switch object := info.Uses[identifier].(type) {
+		case *types.Func:
+			name = object.FullName()
+		case *types.Builtin:
+			name = object.Name()
+		case *types.Var:
+			if object.Pos() > fn.Type.Pos() && object.Pos() < fn.Type.End() {
+				name = "param " + object.Name()
+			}
+		}
+		callees[identifier] = true
+		closed = closed && slices.Contains(allowed, name) && (name != "localcell.privateDir" || len(call.Args) == 2 && types.ExprString(call.Args[1]) == "false")
 	}
+	if fn != nil {
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			if identifier, ok := n.(*ast.Ident); ok && !callees[identifier] {
+				switch object := info.Uses[identifier].(type) {
+				case *types.Func:
+					closed = false
+				case *types.Var:
+					_, function := object.Type().Underlying().(*types.Signature)
+					closed = closed && (!function || object.Pkg() == nil || object.Parent() != object.Pkg().Scope())
+				}
+			}
+			return true
+		})
+	}
+	return closed
+}
+
+// locklessContract returns the keys checkpoint.go's dry admission violates.
+// It type-checks the given package sources (as built here) against
+// checkpoint.go's standard imports, read from source as readers4 does.
+func locklessContract(sources map[string]string) []string {
+	var file *ast.File
+	var files []*ast.File
+	for _, name := range slices.Sorted(maps.Keys(sources)) {
+		parsed, err := parser.ParseFile(readers4Fset, name, strings.ReplaceAll(sources[name], "\r\n", "\n"), 0)
+		if name == "checkpoint.go" && err != nil {
+			return []string{"parse:checkpoint.go"}
+		} else if name == "checkpoint.go" {
+			file = parsed
+		}
+		files = append(files, parsed)
+	}
+	info := &types.Info{Uses: map[*ast.Ident]types.Object{}}
+	config := types.Config{Error: func(error) {}, Importer: readers4Importer(func(path string) (*types.Package, error) {
+		if strings.Contains(path, ".") || !slices.ContainsFunc(file.Imports, func(spec *ast.ImportSpec) bool { return spec.Path.Value == strconv.Quote(path) }) {
+			return nil, errors.New("import not admitted")
+		}
+		return readers4Std.Import(path)
+	})}
+	_, _ = config.Check("localcell", readers4Fset, files, info)
 	methods := map[string]*ast.FuncDecl{}
 	for _, declaration := range file.Decls {
 		if fn, ok := declaration.(*ast.FuncDecl); ok && fn.Recv != nil && fn.Body != nil {
@@ -400,17 +535,8 @@ func locklessContract(sources map[string]string) []string {
 	if statement("deleteCheckpointLocked", 0) != admissionStatements(`if err := c.admitDeleteCheckpoint(options); err != nil { return err }`)[0] || statement("admitDeleteCheckpoint", -1) != "return nil" {
 		failures = append(failures, "lockless_split")
 	}
-	for name, reads := range locklessReads {
-		writes := methods[name] == nil
-		for _, call := range locklessAllCalls(methods[name]) {
-			callee := types.ExprString(call.Fun)
-			if selector, ok := call.Fun.(*ast.SelectorExpr); ok {
-				callee = selector.Sel.Name
-				writes = writes || (strings.HasPrefix(types.ExprString(call.Fun), "os.") && !slices.Contains(reads, callee))
-			}
-			writes = writes || slices.Contains(locklessWriters, callee) || (callee == "privateDir" && (len(call.Args) != 2 || types.ExprString(call.Args[1]) != "false"))
-		}
-		if writes {
+	for name, allowed := range locklessCallees {
+		if !locklessClosed(info, methods[name], allowed) {
 			failures = append(failures, "lockless_writer:"+name)
 		}
 	}
@@ -418,7 +544,7 @@ func locklessContract(sources map[string]string) []string {
 	if fn := methods["admitCheckpointDry"]; fn != nil {
 		ast.Inspect(fn.Body, func(n ast.Node) bool {
 			if assignment, ok := n.(*ast.AssignStmt); ok && len(assignment.Lhs) == 1 && types.ExprString(assignment.Lhs[0]) == "ops.control" {
-				assigned = append(assigned, assignment.Pos())
+				assigned = append(assigned, map[bool]token.Pos{true: assignment.Pos()}[admissionNodeText(assignment) == admissionStatements(locklessSentinel)[0]])
 			}
 			return true
 		})
@@ -428,7 +554,7 @@ func locklessContract(sources map[string]string) []string {
 			admitted = append(admitted, map[bool]token.Pos{true: call.Pos()}[types.ExprString(call) == "c.admitCheckpoint(ctx, options, ops)"])
 		}
 	}
-	if len(assigned) != 1 || len(admitted) != 1 || admitted[0] == token.NoPos || assigned[0] > admitted[0] {
+	if len(assigned) != 1 || len(admitted) != 1 || assigned[0] == token.NoPos || admitted[0] == token.NoPos || assigned[0] > admitted[0] {
 		failures = append(failures, "lockless_control")
 	}
 	fn := methods["refuseBeforeLockNames"]
@@ -439,20 +565,9 @@ func locklessContract(sources map[string]string) []string {
 	if !slices.Equal(calls, locklessOrder) {
 		return append(failures, "lockless_order")
 	}
-	// Every early return is nil but the one after the lock probe that returns
-	// the second validateRoot's refusal.
-	acquired, allowed := token.NoPos, map[ast.Node]bool{}
+	// Every early return defers: it is nil.
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
-		if call, ok := n.(*ast.CallExpr); ok && types.ExprString(call.Fun) == "acquireLock" {
-			acquired = call.Pos()
-		} else if branch, ok := n.(*ast.IfStmt); ok && branch.Init != nil && acquired != token.NoPos && len(branch.Body.List) == 1 &&
-			admissionNodeText(branch.Init) == "err := c.validateRoot(false)" && admissionNodeText(branch.Body.List[0]) == "return err" {
-			allowed[branch.Body.List[0]] = true
-		}
-		return true
-	})
-	ast.Inspect(fn.Body, func(n ast.Node) bool {
-		if result, ok := n.(*ast.ReturnStmt); ok && n != fn.Body.List[len(fn.Body.List)-1] && admissionNodeText(result) != "return nil" && !allowed[n] {
+		if result, ok := n.(*ast.ReturnStmt); ok && n != fn.Body.List[len(fn.Body.List)-1] && admissionNodeText(result) != "return nil" {
 			failures = append(failures, "lockless_defer")
 		}
 		return true
@@ -461,7 +576,13 @@ func locklessContract(sources map[string]string) []string {
 }
 
 func TestCheckpointLocklessSourceContract(t *testing.T) {
-	source := strings.ReplaceAll(admissionReadSources(t)["checkpoint.go"], "\r\n", "\n")
+	sources := admissionReadSources(t)
+	maps.DeleteFunc(sources, func(name, _ string) bool {
+		built, err := build.Default.MatchFile(".", name)
+		return err != nil || !built
+	})
+	source := strings.ReplaceAll(sources["checkpoint.go"], "\r\n", "\n")
+	dry, shape := "\tops := c.checkpointOps()\n\tops.control", "MatchString(options.CheckpointID) {\n\t\treturn errCheckpointIdentity\n\t}\n"
 	for _, row := range []struct{ name, before, after, key string }{
 		{"control", "", "", ""},
 		{"gate_removed", "\tif (owner == nil && run == nil) || c.validateRoot(false) != nil {\n\t\treturn nil\n\t}\n", "", "lockless_order"},
@@ -476,6 +597,14 @@ func TestCheckpointLocklessSourceContract(t *testing.T) {
 		{"create_unguarded", "\tif err := c.refuseBeforeLockNames(func() error { return c.admitCheckpointDry(ctx, options) }); err != nil {\n\t\treturn err\n\t}\n", "", "lockless_first:Checkpoint"},
 		{"delete_unguarded", "\tif err := c.refuseBeforeLockNames(func() error { return c.admitDeleteCheckpoint(options) }); err != nil {\n\t\treturn err\n\t}\n", "", "lockless_first:DeleteCheckpoint"},
 		{"unparsable", "package localcell\n", "package localcell {\n", "parse:checkpoint.go"},
+		{"second_validate_returns", "if err := c.validateRoot(false); err != nil {\n\t\treturn nil", "if err := c.validateRoot(false); err != nil {\n\t\treturn err", "lockless_defer"},
+		{"dry_lock_names", dry, "\tif l, err := acquireLock(c.cfg.Root, true); err == nil {\n\t\t_ = l.Close()\n\t}\n" + dry, "lockless_writer:admitCheckpointDry"},
+		{"dry_control_run", dry, "\t_, _ = c.checkpointControl(ctx)\n" + dry, "lockless_writer:admitCheckpointDry"},
+		{"sync_variable", dry, "\t_ = syncJournalDirectory(c.cfg.Root)\n" + dry, "lockless_writer:admitCheckpointDry"},
+		{"sync_file", dry, "\tif f, err := openPrivateReader(c.cfg.Root); err == nil {\n\t\t_ = syncFile(f)\n\t\t_ = f.Close()\n\t}\n" + dry, "lockless_writer:admitCheckpointDry"},
+		{"sync_parent", shape, shape + "\t_ = syncPrivateDirParent(c.recoveryDir())\n", "lockless_writer:admitDeleteCheckpoint"},
+		{"sentinel_control", "{ return pgControlData{}, errCheckpointDryAdmitted }", "{ _, _ = c.checkpointControl(ctx); return pgControlData{}, errCheckpointDryAdmitted }", "lockless_control"},
+		{"control_value", "func(context.Context) (pgControlData, error) { return pgControlData{}, errCheckpointDryAdmitted }", "c.checkpointControl", "lockless_writer:admitCheckpointDry"},
 	} {
 		if strings.Count(source, row.before) != 1 && row.before != "" {
 			t.Fatal("lockless contract anchor is not unique: " + row.name)
@@ -483,8 +612,9 @@ func TestCheckpointLocklessSourceContract(t *testing.T) {
 		mutated := strings.Replace(source, row.before, row.after, 1)
 		for _, ending := range []string{"LF", "CRLF"} {
 			t.Run(row.name+"/"+ending, func(t *testing.T) {
-				input := map[string]string{"LF": mutated, "CRLF": strings.ReplaceAll(mutated, "\n", "\r\n")}[ending]
-				failures := locklessContract(map[string]string{"checkpoint.go": input})
+				input := maps.Clone(sources)
+				input["checkpoint.go"] = map[string]string{"LF": mutated, "CRLF": strings.ReplaceAll(mutated, "\n", "\r\n")}[ending]
+				failures := locklessContract(input)
 				if (row.key == "" && len(failures) != 0) || (row.key != "" && !slices.Contains(failures, row.key)) {
 					t.Fatalf("lockless contract reported %v, want %q", failures, row.key)
 				}

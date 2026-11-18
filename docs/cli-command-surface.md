@@ -6241,22 +6241,24 @@ Every receipt carries this notice:
 
 > Checkpoint journal history may remain, including after purged-root delete; another purge does not prune it. Older readers may refuse that history; downgrade compatibility is unsupported.
 
-A `create` or `delete` refused for what stood in the root when it started leaves
-the root as it found it. When `.owner.lock` or `run/operation.lock` is missing,
-the verb first runs its own checks with only the locks that exist and creates
-the missing names only once they pass; it then repeats them under the full lock.
-So a `delete` in a private directory that never was a cell, or in a purged root
-without its target, is refused (`failed`, `local_checkpoint_identity_mismatch`,
-exit 1) and creates nothing, and a `create` or `delete` in a root whose purge
-was interrupted is refused (`local_checkpoint_state_unsupported`) and creates
-nothing. A missing `.owner.lock`, `run/` or `run/operation.lock` is still
-created before four refusals: beside a maintenance fence
-(`journal/maintenance.json`), a `create` refused by `pg_controldata` or by free
-space, a `delete` that cannot hold its target, and a root that holds
-`run/operation.lock` without `.owner.lock`. A `delete` that removes a checkpoint
-from a purged root recreates `run/`, `run/operation.lock` and `journal/`, and
-keeps that history; a later purge does not prune it, and an older Witself build
-may refuse it.
+When `.owner.lock` or `run/operation.lock` is missing, a `create` or `delete`
+first runs its own checks with only the locks that exist and creates the missing
+names only if they do not refuse; it then repeats them under the full lock. A
+refusal decided by those first checks creates nothing. So a `delete` of an
+absent checkpoint in an empty private directory that never was a cell, or in a
+purged root that is in order and does not hold the target, is refused (`failed`,
+`local_checkpoint_identity_mismatch`, exit 1) and creates nothing, and a
+`create` that names the root's installation ID, or a `delete`, in a root whose
+purge was interrupted is refused (`local_checkpoint_state_unsupported`) and
+creates nothing. A refusal that can only be decided under the full lock still
+creates a missing `.owner.lock`, `run/` or `run/operation.lock` first. Such
+refusals include one beside a maintenance fence (`journal/maintenance.json`), a
+`create` refused by `pg_controldata` or by free space, a `delete` that cannot
+hold its target, a `delete` refused when it closes an interrupted checkpoint
+operation, and one in a root that holds `run/operation.lock` without
+`.owner.lock`. A `delete` that removes a checkpoint from a purged root recreates
+`run/`, `run/operation.lock` and `journal/`, and keeps that history; a later
+purge does not prune it, and an older Witself build may refuse it.
 
 ### Interruptions and leftovers
 

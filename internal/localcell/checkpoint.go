@@ -303,7 +303,7 @@ func (c *Cell) refuseBeforeLockNames(admit func() error) error {
 	}
 	defer func() { _ = held.Close() }()
 	if err := c.validateRoot(false); err != nil {
-		return err
+		return nil
 	}
 	// Only the fence's approved owners read it, under the full lock: a leaf not
 	// proven absent defers. validateRoot just above proved journal absent or a
@@ -311,10 +311,13 @@ func (c *Cell) refuseBeforeLockNames(admit func() error) error {
 	if _, err := os.Lstat(c.path("journal", "maintenance.json")); !errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
-	// Without the owner lock nothing below recovery/ is read: admit runs only if
-	// recovery/ was absent here (as Inspect lists it), and an existing run lock
-	// is left to own(false), after the owner lock. The same validateRoot proved
-	// recovery absent or a real private directory.
+	// Without the owner lock, admit runs only if recovery/ was absent at this
+	// Lstat (as Inspect lists it), and an existing run lock is left to
+	// own(false), after the owner lock. The same validateRoot proved recovery
+	// absent or a real private directory. One window remains: a concurrent owner
+	// that creates recovery/ after this Lstat. The dry admission's own recovery
+	// checks then read it without the owner lock; they write nothing, and a dry
+	// pass can only refuse, never admit.
 	if _, err := os.Lstat(c.recoveryDir()); held == nil && (run == nil || !errors.Is(err, fs.ErrNotExist)) {
 		return nil
 	}
