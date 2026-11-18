@@ -19,16 +19,28 @@ import (
 // on root's volume, and is held, denying delete sharing, until the call
 // returns, so it can be neither renamed nor removed meanwhile. With create the
 // last component is created exclusively (FILE_CREATE) with the exact protected
-// DACL applied at creation; otherwise the existing object is opened for
-// reading. The object is validated by handle before it is returned; a created
-// object that fails is deleted through its own handle. A malformed name is
-// refused before any system call. Errors carry no path.
+// DACL applied at creation; otherwise the existing object is opened, a file
+// for reading. The object is validated by handle before it is returned; a
+// created object that fails is deleted through its own handle. A malformed
+// name is refused before any system call. Errors carry no path.
+//
+// A directory is opened with FILE_TRAVERSE, not FILE_LIST_DIRECTORY or a
+// generic right: its handle serves the directory's identity (Stat), validation
+// and use as a parent, but cannot list entries or be synced (FlushFileBuffers
+// needs GENERIC_WRITE, never requested for a directory). A created
+// object's handle keeps DELETE, which its rollback needs: while it is open,
+// any open of that object for data, execute (traverse) or delete access that
+// does not share delete fails with a sharing violation, among them a walk
+// through a created directory, the pathname guard and os.Open of a created
+// file. Close a created directory's handle before creating below it.
 func WindowsPrivateBeneath(root *os.Root, name string, create, directory bool) (*os.File, error) {
 	return windowsPrivateBeneath(root, name, create, directory, nil)
 }
 
-// held is a native race-test seam after each component before the last is
-// opened and checked; nil in production.
+// held is a native test seam, nil in production: it is called after each
+// component before the last is opened and checked, with that component's
+// index, and after the last is created or opened, before it is validated,
+// with index len(parts)-1. A refusal there is handled as a failed validation.
 func windowsPrivateBeneath(root *os.Root, name string, create, directory bool, held func(int) error) (*os.File, error) {
 	parts, ok := windowsPrivateBeneathParts(name)
 	for _, part := range parts {
@@ -83,14 +95,16 @@ func windowsPrivateBeneath(root *os.Root, name string, create, directory bool, h
 	if err != nil {
 		return nil, err
 	}
-	if err := windowsPrivateValidateHandle(handle, directory); err != nil {
-		if create {
-			err = windowsPrivateRollback(handle, err)
-		}
-		_ = windows.CloseHandle(handle)
-		return nil, err
+	if held != nil && held(len(parts)-1) != nil {
+		err = windowsPrivateFailure(nil)
+	} else if err = windowsPrivateValidateHandle(handle, directory); err == nil {
+		return os.NewFile(uintptr(handle), "private object"), nil
 	}
-	return os.NewFile(uintptr(handle), "private object"), nil
+	if create {
+		err = windowsPrivateRollback(handle, err)
+	}
+	_ = windows.CloseHandle(handle)
+	return nil, err
 }
 
 // windowsPrivateAt opens or creates one component relative to parent with
