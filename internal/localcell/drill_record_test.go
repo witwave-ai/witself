@@ -487,7 +487,8 @@ func drillContract(sources map[string]string) string {
 		found := false
 		ast.Inspect(other, func(n ast.Node) bool {
 			if id, ok := n.(*ast.Ident); ok && f.Scope.Objects[id.Name] != nil {
-				allowedRoot := name == "drill_root.go" && (id.Name == "drillParseRecord" || id.Name == "drillValidID" || id.Name == "drillMaxBytes" || id.Name == "drillRecord")
+				allowedRoot := name == "drill_root.go" && (id.Name == "drillParseRecord" || id.Name == "drillValidID" || id.Name == "drillMaxBytes" || id.Name == "drillRecord") ||
+					name == "drill_storage.go" && id.Name == "drillValidID"
 				found = found || !allowedRoot
 			}
 			return true
@@ -571,6 +572,9 @@ func TestDrillRecordSourceContract(t *testing.T) {
 		}},
 		{"root_allowlist_not_global", "references", func(s map[string]string) {
 			s["drill_probe.go"] = "package localcell; func drillProbe() { _ = drillParseRecord }"
+		}},
+		{"storage_forbidden_reference", "references", func(s map[string]string) {
+			s["drill_storage.go"] += "\nfunc drillStorageProbe() { _ = drillAdvance }"
 		}},
 		{"uncalled_goroutine", "statements", func(s map[string]string) {
 			s["drill_record.go"] += "\nfunc drillProbe() { _ = func() { go drillOther() } }; func drillOther() {}"
