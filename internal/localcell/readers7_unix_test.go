@@ -69,7 +69,9 @@ func TestLogChildInheritsBlocking(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 			defer cancel()
 			child := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestLogChildHelper$", "--", "readers7-log-child")
-			child.Env, child.Stdout, child.Stderr = []string{}, f, f
+			// A test binary built with coverage warns on its standard error at exit
+			// when it has no coverage directory; that error stream is the log here.
+			child.Env, child.Stdout, child.Stderr = []string{"GOCOVERDIR=" + t.TempDir()}, f, f
 			blocking := err == nil && !writerNonblocking(f)
 			runErr := child.Run()
 			data, readErr := os.ReadFile(log)
