@@ -415,6 +415,7 @@ type journalProgress struct {
 	done           map[string]bool
 	durableBytes   int64
 	tornTail       bool
+	readFile       os.FileInfo // the read handle's stat; nil (matching no file) when absent or unstatable
 	updateID       string
 	updateState    updateState
 	updateMaxState updateState
@@ -450,6 +451,7 @@ func (c *Cell) readJournal() (journalProgress, error) {
 		return progress, err
 	}
 	defer func() { _ = f.Close() }()
+	progress.readFile, _ = f.Stat()
 	reader := bufio.NewReaderSize(f, 64*1024)
 	for {
 		line, readErr := reader.ReadSlice('\n')
@@ -520,6 +522,8 @@ func (c *Cell) readJournal() (journalProgress, error) {
 // discardJournalTail requires the operation lock. Sync the truncation before
 // any recovery append so a second crash cannot turn the tail into an interior
 // record. Inspection only reads the prefix; Repair performs this reconciliation.
+// The opened handle must be the file readJournal measured: another file put at
+// the name since (during a lease wait, say) is refused, never truncated.
 func (c *Cell) discardJournalTail(progress journalProgress) error {
 	if !progress.tornTail {
 		return nil
@@ -530,6 +534,9 @@ func (c *Cell) discardJournalTail(progress journalProgress) error {
 		return err
 	}
 	defer func() { _ = f.Close() }()
+	if info, err := f.Stat(); err != nil || !os.SameFile(progress.readFile, info) {
+		return torn
+	}
 	if err := f.Truncate(progress.durableBytes); err != nil {
 		return errors.New("cannot truncate torn local cell journal")
 	}

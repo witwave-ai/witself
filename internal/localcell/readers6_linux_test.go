@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -21,22 +22,57 @@ func init() {
 	}})
 }
 
-// writerLease is a read lease taken through a second, read-only open (mode zero) or a write
-// lease through a write-only one, maybe from the call's own goroutine; do runs fn on its descriptor while held.
+// writerLease is a lease taken through a second, read-only open, maybe from the call's own goroutine;
+// do runs fn on its descriptor while held. Its holder polls F_GETLEASE every 100 µs and at a break
+// records it and lets go, lets go and takes the lease again, or keeps it.
 type writerLease struct {
-	mu   sync.Mutex
-	file *os.File
-	mode int
+	mu                 sync.Mutex
+	file               *os.File
+	lease              int
+	letGo, retake, saw bool
+}
+
+// leaseHolder is the row's holder by kind (lets_go, kept, retaken); kept and retaken shorten the
+// ceiling to 300 ms for the row (never in parallel): the wait sleeps no interval that would end
+// past it, so their refusal comes at least leaseKeptAfter in.
+const leaseKeptAfter = 200 * time.Millisecond
+
+func leaseHolder(t *testing.T, kind string, lease int) *writerLease {
+	if saved := leaseWait; kind != "lets_go" {
+		leaseWait.ceiling = 300 * time.Millisecond
+		t.Cleanup(func() { leaseWait = saved })
+	}
+	l := &writerLease{lease: lease, letGo: kind == "lets_go", retake: kind == "retaken"}
+	t.Cleanup(l.close)
+	return l
 }
 
 func (l *writerLease) take(name string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	f, err := os.OpenFile(name, l.mode, 0)
-	if _, leaseErr := unix.FcntlInt(f.Fd(), unix.F_SETLEASE, map[int]int{os.O_RDONLY: unix.F_RDLCK, os.O_WRONLY: unix.F_WRLCK}[l.mode]); err == nil && leaseErr == nil {
+	f, err := os.Open(name)
+	if _, leaseErr := unix.FcntlInt(f.Fd(), unix.F_SETLEASE, l.lease); err == nil && leaseErr == nil {
 		l.file = f
+		go l.hold(f)
 	} else {
 		_ = f.Close()
+	}
+}
+
+func (l *writerLease) hold(f *os.File) {
+	for open := true; open; l.mu.Unlock() {
+		time.Sleep(100 * time.Microsecond)
+		l.mu.Lock()
+		if held, err := unix.FcntlInt(f.Fd(), unix.F_GETLEASE, 0); l.file == f && err == nil && held != l.lease {
+			l.saw = true
+			if l.letGo || l.retake {
+				_, _ = unix.FcntlInt(f.Fd(), unix.F_SETLEASE, unix.F_UNLCK)
+			}
+			if l.retake {
+				_, _ = unix.FcntlInt(f.Fd(), unix.F_SETLEASE, l.lease)
+			}
+		}
+		open = l.file == f
 	}
 }
 
@@ -49,17 +85,19 @@ func (l *writerLease) do(fn func(fd uintptr)) bool {
 	return l.file != nil
 }
 
+func (l *writerLease) broken() bool { l.mu.Lock(); defer l.mu.Unlock(); return l.saw }
+
 func (l *writerLease) release() {
-	l.do(func(fd uintptr) { _, _ = unix.FcntlInt(fd, unix.F_SETLEASE, unix.F_UNLCK) })
+	l.do(func(fd uintptr) { l.retake = false; _, _ = unix.FcntlInt(fd, unix.F_SETLEASE, unix.F_UNLCK) })
 }
 
-func (l *writerLease) close() { l.do(func(uintptr) { _ = l.file.Close() }) }
+func (l *writerLease) close() { l.do(func(uintptr) { _ = l.file.Close(); l.file = nil }) }
 
-// A read lease held on the journal when a write open starts is refused at once
-// with the site's open text, where HEAD waited (OQ1); nothing is appended or
-// truncated, and the holder's lease reads F_UNLCK: the break has begun.
-func TestWriterLeaseRefusedAtOnce(t *testing.T) {
-	for _, row := range []struct {
+// A read lease held on the journal when a write open starts is waited out: a holder that lets
+// go at the break costs a moment; one kept past the ceiling (300 ms here) gives the site's open
+// text when the wait ends, nothing appended or truncated, and its lease reads F_UNLCK.
+func TestWriterLeaseWaitedOut(t *testing.T) {
+	for index, row := range slices.Repeat([]struct {
 		name, want string
 		setup      func(t *testing.T, l *writerLease) (string, func() error)
 	}{
@@ -91,31 +129,33 @@ func TestWriterLeaseRefusedAtOnce(t *testing.T) {
 			}
 			return readerJournalPath(c), func() error { return c.Repair(t.Context()) }
 		}},
-	} {
-		t.Run(row.name, func(t *testing.T) {
-			l := &writerLease{}
-			t.Cleanup(l.close)
+	}, 2) {
+		holder := []string{"lets_go", "kept"}[index/4]
+		t.Run(row.name+"/"+holder, func(t *testing.T) {
+			l := leaseHolder(t, holder, unix.F_RDLCK)
 			name, call := row.setup(t, l)
-			size := writerSize(name)
+			size, started := writerSize(name), time.Now()
 			got, held := readerWatchdog(t, call, l.release), -1
 			if !l.do(func(fd uintptr) { held, _ = unix.FcntlInt(fd, unix.F_GETLEASE, 0) }) {
 				t.Fatal("this kernel or sandbox refused the read lease the writer row needs")
 			}
-			if got == nil || got.Error() != row.want || writerSize(name) != size || held != unix.F_UNLCK {
+			if holder == "lets_go" && (got != nil || !l.broken()) || holder == "kept" && (got == nil || got.Error() != row.want || writerSize(name) != size || held != unix.F_UNLCK || time.Since(started) < leaseKeptAfter) {
 				t.Fatalf("the leased journal open gave its open text %t: size kept %t, break begun %t", got != nil && got.Error() == row.want, writerSize(name) == size, held == unix.F_UNLCK)
 			}
 		})
 	}
 }
 
-// The checkpoint verbs refuse at once a read lease held on the journal when
-// they start (HEAD waited): nothing is journaled, create leaves recovery/
-// itself absent or listing no checkpoint (R9: with the root a directory,
-// not-exist is absence on Linux), and a delete's checkpoint stays complete.
-func TestWriterLeaseCheckpointVerbs(t *testing.T) {
+// The checkpoint verbs wait out a read lease held on the journal when they start: a holder that
+// lets go at the break costs a moment and the verb succeeds; one kept past the ceiling (300 ms
+// here) gives today's refusal when the wait ends: nothing is journaled, create leaves recovery/
+// itself absent or listing no checkpoint (R9: with the root a directory, not-exist is absence on
+// Linux), and a delete's checkpoint stays complete.
+func TestWriterLeaseCheckpointVerbsWaitedOut(t *testing.T) {
 	for _, verb := range []string{"create", "delete"} {
-		for _, layout := range []string{"legacy", "selected"} {
-			t.Run(verb+"/"+layout, func(t *testing.T) {
+		for _, run := range []string{"legacy/lets_go", "legacy/kept", "selected/lets_go", "selected/kept"} {
+			t.Run(verb+"/"+run, func(t *testing.T) {
+				layout, holder, _ := strings.Cut(run, "/")
 				f, _ := checkpointFixture(t, layout, false)
 				c, ids := f.cell, []string(nil)
 				if verb == "delete" && (c.Checkpoint(t.Context(), checkpointOptions(f)) != nil || len(checkpointIDs(t, c)) != 1) {
@@ -123,21 +163,26 @@ func TestWriterLeaseCheckpointVerbs(t *testing.T) {
 				}
 				ids = checkpointIDs(t, c)
 				before, err := os.ReadFile(readerJournalPath(c))
-				l := &writerLease{}
-				t.Cleanup(l.close)
+				l := leaseHolder(t, holder, unix.F_RDLCK)
 				l.take(readerJournalPath(c))
 				if err != nil || !l.do(func(uintptr) {}) {
 					t.Fatal("this kernel or sandbox refused the read lease the writer row needs")
 				}
+				started := time.Now()
 				err = readerWatchdog(t, func() error {
 					if verb == "create" {
 						return c.Checkpoint(t.Context(), checkpointOptions(f))
 					}
 					return c.DeleteCheckpoint(t.Context(), DeleteCheckpointOptions{CheckpointID: ids[0]})
 				}, l.release)
-				l.close()
+				if l.close(); holder == "lets_go" {
+					if err != nil || !l.broken() || len(checkpointIDs(t, c)) != 1-len(ids) {
+						t.Fatal("the checkpoint verb did not wait out a journal lease whose holder let go at the break")
+					}
+					return
+				}
 				after, readErr := os.ReadFile(readerJournalPath(c))
-				if failure := ClassifyCheckpointFailure(err); failure.Class != "local_checkpoint_operation_failed" || err.Error() != "cannot open local cell journal" || readErr != nil || !bytes.Equal(before, after) {
+				if failure := ClassifyCheckpointFailure(err); failure.Class != "local_checkpoint_operation_failed" || err.Error() != "cannot open local cell journal" || readErr != nil || !bytes.Equal(before, after) || time.Since(started) < leaseKeptAfter {
 					t.Fatalf("the leased checkpoint %s ended as class %q, journal unchanged %t", verb, failure.Class, readErr == nil && bytes.Equal(before, after))
 				}
 				root, rootErr := os.Lstat(c.cfg.Root)
@@ -154,16 +199,18 @@ func TestWriterLeaseCheckpointVerbs(t *testing.T) {
 }
 
 // The journal lease of docs/cli-command-surface.md, run as the command runs it (Inspect, then
-// the verb when Inspect lists): a write lease stops it at Inspect, a read lease at the verb's
-// journal write, at once, with the operation failure class and no reason; nothing is journaled,
-// create makes no checkpoint and delete keeps its own. Once the holder lets go, both succeed.
-func TestWriterLeaseCheckpointRetry(t *testing.T) {
+// the verb when Inspect lists). A holder that lets go at the break costs a moment and both
+// succeed; one kept past the ceiling (300 ms here) stops a write lease at Inspect and a read lease
+// at the verb's journal write, when the wait ends, with the operation failure class and no reason;
+// nothing is journaled, create makes no checkpoint and delete keeps its own. Once it lets go, both succeed.
+func TestWriterLeaseCheckpointCommandWaitedOut(t *testing.T) {
 	for _, lease := range []string{"read", "write"} {
 		for _, verb := range []string{"create", "delete"} {
-			for _, layout := range []string{"legacy", "selected"} {
-				t.Run(lease+"/"+verb+"/"+layout, func(t *testing.T) {
+			for _, run := range []string{"legacy/lets_go", "legacy/kept", "selected/lets_go", "selected/kept"} {
+				t.Run(lease+"/"+verb+"/"+run, func(t *testing.T) {
+					layout, holder, _ := strings.Cut(run, "/")
 					f, _ := checkpointFixture(t, layout, false)
-					c, ids, l := f.cell, []string(nil), &writerLease{mode: map[string]int{"read": os.O_RDONLY, "write": os.O_WRONLY}[lease]}
+					c, ids, l := f.cell, []string(nil), leaseHolder(t, holder, map[string]int{"read": unix.F_RDLCK, "write": unix.F_WRLCK}[lease])
 					call := func() error {
 						if verb == "create" {
 							return c.Checkpoint(t.Context(), checkpointOptions(f))
@@ -175,24 +222,29 @@ func TestWriterLeaseCheckpointRetry(t *testing.T) {
 					}
 					ids = checkpointIDs(t, c)
 					before, err := os.ReadFile(readerJournalPath(c))
-					t.Cleanup(l.close)
 					l.take(readerJournalPath(c))
 					if err != nil || !l.do(func(uintptr) {}) {
 						t.Fatal("this kernel or sandbox refused the lease the writer row needs")
 					}
 					var observed, called error
+					started := time.Now()
 					_ = readerWatchdog(t, func() error {
 						if _, observed = c.Inspect(t.Context()); observed == nil {
 							called = call()
 						}
 						return nil
 					}, l.release)
-					l.close()
+					if l.close(); holder == "lets_go" {
+						if observed != nil || called != nil || !l.broken() || len(checkpointIDs(t, c)) != 1-len(ids) {
+							t.Fatal("the checkpoint command did not wait out a journal lease whose holder let go at the break")
+						}
+						return
+					}
 					after, readErr := os.ReadFile(readerJournalPath(c))
 					got, want := errors.Join(observed, called), map[string]string{"read": "cannot open local cell journal", "write": "cannot read local cell journal"}[lease]
 					stopped := (observed == nil) == (lease == "read") && got != nil && got.Error() == want
 					kept := readErr == nil && bytes.Equal(before, after) && slices.Equal(checkpointIDs(t, c), ids) && (verb == "create" || checkpointSummaryOf(t, c, ids[0]).Complete)
-					if !stopped || ClassifyCheckpointFailure(got) != (CheckpointFailure{Class: "local_checkpoint_operation_failed"}) || !kept {
+					if !stopped || ClassifyCheckpointFailure(got) != (CheckpointFailure{Class: "local_checkpoint_operation_failed"}) || !kept || time.Since(started) < leaseKeptAfter {
 						t.Fatalf("the leased checkpoint %s stopped at its step %t, journal and checkpoints kept %t", verb, stopped, kept)
 					}
 					if _, err := c.Inspect(t.Context()); err != nil || call() != nil || len(checkpointIDs(t, c)) != 1-len(ids) {

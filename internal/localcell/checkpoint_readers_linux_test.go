@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -66,30 +67,38 @@ func checkpointLeasedTree(t *testing.T, c *Cell, lease *os.File) map[string]reta
 }
 
 // A write lease that another open of a database file holds from before the
-// call is refused at once, never waited out (LC-READERS-3R P1, accepted):
+// call is waited out (LC-LEASE-1): a holder that lets go at the break costs a
+// moment and create makes one complete checkpoint, as before the reader slices.
+// One kept past the ceiling (300 ms here) is refused when the wait ends:
 // PG_VERSION at admission as an unsupported source, before the control call
 // and with the tree unchanged, any other file in the copy as a failed copy
-// with the cleanup complete. The lease is held until the row ends, the refused
-// open has started its break, and the watchdog's unblock releases it.
-func TestCheckpointReadersLease(t *testing.T) {
-	for _, row := range []struct{ name, target, want string }{
-		{"pg_version", "pg/PG_VERSION", "local_checkpoint_source_unsupported"},
-		{"source", "pg/base/1/1259", "local_checkpoint_copy_failed"},
+// with the cleanup complete, the break begun.
+func TestCheckpointReadersLeaseWaitedOut(t *testing.T) {
+	for _, row := range []struct{ name, target, want, holder string }{
+		{"pg_version", "pg/PG_VERSION", "local_checkpoint_source_unsupported", "lets_go"}, {"pg_version", "pg/PG_VERSION", "local_checkpoint_source_unsupported", "kept"},
+		{"source", "pg/base/1/1259", "local_checkpoint_copy_failed", "lets_go"}, {"source", "pg/base/1/1259", "local_checkpoint_copy_failed", "kept"},
 	} {
-		t.Run(row.name, func(t *testing.T) {
+		t.Run(row.name+"/"+row.holder, func(t *testing.T) {
 			f, r := checkpointFixture(t, "legacy", false)
 			c := f.cell
 			before := checkpointTreeState(t, c)
-			lease := checkpointLease(t, c, row.target)
-			err := readerWatchdog(t, func() error { return c.Checkpoint(t.Context(), checkpointOptions(f)) }, func() { _ = lease.Close() })
-			failure := ClassifyCheckpointFailure(err)
+			lease := leaseTaken(t, leaseHolder(t, row.holder, unix.F_WRLCK), c.path(filepath.FromSlash(row.target)))
+			started := time.Now()
+			err := readerWatchdog(t, func() error { return c.Checkpoint(t.Context(), checkpointOptions(f)) }, lease.release)
+			failure, ids := ClassifyCheckpointFailure(err), checkpointIDs(t, c)
 			progress, journalErr := c.readJournal()
 			closed := journalErr == nil && progress.pending == nil && !progress.tornTail
-			leftover := slices.ContainsFunc(checkpointIDs(t, c), func(name string) bool { return strings.HasPrefix(name, "ckpt_") })
-			if held, _ := unix.FcntlInt(lease.Fd(), unix.F_GETLEASE, 0); failure.Class != row.want || failure.CleanupIncomplete || !closed || leftover || held != unix.F_RDLCK {
-				t.Fatal("a database file under a write lease was not refused at once with its class, the cleanup complete and the lease held")
+			if row.holder == "lets_go" {
+				if err != nil || !lease.broken() || !closed || len(ids) != 1 || !checkpointSummaryOf(t, c, ids[0]).Complete {
+					t.Fatal("a database file under a write lease whose holder let go at the break was not waited out")
+				}
+				return
 			}
-			if row.name == "pg_version" && (r.calls["control"] != 0 || !reflect.DeepEqual(checkpointLeasedTree(t, c, lease), before)) {
+			leftover := slices.ContainsFunc(ids, func(name string) bool { return strings.HasPrefix(name, "ckpt_") })
+			if held, _ := unix.FcntlInt(lease.file.Fd(), unix.F_GETLEASE, 0); failure.Class != row.want || failure.CleanupIncomplete || !closed || leftover || held != unix.F_RDLCK || time.Since(started) < leaseKeptAfter {
+				t.Fatal("a database file under a kept write lease was not refused when the wait ended with its class, the cleanup complete and the lease held")
+			}
+			if row.name == "pg_version" && (r.calls["control"] != 0 || !reflect.DeepEqual(checkpointLeasedTree(t, c, lease.file), before)) {
 				t.Fatal("a leased PG_VERSION was refused after the control call or with the tree changed")
 			}
 		})

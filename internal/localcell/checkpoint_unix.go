@@ -30,15 +30,17 @@ func checkpointFreeSpace(path string) (free, total uint64, err error) {
 // opens as a directory only, as recovery/ does: a FIFO, file or device at the
 // name is refused unopened, so nothing waits; a link at pg/ is followed as
 // before (admission refused one present then). The returned opener never waits
-// on what stands at a file's name (a FIFO opens at once), and every caller
-// decides the opened handle before a byte is read.
+// on what stands at a file's name (a FIFO opens at once) but waits out a lease
+// on a regular file there (waitOutLease), and every caller decides the opened
+// handle before a byte is read.
 func (c *Cell) openCheckpointSource() (func(string) (*os.File, error), func(), error) {
 	root, err := os.OpenRoot(c.path("pg") + checkpointRootHere)
 	if err != nil {
 		return nil, nil, err
 	}
 	return func(rel string) (*os.File, error) {
-		return root.OpenFile(filepath.FromSlash(rel), os.O_RDONLY|syscall.O_NONBLOCK, 0)
+		name := filepath.FromSlash(rel)
+		return waitOutLease(name, root.Lstat, func() (*os.File, error) { return root.OpenFile(name, os.O_RDONLY|syscall.O_NONBLOCK, 0) })
 	}, func() { _ = root.Close() }, nil
 }
 
