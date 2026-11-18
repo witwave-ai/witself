@@ -22,6 +22,8 @@ const (
 	referencesAtVars     = "var (\n"
 	referencesAtIdentity = "func processIdentity("
 	referencesAtVerify   = "\tvar data []byte\n\tvar oversized bool\n"
+	referencesAtManifest = "\tif err := c.reinstallBoundary(\"operation_manifest\"); err != nil {\n\t\treturn err\n\t}\n"
+	referencesAtDrill    = "\tdefer func() { _ = drill.Close() }()\n"
 )
 
 // packageReferencesRows edit the sources in memory: each edit is a file, a
@@ -63,7 +65,8 @@ var packageReferencesRows = []struct {
 		{"files_linux_twin.go", "replace", "\t\treturn os.OpenFile(path, flags|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, mode)\n", "\t\treturn os.OpenFile(path, flags, mode)\n"},
 		{"files_other.go", "replace", "//go:build !windows\n", "//go:build !windows && !linux\n"}}, []string{"file:files_linux_twin.go", "import:files_linux_twin.go:errors", "import:files_linux_twin.go:os", "import:files_linux_twin.go:runtime", "import:files_linux_twin.go:syscall", "import:files_linux_twin.go:time",
 		"ref:files_linux_twin.go:createPrivateTemp:os.CreateTemp", "ref:files_linux_twin.go:openPlainReader:openPrivateReader", "ref:files_linux_twin.go:openPostgresReader:openPrivateReader", "ref:files_linux_twin.go:openPrivateFile:os.OpenFile",
-		"ref:files_linux_twin.go:openPrivateReader:os.OpenFile", "ref:files_linux_twin.go:openPrivateWriter:os.OpenFile", "ref:files_linux_twin.go:readPostgresFile:readPrivateFile", "ref:files_linux_twin.go:readPrivateFile:os.ReadFile"}},
+		"ref:files_linux_twin.go:openPrivateReader:os.OpenFile", "ref:files_linux_twin.go:openPrivateWriter:os.OpenFile", "ref:files_linux_twin.go:readPostgresFile:readPrivateFile", "ref:files_linux_twin.go:readPrivateFile:os.ReadFile",
+		"ref:files_linux_twin.go:(*Cell).validatePostgresDirectory:privateDir", "ref:files_linux_twin.go:(*Cell).writePostgresConfig:writeAtomicBytes", "ref:files_linux_twin.go:makePrivateDir:os.Mkdir", "ref:files_linux_twin.go:publishPrivateFile:os.Rename", "ref:files_linux_twin.go:removePrivateFile:os.Remove"}},
 	{"custom_tag_twin", [][4]string{{"zz_twin.go", "+", "", "//go:build witselfreviewtwin\n\npackage localcell\n\nimport \"os\"\n\nfunc zzTwin() { _, _ = os.Open(\".\") }\n"}}, []string{"file:zz_twin.go", "uncompiled:zz_twin.go"}},
 	{"linkname", [][4]string{{"zz_link.go", "+", "", "package localcell\n\nimport (\n\t\"os\"\n\t_ \"unsafe\"\n)\n\n//go:linkname zzOpen os.Open\nfunc zzOpen(name string) (*os.File, error)\n"}}, []string{"bodyless:zz_link.go:zzOpen", "file:zz_link.go", "import:zz_link.go:os", "import:zz_link.go:unsafe", "linkname:zz_link.go"}},
 	{"reflective_call", [][4]string{{"lifecycle.go", "after", referencesAtImports, "\t\"reflect\"\n"},
@@ -115,6 +118,43 @@ var packageReferencesRows = []struct {
 		[]string{"ref:lifecycle.go:zzGenIface:(*os.Root).Open"}},
 	{"generic_constraint", [][4]string{{"lifecycle.go", "before", referencesAtRecover, "func zzGenOpenT[T any, R interface{ Open(T) (*os.File, error) }](r R, name T) { _, _ = r.Open(name) }\n\nfunc zzGenRootT(root *os.Root) { zzGenOpenT(root, \".\") }\n\n"}},
 		[]string{"ref:lifecycle.go:zzGenRootT:(*os.Root).Open"}},
+	// Writers and removers: each shape for a writer and for a remover, then the review's three survivors and the unlink switch.
+	{"writer_new_call", [][4]string{{"reinstall.go", "after", referencesAtManifest, "\t_ = os.Truncate(c.path(\"journal\", \"operations.jsonl\"), 0)\n"}}, []string{"ref:reinstall.go:(*Cell).finishReinstall:os.Truncate"}},
+	{"remover_new_call", [][4]string{{"reinstall.go", "after", referencesAtManifest, "\t_ = os.RemoveAll(c.path(\"pg\"))\n"}}, []string{"ref:reinstall.go:(*Cell).finishReinstall:os.RemoveAll"}},
+	{"writer_same_file_wrapper", [][4]string{{"files.go", "before", referencesAtProgress, "func zzRenameJournal(from, to string) error { return os.Rename(from, to) }\n\n"},
+		{"files.go", "after", referencesAtJournal, "\t_ = zzRenameJournal(path, path)\n"}}, []string{"ref:files.go:zzRenameJournal:os.Rename"}},
+	{"remover_same_file_wrapper", [][4]string{{"checkpoint_root.go", "before", "// removeCheckpointHeld removes every entry", "func zzRemoveHeldName(path string) error { return os.Remove(path) }\n\n"},
+		{"checkpoint_root.go", "after", "\tc.checkpointStage(\"directory\")\n", "\t_ = zzRemoveHeldName(c.recoveryDir())\n"}}, []string{"ref:checkpoint_root.go:zzRemoveHeldName:os.Remove"}},
+	{"writer_package_alias", [][4]string{{"postgres_pending.go", "before", referencesAtPending, "var zzPublish = publishPrivateFile\n\n"},
+		{"checkpoint.go", "before", referencesAtVersion, "\t_ = zzPublish(c.path(\"pg\", \"PG_VERSION\"), c.path(\"pg\", \"PG_VERSION\"))\n"}}, []string{"ref:checkpoint.go:(*Cell).admitCheckpoint:publishPrivateFile", "ref:postgres_pending.go:zzPublish:publishPrivateFile"}},
+	{"remover_package_alias", [][4]string{{"postgres_pending.go", "before", referencesAtPending, "var zzRemoveAll = os.RemoveAll\n\n"},
+		{"reinstall.go", "after", referencesAtManifest, "\t_ = zzRemoveAll(c.path(\"pg\"))\n"}}, []string{"ref:postgres_pending.go:zzRemoveAll:os.RemoveAll", "ref:reinstall.go:(*Cell).finishReinstall:os.RemoveAll"}},
+	{"writer_function_value", [][4]string{{"service_health.go", "after", "\tpath := c.path(\"service\", \"api.secret\")\n", "\twrite := writeAtomicBytes\n\t_ = write(path, nil, nil)\n"}}, []string{"ref:service_health.go:(*Cell).serviceAPICredential:writeAtomicBytes"}},
+	{"remover_function_value", [][4]string{{"service_systemd_adapter.go", "before", "\t// Draining needs the operation lock and must finish before either lock.\n", "\tremove := os.RemoveAll\n\t_ = remove(\"zz\")\n"}},
+		[]string{"ref:service_systemd_adapter.go:(*systemdUserAdapter).Remove:os.RemoveAll"}},
+	{"writer_helper_other_file", [][4]string{{"postgres_pending.go", "before", referencesAtPending, "func zzHelperWrite(path string) error { return writeAtomicBytes(path, nil, nil) }\n\n"},
+		{"drill_root.go", "after", referencesAtDrill, "\t_ = zzHelperWrite(c.recoveryDir())\n"}}, []string{"ref:postgres_pending.go:zzHelperWrite:writeAtomicBytes"}},
+	{"remover_helper_other_file", [][4]string{{"postgres_pending.go", "before", referencesAtPending, "func zzHelperRemove(path string) error { return os.RemoveAll(path) }\n\n"},
+		{"drill_root.go", "after", referencesAtDrill, "\t_ = zzHelperRemove(c.recoveryDir())\n"}}, []string{"ref:postgres_pending.go:zzHelperRemove:os.RemoveAll"}},
+	{"writer_wrapper_elsewhere", [][4]string{{"drill_root.go", "after", referencesAtDrill, "\t_ = c.journal(\"remove\", \"runtime_cleanup\", \"started\")\n"}}, []string{"ref:drill_root.go:(*Cell).deleteDrillLocked:(*Cell).journal"}},
+	{"remover_wrapper_elsewhere", [][4]string{{"drill_root.go", "after", referencesAtDrill, "\t_ = c.finishRemoval(manifest, false)\n"}}, []string{"ref:drill_root.go:(*Cell).deleteDrillLocked:(*Cell).finishRemoval"}},
+	{"writer_held_root_method", [][4]string{{"drill_root.go", "after", referencesAtDrill, "\trename := drill.Rename\n\t_ = rename(\"zz\", drillRootRecordName)\n"}}, []string{"ref:drill_root.go:(*Cell).deleteDrillLocked:(*os.Root).Rename"}},
+	{"remover_held_root_method", [][4]string{{"checkpoint_root.go", "after", "\tc.checkpointStage(\"unseal\")\n", "\tremove := recovery.RemoveAll\n\t_ = remove(checkpointID)\n"}},
+		[]string{"ref:checkpoint_root.go:(*Cell).unsealCheckpointHeld:(*os.Root).RemoveAll"}},
+	{"writer_one_system_file", [][4]string{{"files_windows.go", "after", "func readPrivateFile(path string) ([]byte, error) {\n", "\t_ = os.Chmod(path, 0o600)\n"}}, []string{"ref:files_windows.go:readPrivateFile:os.Chmod"}},
+	{"remover_one_system_file", [][4]string{{"process_darwin.go", "after", "func processIdentity(pid int) (string, bool, error) {\n", "\t_ = unix.Unlink(\"zz\")\n"}}, []string{"ref:process_darwin.go:processIdentity:golang.org/x/sys/unix.Unlink"}},
+	{"writer_interface_method", [][4]string{{"lifecycle.go", "before", referencesAtRecover, "func zzTruncate(f *os.File) {\n\tvar t interface{ Truncate(int64) error } = f\n\t_ = t.Truncate(0)\n}\n\n"}}, []string{"ref:lifecycle.go:zzTruncate:(*os.File).Truncate"}},
+	{"remover_interface_method", [][4]string{{"lifecycle.go", "before", referencesAtRecover, "func zzRemoveIface(root *os.Root) {\n\tvar r interface{ RemoveAll(string) error } = root\n\t_ = r.RemoveAll(\"zz\")\n}\n\n"}},
+		[]string{"ref:lifecycle.go:zzRemoveIface:(*os.Root).RemoveAll"}},
+	{"writer_literal_variable", [][4]string{{"lifecycle.go", "before", referencesAtRecover, "var zzWriteHook = func(path string) error { return writeAtomicBytes(path, nil, nil) }\n\nfunc zzUseWriteHook() { _ = zzWriteHook(\"zz\") }\n\n"}},
+		[]string{"ref:lifecycle.go:zzUseWriteHook:writeAtomicBytes", "ref:lifecycle.go:zzWriteHook:writeAtomicBytes"}},
+	{"remover_literal_field", [][4]string{{"lifecycle.go", "before", referencesAtRecover, "type zzDropper struct{ drop func(string) error }\n\nvar zzDrop = zzDropper{drop: func(path string) error { return os.RemoveAll(path) }}\n\nfunc zzUseDrop() { _ = zzDrop.drop(\"zz\") }\n\n"}},
+		[]string{"ref:lifecycle.go:zzDrop:os.RemoveAll", "ref:lifecycle.go:zzUseDrop:os.RemoveAll"}},
+	{"copy_fs", [][4]string{{"checkpoint.go", "before", "func checkpointComplete(", "func zzCopyFS(dir string, fsys fs.FS) { _ = os.CopyFS(dir, fsys) }\n\n"}}, []string{"ref:checkpoint.go:zzCopyFS:os.CopyFS"}},
+	{"make_fifo", [][4]string{{"service_systemd_linux.go", "before", "func systemdTool(name string) string {", "func zzMkfifo(path string) { _ = unix.Mkfifo(path, 0o600) }\n\n"}}, []string{"ref:service_systemd_linux.go:zzMkfifo:golang.org/x/sys/unix.Mkfifo"}},
+	{"unix_socket_listen", [][4]string{{"service_control_unix.go", "before", "func (c *Cell) removeServiceControlEndpoint() error {", "func zzListenGram(path string) {\n\tvar config net.ListenConfig\n\tif conn, err := config.ListenPacket(context.Background(), \"unixgram\", path); err == nil {\n\t\t_ = conn.Close()\n\t}\n}\n\n"}},
+		[]string{"ref:service_control_unix.go:zzListenGram:(*net.ListenConfig).ListenPacket"}},
+	{"unlink_on_close", [][4]string{{"service_control_unix.go", "after", "\tlistener.SetUnlinkOnClose(false)\n", "\tdefer listener.SetUnlinkOnClose(true)\n"}}, []string{"ref:service_control_unix.go:(*Cell).listenServiceControl:(*net.UnixListener).SetUnlinkOnClose"}},
 }
 
 // referencesEnding returns the sources with every line ended by ending.
