@@ -17,8 +17,8 @@ import (
 )
 
 // TestCheckpointSignalHelperProcess runs one TestCheckpointSignalCancellation
-// row: with the command's signal context it blocks once at the row's step until
-// that context ends (at most 30 s), finishes the call and prints its class.
+// row: with its own copy of the signal context (not the adapter's) it blocks once
+// at the row's step until that context ends (at most 30 s), finishes and prints its class.
 func TestCheckpointSignalHelperProcess(t *testing.T) {
 	if len(os.Args) < 5 || os.Args[len(os.Args)-4] != "localcell-checkpoint-signal-helper" {
 		return

@@ -12,8 +12,8 @@ import (
 	"github.com/witwave-ai/witself/internal/localcell"
 )
 
-// The adapter connects the checkpoint handler to the local cell API; nothing
-// in production references localCheckpointRun or localCheckpointOpen yet.
+// The adapter connects the checkpoint handler to the local cell API; run's
+// "local" case reaches it only through localCheckpointNamespace.
 //
 // Trust boundary: the callbacks are adapter-owned and cooperative. They always
 // pass the handler's context, never panic on any local cell result, and reach
@@ -111,14 +111,27 @@ func localCheckpointRun(ctx context.Context, args []string, open func(localCheck
 	return localCheckpointCommand(ctx, args, localCheckpointCallbacksFor(mode, open), stdout, stderr)
 }
 
-// localCheckpointSignals makes the command's context; nothing in production
-// calls it yet. The first SIGINT, SIGTERM or SIGHUP cancels it (on Windows,
+// localCheckpointSignals makes the command's context; localCheckpointNamespace
+// alone calls it. The first SIGINT, SIGTERM or SIGHUP cancels it (on Windows,
 // Ctrl-C and Ctrl-Break arrive as os.Interrupt; closing the console, logoff
-// and shutdown as SIGTERM). AfterFunc then runs stop, which restores the
-// default, so a further signal ends the process as before; one that arrives
-// before stop has run is absorbed.
+// and shutdown as SIGTERM). AfterFunc then runs stop, which restores each
+// signal's handling before the call, so a further signal acts as before; one
+// that arrives before stop has finished is absorbed (a window of time).
 func localCheckpointSignals() (context.Context, context.CancelFunc) {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	context.AfterFunc(ctx, stop)
 	return ctx, stop
+}
+
+// localCheckpointNamespace is the released route: anything but the checkpoint
+// word is the fixed usage line, exit 2, before any signal is caught; otherwise
+// the signal context is made before the handler parses and stopped on return.
+func localCheckpointNamespace(args []string) int {
+	if len(args) == 0 || args[0] != "checkpoint" {
+		_, _ = io.WriteString(os.Stderr, "usage: witself local checkpoint create|inspect|delete --checkpoint-mode=cold-v1 --root=ABSOLUTE_PATH\n")
+		return 2
+	}
+	ctx, stop := localCheckpointSignals()
+	defer stop()
+	return localCheckpointRun(ctx, args[1:], localCheckpointOpen, os.Stdout, os.Stderr)
 }

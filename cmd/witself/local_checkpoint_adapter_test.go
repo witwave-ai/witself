@@ -233,6 +233,9 @@ var lcAdapterImports = []string{"context", "errors", "io", "os", "os/signal", "s
 var lcAdapterNames = []string{"Binaries", "Bytes", "Checkpoint", "CheckpointID", "CheckpointListing", "CheckpointOptions", "CheckpointUnknown", "Checkpoints", "Class", "ClassifyCheckpointFailure", "CleanupIncomplete", "Complete", "Config", "ContainsRune", "Context", "CreatedAt", "DeleteCheckpoint", "DeleteCheckpointOptions", "ID", "Inspect", "Inspection", "InstallationID", "Manifest", "New", "PostgresDir", "Reason", "Root", "Timeout", "Writer", "checkpointID", "entries", "installationID", "installationPresent", "pgbin", "root", "status", "timeout", "unknown"}
 var lcAdapterHandler = []string{"localCheckpointCommand", "localCheckpointParse", "localCheckpointCallbacks", "localCheckpointRequest", "localCheckpointFailure", "localCheckpointObservation", "localCheckpointSummary"}
 
+// The command sources that may import os/signal, closed (LC-S7D2F4B2R G-3).
+var lcSignalFiles = []string{"dashboard.go", "local_checkpoint_adapter.go", "memory_curator_auto.go", "tui.go", "tui_console_child.go"}
+
 // Signal names and objects, only inside localCheckpointSignals (pinned text).
 var lcSignalNames = []string{"AfterFunc", "Background", "CancelFunc", "Interrupt", "NotifyContext", "SIGHUP", "SIGTERM"}
 var lcSignalObjects = []string{"context.AfterFunc", "context.Background", "context.CancelFunc", "os.Interrupt", "os/signal.NotifyContext", "syscall.SIGHUP", "syscall.SIGTERM"}
@@ -242,6 +245,25 @@ const lcSignalsEntry = `func localCheckpointSignals() (context.Context, context.
 	context.AfterFunc(ctx, stop)
 	return ctx, stop
 }`
+
+// The released route: run's one case body, usage's one help line, the namespace.
+const lcRoute, lcHelp = "return localCheckpointNamespace(args[1:])", "  witself local checkpoint create|inspect|delete  Opt-in cold local-cell checkpoints (--checkpoint-mode=cold-v1); not restore-verified"
+const lcNamespaceEntry = `func localCheckpointNamespace(args []string) int {
+	if len(args) == 0 || args[0] != "checkpoint" {
+		_, _ = io.WriteString(os.Stderr, "usage: witself local checkpoint create|inspect|delete --checkpoint-mode=cold-v1 --root=ABSOLUTE_PATH\n")
+		return 2
+	}
+	ctx, stop := localCheckpointSignals()
+	defer stop()
+	return localCheckpointRun(ctx, args[1:], localCheckpointOpen, os.Stdout, os.Stderr)
+}`
+
+// Entry functions pinned by text, with the names and objects only they may use.
+var lcEntries = []struct {
+	name, text string
+	admits     []string
+}{{"localCheckpointSignals", lcSignalsEntry, slices.Concat(lcSignalNames, lcSignalObjects)},
+	{"localCheckpointNamespace", lcNamespaceEntry, []string{"Stderr", "Stdout", "WriteString", "io.WriteString", "os.Stderr", "os.Stdout"}}}
 
 // lcCheck type-checks files as package main, importing only admitted paths.
 func lcCheck(files []*ast.File, admit func(string) bool) (*types.Scope, map[*ast.Ident]types.Object, []types.Error) {
@@ -304,13 +326,16 @@ func lcFence(module map[string]string) map[string]bool {
 	for _, name := range scope.Names() {
 		fail("prefix", !strings.HasPrefix(name, "localCheckpoint"))
 	}
-	// (c) Outside the two files no reserved identifier occurs and no other
-	// command source imports the local cell package.
+	// (c) Outside the two files only (g)'s route names a reserved identifier,
+	// and no other command source imports the local cell package.
+	reserved := 0
 	for name, file := range files {
 		if name != handler && name != adapter {
 			ast.Inspect(file, func(node ast.Node) bool {
-				ident, ok := node.(*ast.Ident)
-				fail("outside", ok && strings.HasPrefix(ident.Name, "localCheckpoint"))
+				if ident, ok := node.(*ast.Ident); ok && strings.HasPrefix(ident.Name, "localCheckpoint") {
+					reserved++
+					fail("outside", name != "cmd/witself/main.go" || ident.Name != "localCheckpointNamespace")
+				}
 				return true
 			})
 			fail("outside", path.Dir(name) == "cmd/witself" && slices.ContainsFunc(file.Imports, func(spec *ast.ImportSpec) bool {
@@ -319,27 +344,109 @@ func lcFence(module map[string]string) map[string]bool {
 			}))
 		}
 	}
-	// (e) The adapter's imports, selectors and composite keys are closed; signal
-	// names and objects lie only in localCheckpointSignals, whose text is pinned.
-	signals := slices.IndexFunc(files[adapter].Decls, func(decl ast.Decl) bool {
-		function, ok := decl.(*ast.FuncDecl)
-		object := scope.Lookup("localCheckpointSignals")
-		return ok && object != nil && function.Name.Pos() == object.Pos()
-	})
-	inside := func(pos token.Pos) bool {
-		return signals >= 0 && files[adapter].Decls[signals].Pos() <= pos && pos < files[adapter].Decls[signals].End()
-	}
-	if fail("entry", signals < 0); signals >= 0 {
-		start, end := lcFset.Position(files[adapter].Decls[signals].Pos()).Offset, lcFset.Position(files[adapter].Decls[signals].End()).Offset
-		fail("entry", strings.ReplaceAll(module[adapter][start:end], "\r\n", "\n") != lcSignalsEntry)
-	}
-	for ident, object := range uses {
-		if lcFset.File(ident.Pos()).Name() == adapter && object.Pkg() != nil {
-			name := object.Pkg().Path() + "." + object.Name()
-			confined := object.Pkg().Path() == "os/signal" || object.Pkg().Path() == "syscall" || slices.Contains(lcSignalObjects, name)
-			fail("allowlist", confined && (!inside(ident.Pos()) || !slices.Contains(lcSignalObjects, name)))
+	fail("outside", reserved != 1)
+	// run's one caller is main in main.go: every other bare run in a command
+	// source is a declaration, a field or key, or a value of a local that its
+	// declaration defines. Only lcSignalFiles may import os/signal.
+	calls := 0
+	for name, source := range module {
+		file, err := files[name], error(nil)
+		if path.Dir(name) != "cmd/witself" {
+			continue
+		} else if file == nil {
+			file, err = parser.ParseFile(lcFset, name, source, parser.SkipObjectResolution)
+		}
+		if fail("outside", err != nil); err != nil {
+			continue
+		}
+		fail("route", !slices.Contains(lcSignalFiles, path.Base(name)) && slices.ContainsFunc(file.Imports, func(spec *ast.ImportSpec) bool {
+			value, err := strconv.Unquote(spec.Path.Value)
+			return err != nil || value == "os/signal"
+		}))
+		for _, decl := range file.Decls {
+			function, _ := decl.(*ast.FuncDecl)
+			named, called, local := map[*ast.Ident]bool{}, map[*ast.Ident]bool{}, false
+			ast.Inspect(decl, func(node ast.Node) bool {
+				var defines []*ast.Ident
+				switch node := node.(type) {
+				case *ast.SelectorExpr:
+					named[node.Sel] = true
+				case *ast.KeyValueExpr:
+					key, _ := node.Key.(*ast.Ident)
+					named[key] = true
+				case *ast.CallExpr:
+					fun, _ := ast.Unparen(node.Fun).(*ast.Ident)
+					called[fun] = true
+				case *ast.Field:
+					defines = node.Names
+				case *ast.ValueSpec:
+					defines = node.Names
+				case *ast.AssignStmt:
+					for _, lhs := range node.Lhs {
+						if ident, ok := lhs.(*ast.Ident); ok && node.Tok == token.DEFINE {
+							defines = append(defines, ident)
+						}
+					}
+				case *ast.RangeStmt:
+					for _, expr := range []ast.Expr{node.Key, node.Value} {
+						if ident, ok := expr.(*ast.Ident); ok && node.Tok == token.DEFINE {
+							defines = append(defines, ident)
+						}
+					}
+				}
+				for _, ident := range defines {
+					named[ident], local = true, local || ident.Name == "run"
+				}
+				return true
+			})
+			ast.Inspect(decl, func(node ast.Node) bool {
+				switch ident, ok := node.(*ast.Ident); {
+				case !ok || ident.Name != "run" || named[ident] || function != nil && ident == function.Name:
+				case called[ident]:
+					calls++
+					fail("outside", function == nil || function.Recv != nil || function.Name.Name != "main" || name != "cmd/witself/main.go")
+				default:
+					fail("outside", !local)
+				}
+				return true
+			})
 		}
 	}
+	fail("outside", calls != 1)
+	// (e) Imports, selectors and composite keys are closed; each entry's names
+	// and objects lie in it alone; the signal context's one use is the namespace.
+	decls := make([]ast.Decl, len(lcEntries))
+	for index, entry := range lcEntries {
+		object := scope.Lookup(entry.name)
+		at := slices.IndexFunc(files[adapter].Decls, func(decl ast.Decl) bool {
+			function, ok := decl.(*ast.FuncDecl)
+			return ok && object != nil && function.Name.Pos() == object.Pos()
+		})
+		if fail("entry", at < 0); at >= 0 {
+			decls[index] = files[adapter].Decls[at]
+			start, end := lcFset.Position(decls[index].Pos()).Offset, lcFset.Position(decls[index].End()).Offset
+			fail("entry", strings.ReplaceAll(module[adapter][start:end], "\r\n", "\n") != entry.text)
+		}
+	}
+	inside := func(pos token.Pos, index int) bool {
+		return decls[index] != nil && decls[index].Pos() <= pos && pos < decls[index].End()
+	}
+	admitted := func(pos token.Pos, value string) bool { // names never hold a dot, objects always do
+		return inside(pos, 0) && slices.Contains(lcEntries[0].admits, value) || inside(pos, 1) && slices.Contains(lcEntries[1].admits, value)
+	}
+	signals := 0
+	for ident, object := range uses {
+		if object != nil && object == scope.Lookup(lcEntries[0].name) {
+			signals++
+			fail("references", !inside(ident.Pos(), 1))
+		}
+		if lcFset.File(ident.Pos()).Name() == adapter && object.Pkg() != nil {
+			name := object.Pkg().Path() + "." + object.Name()
+			confined := object.Pkg().Path() == "os/signal" || object.Pkg().Path() == "syscall" || slices.Contains(lcEntries[0].admits, name) || slices.Contains(lcEntries[1].admits, name)
+			fail("allowlist", confined && !admitted(ident.Pos(), name))
+		}
+	}
+	fail("references", signals != 1)
 	for _, spec := range files[adapter].Imports {
 		value, err := strconv.Unquote(spec.Path.Value)
 		fail("allowlist", err != nil || spec.Name != nil || !slices.Contains(lcAdapterImports, value))
@@ -347,7 +454,7 @@ func lcFence(module map[string]string) map[string]bool {
 	ast.Inspect(files[adapter], func(node ast.Node) bool {
 		switch node := node.(type) {
 		case *ast.SelectorExpr:
-			fail("allowlist", !slices.Contains(lcAdapterNames, node.Sel.Name) && (!inside(node.Pos()) || !slices.Contains(lcSignalNames, node.Sel.Name)))
+			fail("allowlist", !slices.Contains(lcAdapterNames, node.Sel.Name) && !admitted(node.Pos(), node.Sel.Name))
 		case *ast.KeyValueExpr:
 			key, ok := node.Key.(*ast.Ident)
 			fail("allowlist", !ok || !slices.Contains(lcAdapterNames, key.Name))
@@ -355,27 +462,48 @@ func lcFence(module map[string]string) map[string]bool {
 		return true
 	})
 	// (f) Neither file declares init, and the adapter declares no package
-	// variable, whose initializer would run before main. (g) run and usage,
-	// both present, hold no folded string constant equal to local or
-	// containing checkpoint.
+	// variable, whose initializer would run before main. (g) main.go imports
+	// no os/signal or syscall; run and usage each hold one folded constant equal
+	// to local or containing checkpoint: the sole literal of one case whose body
+	// is the pinned route, and the pinned help line. main and main.go's
+	// package-level declarations hold none (LC-S7D2F4B2R G-1).
 	for _, decl := range append(slices.Clone(files[handler].Decls), files[adapter].Decls...) {
 		function, ok := decl.(*ast.FuncDecl)
 		fail("init", ok && function.Name.Name == "init")
 		general, ok := decl.(*ast.GenDecl)
 		fail("variable", ok && general.Tok == token.VAR && lcFset.File(decl.Pos()).Name() == adapter)
 	}
-	routes := 0
+	for _, spec := range files["cmd/witself/main.go"].Imports {
+		fail("route", spec.Path.Value == `"os/signal"` || spec.Path.Value == `"syscall"`)
+	}
+	routes, clauses, found := 0, 0, map[string][]string{}
 	for _, decl := range files["cmd/witself/main.go"].Decls {
-		if function, ok := decl.(*ast.FuncDecl); ok && function.Recv == nil && function.Body != nil && (function.Name.Name == "run" || function.Name.Name == "usage") {
+		if function, ok := decl.(*ast.FuncDecl); ok && function.Recv == nil && function.Body != nil && slices.Contains([]string{"run", "usage", "main"}, function.Name.Name) {
 			routes++
 			ast.Inspect(function.Body, func(node ast.Node) bool {
+				if value, constant := lcStringConstant(node); constant && (value == "local" || strings.Contains(value, "checkpoint")) {
+					found[function.Name.Name] = append(found[function.Name.Name], value)
+				}
+				if clause, ok := node.(*ast.CaseClause); ok && slices.ContainsFunc(clause.List, func(value ast.Expr) bool {
+					local, constant := lcStringConstant(value)
+					return constant && local == "local"
+				}) {
+					literal, ok := clause.List[0].(*ast.BasicLit)
+					clauses++
+					fail("route", !ok || literal.Value != `"local"` || len(clause.List) != 1 || len(clause.Body) != 1 ||
+						strings.ReplaceAll(module["cmd/witself/main.go"][lcFset.Position(clause.Body[0].Pos()).Offset:lcFset.Position(clause.Body[0].End()).Offset], "\r\n", "\n") != lcRoute)
+				}
+				return true
+			})
+		} else if general, ok := decl.(*ast.GenDecl); ok && general.Tok != token.IMPORT {
+			ast.Inspect(general, func(node ast.Node) bool {
 				value, constant := lcStringConstant(node)
 				fail("route", constant && (value == "local" || strings.Contains(value, "checkpoint")))
 				return true
 			})
 		}
 	}
-	fail("route", routes != 2)
+	fail("route", routes != 3 || clauses != 1 || found["main"] != nil || !slices.Equal(found["run"], []string{"local"}) || !slices.Equal(found["usage"], []string{lcHelp}))
 	return failed
 }
 
@@ -638,8 +766,8 @@ func TestLocalCheckpointSignal(t *testing.T) {
 					ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 					defer cancel()
 					child := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestLocalCheckpointSignalHelperProcess$", "--", "local-checkpoint-signal-helper", verb)
-					// A coverage build writes its data on exit, else a warning to stderr.
-					child.Env = []string{"WITSELF_HOME=" + t.TempDir(), "DSH_HOME=" + t.TempDir(), "GOCOVERDIR=" + os.Getenv("GOCOVERDIR")}
+					// A coverage build writes its data on exit, here into the row's own directory.
+					child.Env = []string{"WITSELF_HOME=" + t.TempDir(), "DSH_HOME=" + t.TempDir(), "GOCOVERDIR=" + t.TempDir()}
 					var stdout bytes.Buffer
 					child.Stdout = &stdout
 					stderr, err := child.StderrPipe()
@@ -706,4 +834,67 @@ func TestLocalCheckpointSignal(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestLocalCheckpointDispatch drives run: without the exact selector (also with
+// WITSELF_CHECKPOINT_MODE set) each spelling exits 2 with a fixed class or the
+// usage line, echoes nothing and leaves a real root unchanged; with it an empty
+// root lists, repeated consent is refused, and notice and help are documented.
+func TestLocalCheckpointDispatch(t *testing.T) {
+	t.Setenv("WITSELF_HOME", t.TempDir())
+	t.Setenv("DSH_HOME", t.TempDir())
+	refused := func(t *testing.T, root string, args []string, class string) {
+		t.Helper()
+		before := lcaTree(t, filepath.Dir(root))
+		stdout, stderr, code := capturePlanCLI(t, func() int { return run(append([]string{"local"}, args...)) })
+		if code != 2 || strings.Contains(stdout+stderr, root) || strings.Contains(stdout+stderr, lcSentinel) || !maps.Equal(before, lcaTree(t, filepath.Dir(root))) {
+			t.Fatal("a released spelling was not refused unchanged or echoed an argument")
+		}
+		if class == "" && (stdout != "" || stderr != "usage: witself local checkpoint create|inspect|delete --checkpoint-mode=cold-v1 --root=ABSOLUTE_PATH\n") {
+			t.Fatal("the namespace usage line differs")
+		}
+		if class != "" {
+			if r := lcaReceipt(t, stdout); stderr != "" || r.Outcome != "refused" || r.Failure == nil || r.Failure.Class != class || r.Before != nil || r.After != nil {
+				t.Fatal("a released refusal differs from its fixed class")
+			}
+		}
+	}
+	t.Run("disabled", func(t *testing.T) {
+		t.Setenv("WITSELF_CHECKPOINT_MODE", "cold-v1")
+		_, root := lcaRoot(t)
+		refused(t, root, nil, "")
+		refused(t, root, []string{lcSentinel, "checkpoint"}, "")
+		refused(t, root, []string{"checkpoint"}, "local_checkpoint_command_disabled")
+		refused(t, root, []string{"checkpoint", lcSentinel, "--root=" + root}, "local_checkpoint_command_disabled")
+		for _, verb := range []string{"create", "inspect", "delete"} {
+			args := lcReplace(lcArgs(verb), "root", root)
+			refused(t, root, append([]string{"checkpoint"}, slices.DeleteFunc(slices.Clone(args), func(a string) bool { return strings.HasPrefix(a, "--checkpoint-mode=") })...), "local_checkpoint_command_disabled")
+			for _, mode := range []string{"cold-v1x", "COLD-V1", "cold-v1 "} {
+				refused(t, root, append([]string{"checkpoint"}, lcReplace(args, "checkpoint-mode", mode)...), "local_checkpoint_command_disabled")
+			}
+		}
+	})
+	t.Run("enabled", func(t *testing.T) {
+		parent, root := lcaRoot(t)
+		before := lcaTree(t, parent)
+		stdout, stderr, code := capturePlanCLI(t, func() int {
+			return run([]string{"local", "checkpoint", "inspect", "--checkpoint-mode=cold-v1", "--root=" + root})
+		})
+		if r := lcaReceipt(t, stdout); code != 0 || stderr != "" || r.Outcome != "succeeded" || r.After == nil || r.After.Status != "listed" || r.After.Count == nil || *r.After.Count != 0 || !maps.Equal(before, lcaTree(t, parent)) {
+			t.Fatal("a selected inspect did not list an empty private root unchanged")
+		}
+		for verb, consent := range map[string][]string{"create": {"--installation-id=" + lcIdentity}, "delete": {"--checkpoint-id=" + lcID, "--checkpoint-mode=cold-v1"}} {
+			for _, repeated := range consent {
+				refused(t, root, append(append([]string{"checkpoint"}, lcReplace(lcArgs(verb), "root", root)...), repeated), "local_checkpoint_arguments_invalid")
+			}
+		}
+		doc, err := os.ReadFile(commandSurfaceDoc)
+		_, section, found := strings.Cut(strings.ReplaceAll(string(doc), "\r\n", "\n"), "\n## `witself local`\n")
+		section, _, _ = strings.Cut(section, "\n## ")
+		var help bytes.Buffer
+		usage(&help)
+		if err != nil || !found || !slices.ContainsFunc(strings.Split(section, "\n"), func(line string) bool { return strings.Contains(line, lcNotice) }) || strings.Count("\n"+help.String(), "\n"+lcHelp+"\n") != 1 {
+			t.Fatal("the receipt notice or help line differs from the documented one")
+		}
+	})
 }

@@ -1,6 +1,7 @@
 // Package localcell owns a disposable local cell under one caller-supplied root.
-// Only tests and the internal localcellharness command use it; it does not
-// install, activate, or change an ordinary Witself installation.
+// Tests, the internal localcellharness command and the released witself local
+// checkpoint command use it; it does not install, activate, or change an
+// ordinary Witself installation.
 //
 // The root contains manifest.json, pg/ for PostgreSQL data, spool/ for the local
 // runtime archive spool, run/ for operation locking, process identity records,
@@ -49,7 +50,9 @@
 // Repair never inherits purge authority or regenerates missing custody/history.
 // Retained temporary files do not establish a durable pending-work guarantee.
 //
-// Checkpoint and DeleteCheckpoint are dark: no released command calls them.
+// The released witself local checkpoint command, opt-in per call with
+// --checkpoint-mode=cold-v1, reaches only Inspect, Checkpoint and
+// DeleteCheckpoint; no other Cell operation is reachable from a released command.
 // Checkpoint copies the PGDATA, manifest.json and retained custody of the cold
 // installation named by its exact identity into a new recovery/<id>/, re-reads
 // the copy, writes inventory.json, and writes witness.json last; only a

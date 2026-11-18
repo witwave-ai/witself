@@ -122,6 +122,7 @@ Under a command heading in an implemented family that is not marked target, tabl
 | `witself` | `integrations` | implemented | — |
 | `witself` | `integration` | implemented | — |
 | `witself` | `legal` | implemented | — |
+| `witself` | `local` | implemented | — |
 | `witself` | `mcp` | implemented | — |
 | `witself` | `memory` | implemented | — |
 | `witself` | `message` | implemented | — |
@@ -6157,6 +6158,187 @@ Flags:
 | `--account` | Only dashboards under this local account name. |
 | `--realm` | Only dashboards in this realm. |
 | `--json` | Print JSON instead of a summary. |
+
+## `witself local`
+
+**Family status: implemented.**
+
+`witself local checkpoint create|inspect|delete` manages cold checkpoints of one
+local cell: copies of its stopped PostgreSQL data, `manifest.json` and kept
+passwords below `recovery/`, at most two complete ones. It never installs,
+starts, stops, repairs, restores or removes a cell. `create` admits only a
+stopped database (no live recorded component, no `pg/postmaster.pid`, a
+`pg_controldata` state of `shut down`) and starts no program but
+`pg_controldata` from `--pgbin`, at admission and before its witness. `delete`
+likewise refuses while a recorded component is live
+(`local_checkpoint_state_unsupported`). `witself local` with anything but
+`checkpoint` prints a fixed usage line on standard error and exits 2.
+
+Every call must carry `--checkpoint-mode=cold-v1`; without it, or with another
+value, it refuses with `local_checkpoint_command_disabled`, exit 2, touching
+nothing in the root. No environment variable, configuration or discovery
+selects it.
+`--root` is the cell root's absolute path. `--timeout` (positive, default `30s`)
+budgets `create`'s cooperative checks and each `pg_controldata` run; `inspect`
+and `delete` ignore it, a consented `delete` proceeds after it is spent, and it
+is no wall-clock bound. `create` also takes `--pgbin`, the absolute PostgreSQL
+16 binary directory (an absolute path proves nothing about authenticity), and
+`--installation-id`, exactly as `inspect` reports it (1 to 64 ASCII letters,
+digits, `_` or `-`); `delete` takes one exact `--checkpoint-id`. The identifier
+is the only consent: no prompt and no yes, force, latest, oldest, all, prefix
+or glob form. Options are read in order up to the first argument the parser
+cannot take, and a call whose selector was not read by then is disabled.
+Otherwise an unknown verb, an unknown or repeated option, an extra argument, a
+relative path, a bad timeout or a malformed identifier is
+`local_checkpoint_arguments_invalid`, and a missing identifier
+`local_checkpoint_confirmation_required`. Exit 0 is success, 1 an operational
+refusal or failure, 2 a usage, selector or consent refusal, also a `create`
+whose `--installation-id` differs from the one the command reads first
+(`local_checkpoint_identity_mismatch`).
+
+Each call prints one JSON receipt line: `operation` (`create`, `inspect`,
+`delete` or `unknown`); `outcome` (`succeeded`, `failed` or `refused`);
+`failure` (`class`, an optional `reason`, `cleanup_incomplete`); `before` and
+`after`, each with `status` (`listed`, `busy`, `unowned` or `unavailable`),
+`failure`, `installation_id`, `count`, `unknown_count` and `entries` (`id`,
+`installation_id`, `complete`, `verification`); for `delete`, `target` and
+`presence` (`present`, `absent` or `unknown`); `verification`, always
+`not_performed`; and `notice`. Before and after are separate observations; a
+receipt never says which entry a call created. `complete` means the writer
+finished, not that the copy was verified or can be restored; nothing here
+verifies, restores, drills or rolls back.
+
+An `inspect` that lists exits 0 (`succeeded`). A `busy` cell (another operation
+holds it) or an `unowned` one (`recovery/` but no owner lock) is `refused`,
+exit 1, with no `failure`: never a sign that there are no checkpoints. A read
+error is `refused`, exit 1, with a class; most carry no reason, which comes
+only with `local_checkpoint_state_unsupported` (below). Unsafe listing metadata
+is `refused`, exit 1, `local_checkpoint_metadata_unsupported`. A `create` or
+`delete` whose first observation does not list is refused alike; an after-read
+that is `busy`, `unowned` or unsafe makes it exit 1 even after a successful
+change, but one that fails with a read error does not: the successful change
+exits 0 with `after.status: unavailable` (for `delete`, `presence: unknown`).
+Other classes: `local_checkpoint_state_unsupported`,
+`local_checkpoint_source_unsupported`, `local_checkpoint_storage_insufficient`,
+`local_checkpoint_limit_reached`, `local_checkpoint_incomplete`,
+`local_checkpoint_witness_mismatch`, `local_checkpoint_copy_failed`,
+`local_maintenance_fence_active`, `local_cell_locked`,
+`local_cell_layout_refused`, and `local_checkpoint_operation_failed` for any
+other failure. Reasons: `boundary_unreadable`, `boundary_noncanonical`,
+`boundary_not_private`, `descendant_refused`, `tree_unreadable` and
+`unknown_entries`.
+
+A `recovery/` that is itself a link, not a directory or not private makes all
+three verbs refuse with `local_cell_layout_refused` and no reason. An object
+below it that is not private, or not a plain file or directory, makes them
+refuse with `local_checkpoint_state_unsupported` and a reason, unless the cell
+is `busy` or `unowned`, which they report instead. Either way nothing changes.
+The command never repairs, re-permissions, moves or removes such an object:
+make it private or move it out by hand, then retry. A private entry there that
+is not a checkpoint blocks only `create` (`unknown_entries`).
+
+Every receipt carries this notice:
+
+> Checkpoint journal history may remain, including after purged-root delete; another purge does not prune it. Older readers may refuse that history; downgrade compatibility is unsupported.
+
+Before it looks for its target, a `delete` whose first observation lists
+creates whichever of `.owner.lock`, `run/` and `run/operation.lock` is missing.
+In a private directory that never was a cell it creates them there before it
+finds no such checkpoint (`failed`, `local_checkpoint_identity_mismatch`,
+exit 1) and leaves them. In a purged root it recreates `run/` and
+`run/operation.lock` as well as `journal/`, and keeps that history; a later
+purge does not prune it, and an older Witself build may refuse it.
+
+### Interruptions and leftovers
+
+The first SIGINT, SIGTERM or SIGHUP (on Windows Ctrl-C, Ctrl-Break, closing the
+console, logoff or shutdown) cancels the operation at its next check: `create`
+removes its partial copy, closes its journal operation and prints `failed`,
+exit 1, `local_checkpoint_copy_failed` (`local_checkpoint_operation_failed`
+during admission); a `create` past its last check, a `delete` and an `inspect`
+finish with their usual receipt; a file being copied or hashed is finished
+first. Right after the first signal, a short window set by time, not by count,
+absorbs further signals. A signal after it acts as without the command: it ends
+the process with no receipt (shell status 128 plus the signal number), leaving
+what a kill leaves (below), unless that signal was ignored when it started. So
+under `nohup` a first hangup still cancels and later ones stay ignored, as does
+SIGINT in a background job of a non-interactive shell. On Windows, closing the
+console, logging off or shutting down leaves only the system's grace period,
+then ends the process as if killed.
+
+A `create` or `delete` that is killed, loses power or cannot write its journal
+after its first journal record leaves its operation open. The next `create` or
+`delete` of that root whose admission passes closes it first, then does its own
+work; the close stops, signals and deletes nothing, and the receipt does not
+show it. A verb refused at admission (such as a `create` at the limit or beside
+an incomplete checkpoint) closes nothing. Any other open operation, a torn
+journal tail, or an operation Repair has begun keeps both verbs refusing with
+`local_checkpoint_state_unsupported`; `inspect` cannot show why. A torn tail,
+from a power loss or disk failure during a journal write (the close's own
+included), is never closed by these verbs: only the cell's Repair settles it,
+and no released command performs Repair.
+
+An interrupted `create` can leave a half-written checkpoint directory: `inspect`
+lists it by exact identifier with `"complete": false`, `create` refuses with
+`local_checkpoint_incomplete` while it exists, and `delete --checkpoint-id=`
+that identifier removes it and nothing else. Until then it holds a private
+partial copy of the data and passwords, and its disk space. A damaged
+checkpoint lists the same way. A `delete` killed before it removes the witness
+leaves its target listed complete, one killed after leaves it incomplete;
+either way the same `delete` run again closes any operation it left and
+finishes. Run again after its target is gone, it reports
+`local_checkpoint_identity_mismatch` with `presence: absent`: the checkpoint is
+gone, and the next `create`, or `delete` of an existing checkpoint, whose
+admission passes closes the leftover.
+
+A failure to write standard output can leave a truncated receipt line; the
+command then prints only `local_checkpoint_operation_failed` on standard error
+and exits 1. `cleanup_incomplete: true` means a failed `create` could not remove
+its own partial directory (it removes nothing it cannot prove its own): delete
+that entry by its identifier.
+
+### Same-user limits
+
+`delete` removes through `recovery/` and the checkpoint held as directories.
+Only a process running as the same user can cause these: one file, link or empty
+directory planted at the exact checkpoint name inside the held recovery
+directory between the last check and the last removal is removed instead; a
+same-user rename onto the exact name BEFORE the directories are held makes that
+directory the one deleted; a parent of the cell root replaced by a link before
+the hold moves the whole deletion into the linked tree, still limited to a
+directory of that exact name.
+
+On Linux and macOS, `create` writes its copy by pathname: a same-user process
+renaming a directory inside the cell during the copy can make the private copy,
+password files included, land outside the cell while `create` reports success.
+Such a process can already read those files. There, a same-user process that
+puts a FIFO at `journal/operations.jsonl` after the command's checks can make
+`create` or `delete` wait, while it holds the cell lock, when it appends to
+the journal. `inspect` does not append. The first signal does not end such a
+wait; a signal after the window above does, leaving what a kill leaves. A FIFO
+put at the database directory `pg/`, or at a directory the command syncs after
+creating or changing it, is refused at once and is not waited on. A FIFO put at `pg/global/pg_control` after `create` has
+planned its copy makes its `pg_controldata` run wait instead, also under the
+cell lock, until `--timeout` runs out or the first signal ends that wait. There
+too, a link put inside the database directory during
+the copy is followed, but only within it; one put at the manifest, a kept
+password file or a copy being inventoried is refused.
+
+On Linux, if another process holds a write lease on a database file from
+before `create` starts, `create` is refused at once instead of waiting for the
+lease to end: on `PG_VERSION` with `local_checkpoint_source_unsupported` before
+anything is journaled, on any other copied file except `global/pg_control` with
+`local_checkpoint_copy_failed`, its partial copy removed and its operation
+closed. A lease on `global/pg_control` is different: `pg_controldata` waits on
+it until `--timeout` ends the run (`local_checkpoint_operation_failed`, nothing
+journaled) or the system breaks the lease (`/proc/sys/fs/lease-break-time`, 45
+seconds by default) and `create` goes on; the first signal ends that wait. The
+refused open asks the holder to let go; retrying after it has done so succeeds.
+Nothing ordinary holds such a lease on the files of a stopped database.
+
+On Windows, `delete` also removes a checkpoint whose witness file is read-only,
+has been replaced by an empty directory, or changed after `delete` checked the
+tree; the witness's access list is not re-checked at removal.
 
 ## First Implementation Slice
 

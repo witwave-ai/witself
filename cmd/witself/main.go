@@ -196,6 +196,8 @@ func run(args []string) int {
 		return dashboardCmd(args[1:])
 	case "tui":
 		return tuiCmd(args[1:])
+	case "local":
+		return localCheckpointNamespace(args[1:])
 	case "help", "--help", "-h":
 		usage(os.Stdout)
 		return 0
@@ -4318,6 +4320,7 @@ func usage(w io.Writer) {
 	cliout.Line(w, "  witself dashboard serve|status|stop  Serve a local content-read-only Agent Console, list registered ones, or stop one")
 	cliout.Line(w, "  witself dashboard open [--print-url]  Verify and open a running console, or deliberately print its private opening URL")
 	cliout.Line(w, "  witself tui [--agent NAME] [--demo]  Open the native agent terminal workspace")
+	cliout.Line(w, "  witself local checkpoint create|inspect|delete  Opt-in cold local-cell checkpoints (--checkpoint-mode=cold-v1); not restore-verified")
 	cliout.Line(w, "  witself help                 Show this help")
 	cliout.Line(w)
 	cliout.Line(w, "Cloud commands take --account NAME (a local account name; when omitted,")
