@@ -24,6 +24,12 @@ const (
 	referencesAtVerify   = "\tvar data []byte\n\tvar oversized bool\n"
 	referencesAtManifest = "\tif err := c.reinstallBoundary(\"operation_manifest\"); err != nil {\n\t\treturn err\n\t}\n"
 	referencesAtDrill    = "\tdefer func() { _ = drill.Close() }()\n"
+	referencesAtControl  = "func startServiceControlServer("
+	referencesAtSystemd  = "func systemdTool(name string) string {"
+	referencesAtInspect  = "\tresult := Inspection{Processes: map[string]ProcessState{}}\n"
+	referencesAtRemoval  = "func (c *Cell) finishRemoval("
+	referencesAtRemove   = "\tif err := os.Remove(c.path(\"manifest.json\")); err != nil {\n"
+	referencesUseRemove  = "\tif zzRemove != nil {\n\t\t_ = zzRemove(c.path(\"pg\"))\n\t}\n"
 )
 
 // packageReferencesRows edit the sources in memory: each edit is a file, a
@@ -94,7 +100,7 @@ var packageReferencesRows = []struct {
 	{"tls_key_pair", [][4]string{{"lifecycle.go", "after", referencesAtImports, "\t\"crypto/tls\"\n"},
 		{"lifecycle.go", "before", referencesAtRecover, "func zzKeyPair(cert, key string) { _, _ = tls.LoadX509KeyPair(cert, key) }\n\n"}}, []string{"import:lifecycle.go:crypto/tls"}},
 	{"unix_dial", [][4]string{{"lifecycle.go", "after", referencesAtImports, "\t\"net\"\n"},
-		{"lifecycle.go", "before", referencesAtRecover, "func zzDial(path string) {\n\tif conn, err := net.Dial(\"unix\", path); err == nil {\n\t\t_ = conn.Close()\n\t}\n}\n\n"}}, []string{"import:lifecycle.go:net", "ref:lifecycle.go:zzDial:net.Dial"}},
+		{"lifecycle.go", "before", referencesAtRecover, "func zzDial(path string) {\n\tif conn, err := net.Dial(\"unix\", path); err == nil {\n\t\t_ = conn.Close()\n\t}\n}\n\n"}}, []string{"import:lifecycle.go:net", "ref:lifecycle.go:zzDial:(*net.UnixListener).Close", "ref:lifecycle.go:zzDial:net.Dial"}},
 	{"nt_create_file", [][4]string{{"stop_windows.go", "before", referencesAtVars, "func zzNtCreate(oa *windows.OBJECT_ATTRIBUTES) {\n\tvar handle windows.Handle\n\tvar status windows.IO_STATUS_BLOCK\n\t_ = windows.NtCreateFile(&handle, windows.GENERIC_READ, oa, &status, nil, 0, 0, windows.FILE_OPEN, 0, 0, 0)\n}\n\n"}}, []string{"ref:stop_windows.go:zzNtCreate:golang.org/x/sys/windows.NtCreateFile"}},
 	{"find_first_file", [][4]string{{"stop_windows.go", "before", referencesAtVars, "func zzFindFirst(pattern *uint16) {\n\tvar data windows.Win32finddata\n\tif handle, err := windows.FindFirstFile(pattern, &data); err == nil {\n\t\t_ = windows.FindClose(handle)\n\t}\n}\n\n"}}, []string{"ref:stop_windows.go:zzFindFirst:golang.org/x/sys/windows.FindFirstFile"}},
 	{"syscall_dll", [][4]string{{"stop_windows.go", "before", referencesAtVars, "func zzStdDLL() { _, _, _ = syscall.NewLazyDLL(\"kernel32.dll\").NewProc(\"GetTickCount\").Call() }\n\n"}},
@@ -153,8 +159,51 @@ var packageReferencesRows = []struct {
 	{"copy_fs", [][4]string{{"checkpoint.go", "before", "func checkpointComplete(", "func zzCopyFS(dir string, fsys fs.FS) { _ = os.CopyFS(dir, fsys) }\n\n"}}, []string{"ref:checkpoint.go:zzCopyFS:os.CopyFS"}},
 	{"make_fifo", [][4]string{{"service_systemd_linux.go", "before", "func systemdTool(name string) string {", "func zzMkfifo(path string) { _ = unix.Mkfifo(path, 0o600) }\n\n"}}, []string{"ref:service_systemd_linux.go:zzMkfifo:golang.org/x/sys/unix.Mkfifo"}},
 	{"unix_socket_listen", [][4]string{{"service_control_unix.go", "before", "func (c *Cell) removeServiceControlEndpoint() error {", "func zzListenGram(path string) {\n\tvar config net.ListenConfig\n\tif conn, err := config.ListenPacket(context.Background(), \"unixgram\", path); err == nil {\n\t\t_ = conn.Close()\n\t}\n}\n\n"}},
-		[]string{"ref:service_control_unix.go:zzListenGram:(*net.ListenConfig).ListenPacket"}},
+		[]string{"ref:service_control_unix.go:zzListenGram:(*net.ListenConfig).ListenPacket", "ref:service_control_unix.go:zzListenGram:(*net.UnixListener).Close"}},
 	{"unlink_on_close", [][4]string{{"service_control_unix.go", "after", "\tlistener.SetUnlinkOnClose(false)\n", "\tdefer listener.SetUnlinkOnClose(true)\n"}}, []string{"ref:service_control_unix.go:(*Cell).listenServiceControl:(*net.UnixListener).SetUnlinkOnClose"}},
+	// The second review of writers and removers: primitives it found unguarded, a writer laundered through a local, a conversion,
+	// an identity call, a parameter, a send, a range or a literal, a caller-chosen target, writes through plumbing and the armed listener.
+	{"dialer_dial_unix", [][4]string{{"service_control.go", "before", referencesAtControl, "func zzBindGram(path string) {\n\tvar dialer net.Dialer\n\tif conn, err := dialer.DialUnix(context.Background(), \"unixgram\", &net.UnixAddr{Name: path, Net: \"unixgram\"}, nil); err == nil {\n\t\t_ = conn.Close()\n\t}\n}\n\n"}},
+		[]string{"ref:service_control.go:zzBindGram:(*net.Dialer).DialUnix"}},
+	{"ioctl_clone", [][4]string{{"service_systemd_linux.go", "before", referencesAtSystemd, "func zzClone(dst, src *os.File) { _ = unix.IoctlSetInt(int(dst.Fd()), unix.FICLONE, int(src.Fd())) }\n\n"}}, []string{"ref:service_systemd_linux.go:zzClone:golang.org/x/sys/unix.IoctlSetInt"}},
+	{"pick_reconfigure", [][4]string{{"service_systemd_linux.go", "before", referencesAtSystemd, "func zzRemount(path string) {\n\tif fd, err := unix.Fspick(unix.AT_FDCWD, path, 0); err == nil {\n\t\t_ = unix.FsconfigSetFlag(fd, \"ro\")\n\t\t_ = unix.FsconfigReconfigure(fd)\n\t\t_ = unix.Close(fd)\n\t}\n}\n\n"}},
+		[]string{"ref:service_systemd_linux.go:zzRemount:golang.org/x/sys/unix.FsconfigReconfigure", "ref:service_systemd_linux.go:zzRemount:golang.org/x/sys/unix.FsconfigSetFlag", "ref:service_systemd_linux.go:zzRemount:golang.org/x/sys/unix.Fspick"}},
+	{"process_accounting", [][4]string{{"process_linux.go", "before", referencesAtIdentity, "func zzAcct(path string) { _ = syscall.Acct(path) }\n\n"}}, []string{"ref:process_linux.go:zzAcct:syscall.Acct"}},
+	{"multipart_form", [][4]string{{"service_control.go", "before", referencesAtControl, "func zzReadForm(r *http.Request) {\n\tif reader, err := r.MultipartReader(); err == nil {\n\t\tif form, err := reader.ReadForm(0); err == nil {\n\t\t\t_ = form.RemoveAll()\n\t\t}\n\t}\n}\n\n"}},
+		[]string{"ref:service_control.go:zzReadForm:(*mime/multipart.Form).RemoveAll", "ref:service_control.go:zzReadForm:(*mime/multipart.Reader).ReadForm"}},
+	{"cert_file_store", [][4]string{{"service_control_windows.go", "before", "func (c *Cell) removeServiceControlEndpoint() error {", "func zzCertFile(path string) {\n\tname, err := windows.UTF16PtrFromString(path)\n\tif err != nil {\n\t\treturn\n\t}\n\tvar address uintptr\n\tif _, err := fmt.Sscanf(fmt.Sprintf(\"%p\", name), \"0x%x\", &address); err != nil {\n\t\treturn\n\t}\n\tif store, err := windows.CertOpenStore(windows.CERT_STORE_PROV_FILENAME, windows.X509_ASN_ENCODING|windows.PKCS_7_ASN_ENCODING, 0, windows.CERT_FILE_STORE_COMMIT_ENABLE_FLAG|windows.CERT_STORE_CREATE_NEW_FLAG, address); err == nil {\n\t\t_ = windows.CertCloseStore(store, 0)\n\t}\n\t_ = *name\n}\n\n"}},
+		[]string{"ref:service_control_windows.go:zzCertFile:golang.org/x/sys/windows.CertOpenStore"}},
+	{"alias_through_local", [][4]string{{"lifecycle.go", "before", referencesAtRemoval, "var zzRemove func(string) error\n\n"},
+		{"lifecycle.go", "replace", referencesAtRemove, "\tremove := os.Remove\n\tzzRemove = remove\n\tif err := remove(c.path(\"manifest.json\")); err != nil {\n"},
+		{"lifecycle.go", "after", referencesAtInspect, referencesUseRemove}}, []string{"ref:lifecycle.go:(*Cell).Inspect:os.Remove", "ref:lifecycle.go:(*Cell).finishRemoval:os.Remove"}},
+	{"alias_through_conversion", [][4]string{{"lifecycle.go", "before", referencesAtRemoval, "var zzRemove func(string) error\n\n"},
+		{"lifecycle.go", "replace", referencesAtRemove, "\tzzRemove = (func(string) error)(os.Remove)\n\tif err := zzRemove(c.path(\"manifest.json\")); err != nil {\n"},
+		{"lifecycle.go", "after", referencesAtInspect, referencesUseRemove}}, []string{"ref:lifecycle.go:(*Cell).Inspect:os.Remove", "ref:lifecycle.go:(*Cell).finishRemoval:os.Remove"}},
+	{"alias_through_identity", [][4]string{{"lifecycle.go", "before", referencesAtRemoval, "var zzRemove func(string) error\n\nfunc zzKeep[T any](v T) T { return v }\n\n"},
+		{"lifecycle.go", "replace", referencesAtRemove, "\tzzRemove = zzKeep(os.Remove)\n\tif err := zzRemove(c.path(\"manifest.json\")); err != nil {\n"},
+		{"lifecycle.go", "after", referencesAtInspect, referencesUseRemove}}, []string{"ref:lifecycle.go:(*Cell).Inspect:os.Remove", "ref:lifecycle.go:(*Cell).finishRemoval:os.Remove"}},
+	{"alias_through_parameter", [][4]string{{"lifecycle.go", "before", referencesAtRecover, "var zzRemoved func(string) error\n\nfunc zzSetRemove(remove func(string) error) { zzRemoved = remove }\n\nfunc zzUseRemoved() { zzSetRemove(os.Remove); _ = zzRemoved(\"zz\") }\n\n"}},
+		[]string{"ref:lifecycle.go:zzSetRemove:os.Remove", "ref:lifecycle.go:zzUseRemoved:os.Remove"}},
+	{"alias_through_send", [][4]string{{"lifecycle.go", "before", referencesAtRecover, "var zzRemovers = make(chan func(string) error, 1)\n\nfunc zzSendRemove() { zzRemovers <- os.Remove }\n\nfunc zzUseRemovers() { _ = (<-zzRemovers)(\"zz\") }\n\n"}},
+		[]string{"ref:lifecycle.go:zzSendRemove:os.Remove", "ref:lifecycle.go:zzUseRemovers:os.Remove"}},
+	{"alias_through_range", [][4]string{{"lifecycle.go", "before", referencesAtRecover, "var zzRanged func(string) error\n\nfunc zzRangeRemove() {\n\tfor _, remove := range []func(string) error{os.Remove} {\n\t\tzzRanged = remove\n\t}\n}\n\nfunc zzUseRanged() { _ = zzRanged(\"zz\") }\n\n"}},
+		[]string{"ref:lifecycle.go:zzRangeRemove:os.Remove", "ref:lifecycle.go:zzUseRanged:os.Remove"}},
+	{"alias_through_literal", [][4]string{{"lifecycle.go", "before", referencesAtRecover, "var zzWrapped func(string) error\n\nfunc zzWrap(f func(string) error) func(string) error { return f }\n\nfunc zzWrapRemove() { zzWrapped = zzWrap(func(path string) error { return os.Remove(path) }) }\n\nfunc zzUseWrapped() { _ = zzWrapped(\"zz\") }\n\n"}},
+		[]string{"ref:lifecycle.go:zzUseWrapped:os.Remove", "ref:lifecycle.go:zzWrapRemove:os.Remove"}},
+	{"alias_through_result", [][4]string{{"lifecycle.go", "before", referencesAtRecover, "type zzHolder struct{ run func(string) error }\n\nvar zzBoxed zzHolder\n\nfunc zzBox(run func(string) error) zzHolder { return zzHolder{run} }\n\nfunc zzBoxRemove() { zzBoxed = zzBox(os.Remove) }\n\nfunc zzUseBoxed() { _ = zzBoxed.run(\"zz\") }\n\n"}},
+		[]string{"ref:lifecycle.go:zzBoxRemove:os.Remove", "ref:lifecycle.go:zzUseBoxed:os.Remove"}},
+	{"generic_interface_parameter", [][4]string{{"lifecycle.go", "before", referencesAtRecover, "type zzGenParam[T any] interface{ Open(T) (*os.File, error) }\n\nfunc zzGenCall(r zzGenParam[string]) { _, _ = r.Open(\".\") }\n\n"}},
+		[]string{"ref:lifecycle.go:zzGenCall:(*os.Root).Open"}},
+	{"wrapper_caller_target", [][4]string{{"lifecycle.go", "after", referencesAtInspect, "\t_ = c.bindServiceProcessBootWithReader(\"postgres\", serviceBootID)\n"}}, []string{"ref:lifecycle.go:(*Cell).Inspect:(*Cell).bindServiceProcessBootWithReader"}},
+	{"plumbing_copy", [][4]string{{"files.go", "before", referencesAtProgress, "func zzFill(f *os.File, r io.Reader) { _, _ = io.Copy(f, r) }\n\n"}}, []string{"ref:files.go:zzFill:(*os.File).Write"}},
+	{"plumbing_return", [][4]string{{"files.go", "before", referencesAtProgress, "func zzWriter(f *os.File) io.Writer { return f }\n\n"}}, []string{"ref:files.go:zzWriter:(*os.File).Write"}},
+	{"plumbing_send", [][4]string{{"files.go", "before", referencesAtProgress, "func zzSend(f *os.File, out chan<- io.Writer) { out <- f }\n\n"}}, []string{"ref:files.go:zzSend:(*os.File).Write"}},
+	{"plumbing_other_sites", [][4]string{{"files.go", "before", referencesAtProgress, "func zzConversion(f *os.File) { _ = io.Writer(f) }\n\nfunc zzInitializer(f *os.File) {\n\tvar w io.Writer = f\n\t_ = w\n}\n\nfunc zzMapKey(f *os.File, seen map[io.Writer]bool) bool { return seen[f] }\n\nfunc zzCompositeKey(f *os.File) { _ = map[io.Writer]bool{f: true} }\n\nfunc zzComposite(f *os.File) { _ = []io.Writer{f} }\n\nfunc zzAssertion(v any) { _, _ = v.(io.Writer) }\n\nfunc zzTypeSwitch(v any) {\n\tswitch v.(type) {\n\tcase io.Writer:\n\t}\n}\n\nfunc zzRangeAssign(files []*os.File) {\n\tvar w io.Writer\n\tfor _, w = range files {\n\t}\n\t_ = w\n}\n\n"}},
+		[]string{"ref:files.go:zzAssertion:(*os.File).Write", "ref:files.go:zzComposite:(*os.File).Write", "ref:files.go:zzCompositeKey:(*os.File).Write", "ref:files.go:zzConversion:(*os.File).Write", "ref:files.go:zzInitializer:(*os.File).Write", "ref:files.go:zzMapKey:(*os.File).Write", "ref:files.go:zzRangeAssign:(*os.File).Write", "ref:files.go:zzTypeSwitch:(*os.File).Write"}},
+	{"alias_through_named_conversion", [][4]string{{"lifecycle.go", "before", referencesAtRecover, "type zzRemoveA func(string) error\n\ntype zzRemoveB func(string) error\n\nvar zzNamedB zzRemoveB\n\nfunc zzConvertRemove() {\n\ta := zzRemoveA(os.Remove)\n\tzzNamedB = zzRemoveB(a)\n}\n\nfunc zzUseNamedB() { _ = zzNamedB(\"zz\") }\n\n"}},
+		[]string{"ref:lifecycle.go:zzConvertRemove:os.Remove", "ref:lifecycle.go:zzUseNamedB:os.Remove"}},
+	{"armed_listener_close", [][4]string{{"service_control_unix.go", "after", "\tlistener, err := net.ListenUnix(\"unix\", &net.UnixAddr{Name: path, Net: \"unix\"})\n\tif err != nil {\n\t\treturn nil, errors.New(\"localcell: service_control_unavailable\")\n\t}\n", "\t_ = listener.Close()\n"}},
+		[]string{"ref:service_control_unix.go:(*Cell).listenServiceControl:(*net.UnixListener).Close"}},
 }
 
 // referencesEnding returns the sources with every line ended by ending.

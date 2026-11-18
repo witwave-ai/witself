@@ -174,7 +174,7 @@ func (w *referencesWorld) check(system string, sources map[string]string, guarde
 	}
 	// A file is named by its source key, never by a position a line directive
 	// adjusts.
-	info := &types.Info{Uses: map[*ast.Ident]types.Object{}, Defs: map[*ast.Ident]types.Object{}, Instances: map[*ast.Ident]types.Instance{}}
+	info := &types.Info{Uses: map[*ast.Ident]types.Object{}, Defs: map[*ast.Ident]types.Object{}, Instances: map[*ast.Ident]types.Instance{}, Types: map[ast.Expr]types.TypeAndValue{}}
 	config := types.Config{Importer: w.importer(w.listed[w.self].ImportMap, w.listed[w.self].Dir), Sizes: types.SizesFor("gc", "amd64"),
 		Error: func(err error) {
 			fail("types:"+system+":"+fset.PositionFor(err.(types.Error).Pos, false).Filename, true)
@@ -234,13 +234,62 @@ func (w *referencesWorld) check(system string, sources map[string]string, guarde
 		}
 		return names
 	}
-	// A value is given by an initializer, an assignment or a composite-literal
-	// key, and a function literal gives what it references; only a package
-	// variable or a field takes it, never a local. A struct conversion carries a
-	// field into each field of its name and identical type: fields holds them.
-	given, fields := map[ast.Expr]types.Object{}, map[string][]*types.Var{}
+	// typesIn returns a tuple's types; typesOf, those of values, a value of
+	// several results spread.
+	typesIn := func(tuple *types.Tuple) (found []types.Type) {
+		for variable := range tuple.Variables() {
+			found = append(found, variable.Type())
+		}
+		return found
+	}
+	typesOf := func(values ...ast.Expr) (found []types.Type) {
+		for _, value := range values {
+			if tuple, ok := info.TypeOf(value).(*types.Tuple); ok {
+				found = append(found, typesIn(tuple)...)
+			} else {
+				found = append(found, info.TypeOf(value))
+			}
+		}
+		return found
+	}
+	underlying := func(t types.Type) types.Type { return cmp.Or(t, types.Type(types.Typ[types.Invalid])).Underlying() }
+	// converted returns, for a value of a concrete type in from that a site
+	// converts to the interface type at its index in to, each guarded method it
+	// supplies for a method the interface declares; matched, each guarded method
+	// that can supply a method of an interface type a value is asserted to.
+	converted := func(from, to []types.Type) (names []string) {
+		for index := range min(len(from), len(to)) {
+			if face, ok := underlying(to[index]).(*types.Interface); ok && from[index] != nil && !types.IsInterface(from[index]) {
+				for method := range face.Methods() {
+					found, _, _ := types.LookupFieldOrMethod(from[index], true, self, method.Name())
+					names = append(names, targets(found)...)
+				}
+			}
+		}
+		return names
+	}
+	matched := func(t types.Type) (names []string) {
+		if face, ok := underlying(t).(*types.Interface); ok {
+			for method := range face.Methods() {
+				names = append(names, targets(method)...)
+			}
+		}
+		return names
+	}
+	// A value is given by an initializer, an assignment, a composite-literal
+	// key, a call argument, a send or a range. A package variable or a field
+	// takes it as an alias, counted at every use; a local or a parameter carries
+	// it, never counted. A struct conversion carries a field into each field of
+	// its name and identical type: fields holds them. results holds each return's
+	// result types.
+	given, fields, carried, results := map[ast.Expr]types.Object{}, map[string][]*types.Var{}, map[types.Object][]string{}, map[*ast.ReturnStmt]*types.Tuple{}
+	named := func(expression ast.Expr) types.Object {
+		identifier, _ := expression.(*ast.Ident)
+		return cmp.Or(referencesNamed(info, expression), info.Defs[identifier])
+	}
 	for _, file := range files {
 		ast.Inspect(file, func(node ast.Node) bool {
+			body, signature := (*ast.BlockStmt)(nil), types.Type(nil)
 			switch node := node.(type) {
 			case *ast.ValueSpec:
 				for index, value := range node.Values {
@@ -251,16 +300,181 @@ func (w *referencesWorld) check(system string, sources map[string]string, guarde
 			case *ast.AssignStmt:
 				for index, value := range node.Rhs {
 					if len(node.Lhs) == len(node.Rhs) {
-						given[value] = referencesNamed(info, node.Lhs[index])
+						given[value] = named(node.Lhs[index])
 					}
 				}
 			case *ast.KeyValueExpr:
 				if field, ok := referencesNamed(info, node.Key).(*types.Var); ok && field.Kind() == types.FieldVar {
 					given[node.Value] = field
 				}
+			case *ast.CallExpr:
+				if function, ok := referencesNamed(info, node.Fun).(*types.Func); ok && function.Pkg() == self {
+					for index, argument := range node.Args {
+						parameters := function.Origin().Signature().Params()
+						given[argument] = parameters.At(min(index, parameters.Len()-1))
+					}
+				}
+			case *ast.SendStmt:
+				given[node.Value] = named(node.Chan)
+			case *ast.RangeStmt:
+				given[node.X] = named(cmp.Or(node.Value, node.Key))
+			case *ast.FuncDecl:
+				body, signature = node.Body, info.TypeOf(node.Name)
+			case *ast.FuncLit:
+				body, signature = node.Body, info.TypeOf(node)
+			}
+			if signature, ok := signature.(*types.Signature); ok && body != nil {
+				ast.Inspect(body, func(inner ast.Node) bool {
+					if statement, ok := inner.(*ast.ReturnStmt); ok {
+						results[statement] = signature.Results()
+					}
+					_, literal := inner.(*ast.FuncLit)
+					return !literal
+				})
 			}
 			return true
 		})
+	}
+	// referenced returns the names a node references: an identifier's guarded
+	// object or alias and an instantiation's supply; at a site that converts a
+	// value to an interface type, what the value supplies for it; at an assertion
+	// to an interface type or a range assignment to one, what can supply it.
+	referenced := func(node ast.Node) []string {
+		identifier, _ := node.(*ast.Ident)
+		names, to := append(targets(info.Uses[identifier]), supplied(identifier)...), []types.Type(nil)
+		switch node := node.(type) {
+		case *ast.CallExpr:
+			callee := info.Types[ast.Unparen(node.Fun)]
+			if signature, ok := callee.Type.(*types.Signature); ok && !callee.IsType() {
+				if to = typesIn(signature.Params()); signature.Variadic() && !node.Ellipsis.IsValid() {
+					last := to[len(to)-1].(*types.Slice).Elem()
+					to = append(to[:len(to)-1], slices.Repeat([]types.Type{last}, max(len(node.Args)-len(to)+1, 0))...)
+				}
+			} else if callee.IsType() {
+				to = append(to, callee.Type)
+			}
+			return append(names, converted(typesOf(node.Args...), to)...)
+		case *ast.AssignStmt:
+			for _, left := range node.Lhs {
+				to = append(to, info.TypeOf(left))
+			}
+			return append(names, converted(typesOf(node.Rhs...), to)...)
+		case *ast.ValueSpec:
+			for _, name := range node.Names {
+				to = append(to, info.TypeOf(name))
+			}
+			return append(names, converted(typesOf(node.Values...), to)...)
+		case *ast.ReturnStmt:
+			return append(names, converted(typesOf(node.Results...), typesIn(results[node]))...)
+		case *ast.SendStmt:
+			if channel, ok := underlying(info.TypeOf(node.Chan)).(*types.Chan); ok {
+				return append(names, converted(typesOf(node.Value), []types.Type{channel.Elem()})...)
+			}
+		case *ast.IndexExpr:
+			if container, ok := underlying(info.TypeOf(node.X)).(*types.Map); ok {
+				return append(names, converted(typesOf(node.Index), []types.Type{container.Key()})...)
+			}
+		case *ast.CompositeLit:
+			container := underlying(info.TypeOf(node))
+			if pointer, ok := container.(*types.Pointer); ok {
+				container = pointer.Elem().Underlying()
+			}
+			for index, element := range node.Elts {
+				key, value := ast.Expr(nil), element
+				if pair, ok := element.(*ast.KeyValueExpr); ok {
+					key, value = pair.Key, pair.Value
+				}
+				switch container := container.(type) {
+				case *types.Struct:
+					to = []types.Type{info.TypeOf(key)}
+					if key == nil && index < container.NumFields() {
+						to = []types.Type{container.Field(index).Type()}
+					}
+				case interface{ Elem() types.Type }:
+					to = []types.Type{container.Elem()}
+				}
+				if container, ok := container.(*types.Map); ok {
+					names = append(names, converted(typesOf(key), []types.Type{container.Key()})...)
+				}
+				names = append(names, converted(typesOf(value), to)...)
+			}
+		case *ast.TypeAssertExpr:
+			return append(names, matched(info.TypeOf(node.Type))...)
+		case *ast.CaseClause:
+			for _, expression := range node.List {
+				if info.Types[expression].IsType() {
+					names = append(names, matched(info.Types[expression].Type)...)
+				}
+			}
+		case *ast.RangeStmt:
+			if node.Tok == token.ASSIGN {
+				return append(append(names, matched(info.TypeOf(node.Key))...), matched(info.TypeOf(node.Value))...)
+			}
+		}
+		return names
+	}
+	// held returns the names a given value holds: a function literal, what it
+	// references; any other value, each guarded identifier or local in it that is
+	// not called and has no basic type, and what each function literal in it
+	// holds. A call holds an argument it converts or can return, or when a result
+	// is neither of a basic type nor an interface with methods. What a value
+	// holds is found once (shape): its identifiers, and the names that cannot
+	// change; an identifier's own are read on every pass.
+	type valueNames struct {
+		static      []string
+		identifiers []*ast.Ident
+	}
+	shapes := map[ast.Expr]*valueNames{}
+	var shape func(*valueNames, ast.Node, bool)
+	shape = func(names *valueNames, value ast.Node, whole bool) {
+		var skipped map[ast.Node]bool
+		ast.Inspect(value, func(node ast.Node) bool {
+			identifier, _ := node.(*ast.Ident)
+			expression, _ := node.(ast.Expr)
+			basic, _ := underlying(info.TypeOf(expression)).(*types.Basic)
+			literal, nested := node.(*ast.FuncLit)
+			switch call, isCall := node.(*ast.CallExpr); {
+			case whole && identifier != nil:
+				names.identifiers, names.static = append(names.identifiers, identifier), append(names.static, supplied(identifier)...)
+			case whole:
+				names.static = append(names.static, referenced(node)...)
+			case skipped[node] || basic != nil && basic.Kind() != types.Uintptr && basic.Kind() != types.UnsafePointer:
+				return false
+			case nested:
+				shape(names, literal, true)
+				return false
+			case identifier != nil:
+				names.identifiers = append(names.identifiers, identifier)
+			case isCall:
+				if skipped == nil {
+					skipped = map[ast.Node]bool{}
+				}
+				_, invoked := ast.Unparen(call.Fun).(*ast.FuncLit)
+				skipped[call.Fun] = !invoked
+				for _, argument := range call.Args {
+					kept := info.Types[ast.Unparen(call.Fun)].IsType()
+					for _, result := range typesOf(call) {
+						face, _ := underlying(result).(*types.Interface)
+						_, basic := underlying(result).(*types.Basic)
+						kept = kept || !basic && (face == nil || face.NumMethods() == 0) || info.TypeOf(argument) != nil && types.AssignableTo(info.TypeOf(argument), result)
+					}
+					skipped[argument] = !kept
+				}
+			}
+			return true
+		})
+	}
+	held := func(value ast.Expr) []string {
+		if shapes[value] == nil {
+			_, whole := ast.Unparen(value).(*ast.FuncLit)
+			shapes[value] = &valueNames{}
+			shape(shapes[value], value, whole)
+		}
+		names := slices.Clone(shapes[value].static)
+		for _, identifier := range shapes[value].identifiers {
+			names = append(append(names, targets(info.Uses[identifier])...), carried[info.Uses[identifier]]...)
+		}
+		return names
 	}
 	for _, uses := range []map[*ast.Ident]types.Object{info.Defs, info.Uses} {
 		for _, object := range uses {
@@ -273,22 +487,18 @@ func (w *referencesWorld) check(system string, sources map[string]string, guarde
 		changed = false
 		add := func(to types.Object, names []string) {
 			variable, ok := to.(*types.Var)
+			holder := carried
+			if ok && (variable.Kind() == types.PackageVar || variable.Kind() == types.FieldVar) {
+				holder = objects
+			}
 			for _, target := range names {
-				if ok && (variable.Kind() == types.PackageVar || variable.Kind() == types.FieldVar) && !slices.Contains(objects[variable.Origin()], target) {
-					objects[variable.Origin()], changed = append(objects[variable.Origin()], target), true
+				if ok && !slices.Contains(holder[variable.Origin()], target) {
+					holder[variable.Origin()], changed = append(holder[variable.Origin()], target), true
 				}
 			}
 		}
 		for value, to := range given {
-			names := targets(referencesNamed(info, value))
-			if literal, ok := ast.Unparen(value).(*ast.FuncLit); ok {
-				ast.Inspect(literal, func(node ast.Node) bool {
-					identifier, _ := node.(*ast.Ident)
-					names = append(names, targets(info.Uses[identifier])...)
-					return true
-				})
-			}
-			add(to, names)
+			add(to, held(value))
 		}
 		for object, names := range objects {
 			if field, ok := object.(*types.Var); ok && field.Kind() == types.FieldVar {
@@ -317,8 +527,7 @@ func (w *referencesWorld) check(system string, sources map[string]string, guarde
 				function, ok := node.(*ast.FuncDecl)
 				fail("bodyless:"+name+":"+declared, ok && function.Body == nil)
 				ast.Inspect(node, func(node ast.Node) bool {
-					identifier, _ := node.(*ast.Ident)
-					for _, target := range append(targets(info.Uses[identifier]), supplied(identifier)...) {
+					for _, target := range referenced(node) {
 						view.counts[name+"\t"+declared+"\t"+target]++
 					}
 					return true
@@ -332,15 +541,20 @@ func (w *referencesWorld) check(system string, sources map[string]string, guarde
 // referencesNamed returns the object an expression names: an identifier, or a
 // selector's member, through parentheses, instantiation and indexing.
 func referencesNamed(info *types.Info, expression ast.Expr) types.Object {
+	return info.Uses[referencesIdentifier(expression)]
+}
+
+// referencesIdentifier returns the identifier that names it.
+func referencesIdentifier(expression ast.Expr) *ast.Ident {
 	switch node := ast.Unparen(expression).(type) {
 	case *ast.Ident:
-		return info.Uses[node]
+		return node
 	case *ast.SelectorExpr:
-		return info.Uses[node.Sel]
+		return node.Sel
 	case *ast.IndexExpr:
-		return referencesNamed(info, node.X)
+		return referencesIdentifier(node.X)
 	case *ast.IndexListExpr:
-		return referencesNamed(info, node.X)
+		return referencesIdentifier(node.X)
 	}
 	return nil
 }

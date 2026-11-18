@@ -7,8 +7,10 @@ import "strings"
 // handle no check has seen; escape hatches reach code by value, name or
 // address; writers and removers create, write, truncate, rename, link, change
 // the mode, owner, times or attributes of, or remove a name or what a handle
-// refers to, then the package's own that do so or pass on a target they are
-// given. Each is refused wherever packageReferencesList does not list it. A
+// refers to, then the package's own that do so, or pass on or build from what
+// they are given the name they write, create or remove. Each is refused
+// wherever packageReferencesList does not list it, and a guarded method also
+// where a value converted to an interface supplies it. A
 // package no file imports needs no name here: its import is refused.
 var packageReferencesGuarded = strings.Fields(`
 os.Open os.OpenFile os.Create os.CreateTemp os.ReadFile os.WriteFile os.ReadDir os.DirFS os.OpenRoot os.OpenInRoot os.NewFile os.MkdirTemp
@@ -42,11 +44,14 @@ syscall.FindFirstFile syscall.Syscall18 syscall.AllThreadsSyscall syscall.AllThr
 reflect.NewAt reflect.SliceAt (reflect.Value).UnsafePointer (reflect.Value).UnsafeAddr
 os.Chmod os.Chown os.Chtimes os.CopyFS os.Lchown os.Link os.Mkdir os.MkdirAll os.Remove os.RemoveAll os.Rename os.Symlink os.Truncate
 (*os.File).Chmod (*os.File).Chown (*os.File).ReadFrom (*os.File).Truncate (*os.File).Write (*os.File).WriteAt (*os.File).WriteString (*net.ListenConfig).ListenPacket (*net.UnixListener).SetUnlinkOnClose
+(*net.Dialer).DialUnix (*net.UnixListener).Close (*net/http.Request).FormFile (*net/http.Request).FormValue (*net/http.Request).ParseMultipartForm
+(*net/http.Request).PostFormValue (*mime/multipart.Form).RemoveAll (*mime/multipart.Reader).ReadForm
 (*os.Root).Chmod (*os.Root).Chown (*os.Root).Chtimes (*os.Root).Lchown (*os.Root).Link (*os.Root).Mkdir (*os.Root).MkdirAll (*os.Root).Remove (*os.Root).RemoveAll (*os.Root).Rename (*os.Root).Symlink
 syscall.Bind syscall.Chflags syscall.Chmod syscall.Chown syscall.CreateDirectory syscall.CreateFileMapping syscall.CreateHardLink syscall.CreateSymbolicLink syscall.DeleteFile syscall.DeviceIoControl syscall.Exchangedata syscall.Fallocate syscall.Fchflags syscall.Fchmod
 syscall.Fchmodat syscall.Fchown syscall.Fchownat syscall.Ftruncate syscall.Futimes syscall.Futimesat syscall.Lchown syscall.Link syscall.MapViewOfFile syscall.Mkdir syscall.Mkdirat syscall.Mkfifo syscall.Mknod syscall.Mknodat syscall.Mmap syscall.Mount syscall.MoveFile
 syscall.PivotRoot syscall.Pwrite syscall.RemoveDirectory syscall.Removexattr syscall.Rename syscall.Renameat syscall.Rmdir syscall.Sendfile syscall.SetEndOfFile syscall.SetFileAttributes syscall.SetFileTime syscall.Setxattr syscall.Splice syscall.Symlink syscall.Tee
 syscall.Truncate syscall.Undelete syscall.Unlink syscall.Unlinkat syscall.Unmount syscall.Utime syscall.Utimes syscall.UtimesNano syscall.Write syscall.WriteFile
+syscall.Acct syscall.CertOpenStore syscall.Madvise
 golang.org/x/sys/unix.Bind golang.org/x/sys/unix.Chflags golang.org/x/sys/unix.Chmod golang.org/x/sys/unix.Chown golang.org/x/sys/unix.Clonefile golang.org/x/sys/unix.Clonefileat golang.org/x/sys/unix.CopyFileRange golang.org/x/sys/unix.Exchangedata
 golang.org/x/sys/unix.Fallocate golang.org/x/sys/unix.Fchflags golang.org/x/sys/unix.Fchmod golang.org/x/sys/unix.Fchmodat golang.org/x/sys/unix.Fchown golang.org/x/sys/unix.Fchownat golang.org/x/sys/unix.Fclonefileat golang.org/x/sys/unix.Fremovexattr
 golang.org/x/sys/unix.Fsetxattr golang.org/x/sys/unix.Ftruncate golang.org/x/sys/unix.Futimes golang.org/x/sys/unix.Futimesat golang.org/x/sys/unix.IoctlFileClone golang.org/x/sys/unix.IoctlFileCloneRange golang.org/x/sys/unix.Lchown golang.org/x/sys/unix.Link
@@ -56,6 +61,10 @@ golang.org/x/sys/unix.Pwritev golang.org/x/sys/unix.Pwritev2 golang.org/x/sys/un
 golang.org/x/sys/unix.Rmdir golang.org/x/sys/unix.Sendfile golang.org/x/sys/unix.Setattrlist golang.org/x/sys/unix.Setxattr golang.org/x/sys/unix.Splice golang.org/x/sys/unix.Symlink golang.org/x/sys/unix.Symlinkat golang.org/x/sys/unix.Tee
 golang.org/x/sys/unix.Truncate golang.org/x/sys/unix.Undelete golang.org/x/sys/unix.Unlink golang.org/x/sys/unix.Unlinkat golang.org/x/sys/unix.Unmount golang.org/x/sys/unix.Utime golang.org/x/sys/unix.Utimes golang.org/x/sys/unix.UtimesNano
 golang.org/x/sys/unix.UtimesNanoAt golang.org/x/sys/unix.Vmsplice golang.org/x/sys/unix.Write golang.org/x/sys/unix.Writev
+golang.org/x/sys/unix.Acct golang.org/x/sys/unix.FcntlFstore golang.org/x/sys/unix.FcntlInt golang.org/x/sys/unix.FsconfigCreate golang.org/x/sys/unix.FsconfigReconfigure golang.org/x/sys/unix.FsconfigSetBinary golang.org/x/sys/unix.FsconfigSetFd golang.org/x/sys/unix.FsconfigSetFlag
+golang.org/x/sys/unix.FsconfigSetPath golang.org/x/sys/unix.FsconfigSetPathEmpty golang.org/x/sys/unix.FsconfigSetString golang.org/x/sys/unix.Fsmount golang.org/x/sys/unix.Fsopen golang.org/x/sys/unix.Fspick golang.org/x/sys/unix.IoctlGetInt golang.org/x/sys/unix.IoctlGetTermios
+golang.org/x/sys/unix.IoctlGetUint32 golang.org/x/sys/unix.IoctlGetUint64 golang.org/x/sys/unix.IoctlGetWinsize golang.org/x/sys/unix.IoctlIfreq golang.org/x/sys/unix.IoctlLoopConfigure golang.org/x/sys/unix.IoctlLoopSetStatus64 golang.org/x/sys/unix.IoctlRetInt golang.org/x/sys/unix.IoctlSetInt
+golang.org/x/sys/unix.IoctlSetPointerInt golang.org/x/sys/unix.IoctlSetString golang.org/x/sys/unix.IoctlSetTermios golang.org/x/sys/unix.IoctlSetWinsize golang.org/x/sys/unix.Madvise
 golang.org/x/sys/windows.Bind golang.org/x/sys/windows.Chmod golang.org/x/sys/windows.Chown golang.org/x/sys/windows.CreateDirectory golang.org/x/sys/windows.CreateFileMapping golang.org/x/sys/windows.CreateHardLink golang.org/x/sys/windows.CreateSymbolicLink
 golang.org/x/sys/windows.DefineDosDevice golang.org/x/sys/windows.DeleteFile golang.org/x/sys/windows.DeleteVolumeMountPoint golang.org/x/sys/windows.DeviceIoControl golang.org/x/sys/windows.Fchmod golang.org/x/sys/windows.Fchown golang.org/x/sys/windows.Ftruncate
 golang.org/x/sys/windows.Lchown golang.org/x/sys/windows.Link golang.org/x/sys/windows.MapViewOfFile golang.org/x/sys/windows.Mkdir golang.org/x/sys/windows.MoveFile golang.org/x/sys/windows.MoveFileEx golang.org/x/sys/windows.NtSetEaFile
@@ -63,12 +72,16 @@ golang.org/x/sys/windows.NtSetInformationFile golang.org/x/sys/windows.RemoveDir
 golang.org/x/sys/windows.SetFileInformationByHandle golang.org/x/sys/windows.SetFileTime golang.org/x/sys/windows.SetFileValidData golang.org/x/sys/windows.SetKernelObjectSecurity golang.org/x/sys/windows.SetNamedSecurityInfo golang.org/x/sys/windows.SetSecurityInfo
 golang.org/x/sys/windows.SetVolumeLabel golang.org/x/sys/windows.SetVolumeMountPoint golang.org/x/sys/windows.Symlink golang.org/x/sys/windows.Unlink golang.org/x/sys/windows.Utimes golang.org/x/sys/windows.UtimesNano golang.org/x/sys/windows.Write
 golang.org/x/sys/windows.WriteFile
+golang.org/x/sys/windows.CertOpenStore
 github.com/witwave-ai/witself/internal/runtimeconfig.WindowsPrivateMkdir github.com/witwave-ai/witself/internal/runtimeconfig.WindowsPrivatePostgresMkdir github.com/witwave-ai/witself/internal/runtimeconfig.WindowsPrivatePostgresRename
 github.com/witwave-ai/witself/internal/runtimeconfig.WindowsPrivateRemove github.com/witwave-ai/witself/internal/runtimeconfig.WindowsPrivateRename
 (*Cell).appendUpdateJournalEntry (*Cell).copyCheckpoint (*Cell).deleteDrillLocked (*Cell).discardJournalTail (*Cell).discardOwnCheckpoint (*Cell).finishRemoval (*Cell).journal (*Cell).journalCause (*Cell).listenServiceControl (*Cell).preparePostgresDirectory
 (*Cell).publishServiceLease (*Cell).reconcileOldBoot (*Cell).removeCheckpointHeld (*Cell).removeOwnedServiceControlEndpoint (*Cell).removeServiceControlEndpoint (*Cell).stopChildOutcomeWithBudget (*Cell).sweepPostgresPending (*Cell).unsealCheckpointHeld
 (*Cell).writePostgresConfig (*Cell).writeServiceDescriptor (*launchdAgentAdapter).inspectDirectories (*launchdAgentAdapter).removePlistIdentity (*systemdUserAdapter).inspectDirectories (*systemdUserAdapter).removeCreatedUnit acquireLock createWindowsTaskRecord
 drillRootSweep makePrivateDir privateDir publishPrivateFile removePrivateFile writeAtomic writeAtomicBytes writeAtomicBytesOnce writeAtomicOnce
+(*Cell).bindServiceProcessBoot (*Cell).bindServiceProcessBootWithReader (*Cell).deleteCheckpointLocked (*Cell).inventoryCheckpoint (*Cell).launchChild (*Cell).launchWindows
+(*Cell).logFile (*Cell).startChild (*Cell).startChildContext (*Cell).startChildPrepared (*Cell).stopChildOutcome (*Cell).terminateChild (*Cell).updateStep
+(*Cell).waitReadyWithPortRecovery (*Cell).witnessCheckpoint (*Cell).writeUpdateRecord (*launchdAgentAdapter).cleanupPartial (*systemdUserAdapter).cleanupPartial InstallLocalShutdown
 `)
 
 // packageReferencesList is every non-test file of the package, then its import
@@ -77,13 +90,14 @@ drillRootSweep makePrivateDir privateDir publishPrivateFile removePrivateFile wr
 var packageReferencesList = `
 checkpoint.go
 	import bytes context crypto/sha256 encoding/hex encoding/json errors github.com/witwave-ai/witself/internal/id github.com/witwave-ai/witself/internal/runtimeconfig io io/fs math os os/exec path path/filepath regexp runtime slices sort strings sync time unicode/utf16 unicode/utf8
+	(*Cell).DeleteCheckpoint (*Cell).deleteCheckpointLocked
 	(*Cell).admitCheckpoint openPostgresReader readRegular
 	(*Cell).admitDeleteCheckpoint os.ReadDir privateDir
-	(*Cell).checkpointLocked (*Cell).copyCheckpoint (*Cell).discardOwnCheckpoint (*Cell).journal
+	(*Cell).checkpointLocked (*Cell).copyCheckpoint (*Cell).discardOwnCheckpoint (*Cell).inventoryCheckpoint (*Cell).journal (*Cell).witnessCheckpoint
 	(*Cell).checkpointOps openPrivateReader x3 publishPrivateFile x3
 	(*Cell).closeCheckpointFailure (*Cell).journal
 	(*Cell).closeCheckpointLeftover (*Cell).journal
-	(*Cell).copyCheckpoint (*Cell).openCheckpointSource createPrivateTemp privateDir x3 publishPrivateFile syncDirectory x2
+	(*Cell).copyCheckpoint (*Cell).openCheckpointSource (*os.File).Write createPrivateTemp privateDir x3 publishPrivateFile syncDirectory x2
 	(*Cell).deleteCheckpointLocked (*Cell).holdCheckpoint (*Cell).journal (*Cell).removeCheckpointHeld (*Cell).unsealCheckpointHeld privateDir
 	(*Cell).inventoryCheckpoint openPrivateReader path/filepath.WalkDir writeAtomicBytes
 	(*Cell).listCheckpoints os.ReadDir
@@ -119,6 +133,11 @@ commands.go
 	(*Cell).logFile openRegularWriter
 	(*Cell).makePassword writeAtomicBytes
 	(*Cell).password openPrivateReader readRegular
+	(*Cell).pgCommand (*Cell).logFile (*os.File).Write x2
+	(*Cell).startChild (*Cell).startChildContext
+	(*Cell).startChildContext (*Cell).startChildPrepared
+	(*Cell).startChildPrepared (*Cell).bindServiceProcessBoot (*Cell).launchChild (*Cell).logFile
+	ready (*net.UnixListener).Close
 doc.go
 drill_record.go
 	import bytes encoding/json errors io strings
@@ -219,10 +238,11 @@ installer_principals.go
 	(*Cell).prepareSelectedHealthCredential privateDir
 launch_unix.go
 	import context errors io os os/exec syscall time
-	(*Cell).launchChild (*os.File).Write
+	(*Cell).launchChild (*net.UnixListener).Close (*os.File).Write x3
 	DispatchProcessHelper writeAtomic
 launch_windows.go
 	import context errors golang.org/x/sys/windows os path/filepath runtime slices strings unicode/utf16 unsafe
+	(*Cell).launchChild (*Cell).launchWindows
 	(*Cell).launchWindows os.Open unsafe.Pointer x4 writeAtomic x3
 lifecycle.go
 	import context errors os path/filepath runtime strconv time
@@ -230,14 +250,18 @@ lifecycle.go
 	(*Cell).Install (*Cell).preparePostgresDirectory os.ReadDir x2 writeAtomic
 	(*Cell).Remove (*Cell).finishRemoval x2 (*Cell).journal os.RemoveAll x2 writeAtomic x2
 	(*Cell).Repair (*Cell).discardJournalTail (*Cell).finishRemoval (*Cell).journal writeAtomic
+	(*Cell).Start (*Cell).bindServiceProcessBoot (*Cell).startChildPrepared x3 (*Cell).waitReadyWithPortRecovery x2
 	(*Cell).begin (*Cell).journal
 	(*Cell).finish (*Cell).journal writeAtomic
 	(*Cell).finishRemoval os.Remove os.RemoveAll syncDirectory
 	(*Cell).own acquireLock
 	(*Cell).ownExisting acquireLock
 	(*Cell).postmaster openPostgresReader readRegular
+	(*Cell).principalStartOperations (*Cell).startChildPrepared x2 (*Cell).waitReadyWithPortRecovery x2
 	(*Cell).processStateWithRecord readJSON
 	(*Cell).recoverPostgresRecord openPostgresReader readRegular writeAtomic
+	(*Cell).stopSelected (*Cell).stopChildOutcome
+	(*Cell).stopSelectedLegacy (*Cell).terminateChild
 	(*Cell).verifyStartAccount writeAtomic
 lock.go
 	import errors fmt os path/filepath
@@ -255,12 +279,12 @@ lock_windows.go
 	openLockFile openPrivateFile
 port_recovery.go
 	import context errors time
-	(*Cell).waitReadyWithPortRecovery (*Cell).journalCause
+	(*Cell).waitReadyWithPortRecovery (*Cell).journalCause (*Cell).startChildContext
 ports.go
 	import net
 	(*Cell).prepareComponentPortsFor (*Cell).journalCause writeAtomic
-	allocatePorts net.Listen
-	probePorts net.Listen
+	allocatePorts (*net.UnixListener).Close net.Listen
+	probePorts (*net.UnixListener).Close net.Listen
 postgres_files_windows.go
 	import errors github.com/witwave-ai/witself/internal/runtimeconfig os path/filepath
 	(*Cell).preparePostgresDirectory github.com/witwave-ai/witself/internal/runtimeconfig.WindowsPrivatePostgresMkdir
@@ -283,6 +307,7 @@ postgres_windows.go
 	import bytes context errors os path/filepath strconv strings time
 	(*Cell).pendingPostgresWithoutPID readJSON
 	(*Cell).pendingPostmasterPID readJSON
+	(*Cell).startPostgres (*Cell).launchWindows (*Cell).logFile
 	(*Cell).windowsPostgresReady readPostgresFile
 	(*Cell).windowsStalePostmaster readPostgresFile
 private_tree_boundary.go
@@ -312,6 +337,7 @@ reinstall.go
 	(*Cell).finishReinstall (*Cell).journal writeAtomic
 	(*Cell).reinstallAvailable openPostgresReader readRegular
 	(*Cell).reinstallLocked writeAtomic
+	(*Cell).startRetainedPostgres (*Cell).bindServiceProcessBoot
 removal_retention.go
 	import errors os time
 	(*Cell).finishRetainedRemoval (*Cell).journal x3 openRegularWriter syncDirectory writeAtomic x2
@@ -325,9 +351,11 @@ service_adapter_admission.go
 	serviceAdapterRemovalHostLock openLockFile
 service_boot.go
 	import context errors os strings
+	(*Cell).bindServiceProcessBoot (*Cell).bindServiceProcessBootWithReader
 	(*Cell).bindServiceProcessBootWithReader readJSON writeAtomic
 	(*Cell).reconcileOldBoot readJSON removePrivateFile x2 syncDirectory x2
 	(*Cell).reconcileServiceBoot (*Cell).reconcileOldBoot readJSON writeAtomic
+	(*Cell).startServicePostgres (*Cell).bindServiceProcessBoot
 service_boot_darwin.go
 	import errors fmt golang.org/x/sys/unix
 service_boot_linux.go
@@ -340,7 +368,9 @@ service_boot_windows.go
 	windowsNtQuerySystemInformation (*golang.org/x/sys/windows.LazyDLL).NewProc golang.org/x/sys/windows.NewLazySystemDLL
 service_control.go
 	import context crypto/subtle encoding/json errors fmt io net net/http os runtime strconv sync time
-	(*Cell).serveServiceControlForPlatform (*Cell).listenServiceControl (*Cell).removeServiceControlEndpoint
+	(*Cell).Control (*net.UnixListener).Close
+	(*Cell).serveServiceControlForPlatform (*Cell).listenServiceControl (*Cell).removeServiceControlEndpoint (*os.File).Write x3
+	startServiceControlServer (*os.File).Write
 	writeServiceControlResponse (*os.File).Write
 service_control_endpoint.go
 	import crypto/rand encoding/base32 encoding/json io os strings
@@ -355,7 +385,10 @@ service_control_exit.go
 	(*Cell).serveHostExit (*os.File).Write x2
 	(*Cell).serviceHostExitIdentity readJSON
 	(*Cell).serviceHostLeaseHeld openLockFile
+	(*Cell).startHostExitRequest (*net.UnixListener).Close
 	(*Cell).waitServiceHostExit readJSON x2
+	(*serviceHostExitSession).finish (*net.UnixListener).Close
+	(*supervisor).finishHostExit (*os.File).Write
 service_control_exit_budget.go
 	import context time
 service_control_exit_unix.go
@@ -364,14 +397,16 @@ service_control_exit_windows.go
 service_control_unix.go
 	import context errors net os syscall
 	(*Cell).dialServiceControl (*net.Dialer).DialContext
-	(*Cell).listenServiceControl (*net.UnixListener).SetUnlinkOnClose net.ListenUnix os.Chmod removePrivateFile x2
+	(*Cell).listenServiceControl (*net.UnixListener).Close x2 (*net.UnixListener).SetUnlinkOnClose net.ListenUnix os.Chmod removePrivateFile x2
 	(*Cell).removeServiceControlEndpoint removePrivateFile
 service_control_unsupported.go
 	import context net
 service_control_windows.go
 	import context errors fmt golang.org/x/sys/windows io net os runtime sync time unsafe
-	(*Cell).removeServiceControlEndpoint (*Cell).removeOwnedServiceControlEndpoint
+	(*Cell).removeServiceControlEndpoint (*Cell).removeOwnedServiceControlEndpoint (*net.UnixListener).Close
 	(*windowsPipeConn).io golang.org/x/sys/windows.WriteFile
+	(*windowsPipeListener).Accept (*net.UnixListener).Close
+	(*windowsPipeListener).acceptInstance (*os.File).Write x3
 	windowsCreateNamedPipe golang.org/x/sys/windows.CreateNamedPipe
 	windowsDialPipe golang.org/x/sys/windows.CreateFile
 	windowsListenPipe golang.org/x/sys/windows.CreateNamedPipe
@@ -395,9 +430,10 @@ service_foreground.go
 service_health.go
 	import context crypto/rand encoding/base64 encoding/json errors github.com/witwave-ai/witself/internal/runtimeconfig github.com/witwave-ai/witself/internal/store io net/http net/url os time
 	(*Cell).serviceAPICredential readJSON writeAtomic
+	serviceAuthenticatedProbe (*net.UnixListener).Close
 service_launchd.go
 	import bytes context encoding/xml errors fmt io os os/exec path/filepath reflect slices strings time unicode unicode/utf8
-	(*launchdAgentAdapter).Apply (*launchdAgentAdapter).inspectDirectories (*launchdAgentAdapter).removePlistIdentity (*os.File).Chmod (*os.File).Write os.OpenFile
+	(*launchdAgentAdapter).Apply (*launchdAgentAdapter).cleanupPartial (*launchdAgentAdapter).inspectDirectories (*launchdAgentAdapter).removePlistIdentity (*os.File).Chmod (*os.File).Write os.OpenFile
 	(*launchdAgentAdapter).Remove (*launchdAgentAdapter).removePlistIdentity
 	(*launchdAgentAdapter).capability (*launchdAgentAdapter).inspectDirectories
 	(*launchdAgentAdapter).cleanupPartial (*launchdAgentAdapter).removePlistIdentity
@@ -409,7 +445,7 @@ service_launchd_darwin.go
 	import context golang.org/x/sys/unix os os/exec os/user path/filepath strconv syscall time
 service_lease_publish.go
 	import fmt github.com/witwave-ai/witself/internal/runtimeconfig io os time
-	(*Cell).publishServiceLease writeAtomicOnce
+	(*Cell).publishServiceLease (*os.File).Write writeAtomicOnce
 	(leasePublishHooks).defaults writeAtomicOnce x3
 service_maintenance.go
 	import context errors slices
@@ -419,6 +455,7 @@ service_shutdown_descriptor.go
 	import context crypto/rand crypto/subtle encoding/base64 encoding/json errors io path/filepath strings
 service_shutdown_other.go
 	import context github.com/witwave-ai/witself/internal/runtimeconfig time
+	(*Cell).stopChildOutcome (*Cell).terminateChild
 service_shutdown_policy.go
 	import context errors time
 service_shutdown_protocol.go
@@ -430,11 +467,15 @@ service_shutdown_windows.go
 	(*Cell).prepareShutdownLaunch privateDir
 	(*Cell).stopChildOutcome (*Cell).stopChildOutcomeWithBudget
 	(*Cell).stopChildOutcomeWithBudget readJSON removePrivateFile
+	(*windowsShutdownChannel).serve (*net.UnixListener).Close
 	InstallLocalShutdown writeAtomic
 	readShutdownDescriptor openPrivateFile privateDir x3
 	waitShutdownReady readJSON
+	windowsShutdownRequest (*net.UnixListener).Close
 service_supervisor.go
 	import context errors fmt os runtime slices time
+	(*Cell).Run (*os.File).Write x3
+	(*supervisor).call (*os.File).Write
 	(*supervisor).load readJSON
 	(*supervisor).rememberProcesses readJSON x2
 	(*supervisor).save writeAtomic
@@ -442,7 +483,7 @@ service_systemd.go
 	import context path/filepath strconv strings unicode
 service_systemd_adapter.go
 	import bytes context encoding/json errors fmt io os path/filepath reflect strings time
-	(*systemdUserAdapter).Apply (*os.File).Write (*systemdUserAdapter).inspectDirectories (*systemdUserAdapter).removeCreatedUnit x2 os.OpenFile syncDirectory
+	(*systemdUserAdapter).Apply (*os.File).Write (*systemdUserAdapter).cleanupPartial (*systemdUserAdapter).inspectDirectories (*systemdUserAdapter).removeCreatedUnit x2 os.OpenFile syncDirectory
 	(*systemdUserAdapter).Remove os.Remove syncDirectory
 	(*systemdUserAdapter).capabilityForRoot (*systemdUserAdapter).inspectDirectories
 	(*systemdUserAdapter).cleanupPartial (*systemdUserAdapter).removeCreatedUnit
@@ -478,6 +519,7 @@ stop_unix.go
 	import context errors strconv
 stop_windows.go
 	import context errors golang.org/x/sys/windows os os/exec strconv syscall time
+	(*Cell).terminateChild (*Cell).stopChildOutcome
 	(*Cell).windowsStopRecord readJSON
 	attachConsoleProc (*golang.org/x/sys/windows.LazyDLL).NewProc golang.org/x/sys/windows.NewLazySystemDLL
 	freeConsoleProc (*golang.org/x/sys/windows.LazyDLL).NewProc golang.org/x/sys/windows.NewLazySystemDLL
@@ -496,7 +538,8 @@ update_record.go
 	(*Cell).authenticateUpdateInstallation privateDir
 	(*Cell).readDerivedUpdateRecord openServiceRecord
 	(*Cell).readUpdateIntent readJSON
-	(*Cell).updateStep (*Cell).appendUpdateJournalEntry x2
+	(*Cell).reconcileUpdateRecord (*Cell).writeUpdateRecord
+	(*Cell).updateStep (*Cell).appendUpdateJournalEntry x2 (*Cell).writeUpdateRecord
 	(*Cell).writeUpdateRecord writeAtomic
 	openUpdateJournalFile openPrivateFile
 	syncUpdateJournalDirectory syncDirectory
