@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"slices"
 	"syscall"
+	"testing"
 
 	"github.com/witwave-ai/witself/internal/runtimeconfig"
 	"golang.org/x/sys/windows"
@@ -24,6 +25,28 @@ func lcaPrivateFile(path string, data []byte) error {
 		err = closeErr
 	}
 	return err
+}
+
+// lcaUnreadable holds name without read sharing, so the cell cannot read it,
+// and returns the release; a cleanup closes it too.
+func lcaUnreadable(t *testing.T, name string) func() {
+	t.Helper()
+	pointer, err := windows.UTF16PtrFromString(name)
+	if err != nil {
+		t.Fatal("cannot prepare the witness sharing refusal")
+	}
+	held, err := windows.CreateFile(pointer, windows.GENERIC_READ, windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil, windows.OPEN_EXISTING, 0, 0)
+	if err != nil {
+		t.Fatal("cannot hold the witness without read sharing")
+	}
+	release := func() {
+		if held != windows.InvalidHandle {
+			_ = windows.CloseHandle(held)
+			held = windows.InvalidHandle
+		}
+	}
+	t.Cleanup(release)
+	return release
 }
 
 // lcsNames is the OS set: Ctrl-Break, delivered as os.Interrupt. No row can

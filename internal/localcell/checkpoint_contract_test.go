@@ -883,7 +883,7 @@ func checkpointSourceContract(sources map[string]string) []string {
 				}
 				// (g) exact document reader inventories, including repeated reads
 				// within an otherwise permitted owner and local path aliases.
-				if slices.Contains([]string{"readJSON", "openPrivateFile", "readPrivateFile", "readPostgresFile", "os.ReadFile", "os.Open", "ops.open", "checkpointVerifyRead"}, function) {
+				if slices.Contains([]string{"readJSON", "openRegular", "openPrivateFile", "readPrivateFile", "readPostgresFile", "os.ReadFile", "os.Open", "ops.open", "checkpointVerifyRead"}, function) {
 					argument := 0
 					if function == "checkpointVerifyRead" {
 						argument = 3
@@ -1112,6 +1112,7 @@ func TestCheckpointSourceContract(t *testing.T) {
 		{"checkpoint_root_name_made", "checkpoint_unix.go", "name := filepath.FromSlash(rel)", "name := rel", "pgdata_root_name:checkpoint_unix.go"},
 		{"checkpoint_root_name_changed", "checkpoint_unix.go", "name := filepath.FromSlash(rel)\n", "name := filepath.FromSlash(rel)\n\t\tname = filepath.Base(name)\n", "pgdata_root_name:checkpoint_unix.go"},
 		{"witness_read_elsewhere", "checkpoint.go", tail, "func checkpointPeek(dir string) error { var w checkpointWitness; return readJSON(filepath.Join(dir, checkpointWitnessName), &w) }\n\n" + tail, "witness_read:checkpoint.go:checkpointPeek"},
+		{"witness_open_elsewhere", "checkpoint.go", tail, "func checkpointPeek(dir string) { _, _ = openRegular(filepath.Join(dir, checkpointWitnessName), nil, nil, nil) }\n\n" + tail, "witness_read:checkpoint.go:checkpointPeek"},
 		{"witness_second_spelling", "checkpoint.go", tail, "var checkpointSeal = \"witness.json\"\n\n" + tail, "witness_name_spelling"},
 		{"recovery_dir_elsewhere", "lifecycle.go", "\tif err := c.checkpointSummaries(lock, &result); err != nil {", "\t_ = c.recoveryDir()\n\tif err := c.checkpointSummaries(lock, &result); err != nil {", "reference:lifecycle.go:recoveryDir"},
 		{"second_inspect_reference", "lifecycle.go", "\tif err := c.checkpointSummaries(lock, &result); err != nil {", "\t_ = c.checkpointSummaries(lock, &result)\n\tif err := c.checkpointSummaries(lock, &result); err != nil {", "inspect_summaries"},

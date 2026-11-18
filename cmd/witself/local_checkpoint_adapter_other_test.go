@@ -7,12 +7,19 @@ import (
 	"os/exec"
 	"os/signal"
 	"syscall"
+	"testing"
 )
 
 // lcaPrivateDir and lcaPrivateFile create objects the local cell accepts as private.
 func lcaPrivateDir(path string) error { return os.Mkdir(path, 0o700) }
 
 func lcaPrivateFile(path string, data []byte) error { return os.WriteFile(path, data, 0o600) }
+
+// lcaUnreadable returns nil: here no witness the layout check accepts is
+// unreadable through the released route without waiting. A mode that refuses
+// the open is refused first (descendant_refused), and a Linux lease is waited
+// out for 60 seconds; the internal/localcell rows prove that state.
+func lcaUnreadable(*testing.T, string) func() { return nil }
 
 // lcsNames is the signal rows' OS set: SIGINT, SIGTERM and SIGHUP.
 var lcsNames = []string{"interrupt", "terminate", "hangup"}

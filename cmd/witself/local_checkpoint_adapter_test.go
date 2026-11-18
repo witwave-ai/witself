@@ -729,6 +729,45 @@ func TestLocalCheckpointAdapter(t *testing.T) {
 			t.Fatal("refused delete changed a never-cell root")
 		}
 	})
+	// Incomplete only on proof: an empty witness and a directory at its name
+	// list "complete": false, a valid one complete. One that cannot be read
+	// (Windows: held without read sharing) is never listed: inspect and a
+	// delete of it or of another are refused, nothing changed; released, it
+	// lists complete again.
+	t.Run("witness", func(t *testing.T) {
+		parent, root := lcaRoot(t)
+		witness, args := filepath.Join(root, "recovery", lcID, "witness.json"), []string{"inspect", "--checkpoint-mode=cold-v1", "--root=" + root}
+		if lcaPrivateFile(filepath.Join(root, ".owner.lock"), nil) != nil || lcaPrivateDir(filepath.Join(root, "recovery")) != nil ||
+			lcaPrivateDir(filepath.Dir(witness)) != nil || lcaPrivateFile(witness, nil) != nil {
+			t.Fatal("cannot plant the checkpoint witness")
+		}
+		incomplete := `{"operation":"inspect","outcome":"succeeded","after":{"status":"listed","count":1,"unknown_count":0,"entries":[{"id":"ckpt_abcdefghijklmnop","complete":false,"verification":"not_performed"}]},"verification":"not_performed","notice":"NOTICE"}`
+		lcaRun(t, args, localCheckpointOpen, 0, incomplete)
+		if os.Remove(witness) != nil || lcaPrivateDir(witness) != nil {
+			t.Fatal("cannot plant a directory at the witness name")
+		}
+		lcaRun(t, args, localCheckpointOpen, 0, incomplete)
+		if os.Remove(witness) != nil || lcaPrivateFile(witness, []byte(`{"format":1,"checkpoint_id":"ckpt_abcdefghijklmnop","installation_id":"installation_A","created_at":"2026-01-01T00:00:00Z","bytes":5}`)) != nil {
+			t.Fatal("cannot plant a valid witness")
+		}
+		complete := strings.Replace(incomplete, `"complete":false`, `"installation_id":"installation_A","complete":true`, 1)
+		lcaRun(t, args, localCheckpointOpen, 0, complete)
+		before := lcaTree(t, parent)
+		release := lcaUnreadable(t, witness)
+		if release == nil {
+			return
+		}
+		failure := `{"class":"local_checkpoint_operation_failed","cleanup_incomplete":false}`
+		lcaRun(t, args, localCheckpointOpen, 1, `{"operation":"inspect","outcome":"refused","failure":`+failure+`,"after":{"status":"unavailable","failure":`+failure+`},"verification":"not_performed","notice":"NOTICE"}`)
+		for _, id := range []string{lcID, lcOtherID} {
+			lcaRun(t, []string{"delete", "--checkpoint-mode=cold-v1", "--root=" + root, "--checkpoint-id=" + id}, localCheckpointOpen, 1, `{"operation":"delete","outcome":"refused","failure":`+failure+`,"before":{"status":"unavailable","failure":`+failure+`},"target":"`+id+`","presence":"unknown","verification":"not_performed","notice":"NOTICE"}`)
+		}
+		release()
+		if !maps.Equal(before, lcaTree(t, parent)) {
+			t.Fatal("a refusal beside an unreadable witness changed the root")
+		}
+		lcaRun(t, args, localCheckpointOpen, 0, complete)
+	})
 }
 
 // lcsCell: the verb's own call writes blocked and waits for the cancellation
