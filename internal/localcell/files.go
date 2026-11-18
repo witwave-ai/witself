@@ -105,8 +105,8 @@ func (c *Cell) layout() error {
 // it opens and never follows a link at the last element, and returns the handle
 // only once the handle's own stat shows a regular file, before any byte is read.
 // A failed open is classified by Lstat as the check before the open used to be:
-// os.ErrNotExist when absent, else inspect, irregular (a refused link too) or
-// open. Nothing is read on that path.
+// os.ErrNotExist when absent below a directory, else inspect, irregular (a
+// refused link too) or open. Nothing is read on that path.
 func openRegular(path string, inspect, irregular, open error) (*os.File, error) {
 	return openRegularBy(openPrivateReader, nil, path, inspect, irregular, open)
 }
@@ -120,7 +120,7 @@ func openRegularBy(openReader func(string) (*os.File, error), accept func(os.Fil
 	if err != nil {
 		info, err := os.Lstat(path)
 		switch {
-		case errors.Is(err, os.ErrNotExist):
+		case errors.Is(err, os.ErrNotExist) && absentBelowDirectory(path):
 			return nil, os.ErrNotExist
 		case err != nil:
 			return nil, inspect
@@ -138,6 +138,29 @@ func openRegularBy(openReader func(string) (*os.File, error), accept func(os.Fil
 
 func regularFile(info os.FileInfo, accept func(os.FileInfo) bool) bool {
 	return info.Mode().IsRegular() && (accept == nil || accept(info))
+}
+
+// absentBelowDirectory says whether a not-exist Lstat of path may read as
+// absent. On Windows a file where a directory is expected reports path not
+// found, a not-exist error (ENOTDIR is ERROR_PATH_NOT_FOUND there); on Unix it
+// is ENOTDIR, never not-exist, so Unix keeps the error's own answer.
+func absentBelowDirectory(path string) bool {
+	return runtime.GOOS != "windows" || nearestAncestorIsDirectory(path)
+}
+
+// nearestAncestorIsDirectory stats path's ancestors upward, following links
+// as path resolution does, and reports whether the first that exists is a
+// directory; an ancestor that cannot be examined, or none, is not.
+func nearestAncestorIsDirectory(path string) bool {
+	for dir := filepath.Dir(path); ; dir = filepath.Dir(dir) {
+		info, err := os.Stat(dir)
+		if err == nil {
+			return info.IsDir()
+		}
+		if !errors.Is(err, os.ErrNotExist) || filepath.Dir(dir) == dir {
+			return false
+		}
+	}
 }
 
 // openRegularWriter opens path through openPrivateWriter, which never waits on
