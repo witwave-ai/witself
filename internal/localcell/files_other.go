@@ -5,6 +5,7 @@ package localcell
 import (
 	"errors"
 	"os"
+	"runtime"
 	"syscall"
 	"time"
 )
@@ -35,9 +36,11 @@ func openPrivateWriter(path string, flags int, mode os.FileMode) (*os.File, erro
 	})
 }
 
-// leaseWait bounds waitOutLease. Its ceiling exceeds the kernel's default
-// lease-break time (/proc/sys/fs/lease-break-time, 45 seconds), after which a
-// holder that never lets go has lost its lease. Only tests change it.
+// leaseWait bounds waitOutLease, which repeats only on Linux. Its ceiling
+// exceeds Linux's default lease-break time (/proc/sys/fs/lease-break-time, 45
+// seconds), after which a holder that never lets go has lost a conflicting
+// lease; a write lease met by a read is only downgraded then. Only tests
+// change it.
 var leaseWait = struct{ ceiling, first, longest time.Duration }{60 * time.Second, time.Millisecond, 100 * time.Millisecond}
 
 // waitOutLease returns open's result unless open failed with EWOULDBLOCK and
@@ -47,12 +50,15 @@ var leaseWait = struct{ ceiling, first, longest time.Duration }{60 * time.Second
 // from leaseWait.first to at most leaseWait.longest, while the next interval
 // ends by leaseWait.ceiling; the last refusal is returned unchanged. It never
 // opens otherwise, never blocks and sees no context: anything at the name but
-// a regular file is refused at once, on every attempt.
+// a regular file is refused at once, on every attempt. A FUSE file system or a
+// storage manager that answers would-block for a regular file is waited out
+// like a lease. Other systems get the first result: macOS breaks a lease only
+// for a blocking open, so a repeat there could only wait and then refuse.
 func waitOutLease[T any](path string, lstat func(string) (os.FileInfo, error), open func() (T, error)) (T, error) {
 	deadline, delay := time.Now().Add(leaseWait.ceiling), leaseWait.first
 	for {
 		result, err := open()
-		if !errors.Is(err, syscall.EWOULDBLOCK) {
+		if runtime.GOOS != "linux" || !errors.Is(err, syscall.EWOULDBLOCK) {
 			return result, err
 		}
 		if info, statErr := lstat(path); statErr != nil || !info.Mode().IsRegular() || time.Now().Add(delay).After(deadline) {

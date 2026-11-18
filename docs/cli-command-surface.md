@@ -6335,16 +6335,26 @@ password file or a copy being inventoried is refused.
 
 On Linux, another process can hold a lease on a file (`fcntl(2)`): a process
 running as the cell's user, or a privileged one such as a file server that
-exports the cell root. When `create`, `inspect` or `delete` opens a file that
-is leased (a database file, the manifest, a password file, the cell's lock
-files, a checkpoint's `witness.json` or `journal/operations.jsonl`), the open
-asks the holder to let go and the command waits, holding the cell lock, until
-the lease ends, for at most 60 seconds each time it opens the file; it then
-goes on as if no lease had been held. A holder that lets go when asked delays
-the command by a moment; one that never answers loses the lease when the
-system breaks it (`/proc/sys/fs/lease-break-time`, 45 seconds by default).
-While it waits, another `create`, `inspect` or `delete` of the same root stops
-at once with exit 1 and its observation's status `busy`. The wait does not end
+exports the cell root. When `create`, `inspect` or `delete` opens a file under
+a lease that conflicts with the open (any lease for a write, a write lease for
+a read: a read neither breaks nor waits for a read lease), such as a database
+file, the manifest, a password file, the cell's lock files, a checkpoint's
+`witness.json` or `journal/operations.jsonl`, the open asks the holder to let
+go and the command waits until the lease ends, holding the cell lock (a lease
+on `.owner.lock` is waited out before any lock is taken), for at most 60
+seconds each time it opens the file; it then goes on as if no lease had been
+held. `inspect` reads one `witness.json` per checkpoint, so the bound applies
+per leased witness. A FUSE file system or a storage manager that answers
+would-block for a regular file is waited out the same way. Other systems
+refuse such an open at once. A holder that lets go when asked delays the
+command by a moment; one that never answers loses the lease when the system
+breaks it (`/proc/sys/fs/lease-break-time`, 45 seconds by default), but a write
+lease met first by a read is only downgraded, so a command that reads and then
+writes the file waits two breaks, 90 seconds by default. While it waits,
+another `create`, `inspect` or `delete` of the same root stops at once with
+exit 1 and its observation's status `busy`, unless it meets the same lease
+first: a lease on `.owner.lock`, or a write lease on a file it reads such as
+the manifest or the journal, makes it wait as well. The wait does not end
 at `--timeout` or at the first signal: a `create` whose wait outlasts its
 `--timeout` then fails as an out-of-time `create` does, and a first signal
 takes effect only when the wait ends; a second signal ends the process at

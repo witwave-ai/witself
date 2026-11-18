@@ -2,12 +2,16 @@ package localcell
 
 import (
 	"go/ast"
+	"go/build"
 	"go/build/constraint"
+	"go/constant"
 	"go/format"
 	"go/parser"
 	"go/token"
 	"go/types"
+	"io"
 	"maps"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -17,7 +21,9 @@ import (
 // drill record open is excluded (OQ9).
 var leaseWaitSites = []string{"files_other.go:openPrivateReader", "files_other.go:openPrivateWriter", "checkpoint_unix.go:openCheckpointSource", "lock_unix.go:openLockFile"}
 
-const leaseWaitExcluded = "drill_root.go:drillRootHeld"
+// leaseWaitExcluded: the dark drill record open (OQ9); leaseWaitPlain: the one
+// plain open in a file holding a site, pinned to pass its caller's flags only.
+const leaseWaitExcluded, leaseWaitPlain = "drill_root.go:drillRootHeld", "files_other.go:openPrivateFile"
 
 // leaseWaitBody and leaseWaitValues are waitOutLease and leaseWait's value as
 // gofmt prints them, comments aside: calls time.Now(), open(), lstat(path),
@@ -27,7 +33,7 @@ const leaseWaitBody = `func waitOutLease[T any](path string, lstat func(string) 
 	deadline, delay := time.Now().Add(leaseWait.ceiling), leaseWait.first
 	for {
 		result, err := open()
-		if !errors.Is(err, syscall.EWOULDBLOCK) {
+		if runtime.GOOS != "linux" || !errors.Is(err, syscall.EWOULDBLOCK) {
 			return result, err
 		}
 		if info, statErr := lstat(path); statErr != nil || !info.Mode().IsRegular() || time.Now().Add(delay).After(deadline) {
@@ -40,6 +46,25 @@ const leaseWaitBody = `func waitOutLease[T any](path string, lstat func(string) 
 	}
 }`
 const leaseWaitValues = "struct{ ceiling, first, longest time.Duration }{60 * time.Second, time.Millisecond, 100 * time.Millisecond}"
+
+// leaseWaitLock is lock_unix.go's openLockFile as gofmt prints it (G1): its
+// never-waiting flags and the one open, through waitOutLease, nothing else.
+const leaseWaitLock = `func openLockFile(path string, create bool) (*os.File, error) {
+	flags := syscall.O_RDWR | syscall.O_CLOEXEC | syscall.O_NOFOLLOW | syscall.O_NONBLOCK
+	if create {
+		flags |= syscall.O_CREAT
+	}
+	fd, err := waitOutLease(path, os.Lstat, func() (int, error) { return syscall.Open(path, flags, 0o600) })
+	if err != nil {
+		return nil, err
+	}
+	file := os.NewFile(uintptr(fd), path)
+	if err := validateLockFile(file); err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	return file, nil
+}`
 
 func leaseWaitPrint(fset *token.FileSet, node any) string {
 	var printed strings.Builder
@@ -86,6 +111,8 @@ func leaseWaitContract(sources map[string]string) (result []string) {
 			switch node := node.(type) {
 			case *ast.Ident:
 				failures["lease_wait_windows"] = failures["lease_wait_windows"] || windows && (node.Name == "waitOutLease" || node.Name == "leaseWait")
+				// A local or non-function declaration of the name is a shadow (G1).
+				failures["lease_wait_shadow:"+name] = failures["lease_wait_shadow:"+name] || node.Name == "waitOutLease" && node.Obj != nil && node.Obj.Kind != ast.Fun
 			case *ast.AssignStmt:
 				targets = node.Lhs
 			case *ast.IncDecStmt:
@@ -117,6 +144,9 @@ func leaseWaitContract(sources map[string]string) (result []string) {
 			if bare := *function; function.Name.Name == "waitOutLease" {
 				bare.Doc, counts["waitOutLease"] = nil, counts["waitOutLease"]+1
 				failures["lease_wait_body"] = failures["lease_wait_body"] || name != "files_other.go" || leaseWaitPrint(fset, &bare) != leaseWaitBody
+			} else if function.Name.Name == "openLockFile" && name == "lock_unix.go" {
+				bare.Doc, counts["openLockFile"] = nil, counts["openLockFile"]+1
+				failures["lease_wait_lock"] = failures["lease_wait_lock"] || leaseWaitPrint(fset, &bare) != leaseWaitLock
 			}
 			site, nonblocking, calls := name+":"+function.Name.Name, false, []*ast.CallExpr(nil)
 			ast.Inspect(function.Body, func(node ast.Node) bool {
@@ -127,7 +157,13 @@ func leaseWaitContract(sources map[string]string) (result []string) {
 				}
 				return true
 			})
-			if found[site] = !windows && site != leaseWaitExcluded && (nonblocking || slices.Contains(leaseWaitSites, site)); !found[site] {
+			// Every open in a file that holds a site is examined, not only where
+			// O_NONBLOCK is named (G1); the plain open stays exactly a pass-through.
+			holds := slices.ContainsFunc(leaseWaitSites, func(held string) bool { return strings.HasPrefix(held, name+":") })
+			if site == leaseWaitPlain {
+				failures["lease_wait_caller:"+site] = writerOneReturn(function.Body) != "return os.OpenFile(path, flags, mode)"
+				continue
+			} else if found[site] = !windows && site != leaseWaitExcluded && (nonblocking || holds || slices.Contains(leaseWaitSites, site)); !found[site] {
 				continue
 			}
 			for _, call := range calls {
@@ -143,6 +179,7 @@ func leaseWaitContract(sources map[string]string) (result []string) {
 	}
 	failures["lease_wait_body"] = failures["lease_wait_body"] || counts["waitOutLease"] != 1
 	failures["lease_wait_values"] = failures["lease_wait_values"] || counts["leaseWait"] != 1
+	failures["lease_wait_lock"] = failures["lease_wait_lock"] || counts["openLockFile"] != 1
 	for key, failed := range failures {
 		if failed {
 			result = append(result, key)
@@ -150,6 +187,61 @@ func leaseWaitContract(sources map[string]string) (result []string) {
 	}
 	slices.Sort(result)
 	return result
+}
+
+// leaseWaitGate type-checks files_other.go alone as goos builds it, standard
+// packages from source, and returns the constant value of the gate that comes
+// before the EWOULDBLOCK test: true returns the first open's result (P4).
+func leaseWaitGate(goos, source string) (first, ok bool) {
+	target, fset, packages := build.Default, token.NewFileSet(), map[string]*types.Package{"unsafe": types.Unsafe}
+	target.GOOS, target.GOARCH, target.CgoEnabled = goos, "arm64", false
+	var importer readers4Importer
+	importer = func(path string) (*types.Package, error) {
+		if packages[path] != nil {
+			return packages[path], nil
+		}
+		found, err := target.Import(path, "", 0)
+		files := []*ast.File(nil)
+		for index := 0; err == nil && index < len(found.GoFiles); index++ {
+			var file *ast.File
+			file, err = parser.ParseFile(fset, filepath.Join(found.Dir, found.GoFiles[index]), nil, parser.SkipObjectResolution)
+			files = append(files, file)
+		}
+		if err != nil {
+			return nil, err
+		}
+		packages[path], _ = (&types.Config{Importer: importer, Error: func(error) {}}).Check(path, fset, files, nil)
+		return packages[path], nil
+	}
+	matcher := target
+	matcher.OpenFile = func(string) (io.ReadCloser, error) { return io.NopCloser(strings.NewReader(source)), nil }
+	match, err := matcher.MatchFile(".", "files_other.go")
+	file, parseErr := parser.ParseFile(fset, "files_other.go", source, 0)
+	var wait *ast.FuncDecl
+	for index := 0; err == nil && parseErr == nil && index < len(file.Decls); index++ {
+		if function, isFunction := file.Decls[index].(*ast.FuncDecl); isFunction && function.Name.Name == "waitOutLease" {
+			wait = function
+		}
+	}
+	if !match || wait == nil {
+		return false, false
+	}
+	info, value, seen := &types.Info{Types: map[ast.Expr]types.TypeAndValue{}}, constant.Value(nil), false
+	ok = true
+	_, _ = (&types.Config{Importer: importer, Error: func(err error) {
+		ok = ok && (err.(types.Error).Pos < wait.Pos() || err.(types.Error).Pos >= wait.End())
+	}}).Check("localcell", fset, []*ast.File{file}, info)
+	ast.Inspect(wait.Body, func(node ast.Node) bool {
+		if branch, isIf := node.(*ast.IfStmt); isIf && !seen {
+			if or, isOr := branch.Cond.(*ast.BinaryExpr); isOr && or.Op == token.LOR {
+				value = info.Types[or.X].Value
+			}
+			seen = true
+		}
+		return !seen
+	})
+	ok = ok && value != nil && value.Kind() == constant.Bool
+	return ok && constant.BoolVal(value), ok
 }
 
 // The every-platform contract of the lease wait (R6), with LF and CRLF endings;
@@ -190,6 +282,13 @@ func TestLeaseWaitSourceContract(t *testing.T) {
 			"(*os.File, error) { return waitOutLease(path, os.Lstat, func() (*os.File, error) { return openPrivateFile(path, os.O_RDONLY, 0) }) }", "lease_wait_windows"},
 		{"values_assigned", "files.go", "func regularFile(", "func leaseLonger() { leaseWait.ceiling *= 10 }\nfunc regularFile(", "lease_wait_values"},
 		{"parse_error", "files_other.go", "func waitOutLease[T any](", "func waitOutLease[T any]((", "parse:files_other.go"},
+		{"wait_not_gated", "files_other.go", `runtime.GOOS != "linux" || `, "", "lease_wait_body"},
+		{"wait_gate_inverted", "files_other.go", `runtime.GOOS != "linux"`, `runtime.GOOS == "linux"`, "lease_wait_body"},
+		{"lock_flags_blocking", "lock_unix.go", "syscall.O_NOFOLLOW | syscall.O_NONBLOCK\n", "syscall.O_NOFOLLOW\n", "lease_wait_lock"},
+		{"lock_flags_cleared", "lock_unix.go", "syscall.Open(path, flags, 0o600)", "syscall.Open(path, lockFlagsOnce(&flags), 0o600)", "lease_wait_lock"},
+		{"lock_local_shadow", "lock_unix.go", "\tfd, err := waitOutLease(", "\twaitOutLease := func(_ string, _ func(string) (os.FileInfo, error), open func() (int, error)) (int, error) { return open() }\n\tfd, err := waitOutLease(", "lease_wait_shadow:lock_unix.go"},
+		{"lock_probe_helper", "lock_unix.go", "func unlockFile(", "func lockProbe(path string) {\n\tif fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_CLOEXEC, 0); err == nil {\n\t\t_ = syscall.Close(fd)\n\t}\n}\n\nfunc unlockFile(", "lease_wait_caller:lock_unix.go:lockProbe"},
+		{"plain_open_changed", "files_other.go", "return os.OpenFile(path, flags, mode)", "return os.OpenFile(path, flags|syscall.O_NONBLOCK, mode)", "lease_wait_caller:files_other.go:openPrivateFile"},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			if strings.Count(sources[row.file], row.before) != 1 {
@@ -201,6 +300,15 @@ func TestLeaseWaitSourceContract(t *testing.T) {
 				if failures := leaseWaitContract(ended(mutated, ending)); !slices.Contains(failures, row.want) {
 					t.Fatalf("lease wait source contract reported keys %v without the row key %s", failures, row.want)
 				}
+			}
+		})
+	}
+	// P4 by type, on every platform: as darwin builds it the gate is the constant
+	// true, so the first open's result returns; as linux builds it, false.
+	for goos, first := range map[string]bool{"darwin": true, "linux": false} {
+		t.Run("gate_"+goos, func(t *testing.T) {
+			if got, ok := leaseWaitGate(goos, sources["files_other.go"]); !ok || got != first {
+				t.Fatal("waitOutLease does not return its first result exactly where the target is not Linux")
 			}
 		})
 	}

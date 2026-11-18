@@ -23,7 +23,9 @@ type fileIdentityCount struct {
 var fileIdentityExpected = map[string]fileIdentityCount{
 	"checkpoint_root.go":                 {2, 0},
 	"drill_root.go":                      {2, 0},
+	"files.go":                           {1, 0}, // the torn-tail truncate: both sides are handle stats
 	"installer_principal_credentials.go": {3, 1},
+	"removal_retention.go":               {1, 0}, // the retained-cleanup sync: both sides are handle stats
 	"service_launchd.go":                 {4, 0},
 	"service_systemd_adapter.go":         {1, 0},
 	"service_windows_task.go":            {5, 1},

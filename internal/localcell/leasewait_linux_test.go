@@ -3,6 +3,7 @@
 package localcell
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -58,9 +59,10 @@ func TestLeaseWaitHelper(t *testing.T) {
 }
 
 // A lease never let go is waited out only while a regular file stands at the
-// name: 200 ms in, the leased file moved aside and a FIFO (a reader held), a
-// link or a directory put there, the next attempt gives the irregular text
-// within 150 ms of the swap, nothing written to the FIFO, the target unchanged.
+// name: 200 ms in, the leased file exchanged atomically (RENAME_EXCHANGE) with
+// a FIFO (a reader held), a link or a directory planted beside it, the next
+// attempt gives the irregular text within 150 ms of the exchange, nothing
+// written to the FIFO, the target unchanged.
 func TestLeaseWaitSwap(t *testing.T) {
 	for _, side := range []string{"reader", "writer"} {
 		for _, object := range []string{"fifo", "link", "directory"} {
@@ -72,11 +74,15 @@ func TestLeaseWaitSwap(t *testing.T) {
 					t.Fatal("cannot prepare the swap row files")
 				}
 				leaseTaken(t, l, name)
-				plant := map[string]func() error{"fifo": func() (err error) { fifo, _, err = writerFIFO(name, false); return err },
-					"link": func() error { return os.Symlink(target, name) }, "directory": func() error { return os.Mkdir(name, 0o700) }}[object]
+				planted := name + ".new"
+				plant := map[string]func() error{"fifo": func() (err error) { fifo, _, err = writerFIFO(planted, false); return err },
+					"link": func() error { return os.Symlink(target, planted) }, "directory": func() error { return os.Mkdir(planted, 0o700) }}[object]
+				if plant() != nil {
+					t.Fatal("cannot plant the object the swap row exchanges")
+				}
 				time.AfterFunc(200*time.Millisecond, func() {
-					moved := os.Rename(name, name+".aside")
-					swapped <- map[bool]time.Time{true: time.Now()}[moved == nil && plant() == nil]
+					exchanged := unix.Renameat2(unix.AT_FDCWD, planted, unix.AT_FDCWD, name, unix.RENAME_EXCHANGE)
+					swapped <- map[bool]time.Time{true: time.Now()}[exchanged == nil]
 				})
 				err := readerWatchdog(t, func() error { return leaseSide[side].call(name) }, l.release)
 				returned, at := time.Now(), <-swapped
@@ -93,11 +99,14 @@ func TestLeaseWaitSwap(t *testing.T) {
 }
 
 // The real bound (OQ10): a read lease never let go is broken by the kernel
-// after lease-break-time (45 seconds by default), within the 60 second
-// ceiling, and the journal append waiting on it then succeeds.
+// after the lease-break-time it reads (45 seconds by default), within the 60
+// second ceiling, and the journal append waiting on it then succeeds within 5
+// seconds of that time; a time of 0 or less never breaks (fs/locks.c), so the
+// append is refused at the ceiling with the open's text, nothing appended.
 func TestLeaseWaitKernelBreak(t *testing.T) {
 	data, err := os.ReadFile("/proc/sys/fs/lease-break-time")
-	if seconds, parseErr := strconv.Atoi(strings.TrimSpace(string(data))); err != nil || parseErr != nil || seconds > 55 {
+	seconds, parseErr := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || parseErr != nil || seconds > 55 {
 		t.Fatal("the kernel lease break time is unreadable or above 55 seconds, so the ceiling cannot be proven against it")
 	}
 	c, l := readerCell(t), &writerLease{lease: unix.F_RDLCK}
@@ -105,8 +114,13 @@ func TestLeaseWaitKernelBreak(t *testing.T) {
 	size, started := writerSize(readerJournalPath(c)), time.Now()
 	leaseTaken(t, l, readerJournalPath(c))
 	// No ten-second watchdog here: the ceiling itself bounds this call.
-	if err, elapsed := c.journal("stop", "operation", "started"), time.Since(started); err != nil || elapsed < 40*time.Second || elapsed > 60*time.Second || writerSize(readerJournalPath(c)) <= size || !l.broken() {
-		t.Fatal("the journal append did not succeed when the kernel broke the lease within the ceiling")
+	err, elapsed := c.journal("stop", "operation", "started"), time.Since(started)
+	broken, low, high := seconds > 0, time.Duration(seconds-5)*time.Second, min(time.Duration(seconds+5)*time.Second, leaseWait.ceiling)
+	if !broken {
+		low, high = leaseWait.ceiling-leaseWait.longest, leaseWait.ceiling+5*time.Second
+	}
+	if (err == nil) != broken || !broken && err.Error() != "cannot open local cell journal" || elapsed < low || elapsed > high || (writerSize(readerJournalPath(c)) > size) != broken || !l.broken() {
+		t.Fatal("the journal append did not end as the kernel break time it read requires, within the ceiling")
 	}
 }
 
@@ -126,6 +140,14 @@ func TestLeaseWaitLockFile(t *testing.T) {
 				}
 				l.close()
 			}
+			// G1: a write lease never let go (300 ms ceiling) gives the fixed lock refusal.
+			t.Run("kept", func(t *testing.T) {
+				l, started := leaseTaken(t, leaseHolder(t, "kept", unix.F_WRLCK), c.path(filepath.FromSlash(lock))), time.Now()
+				err := readerWatchdog(t, func() error { _, err := c.Inspect(t.Context()); return err }, l.release)
+				if err == nil || err.Error() != "localcell: open "+name+" lock: resource temporarily unavailable" || !l.broken() || time.Since(started) < leaseKeptAfter {
+					t.Fatal("a lock file lease kept past the ceiling did not give the fixed lock refusal when the wait ended")
+				}
+			})
 		})
 	}
 }
@@ -201,4 +223,121 @@ func TestLeaseWaitSupervisorLog(t *testing.T) {
 		t.Fatal("cannot prepare the leased server log")
 	}
 	leaseStep(t, s, c.path("logs", "server.log"), unix.F_RDLCK)
+}
+
+// While a command waits on a lease never let go (ceiling 1 s here), a second
+// Inspect waits too only when it meets the same lease first (P1): on
+// .owner.lock, waited before any lock is taken, or a write lease on the
+// journal; on run/operation.lock (waited holding .owner.lock's lock) or a read
+// lease on the journal it reports Locked at once, the first still waiting.
+func TestLeaseWaitSecondCommand(t *testing.T) {
+	for _, row := range []struct {
+		name, file string
+		lease      int
+		waits      bool
+	}{{"owner_lock", ".owner.lock", unix.F_RDLCK, true}, {"operation_lock", "run/operation.lock", unix.F_RDLCK, false},
+		{"journal_write", "journal/operations.jsonl", unix.F_WRLCK, true}, {"journal_read", "journal/operations.jsonl", unix.F_RDLCK, false}} {
+		t.Run(row.name, func(t *testing.T) {
+			c, _ := unitCell(t)
+			second, err := New(Config{Root: c.cfg.Root, Timeout: time.Second})
+			saved, l, first := leaseWait, &writerLease{lease: row.lease}, make(chan error, 1)
+			t.Cleanup(func() { leaseWait = saved; l.close() })
+			if leaseWait.ceiling = time.Second; err != nil || c.Stop(t.Context()) != nil {
+				t.Fatal("cannot prepare the lock files and the journal")
+			}
+			leaseTaken(t, l, c.path(filepath.FromSlash(row.file)))
+			go func() { first <- c.Stop(t.Context()) }()
+			for deadline := time.Now().Add(5 * time.Second); !l.broken() && time.Now().Before(deadline); {
+				time.Sleep(time.Millisecond)
+			}
+			var inspection Inspection
+			began := time.Now()
+			err = readerWatchdog(t, func() (err error) { inspection, err = second.Inspect(t.Context()); return err }, l.release)
+			took, waiting := time.Since(began), len(first) == 0
+			if firstErr := readerWatchdog(t, func() error { return <-first }, l.release); !l.broken() || firstErr == nil ||
+				row.waits && (err == nil || took < leaseKeptAfter) || !row.waits && (err != nil || !inspection.Locked || !waiting || took >= leaseKeptAfter) {
+				t.Fatalf("the second command waited %t and reported the cell locked %t", took >= leaseKeptAfter, inspection.Locked)
+			}
+		})
+	}
+}
+
+// Repair binds its truncate and retained sync to the journal it read (P3):
+// under a read lease never let go (ceiling 2 s here), 100 ms after the first
+// break the journal is exchanged atomically for a regular file longer or
+// shorter than its durable prefix, and each refuses with its open text at the
+// next attempt: that file byte-identical and unsynced, the moved journal
+// unchanged, the cleanup marker kept. Unleased and unswapped, Repair succeeds.
+func TestLeaseWaitRepairSwap(t *testing.T) {
+	for _, site := range []string{"torn", "retained"} {
+		for _, size := range []string{"longer", "shorter", "plain"} {
+			t.Run(site+"/"+size, func(t *testing.T) {
+				saved, savedSync, l, syncs, swapped := leaseWait, syncFile, &writerLease{lease: unix.F_RDLCK}, 0, make(chan time.Time, 1)
+				t.Cleanup(func() { leaseWait, syncFile = saved, savedSync; l.close() })
+				var c *Cell
+				if site == "torn" {
+					if c, _ = unitCell(t); c.journal("stop", "operation", "started") != nil || c.journal("stop", "operation", "done") != nil {
+						t.Fatal("cannot prepare the closed journal")
+					}
+				} else {
+					c = writerRetainedCleanup(t)
+				}
+				name, want := readerJournalPath(c), map[string]string{"torn": "cannot open torn local cell journal", "retained": "cannot open local cell journal"}[site]
+				durable, err := os.ReadFile(name)
+				if site == "torn" && err == nil {
+					err = testWriteFile(name, append(bytes.Clone(durable), `{"operation":"stop","st`...), 0o600)
+				}
+				before, readErr := os.ReadFile(name)
+				bystander := bytes.Repeat([]byte("b"), map[string]int{"longer": len(before) + 64, "shorter": 3, "plain": 3}[size])
+				if err != nil || readErr != nil || testWriteFile(name+".bystander", bystander, 0o600) != nil {
+					t.Fatal("cannot prepare the journal and its bystander")
+				}
+				leaseWait.ceiling, syncFile = 2*time.Second, func(f *os.File) error {
+					syncs += map[bool]int{true: 1}[filepath.Base(f.Name()) == "operations.jsonl"]
+					return savedSync(f)
+				}
+				switch {
+				case size == "plain":
+					swapped <- time.Time{}
+				case site == "torn":
+					leaseTaken(t, l, name)
+				default:
+					c.cfg.Failpoint = func(op, step string) error {
+						if op == "remove" && step == "cleanup_journal" {
+							l.take(name)
+						}
+						return nil
+					}
+				}
+				if size != "plain" {
+					go func() {
+						for deadline := time.Now().Add(5 * time.Second); !l.broken() && time.Now().Before(deadline); {
+							time.Sleep(time.Millisecond)
+						}
+						time.Sleep(100 * time.Millisecond)
+						exchanged := unix.Renameat2(unix.AT_FDCWD, name+".bystander", unix.AT_FDCWD, name, unix.RENAME_EXCHANGE)
+						swapped <- map[bool]time.Time{true: time.Now()}[exchanged == nil && l.broken()]
+					}()
+				}
+				err = readerWatchdog(t, func() error { return c.Repair(t.Context()) }, l.release)
+				returned, at := time.Now(), <-swapped
+				m, manifestErr := readManifest(c.cfg.Root)
+				if size == "plain" {
+					if err != nil || syncs != 1 || manifestErr != nil || m.Cleanup != nil || site == "torn" && writerSize(name) != int64(len(durable)) {
+						t.Fatal("repair without a lease or a swap did not succeed as before")
+					}
+					return
+				}
+				if !l.do(func(uintptr) {}) {
+					t.Fatal("this kernel or sandbox refused the lease the row needs")
+				}
+				now, nowErr := os.ReadFile(name)
+				moved, movedErr := os.ReadFile(name + ".bystander")
+				kept := nowErr == nil && bytes.Equal(now, bystander) && movedErr == nil && bytes.Equal(moved, before) && syncs == 0
+				if at.IsZero() || err == nil || err.Error() != want || returned.Sub(at) > time.Second || !kept || manifestErr != nil || site == "retained" && m.Cleanup == nil {
+					t.Fatalf("the swapped journal site refused with its open text %t, files kept unsynced %t, marker kept %t", err != nil && err.Error() == want, kept, manifestErr == nil && m.Cleanup != nil)
+				}
+			})
+		}
+	}
 }

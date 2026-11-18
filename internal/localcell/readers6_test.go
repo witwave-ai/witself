@@ -419,6 +419,49 @@ func TestJournalWritersStillWrite(t *testing.T) {
 			t.Fatal("repair did not sync the retained journal once and clear the cleanup checkpoint")
 		}
 	})
+	// P3 on every platform: a regular file put at the journal's name after the
+	// read is refused by both journal writes with their open texts, nothing
+	// truncated or synced; the moved journal and the cleanup marker are kept.
+	for _, site := range []string{"torn", "retained"} {
+		t.Run(site+"_replaced", func(t *testing.T) {
+			var c *Cell
+			var progress journalProgress
+			if site == "torn" {
+				c, progress = writerTornCell(t)
+			} else {
+				c = writerRetainedCleanup(t)
+			}
+			saved, syncs, bystander := syncFile, 0, []byte("bystander")
+			t.Cleanup(func() { syncFile = saved })
+			syncFile = func(f *os.File) error {
+				syncs += map[bool]int{true: 1}[filepath.Base(f.Name()) == "operations.jsonl"]
+				return saved(f)
+			}
+			name := readerJournalPath(c)
+			before, err := os.ReadFile(name)
+			replace := func() { err = errors.Join(err, os.Rename(name, name+".moved"), testWriteFile(name, bystander, 0o600)) }
+			got, want := error(nil), "cannot open torn local cell journal"
+			if site == "torn" {
+				replace()
+				got = c.discardJournalTail(progress)
+			} else {
+				want, c.cfg.Failpoint = "cannot open local cell journal", func(op, step string) error {
+					if op == "remove" && step == "cleanup_journal" {
+						replace()
+					}
+					return nil
+				}
+				got = c.Repair(t.Context())
+			}
+			now, nowErr := os.ReadFile(name)
+			moved, movedErr := os.ReadFile(name + ".moved")
+			m, manifestErr := readManifest(c.cfg.Root)
+			if err != nil || got == nil || got.Error() != want || nowErr != nil || !bytes.Equal(now, bystander) || movedErr != nil || !bytes.Equal(moved, before) ||
+				syncs != 0 || manifestErr != nil || site == "retained" && m.Cleanup == nil {
+				t.Fatal("a regular file put at the journal name after the read was not refused with nothing truncated or synced")
+			}
+		})
+	}
 	t.Run("journal_directory_file", func(t *testing.T) {
 		c, _ := unitCell(t)
 		if os.RemoveAll(c.path("journal")) != nil || testWriteFile(c.path("journal"), []byte("planted"), 0o600) != nil {

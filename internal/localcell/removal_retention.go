@@ -77,11 +77,16 @@ func (c *Cell) finishRetainedRemoval(m *Manifest) error {
 	} else if progress.durableBytes != 0 {
 		// A previous append may have returned a sync error after writing a
 		// complete line. Re-acknowledge that physical prefix before dropping
-		// the remaining checkpoint; an absent legacy journal is never created.
+		// the remaining checkpoint; an absent legacy journal is never created,
+		// and a file put at its name since the read is refused, never synced.
 		unavailable := errors.New("cannot open local cell journal")
 		f, err := openRegularWriter(c.path("journal", "operations.jsonl"), os.O_WRONLY, 0, unavailable, unavailable)
 		if err != nil {
 			return err
+		}
+		if info, err := f.Stat(); err != nil || !os.SameFile(progress.readFile, info) {
+			_ = f.Close()
+			return unavailable
 		}
 		err = syncFile(f)
 		closeErr := f.Close()

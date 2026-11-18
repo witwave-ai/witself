@@ -564,6 +564,17 @@ func checkpointWaitingContract(parsed map[string]*ast.File, failures map[string]
 			return true
 		})
 		failures["pgdata_root_unassigned:checkpoint_unix.go"] = unassigned != 0
+		// G4: the opener's name is made once, as name := filepath.FromSlash(rel).
+		names := 0
+		ast.Inspect(file, func(node ast.Node) bool {
+			if assign, ok := node.(*ast.AssignStmt); ok && slices.ContainsFunc(assign.Lhs, func(target ast.Expr) bool { return types.ExprString(target) == "name" }) {
+				names += map[bool]int{true: 1, false: 2}[assign.Tok == token.DEFINE && len(assign.Lhs) == 1 && len(assign.Rhs) == 1 && types.ExprString(assign.Rhs[0]) == "filepath.FromSlash(rel)"]
+			} else if spec, ok := node.(*ast.ValueSpec); ok && slices.ContainsFunc(spec.Names, func(name *ast.Ident) bool { return name.Name == "name" }) {
+				names += 2
+			}
+			return true
+		})
+		failures["pgdata_root_name:checkpoint_unix.go"] = names != 1
 	}
 }
 
@@ -1015,6 +1026,8 @@ func TestCheckpointSourceContract(t *testing.T) {
 		{"second_journal_create", "checkpoint.go", "\tif err := c.begin(\"checkpoint\"); err != nil {", "\t_ = privateDir(c.path(\"journal\"), true)\n\tif err := c.begin(\"checkpoint\"); err != nil {", "writer_root:checkpoint.go:privateDir"},
 		{"manifest_opened_for_write", "checkpoint.go", "openPrivateReader(c.path(\"manifest.json\"))", "openPrivateFile(c.path(\"manifest.json\"), os.O_RDWR, 0)", "live_path_not_read:checkpoint.go:manifest.json"},
 		{"root_open_for_write", "checkpoint_unix.go", "root.OpenFile(name, os.O_RDONLY|syscall.O_NONBLOCK, 0)", "root.OpenFile(name, os.O_RDWR|syscall.O_NONBLOCK, 0)", "root_open_not_read_only:checkpoint_unix.go"},
+		{"checkpoint_root_name_made", "checkpoint_unix.go", "name := filepath.FromSlash(rel)", "name := rel", "pgdata_root_name:checkpoint_unix.go"},
+		{"checkpoint_root_name_changed", "checkpoint_unix.go", "name := filepath.FromSlash(rel)\n", "name := filepath.FromSlash(rel)\n\t\tname = filepath.Base(name)\n", "pgdata_root_name:checkpoint_unix.go"},
 		{"witness_read_elsewhere", "checkpoint.go", tail, "func checkpointPeek(dir string) error { var w checkpointWitness; return readJSON(filepath.Join(dir, checkpointWitnessName), &w) }\n\n" + tail, "witness_read:checkpoint.go:checkpointPeek"},
 		{"witness_second_spelling", "checkpoint.go", tail, "var checkpointSeal = \"witness.json\"\n\n" + tail, "witness_name_spelling"},
 		{"recovery_dir_elsewhere", "lifecycle.go", "\tif err := c.checkpointSummaries(lock, &result); err != nil {", "\t_ = c.recoveryDir()\n\tif err := c.checkpointSummaries(lock, &result); err != nil {", "reference:lifecycle.go:recoveryDir"},
