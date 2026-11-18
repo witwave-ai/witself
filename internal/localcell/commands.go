@@ -127,16 +127,16 @@ func (c *Cell) command(ctx context.Context, binary string, args ...string) (*exe
 	return cmd, nil
 }
 
+// logFile refuses what is not a regular file at the name before opening, then
+// opens through openRegularWriter: a FIFO, link or lease never makes it wait,
+// and every child inherits a regular file in blocking mode as its output.
 func (c *Cell) logFile(component string) (*os.File, error) {
 	path := c.path("logs", component+".log")
+	irregular := errors.New("local cell log must be a regular file")
 	if info, err := os.Lstat(path); err == nil && !info.Mode().IsRegular() {
-		return nil, errors.New("local cell log must be a regular file")
+		return nil, irregular
 	}
-	f, err := openPrivateFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
-	if err != nil {
-		return nil, errors.New("cannot open local cell log")
-	}
-	return f, nil
+	return openRegularWriter(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600, irregular, errors.New("cannot open local cell log"))
 }
 
 func (c *Cell) pgCommand(ctx context.Context, tool string, args ...string) error {
