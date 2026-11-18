@@ -145,8 +145,10 @@ drill_reserve.go
 	import errors io/fs
 drill_reserve_linux.go
 	import errors golang.org/x/sys/unix os strings unsafe
+	drillPlatformAllocate golang.org/x/sys/unix.Fallocate
 	drillPlatformAt (*os.Root).Open golang.org/x/sys/unix.Openat
 	drillPlatformCreate golang.org/x/sys/unix.Openat os.NewFile
+	drillPlatformMkdir golang.org/x/sys/unix.Mkdirat
 	drillPlatformVerify golang.org/x/sys/unix.Syscall unsafe.Pointer
 drill_reserve_other.go
 	import os
