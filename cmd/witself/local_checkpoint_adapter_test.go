@@ -19,6 +19,7 @@ import (
 	"path"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -197,17 +198,22 @@ func lcaRoot(t *testing.T) (parent, root string) {
 	return parent, root
 }
 
-// lcaTree records each name, type and file content below dir; never printed.
+// lcaTree records each name, type, permission bits and file content below
+// dir; never printed.
 func lcaTree(t *testing.T, dir string) map[string]string {
 	t.Helper()
 	tree := map[string]string{}
 	if filepath.WalkDir(dir, func(path string, entry fs.DirEntry, err error) error {
+		var info fs.FileInfo
+		if err == nil {
+			info, err = entry.Info()
+		}
 		if err == nil {
 			var data []byte
 			if entry.Type().IsRegular() {
 				data, err = os.ReadFile(path)
 			}
-			tree[path] = entry.Type().String() + string(data)
+			tree[path] = info.Mode().String() + string(data)
 		}
 		return err
 	}) != nil {
@@ -691,11 +697,36 @@ func TestLocalCheckpointAdapter(t *testing.T) {
 		before := lcaTree(t, parent)
 		listed := `{"status":"listed","count":1,"unknown_count":0,"entries":[{"id":"ckpt_abcdefghijklmnop","complete":false,"verification":"not_performed"}]}`
 		lcaRun(t, []string{"delete", "--checkpoint-mode=cold-v1", "--root=" + root, "--checkpoint-id=" + lcID}, localCheckpointOpen, 1, `{"operation":"delete","outcome":"failed","failure":{"class":"local_maintenance_fence_active","cleanup_incomplete":false},"before":`+listed+`,"after":`+listed+`,"target":"ckpt_abcdefghijklmnop","presence":"present","verification":"not_performed","notice":"NOTICE"}`)
-		after := lcaTree(t, parent)
-		delete(after, filepath.Join(root, "run"))
-		delete(after, filepath.Join(root, "run", "operation.lock"))
-		if !maps.Equal(before, after) {
-			t.Fatal("fenced delete changed checkpoint, journal or manifest bytes")
+		// A fence beside a missing lock name defers to own(false): exactly run/
+		// and run/operation.lock are added (OQ1(a)), nothing else changes. They
+		// are recorded as the private directory and empty lock file planted here.
+		want := maps.Clone(before)
+		want[filepath.Join(root, "run")], want[filepath.Join(root, "run", "operation.lock")] = before[filepath.Join(root, "journal")], before[filepath.Join(root, ".owner.lock")]
+		if !maps.Equal(want, lcaTree(t, parent)) {
+			t.Fatal("fenced delete changed the root beyond its two run names")
+		}
+	})
+	t.Run("lockless", func(t *testing.T) {
+		parent, root := lcaRoot(t)
+		before := lcaTree(t, parent)
+		lcaRun(t, []string{"delete", "--checkpoint-mode=cold-v1", "--root=" + root, "--checkpoint-id=" + lcID}, localCheckpointOpen, 1, `{"operation":"delete","outcome":"failed","failure":{"class":"local_checkpoint_identity_mismatch","cleanup_incomplete":false},"before":{"status":"listed","count":0,"unknown_count":0},"after":{"status":"listed","count":0,"unknown_count":0},"target":"ckpt_abcdefghijklmnop","presence":"absent","verification":"not_performed","notice":"NOTICE"}`)
+		if !maps.Equal(before, lcaTree(t, parent)) {
+			t.Fatal("refused delete created a lock name in a fresh private root")
+		}
+	})
+	// A never-cell root holding a 0755 tmp: refused for its layout, nothing
+	// created. On Windows the mode is no DACL: the inherited one is refused by
+	// the private-tree validator with a cause outside the class table.
+	t.Run("never-cell-layout", func(t *testing.T) {
+		parent, root := lcaRoot(t)
+		if os.Mkdir(filepath.Join(root, "tmp"), 0o755) != nil || os.Chmod(filepath.Join(root, "tmp"), 0o755) != nil {
+			t.Fatal("cannot plant a shared directory in the root")
+		}
+		failure := `{"class":"` + map[bool]string{false: "local_cell_layout_refused", true: "local_checkpoint_operation_failed"}[runtime.GOOS == "windows"] + `","cleanup_incomplete":false}`
+		before := lcaTree(t, parent)
+		lcaRun(t, []string{"delete", "--checkpoint-mode=cold-v1", "--root=" + root, "--checkpoint-id=" + lcID}, localCheckpointOpen, 1, `{"operation":"delete","outcome":"refused","failure":`+failure+`,"before":{"status":"unavailable","failure":`+failure+`},"target":"ckpt_abcdefghijklmnop","presence":"unknown","verification":"not_performed","notice":"NOTICE"}`)
+		if !maps.Equal(before, lcaTree(t, parent)) {
+			t.Fatal("refused delete changed a never-cell root")
 		}
 	})
 }

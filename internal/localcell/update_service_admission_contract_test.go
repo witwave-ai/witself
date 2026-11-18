@@ -70,12 +70,14 @@ if err != nil { return err }
 defer func() { _ = lock.Close() }()
 ` + maintenanceAdmissionStatement + `
 return c.reinstallLocked(ctx, options)`,
-	"Checkpoint": `lock, err := c.own(false)
+	"Checkpoint": `if err := c.refuseBeforeLockNames(func() error { return c.admitCheckpointDry(ctx, options) }); err != nil { return err }
+lock, err := c.own(false)
 if err != nil { return err }
 defer func() { _ = lock.Close() }()
 ` + maintenanceAdmissionStatement + `
 return c.checkpointLocked(ctx, options)`,
-	"DeleteCheckpoint": `lock, err := c.own(false)
+	"DeleteCheckpoint": `if err := c.refuseBeforeLockNames(func() error { return c.admitDeleteCheckpoint(options) }); err != nil { return err }
+lock, err := c.own(false)
 if err != nil { return err }
 defer func() { _ = lock.Close() }()
 ` + maintenanceAdmissionStatement + `
@@ -460,8 +462,11 @@ func serviceAdmissionMutations(owner string) []admissionSourceMutation {
 	if owner == "RepairService" {
 		ownIndex, manifestIndex = 3, 6
 	}
-	if owner == "Reinstall" || owner == "Checkpoint" || owner == "DeleteCheckpoint" {
+	if owner == "Reinstall" {
 		ownIndex, manifestIndex = 0, 1
+	}
+	if owner == "Checkpoint" || owner == "DeleteCheckpoint" {
+		ownIndex, manifestIndex = 1, 2
 	}
 	mutations := []admissionSourceMutation{
 		{"DeleteGate", "reference_count", replaceGate("")},

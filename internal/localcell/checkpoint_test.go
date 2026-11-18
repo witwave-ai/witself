@@ -173,18 +173,12 @@ func checkpointSameError(err error, want string) bool {
 	return err != nil && err.Error() == want
 }
 
-// checkpointUnchanged requires a byte- and mode-identical tree, apart from the
-// run/ entries the pinned lock prefix creates when a purge removed them.
+// checkpointUnchanged requires a byte-, mode- and name-identical tree: a
+// refused call creates no lock name either.
 func checkpointUnchanged(t *testing.T, c *Cell, before map[string]retainedEntry) {
 	t.Helper()
-	after := checkpointTreeState(t, c)
-	for _, name := range []string{"run", "run/operation.lock"} {
-		if _, existed := before[name]; !existed {
-			delete(after, name)
-		}
-	}
-	if !reflect.DeepEqual(before, after) {
-		t.Fatal("refused checkpoint call changed the tree beyond its lock prefix")
+	if !reflect.DeepEqual(before, checkpointTreeState(t, c)) {
+		t.Fatal("refused checkpoint call changed the tree or created a name")
 	}
 }
 
