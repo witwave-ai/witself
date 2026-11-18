@@ -238,10 +238,21 @@ var drillStorageCallees = []string{"(context.Context).Err", "(*regexp.Regexp).Ma
 	"localcell.verifyCheckpointDocuments", "localcell.checkpointVerifyShape", "(*localcell.Cell).readJournal", "(*localcell.Cell).validateRecovery",
 	"(*localcell.Cell).recoveryDir", "(*localcell.Cell).checkpointDir", "(*localcell.Cell).checkpointOps"}
 
-// drillStorageReferences type-checks the sources built here with their standard imports from source (as
-// writerReferences) and returns drill_storage_callee:<file>:<name> per name outside drillStorageCallees:
-// a call, a value, a renamed or dot import's member, or a package variable declared as one in any file.
-func drillStorageReferences(sources map[string]string) (failures []string) {
+// drillReserveCallees are drillStorageCallees' counterpart for the reservation files (G4B1: the Linux
+// platform layer); x/sys members do not resolve here, and the checkpoint contract pins them.
+var drillReserveCallees = []string{"errors.As", "errors.Is", "(*os.Root).Mkdir", "(*os.Root).OpenFile", "(*os.File).Fd", "(*os.File).Stat",
+	"(io/fs.FileInfo).Size", "path/filepath.FromSlash", "localcell.drillStorageAdd"}
+
+// drillStorageReferences returns drill_storage_callee:<file>:<name> per name outside drillStorageCallees.
+func drillStorageReferences(sources map[string]string) []string {
+	return drillCalleeReferences(sources, "drill_storage", drillStorageCallees)
+}
+
+// drillCalleeReferences type-checks the sources built here with their standard imports from source (as
+// writerReferences) and returns <prefix>_callee:<file>:<name> per name outside allowed that a file whose
+// name starts with prefix names: a call, a value, a renamed or dot import's member, or a package variable
+// declared as one in any file.
+func drillCalleeReferences(sources map[string]string, prefix string, allowed []string) (failures []string) {
 	platform, files, own, admit := build.Default, []*ast.File(nil), map[string]*ast.File{}, map[string]bool{}
 	lf := func(name string) string { return strings.ReplaceAll(sources[filepath.Base(name)], "\r\n", "\n") }
 	platform.OpenFile = func(name string) (io.ReadCloser, error) { return io.NopCloser(strings.NewReader(lf(name))), nil }
@@ -251,7 +262,7 @@ func drillStorageReferences(sources map[string]string) (failures []string) {
 		if err != nil || parseErr != nil || !match {
 			continue
 		}
-		if files = append(files, file); strings.HasPrefix(name, "drill_storage") {
+		if files = append(files, file); strings.HasPrefix(name, prefix) {
 			own[name] = file
 		}
 		for _, spec := range file.Imports {
@@ -290,9 +301,9 @@ func drillStorageReferences(sources map[string]string) (failures []string) {
 					key = object.Pkg().Path() + "." + object.Name()
 				}
 			}
-			if key != "" && !slices.Contains(drillStorageCallees, key) {
+			if key != "" && !slices.Contains(allowed, key) {
 				if declared := readers4Fset.File(object.Pos()); declared != nil && own[declared.Name()] == nil {
-					failures = append(failures, "drill_storage_callee:"+name+":"+key)
+					failures = append(failures, prefix+"_callee:"+name+":"+key)
 				}
 			}
 			return true
@@ -335,6 +346,48 @@ func TestDrillStorageSourceContract(t *testing.T) {
 				failures := drillStorageReferences(input)
 				if !slices.Equal(failures, []string{"drill_storage_callee:drill_storage.go:" + row.want}) && (row.want != "" || len(failures) != 0) {
 					t.Fatalf("drill storage source contract reported %v", failures)
+				}
+			}
+		})
+	}
+}
+
+// The reservation files name no pathname writer, sync, remover, writer or lock by declaration: each
+// probe in drill_reserve.go reports exactly its own key, LF and CRLF.
+func TestDrillReserveSourceContract(t *testing.T) {
+	sources := admissionReadSources(t)
+	for name, source := range sources {
+		sources[name] = strings.ReplaceAll(source, "\r\n", "\n")
+	}
+	const tail = "func drillExtentsCover("
+	for _, row := range []struct{ name, want, probe string }{
+		{"control", "", ""},
+		{"pathname_writer", "localcell.makePrivateDir", "func (c *Cell) drillReserveProbe() { _ = makePrivateDir(c.recoveryDir()) }\n\n"},
+		{"sync_elsewhere", "localcell.syncDirectory", "func (c *Cell) drillReserveProbe() { _ = syncDirectory(c.recoveryDir()) }\n\n"},
+		{"remover", "localcell.removePrivateFile", "func drillReserveProbe() { _ = removePrivateFile(\"x\") }\n\n"},
+		{"writer", "localcell.writeAtomicBytes", "func drillReserveProbe() { _ = writeAtomicBytes(\"x\", nil, nil) }\n\n"},
+		{"lock", "localcell.acquireLock", "func (c *Cell) drillReserveProbe() { _, _ = acquireLock(c.cfg.Root, true) }\n\n"},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			var want []string
+			if row.want != "" {
+				want = append(want, "drill_reserve_callee:drill_reserve.go:"+row.want)
+			}
+			// c.recoveryDir joins drillReserveCallees with the Windows creators; until then a probe that spells it
+			// reports it too.
+			if strings.Contains(row.probe, "c.recoveryDir()") && !slices.Contains(drillReserveCallees, "(*localcell.Cell).recoveryDir") {
+				want = append(want, "drill_reserve_callee:drill_reserve.go:(*localcell.Cell).recoveryDir")
+			}
+			slices.Sort(want)
+			for _, ending := range []string{"\n", "\r\n"} {
+				input := maps.Clone(sources)
+				drillAssert(t, strings.Count(input["drill_reserve.go"], tail) == 1, "drill reserve contract anchor is not unique")
+				input["drill_reserve.go"] = strings.Replace(input["drill_reserve.go"], tail, row.probe+tail, 1)
+				for name, source := range input {
+					input[name] = strings.ReplaceAll(source, "\n", ending)
+				}
+				if failures := drillCalleeReferences(input, "drill_reserve", drillReserveCallees); !slices.Equal(failures, want) {
+					t.Fatalf("drill reserve source contract reported %v", failures)
 				}
 			}
 		})

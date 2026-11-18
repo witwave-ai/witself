@@ -20,7 +20,8 @@ import (
 
 // checkpointFiles are the files that implement checkpoints.
 var checkpointFiles = []string{"checkpoint.go", "checkpoint_unix.go", "checkpoint_windows.go", "checkpoint_other.go", "checkpoint_verify.go", "drill_root.go",
-	"checkpoint_root.go", "drill_storage.go", "drill_storage_linux.go", "drill_storage_darwin.go", "drill_storage_windows.go", "drill_storage_other.go"}
+	"checkpoint_root.go", "drill_storage.go", "drill_storage_linux.go", "drill_storage_darwin.go", "drill_storage_windows.go", "drill_storage_other.go",
+	"drill_reserve.go", "drill_reserve_linux.go", "drill_reserve_other.go"}
 
 // checkpointForbiddenOS are calls the checkpoint files may not make (C7(e));
 // os.RemoveAll is counted by (a); os.OpenRoot is the Unix opener's, the drill
@@ -358,7 +359,17 @@ var checkpointSystemSelectors = map[string][]string{"checkpoint_unix.go": {"sysc
 	"checkpoint_windows.go":  {"windows.UTF16PtrFromString", "windows.GetDiskFreeSpaceEx"},
 	"drill_storage_linux.go": {"unix.Statfs_t", "unix.Fstatfs"}, "drill_storage_darwin.go": {"unix.Statfs_t", "unix.Fstatfs"},
 	"drill_storage_windows.go": {"windows.Handle", "windows.NewLazySystemDLL", "windows.ByHandleFileInformation", "windows.GetVolumeInformationByHandle",
-		"windows.GetFileInformationByHandle", "windows.IO_STATUS_BLOCK", "windows.UTF16ToString", "windows.FILE_ATTRIBUTE_COMPRESSED"}}
+		"windows.GetFileInformationByHandle", "windows.IO_STATUS_BLOCK", "windows.UTF16ToString", "windows.FILE_ATTRIBUTE_COMPRESSED"},
+	"drill_reserve_linux.go": {"unix.Fallocate", "unix.ENOSPC", "unix.EDQUOT", "unix.EFBIG", "unix.EOPNOTSUPP", "unix.Syscall", "unix.SYS_IOCTL"}}
+
+// drillReserveCalls are the reservation files' only writing, removing,
+// renaming or non-read-only calls, by file, call text and exact count; rules
+// (e) and (h) admit these and nothing else.
+var drillReserveCalls = map[string]map[string]int{"drill_reserve_linux.go": {"boundary.Mkdir(drillID, 0o700)": 1,
+	"drill.Mkdir(filepath.FromSlash(name), 0o700)": 1, "drill.OpenFile(filepath.FromSlash(name), os.O_WRONLY | os.O_CREATE | os.O_EXCL, 0o600)": 1}}
+
+// drillRootShared are the drill_root.go declarations another checkpoint file may name.
+var drillRootShared = map[string][]string{"drill_storage.go": {"drillRootHere", "drillRootNames"}}
 
 // (d) no drill storage file selects a drillStorageWrites name, called or not, but
 // (b)'s os.OpenRoot, names a drillStorageHelpers name, or resolves another ntdll procedure.
@@ -410,13 +421,14 @@ func checkpointHeldContract(parsed map[string]*ast.File, failures map[string]boo
 			}
 		}
 		rootFile, uses, counted := name == "checkpoint_root.go", map[string]int{}, map[string]int{}
-		selected, inventoried, opens := map[*ast.Ident]bool{}, map[ast.Node]bool{}, map[ast.Node]bool{}
+		selected, inventoried, opens, reserved := map[*ast.Ident]bool{}, map[ast.Node]bool{}, map[ast.Node]bool{}, map[ast.Node]bool{}
 		ast.Inspect(file, func(node ast.Node) bool {
 			switch node := node.(type) {
 			case *ast.CallExpr:
 				text := types.ExprString(node)
 				opens[node.Fun] = name == "checkpoint_unix.go" && text == `os.OpenRoot(c.path("pg") + checkpointRootHere)` || rootFile && text == "os.OpenRoot(c.recoveryDir() + checkpointRootHere)" ||
 					name == "drill_storage.go" && text == "os.OpenRoot(c.recoveryDir() + drillRootHere)"
+				reserved[node.Fun] = drillReserveCalls[name][text] != 0 // a listed call marks its selector for (h)
 				if selector, ok := node.Fun.(*ast.SelectorExpr); ok && rootFile && (types.ExprString(selector.X) == "os" || slices.Contains(checkpointRootMethods, selector.Sel.Name)) {
 					counted[text]++
 					inventoried[selector] = checkpointRootCalls[text] != 0
@@ -437,7 +449,7 @@ func checkpointHeldContract(parsed map[string]*ast.File, failures map[string]boo
 				if rootFile && slices.Contains(checkpointRootMethods, node.Sel.Name) && !inventoried[node] {
 					failures["checkpoint_root_selector:"+text] = true // (f)
 				}
-				if !rootFile && receiver != "os" && slices.Contains([]string{"Remove", "RemoveAll", "Rename", "Link", "Symlink", "Mkdir", "MkdirAll", "Create",
+				if !rootFile && receiver != "os" && !reserved[node] && slices.Contains([]string{"Remove", "RemoveAll", "Rename", "Link", "Symlink", "Mkdir", "MkdirAll", "Create",
 					"WriteFile", "Chmod", "Chown", "Lchown", "Chtimes", "Truncate", "Write", "WriteAt", "WriteString"}, node.Sel.Name) {
 					failures["checkpoint_mutating_method:"+name+":"+text] = true // (h)
 				}
@@ -644,7 +656,7 @@ func checkpointSourceContract(sources map[string]string) []string {
 		"checkpointWitnessName:checkpoint_verify.go:checkpointVerifyTree": 1, "checkpointInventoryName:checkpoint_verify.go:checkpointVerifyTree": 1,
 	}
 	witnessSpellings, inventorySpellings, journalCreates, inspectSummaries, drillHooks, drillOpenRoots := 0, 0, 0, 0, 0, 0
-	drillRootCalled := map[string]int{}
+	drillRootCalled, drillReserveCalled := map[string]int{}, map[string]int{}
 	storageOpenRoots, storageCalls, storageProcs := 0, map[ast.Node]string{}, []string(nil)
 	for name, file := range parsed {
 		checkpointFile := slices.Contains(checkpointFiles, name)
@@ -726,7 +738,7 @@ func checkpointSourceContract(sources map[string]string) []string {
 				}
 				if identifier, ok := node.(*ast.Ident); ok && declared[identifier.Name] != "" {
 					origin := declared[identifier.Name]
-					if checkpointFile && name != "drill_root.go" && origin == "drill_root.go" && (name != "drill_storage.go" || identifier.Name != "drillRootHere" && identifier.Name != "drillRootNames") {
+					if checkpointFile && name != "drill_root.go" && origin == "drill_root.go" && !slices.Contains(drillRootShared[name], identifier.Name) {
 						failures["drill_reference:"+name+":"+identifier.Name] = true
 					}
 					if name == "drill_root.go" && origin != "drill_root.go" && !slices.Contains([]string{"recoveryDir", "validateRecovery", "checkpointIDPattern"}, identifier.Name) {
@@ -819,6 +831,9 @@ func checkpointSourceContract(sources map[string]string) []string {
 				if _, bare := call.Fun.(*ast.Ident); bare || function == "os.OpenRoot" {
 					drillRootTyped[call.Fun] = true
 				}
+				if _, listed := drillReserveCalls[name][types.ExprString(call)]; listed {
+					drillReserveCalled[name+":"+types.ExprString(call)]++
+				}
 				if name == "drill_storage.go" && function == "os.OpenRoot" { // (b) the one held recovery/, as a directory only
 					storageOpenRoots++
 					failures["drill_storage_openroot_target"] = failures["drill_storage_openroot_target"] || types.ExprString(call) != "os.OpenRoot(c.recoveryDir() + drillRootHere)"
@@ -882,8 +897,9 @@ func checkpointSourceContract(sources map[string]string) []string {
 					failures["forbidden_call:"+name+":"+function] = true
 				}
 				// (e) a root open is read-only; the PGDATA source's in checkpoint_unix.go
-				// is exactly read-only and non-blocking, and the drill record's may be.
-				if flags := ""; strings.HasSuffix(function, ".OpenFile") && function != "os.OpenFile" {
+				// is exactly read-only and non-blocking, and the drill record's may be;
+				// a reservation file's listed creation is drillReserveCalls'.
+				if flags := ""; strings.HasSuffix(function, ".OpenFile") && function != "os.OpenFile" && drillReserveCalls[name][types.ExprString(call)] == 0 {
 					if len(call.Args) == 3 {
 						flags = types.ExprString(call.Args[1])
 					}
@@ -946,6 +962,11 @@ func checkpointSourceContract(sources map[string]string) []string {
 	for method, count := range drillRootCounts {
 		failures["drill_root_count:"+method] = drillRootCalled[method] != count
 	}
+	for file, calls := range drillReserveCalls {
+		for text, count := range calls {
+			failures["drill_reserve_call:"+file+":"+text] = drillReserveCalled[file+":"+text] != count
+		}
+	}
 	failures["drill_call_count:os.OpenRoot"], failures["drill_hook_count"] = drillOpenRoots != 1, drillHooks != 1
 	failures["drill_storage_openroot_count"], failures["drill_storage_proc"] = storageOpenRoots != 1, !slices.Equal(storageProcs, []string{drillStorageProc})
 	failures["journal_create_count"], failures["witness_name_spelling"], failures["inspect_summaries"] = journalCreates != 1, witnessSpellings != 1, inspectSummaries != 1
@@ -978,7 +999,14 @@ func TestCheckpointSourceContract(t *testing.T) {
 	const drillTail = "const drillRootRecordName"
 	const rootTail = "func syncRootDirectory("
 	const storageTail, platformTail = "func drillStorageAdd(", "func drillPlatformVolume("
+	const reserveTail, createCall = "func drillPlatformAllocate(", "drill.OpenFile(filepath.FromSlash(name), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)"
 	mutations := []mutation{
+		{"drill_reserve_mutating", "drill_reserve_linux.go", reserveTail, "func drillReserveProbe(r *os.Root) { _ = r.Remove(\"x\") }\n\n" + reserveTail, "checkpoint_mutating_method:drill_reserve_linux.go:r.Remove"},
+		{"drill_reserve_second_create", "drill_reserve_linux.go", reserveTail, "func drillReserveProbe(drill *os.Root, name string) { _, _ = " + createCall + " }\n\n" + reserveTail,
+			"drill_reserve_call:drill_reserve_linux.go:drill.OpenFile(filepath.FromSlash(name), os.O_WRONLY | os.O_CREATE | os.O_EXCL, 0o600)"},
+		{"drill_reserve_system", "drill_reserve_linux.go", reserveTail, "func drillReserveProbe(f *os.File) { _ = unix.Ftruncate(int(f.Fd()), 0) }\n\n" + reserveTail, "system_call:drill_reserve_linux.go:unix.Ftruncate"},
+		{"drill_reserve_caller", "lifecycle.go", "func (c *Cell) begin(", "func (c *Cell) drillReserveCaller() { _ = drillPlatformAllocate(nil, 0, 0) }\n\nfunc (c *Cell) begin(", "reference:lifecycle.go:drillPlatformAllocate"},
+		{"drill_reserve_openroot", "drill_reserve_linux.go", reserveTail, "func (c *Cell) drillReserveProbe() { _, _ = os.OpenRoot(c.recoveryDir() + drillRootHere) }\n\n" + reserveTail, "forbidden_call:drill_reserve_linux.go:os.OpenRoot"},
 		{"drill_storage_write_seed", "drill_storage.go", storageTail, "func (c *Cell) drillStorageProbe(r *os.Root) { _ = r.Mkdir(\"x\", 0o700) }\n\n" + storageTail, "drill_storage_write:drill_storage.go:Mkdir"},
 		{"drill_storage_second_openroot", "drill_storage.go", storageTail, "func drillStorageProbe(c *Cell) { _, _ = os.OpenRoot(c.recoveryDir() + drillRootHere) }\n\n" + storageTail, "drill_storage_openroot_count"},
 		{"drill_storage_openroot_plain", "drill_storage.go", "os.OpenRoot(c.recoveryDir() + drillRootHere)", "os.OpenRoot(c.recoveryDir())", "drill_storage_openroot_target"},
