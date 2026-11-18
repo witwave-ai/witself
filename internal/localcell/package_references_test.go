@@ -56,22 +56,28 @@ type referencesView struct {
 	counts                   map[string]int
 }
 
-// load lists the package's dependencies for system with the go command, its
-// error output discarded; a failure leaves the world failed.
+// load lists the package's dependencies for system with the go command (its
+// error output discarded, its module index off so that it writes nothing to
+// the build cache) and admits the listing.
 func (w *referencesWorld) load(system string) {
-	w.listed, w.fset, w.packages = map[string]*referencesListed{}, token.NewFileSet(), map[string]*types.Package{}
 	command := exec.Command("go", "list", "-deps", "-json=ImportPath,Dir,GoFiles,ImportMap", ".")
-	command.Env, command.Stderr = append(os.Environ(), "GOOS="+system, "GOARCH=amd64", "CGO_ENABLED=0"), io.Discard
-	output, err := command.Output()
+	command.Env = append(os.Environ(), "GOOS="+system, "GOARCH=amd64", "CGO_ENABLED=0", "GODEBUG="+strings.TrimPrefix(os.Getenv("GODEBUG")+",goindex=0", ","))
+	// A JoinPath keeps go/build from running the go command itself.
+	w.context, command.Stderr = build.Default, io.Discard
+	w.context.GOOS, w.context.GOARCH, w.context.CgoEnabled, w.context.JoinPath = system, "amd64", false, filepath.Join
+	w.admit(command.Output())
+}
+
+// admit decodes a listing: a go command error, a listing that does not decode,
+// or one without the package or runtime leaves the world failed.
+func (w *referencesWorld) admit(output []byte, err error) {
+	w.listed, w.fset, w.packages = map[string]*referencesListed{}, token.NewFileSet(), map[string]*types.Package{}
 	for decoder := json.NewDecoder(bytes.NewReader(output)); err == nil; {
 		listed := &referencesListed{}
 		if err = decoder.Decode(listed); err == nil {
 			w.listed[listed.ImportPath], w.self = listed, listed.ImportPath
 		}
 	}
-	// A JoinPath keeps go/build from running the go command itself.
-	w.context = build.Default
-	w.context.GOOS, w.context.GOARCH, w.context.CgoEnabled, w.context.JoinPath = system, "amd64", false, filepath.Join
 	if runtime := w.listed["runtime"]; runtime != nil {
 		w.context.GOROOT = filepath.Dir(filepath.Dir(runtime.Dir))
 	}
@@ -166,44 +172,73 @@ func (w *referencesWorld) check(system string, sources map[string]string, guarde
 	if fail("world:"+system, w.failed) {
 		return view
 	}
-	info := &types.Info{Uses: map[*ast.Ident]types.Object{}, Defs: map[*ast.Ident]types.Object{}}
+	// A file is named by its source key, never by a position a line directive
+	// adjusts.
+	info := &types.Info{Uses: map[*ast.Ident]types.Object{}, Defs: map[*ast.Ident]types.Object{}, Instances: map[*ast.Ident]types.Instance{}}
 	config := types.Config{Importer: w.importer(w.listed[w.self].ImportMap, w.listed[w.self].Dir), Sizes: types.SizesFor("gc", "amd64"),
-		Error: func(err error) { fail("types:"+system+":"+fset.Position(err.(types.Error).Pos).Filename, true) }}
+		Error: func(err error) {
+			fail("types:"+system+":"+fset.PositionFor(err.(types.Error).Pos, false).Filename, true)
+		}}
 	self, _ := config.Check(w.self, fset, files, info)
 	// objects are the guarded names each object stands for: a guarded object its
 	// own, and a package variable or field each guarded name given to it.
-	objects, concrete := map[types.Object][]string{}, []*types.Func{}
+	objects, methods := map[types.Object][]string{}, []*types.Func{}
 	for _, name := range guarded {
 		object := w.resolve(self, name)
-		if method, ok := object.(*types.Func); ok && method.Signature().Recv() != nil && !types.IsInterface(method.Signature().Recv().Type()) {
-			concrete = append(concrete, method)
+		if method, ok := object.(*types.Func); ok && method.Signature().Recv() != nil {
+			methods = append(methods, method)
 		}
 		if object != nil {
 			objects[object], view.resolved[name] = append(objects[object], name), true
 		}
 	}
-	// targets adds, for an interface method, each guarded concrete method of its
-	// name and identical signature (receivers are not compared, as
-	// go/types/predicates.go:337-385 shows).
+	// targets adds, for an interface method, each other guarded method of its
+	// name and identical signature as used, an instance's and not its origin's
+	// (receivers are not compared, as go/types/predicates.go:337-385 shows).
 	targets := func(object types.Object) []string {
-		if function, ok := object.(*types.Func); ok {
-			object = function.Origin()
+		method, _ := object.(*types.Func)
+		if method != nil {
+			object = method.Origin()
 		} else if variable, ok := object.(*types.Var); ok {
 			object = variable.Origin()
 		}
 		names := slices.Clone(objects[object])
-		if method, ok := object.(*types.Func); ok && method.Signature().Recv() != nil && types.IsInterface(method.Signature().Recv().Type()) {
-			for _, guard := range concrete {
-				if guard.Name() == method.Name() && types.Identical(guard.Signature(), method.Signature()) {
+		if method != nil && method.Signature().Recv() != nil && types.IsInterface(method.Signature().Recv().Type()) {
+			for _, guard := range methods {
+				if guard != method.Origin() && guard.Name() == method.Name() && types.Identical(guard.Signature(), method.Signature()) {
 					names = append(names, objects[guard]...)
 				}
 			}
 		}
 		return names
 	}
+	// supplied adds, at an instantiation, each guarded method a type argument
+	// supplies for a method of its type parameter's constraint.
+	supplied := func(identifier *ast.Ident) (names []string) {
+		var generic *types.TypeParamList
+		if function, ok := info.Uses[identifier].(*types.Func); ok {
+			generic = function.Origin().Signature().TypeParams()
+		} else if name, ok := info.Uses[identifier].(*types.TypeName); ok {
+			if named, ok := types.Unalias(name.Type()).(*types.Named); ok {
+				generic = named.Origin().TypeParams()
+			}
+		}
+		arguments := info.Instances[identifier].TypeArgs
+		for index := range min(generic.Len(), arguments.Len()) {
+			if constraint, ok := generic.At(index).Constraint().Underlying().(*types.Interface); ok {
+				for method := range constraint.Methods() {
+					found, _, _ := types.LookupFieldOrMethod(arguments.At(index), true, self, method.Name())
+					names = append(names, targets(found)...)
+				}
+			}
+		}
+		return names
+	}
 	// A value is given by an initializer, an assignment or a composite-literal
-	// key; only a package variable or a field takes it, never a local.
-	given := map[ast.Expr]types.Object{}
+	// key, and a function literal gives what it references; only a package
+	// variable or a field takes it, never a local. A struct conversion carries a
+	// field into each field of its name and identical type: fields holds them.
+	given, fields := map[ast.Expr]types.Object{}, map[string][]*types.Var{}
 	for _, file := range files {
 		ast.Inspect(file, func(node ast.Node) bool {
 			switch node := node.(type) {
@@ -227,23 +262,55 @@ func (w *referencesWorld) check(system string, sources map[string]string, guarde
 			return true
 		})
 	}
+	for _, uses := range []map[*ast.Ident]types.Object{info.Defs, info.Uses} {
+		for _, object := range uses {
+			if field, ok := object.(*types.Var); ok && field.Kind() == types.FieldVar && !slices.Contains(fields[field.Name()], field.Origin()) {
+				fields[field.Name()] = append(fields[field.Name()], field.Origin())
+			}
+		}
+	}
 	for changed := true; changed; {
 		changed = false
-		for value, to := range given {
+		add := func(to types.Object, names []string) {
 			variable, ok := to.(*types.Var)
-			for _, target := range targets(referencesNamed(info, value)) {
+			for _, target := range names {
 				if ok && (variable.Kind() == types.PackageVar || variable.Kind() == types.FieldVar) && !slices.Contains(objects[variable.Origin()], target) {
 					objects[variable.Origin()], changed = append(objects[variable.Origin()], target), true
 				}
 			}
 		}
+		for value, to := range given {
+			names := targets(referencesNamed(info, value))
+			if literal, ok := ast.Unparen(value).(*ast.FuncLit); ok {
+				ast.Inspect(literal, func(node ast.Node) bool {
+					identifier, _ := node.(*ast.Ident)
+					names = append(names, targets(info.Uses[identifier])...)
+					return true
+				})
+			}
+			add(to, names)
+		}
+		for object, names := range objects {
+			if field, ok := object.(*types.Var); ok && field.Kind() == types.FieldVar {
+				for _, other := range fields[field.Name()] {
+					if types.Identical(other.Type(), field.Type()) {
+						add(other, names)
+					}
+				}
+			}
+		}
 	}
 	for _, file := range files {
-		name := fset.Position(file.Package).Filename
+		name := fset.PositionFor(file.Package, false).Filename
 		for _, group := range file.Comments {
 			for _, comment := range group.List {
 				fail("linkname:"+name, strings.HasPrefix(comment.Text, "//go:linkname"))
+				fail("line:"+name, strings.HasPrefix(comment.Text, "//line ") || strings.HasPrefix(comment.Text, "/*line "))
 			}
+		}
+		for _, spec := range file.Imports {
+			path, _ := strconv.Unquote(spec.Path.Value)
+			view.counts[name+"\timport\t"+path] = 1
 		}
 		for _, declaration := range file.Decls {
 			referencesDeclarations(declaration, func(declared string, node ast.Node) {
@@ -251,7 +318,7 @@ func (w *referencesWorld) check(system string, sources map[string]string, guarde
 				fail("bodyless:"+name+":"+declared, ok && function.Body == nil)
 				ast.Inspect(node, func(node ast.Node) bool {
 					identifier, _ := node.(*ast.Ident)
-					for _, target := range targets(info.Uses[identifier]) {
+					for _, target := range append(targets(info.Uses[identifier]), supplied(identifier)...) {
 						view.counts[name+"\t"+declared+"\t"+target]++
 					}
 					return true
@@ -299,8 +366,10 @@ func referencesDeclarations(declaration ast.Decl, visit func(string, ast.Node)) 
 }
 
 // packageReferencesContract checks the sources on every system in parallel
-// against the list and the guarded names, and returns its keys, sorted.
-func packageReferencesContract(sources map[string]string, guarded []string, list string) []string {
+// against the list and the guarded names, and returns its keys, sorted, and
+// for each key of a count the wanted and found counts on each system that
+// compiles its file.
+func packageReferencesContract(sources map[string]string, guarded []string, list string) ([]string, map[string]string) {
 	var views [len(referencesSystems)]referencesView
 	var group sync.WaitGroup
 	for index, system := range referencesSystems {
@@ -308,7 +377,7 @@ func packageReferencesContract(sources map[string]string, guarded []string, list
 	}
 	group.Wait()
 	listed, expected := referencesParseList(list)
-	keys, compiled, resolved := map[string]bool{}, map[string]bool{}, map[string]bool{}
+	keys, counted, compiled, resolved := map[string]bool{}, map[string]string{}, map[string]bool{}, map[string]bool{}
 	fail := func(key string, bad bool) { keys[key] = keys[key] || bad }
 	for index, view := range views {
 		for key, bad := range view.keys {
@@ -320,8 +389,13 @@ func packageReferencesContract(sources map[string]string, guarded []string, list
 			view.counts[key[:strings.LastIndex(key, "\t")]] += 0 // a listed reference counts on every system
 		}
 		for key, count := range view.counts {
-			file, _, _ := strings.Cut(key, "\t")
-			fail("ref:"+strings.ReplaceAll(key, "\t", ":"), view.compiled[file] && !view.keys["world:"+referencesSystems[index]] && count != expected[key+"\t"+referencesSystems[index]])
+			file, rest, _ := strings.Cut(key, "\t")
+			named, system := "ref:"+strings.ReplaceAll(key, "\t", ":"), referencesSystems[index]
+			if path, imported := strings.CutPrefix(rest, "import\t"); imported {
+				named = "import:" + file + ":" + path
+			}
+			fail(named, view.compiled[file] && !view.keys["world:"+system] && count != expected[key+"\t"+system])
+			counted[named] = key
 		}
 	}
 	for name := range listed {
@@ -336,12 +410,23 @@ func packageReferencesContract(sources map[string]string, guarded []string, list
 		fail("unknown:"+name, !resolved[name])
 	}
 	maps.DeleteFunc(keys, func(_ string, bad bool) bool { return !bad })
-	return slices.Sorted(maps.Keys(keys))
+	details := map[string]string{}
+	for named, key := range counted {
+		file, want, got := key[:strings.Index(key, "\t")], "", ""
+		for index, view := range views {
+			if system := referencesSystems[index]; keys[named] && view.compiled[file] && !view.keys["world:"+system] {
+				want, got = want+" "+system+"="+strconv.Itoa(expected[key+"\t"+system]), got+" "+system+"="+strconv.Itoa(view.counts[key])
+				details[named] = " want" + want + " got" + got
+			}
+		}
+	}
+	return slices.Sorted(maps.Keys(keys)), details
 }
 
 // referencesParseList returns the list's files and its counts, keyed file,
-// declaration, object and system: a line per file, then a tab-indented line
-// per declaration, "<declaration> <object> [xN] [@system,...] <object> ...".
+// declaration, object and system: a line per file, then tab-indented lines,
+// "import <path> ..." for its imports and, per declaration, "<declaration>
+// <object> [xN] [@system,...] <object> ...".
 func referencesParseList(list string) (map[string]bool, map[string]int) {
 	files, expected, file, pattern := map[string]bool{}, map[string]int{}, "", regexp.MustCompile(`(\S+)(?: x([0-9]+))?(?: @(\S+))?`)
 	for line := range strings.Lines(strings.TrimSpace(list)) {
