@@ -1046,8 +1046,10 @@ var errCheckpointWitnessIrregular = errors.New("local cell checkpoint witness is
 // Incomplete is said only on proof: the name absent below a directory (the
 // os.ErrNotExist of openRegular, which absentBelowDirectory backs: on Windows
 // a file where the checkpoint directory was is a not-exist error too), what
-// stands there not a regular file, or its whole bounded content read and not
-// that witness. Every other open, inspect or read failure is returned.
+// stands there examined and not a regular file (its Lstat after a failed open,
+// or the opened handle's stat), or its whole bounded content read and not that
+// witness. Every other open, inspect or read failure is returned, a failed
+// stat of the opened handle too.
 func checkpointComplete(dir, checkpointID string) (checkpointWitness, bool, error) {
 	f, err := openRegular(filepath.Join(dir, checkpointWitnessName), errCheckpointWitnessUnread, errCheckpointWitnessIrregular, errCheckpointWitnessUnread)
 	if errors.Is(err, os.ErrNotExist) || errors.Is(err, errCheckpointWitnessIrregular) {

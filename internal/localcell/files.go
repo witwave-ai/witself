@@ -104,6 +104,7 @@ func (c *Cell) layout() error {
 // openRegular opens path through openPrivateReader, which never waits on what
 // it opens and never follows a link at the last element, and returns the handle
 // only once the handle's own stat shows a regular file, before any byte is read.
+// A failed stat of the handle examined nothing: inspect, never irregular.
 // A failed open is classified by Lstat as the check before the open used to be:
 // os.ErrNotExist when absent below a directory, else inspect, irregular (a
 // refused link too) or open. Nothing is read on that path.
@@ -129,7 +130,11 @@ func openRegularBy(openReader func(string) (*os.File, error), accept func(os.Fil
 		}
 		return nil, open
 	}
-	if info, err := f.Stat(); err != nil || !regularFile(info, accept) {
+	switch info, err := f.Stat(); {
+	case err != nil:
+		_ = f.Close()
+		return nil, inspect
+	case !regularFile(info, accept):
 		_ = f.Close()
 		return nil, irregular
 	}

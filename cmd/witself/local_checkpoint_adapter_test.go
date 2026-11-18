@@ -731,9 +731,9 @@ func TestLocalCheckpointAdapter(t *testing.T) {
 	})
 	// Incomplete only on proof: an empty witness and a directory at its name
 	// list "complete": false, a valid one complete. One that cannot be read
-	// (Windows: held without read sharing) is never listed: inspect and a
-	// delete of it or of another are refused, nothing changed; released, it
-	// lists complete again.
+	// (Windows: held without read sharing; macOS: a deny-read ACL entry) is
+	// never listed: inspect and a delete of it or of another are refused,
+	// nothing changed; released, it lists complete again.
 	t.Run("witness", func(t *testing.T) {
 		parent, root := lcaRoot(t)
 		witness, args := filepath.Join(root, "recovery", lcID, "witness.json"), []string{"inspect", "--checkpoint-mode=cold-v1", "--root=" + root}

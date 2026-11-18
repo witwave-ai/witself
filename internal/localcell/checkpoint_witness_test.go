@@ -9,6 +9,7 @@ import (
 	"go/token"
 	"go/types"
 	"io"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -60,6 +61,7 @@ func TestCheckpointWitnessRead(t *testing.T) {
 		{"format_2", join(edited(func(w *checkpointWitness) { w.Format = 2 })), false, nil},
 		{"unknown_field", join([]byte(`{"unknown":1,`), valid[1:]), false, nil},
 		{"trailing_value", join(valid, []byte("{}")), false, nil},
+		{"trailing_garbage", join(valid, []byte("x")), false, nil},
 		{"object_past_bound", join([]byte("{"), spaces(1<<20), valid[1:]), false, nil},
 		{"read_fails_at_once", failing(), false, errCheckpointWitnessUnread},
 		{"read_fails_midway", failing(valid[:len(valid)/2]), false, errCheckpointWitnessUnread},
@@ -105,6 +107,48 @@ func TestCheckpointWitnessOpen(t *testing.T) {
 			row.plant(t, f.cell)
 			if _, complete, err := checkpointComplete(f.cell.path("recovery", id), id); complete || !errors.Is(err, row.err) {
 				t.Fatal("witness open reported another completeness or error")
+			}
+		})
+	}
+}
+
+// A handle whose own stat fails examined nothing ((*os.File).Stat of a closed
+// handle fails on every OS): openRegularBy returns the reader's inspect error,
+// never irregular, and the handle left open is examined and returned. With
+// checkpointComplete's three errors (witness_open) the failure over a witness
+// its real open reads complete is errCheckpointWitnessUnread, the error it
+// returns (witness_proven), never absence or irregular: never incomplete.
+func TestCheckpointWitnessHandleStat(t *testing.T) {
+	const id = "ckpt_abcdefghijklmnop"
+	fixture, _ := checkpointFixture(t, "legacy", false)
+	dir := checkpointPlant(t, fixture.cell, id, id)
+	if _, complete, err := checkpointComplete(dir, id); !complete || err != nil {
+		t.Fatal("the planted witness does not read complete through the real open")
+	}
+	inspect, irregular, open := errors.New("synthetic inspect"), errors.New("synthetic irregular"), errors.New("synthetic open")
+	for _, row := range []struct {
+		name                           string
+		closed                         bool
+		inspect, irregular, open, want error
+	}{
+		{"closed", true, inspect, irregular, open, inspect},
+		{"examined", false, inspect, irregular, open, nil},
+		{"checkpoint", true, errCheckpointWitnessUnread, errCheckpointWitnessIrregular, errCheckpointWitnessUnread, errCheckpointWitnessUnread},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			f, err := openRegularBy(func(path string) (*os.File, error) {
+				handle, err := os.Open(path)
+				if err == nil && row.closed {
+					_ = handle.Close()
+				}
+				return handle, err
+			}, nil, filepath.Join(dir, checkpointWitnessName), row.inspect, row.irregular, row.open)
+			if f != nil {
+				_ = f.Close()
+			}
+			incomplete := errors.Is(err, os.ErrNotExist) || errors.Is(err, errCheckpointWitnessIrregular)
+			if err != row.want || (f == nil) == (err == nil) || incomplete || err != nil && ClassifyCheckpointFailure(err) != (CheckpointFailure{Class: "local_checkpoint_operation_failed"}) {
+				t.Fatal("a handle whose stat failed was read as irregular or absent, or an examined one refused")
 			}
 		})
 	}

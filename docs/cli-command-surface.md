@@ -6294,16 +6294,23 @@ lists it by exact identifier with `"complete": false`, `create` refuses with
 `local_checkpoint_incomplete` while it exists, and `delete --checkpoint-id=`
 that identifier removes it and nothing else. Until then it holds a private
 partial copy of the data and passwords, and its disk space. A damaged
-checkpoint lists the same way: one whose `witness.json` is missing, is not a
-regular file, or was read and is not that checkpoint's witness. A `witness.json`
-that is there but cannot be opened or read is never listed as
+checkpoint lists the same way: one whose `witness.json` is missing, is a
+directory, or was read and is not that checkpoint's witness. A link, FIFO or
+socket at that name, or a `witness.json` whose mode refuses the open, is an
+object below `recovery/` that is not private or not a plain file: all three
+verbs refuse with `local_checkpoint_state_unsupported` and `descendant_refused`.
+A `witness.json` that passes that check (a private regular file) but cannot be
+opened, examined or read is never listed as
 `"complete": false`: the observation that meets it is `unavailable`, with
 `local_checkpoint_operation_failed` and no reason. `inspect` is then `refused`,
 exit 1, and a `create`, or a `delete` of any checkpoint of that root, is
 refused, exit 1, before it changes anything; a `create` whose own checks meet it
 fails with the same class. Run the command again once the file can be read; if
 it stays unreadable, move that checkpoint's directory out of the cell root by
-hand, then retry. A `delete` killed before it removes the witness
+hand, then retry. The receipt does not name it: it is the directory below
+`recovery/` whose `witness.json` the cell's user cannot read. The moved
+directory is still a private copy of the data and passwords: keep it private,
+or delete it by hand. A `delete` killed before it removes the witness
 leaves its target listed complete, one killed after leaves it incomplete;
 either way the same `delete` run again closes any operation it left and
 finishes. Run again after its target is gone, it reports
