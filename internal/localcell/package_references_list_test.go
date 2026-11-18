@@ -91,6 +91,18 @@ drill_root.go
 	drillRootHeld (*os.Root).OpenFile
 	drillRootNames (*os.Root).Open
 	drillRootSync (*os.Root).Open
+drill_storage.go
+	import context errors math os strings
+	(*Cell).admitDrillStorageLocked (*os.Root).Open os.OpenRoot
+drill_storage_darwin.go
+	import golang.org/x/sys/unix os
+drill_storage_linux.go
+	import golang.org/x/sys/unix os
+drill_storage_other.go
+	import os
+drill_storage_windows.go
+	import golang.org/x/sys/windows os unsafe
+	drillPlatformVolume (*golang.org/x/sys/windows.LazyDLL).NewProc (*golang.org/x/sys/windows.LazyProc).Call x2 golang.org/x/sys/windows.NewLazySystemDLL unsafe.Pointer x4
 environment_unix.go
 environment_windows.go
 	import errors golang.org/x/sys/windows path/filepath strings
@@ -112,7 +124,7 @@ files.go
 	syncPrivateDirParent syncDirectory
 	writeAtomicBytesOnce createPrivateTemp syncDirectory
 files_other.go
-	import os syscall
+	import errors os runtime syscall time
 	createPrivateTemp os.CreateTemp
 	openPlainReader openPrivateReader
 	openPostgresReader openPrivateReader
