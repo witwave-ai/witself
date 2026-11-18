@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"go/ast"
+	"go/build"
 	"go/parser"
 	"go/token"
 	"go/types"
+	"io"
 	"maps"
 	"os"
 	"path/filepath"
@@ -76,6 +78,80 @@ func writerCheckOrder(declarations []*ast.FuncDecl) bool {
 		types.ExprString(branch.Cond) == "err != nil" && lstat.Pos() > branch.Body.Pos() && lstat.End() < branch.Body.End()
 }
 
+// writerForbidden: files.go and removal_retention.go reference none of these
+// by any spelling but syncDirectory's pinned directory open (G1).
+var writerForbidden = []string{"os.OpenFile", "os.Open", "os.Create", "os.ReadFile", "os.WriteFile",
+	"localcell.openPrivateFile", "localcell.readPrivateFile", "localcell.readPostgresFile"}
+
+const writerPinnedOpen = `os.Open(path + string(filepath.Separator) + ".")`
+
+// writerReferences type-checks the sources this platform builds, as readers4Contract
+// does: writer_reference:<file>:<name> per reference in the two files to a forbidden
+// name (a call, a value, a renamed import, a package variable declared as one in any
+// file); writer_reference_types per parse error, or type error there but at a non-standard import.
+func writerReferences(sources map[string]string, failures map[string]bool) {
+	platform, files, own, admit, unresolved := build.Default, []*ast.File(nil), map[string]*ast.File{}, map[string]bool{}, map[token.Pos]bool{}
+	lf := func(name string) string { return strings.ReplaceAll(sources[filepath.Base(name)], "\r\n", "\n") }
+	platform.OpenFile = func(name string) (io.ReadCloser, error) { return io.NopCloser(strings.NewReader(lf(name))), nil }
+	for _, name := range slices.Sorted(maps.Keys(sources)) {
+		match, err := platform.MatchFile(".", name)
+		file, parseErr := parser.ParseFile(readers4Fset, name, lf(name), 0)
+		if failures["writer_reference_types"] = failures["writer_reference_types"] || err != nil || match && parseErr != nil; !match || parseErr != nil {
+			continue
+		}
+		if files = append(files, file); name == "files.go" || name == "removal_retention.go" {
+			own[name] = file
+			for _, spec := range file.Imports {
+				path := strings.Trim(spec.Path.Value, "\"`")
+				admit[path] = !strings.Contains(strings.Split(path, "/")[0], ".")
+				unresolved[spec.Path.Pos()] = !admit[path]
+			}
+		}
+	}
+	info := &types.Info{Uses: map[*ast.Ident]types.Object{}}
+	config := types.Config{Importer: readers4Importer(func(path string) (*types.Package, error) {
+		if !admit[path] {
+			return nil, errors.New("import not admitted")
+		}
+		return readers4Std.Import(path)
+	}), Error: func(err error) {
+		file := readers4Fset.File(err.(types.Error).Pos)
+		failures["writer_reference_types"] = failures["writer_reference_types"] || file != nil && own[file.Name()] != nil && !unresolved[err.(types.Error).Pos]
+	}}
+	_, _ = config.Check("localcell", readers4Fset, files, info)
+	aliases := map[types.Object]types.Object{}
+	for _, initializer := range info.InitOrder {
+		if selector, ok := ast.Unparen(initializer.Rhs).(*ast.SelectorExpr); ok {
+			aliases[initializer.Lhs[0]] = info.Uses[selector.Sel]
+		} else if identifier, ok := ast.Unparen(initializer.Rhs).(*ast.Ident); ok {
+			aliases[initializer.Lhs[0]] = info.Uses[identifier]
+		}
+	}
+	for name, file := range own {
+		var pinned *ast.Ident
+		for _, declaration := range file.Decls {
+			function, _ := declaration.(*ast.FuncDecl)
+			ast.Inspect(declaration, func(node ast.Node) bool {
+				switch node := node.(type) {
+				case *ast.CallExpr:
+					if selector, ok := node.Fun.(*ast.SelectorExpr); ok && pinned == nil && name == "files.go" && function != nil && function.Recv == nil && function.Name.Name == "syncDirectory" && types.ExprString(node) == writerPinnedOpen {
+						pinned = selector.Sel
+					}
+				case *ast.Ident:
+					object := info.Uses[node]
+					for depth := 0; depth < 8 && aliases[object] != nil; depth++ {
+						object = aliases[object]
+					}
+					if object != nil && object.Pkg() != nil && object.Parent() == object.Pkg().Scope() && node != pinned && slices.Contains(writerForbidden, object.Pkg().Path()+"."+object.Name()) {
+						failures["writer_reference:"+name+":"+object.Pkg().Path()+"."+object.Name()] = true
+					}
+				}
+				return true
+			})
+		}
+	}
+}
+
 // writerOpenContract returns every failed key of R7 over the non-test sources,
 // read without build constraints, so every platform checks both platform files.
 func writerOpenContract(sources map[string]string) (result []string) {
@@ -127,6 +203,7 @@ func writerOpenContract(sources map[string]string) (result []string) {
 	failures["writer_blocking_unix"] = len(other["blockingWriter"]) != 1 || !slices.Equal(syscalls, []string{"syscall.SetNonblock(int(fd), false)"})
 	failures["writer_windows_open"] = writerReturn(windows, "openPrivateWriter") != "return openPrivateFile(path, flags, mode)" || writerReturn(windows, "blockingWriter") != "return nil"
 	failures["writer_check_order"] = !writerCheckOrder(parsed["files.go"]["openRegularWriter"])
+	writerReferences(sources, failures)
 	for key, failed := range failures {
 		if failed {
 			result = append(result, key)
@@ -177,6 +254,54 @@ func TestWriterOpenSourceContract(t *testing.T) {
 			for _, ending := range []string{"\n", "\r\n"} {
 				if failures := writerOpenContract(ended(mutated, ending)); !slices.Contains(failures, row.want) {
 					t.Fatalf("writer open source contract reported keys %v without the row key", failures)
+				}
+			}
+		})
+	}
+	// G1: the review's six reopens (rows 1 to 6), aliases declared in another file, a renamed
+	// import, the other names, the pin, a type error, a non-standard import left unresolved.
+	appendBlock := "\tf, err := " + journalOpen + "\n\tif err != nil {\n\t\treturn err\n\t}\n"
+	discardBlock := "\tf, err := openRegularWriter(c.path(\"journal\", \"operations.jsonl\"), os.O_WRONLY, 0, torn, torn)\n\tif err != nil {\n\t\treturn err\n\t}\n"
+	retainedBlock := "\t\tf, err := openRegularWriter(c.path(\"journal\", \"operations.jsonl\"), os.O_WRONLY, 0, unavailable, unavailable)\n\t\tif err != nil {\n\t\t\treturn err\n\t\t}\n"
+	const progress, boundary, journalName = "// journalProgress contains only", "func (c *Cell) removalBoundary(step string) error {", `c.path("journal", "operations.jsonl")`
+	reopen := func(open, failure string) string {
+		return "\t_ = f.Close()\n\tif f, err = " + open + "; err != nil {\n\t\treturn " + failure + "\n\t}\n"
+	}
+	wrapper := func(name, flags string) string {
+		return "func " + name + "(path string) (*os.File, error) {\n\treturn os.OpenFile(path, " + flags + ", 0)\n}\n\n"
+	}
+	for _, row := range []struct {
+		name, want string
+		edits      []string // file, anchor, replacement, ...
+	}{
+		{"reopen_wrapper_append", "writer_reference:files.go:os.OpenFile", []string{"files.go", appendBlock, appendBlock + reopen("reopenJournal(path)", `errors.New("cannot open local cell journal")`), "files.go", progress, wrapper("reopenJournal", "os.O_WRONLY|os.O_APPEND") + progress}},
+		{"reopen_wrapper_truncate", "writer_reference:files.go:os.OpenFile", []string{"files.go", discardBlock, discardBlock + reopen("reopenJournal("+journalName+")", `errors.New("cannot open torn local cell journal")`), "files.go", progress, wrapper("reopenJournal", "os.O_WRONLY") + progress}},
+		{"reopen_wrapper_retained", "writer_reference:removal_retention.go:os.OpenFile", []string{"removal_retention.go", retainedBlock, retainedBlock + reopen("reopenRetainedJournal("+journalName+")", "unavailable"), "removal_retention.go", boundary, wrapper("reopenRetainedJournal", "os.O_WRONLY") + boundary}},
+		{"reopen_package_alias", "writer_reference:files.go:localcell.openPrivateFile", []string{"files.go", progress, "var journalOpener = openPrivateFile\n\n" + progress, "files.go", appendBlock, appendBlock + reopen("journalOpener(path, os.O_WRONLY|os.O_APPEND, 0)", `errors.New("cannot open local cell journal")`)}},
+		{"reopen_value_append", "writer_reference:files.go:localcell.openPrivateFile", []string{"files.go", appendBlock, "\topen := openPrivateFile\n" + appendBlock + reopen("open(path, os.O_WRONLY|os.O_APPEND, 0)", `errors.New("cannot open local cell journal")`)}},
+		{"reopen_value_truncate", "writer_reference:files.go:os.OpenFile", []string{"files.go", discardBlock, "\topen := os.OpenFile\n" + discardBlock + reopen("open("+journalName+", os.O_WRONLY, 0)", "torn")}},
+		{"other_file_alias", "writer_reference:files.go:localcell.openPrivateFile", []string{"files.go", appendBlock, appendBlock + reopen("openUpdateJournalFile(path, os.O_WRONLY|os.O_APPEND, 0)", "err")}},
+		{"other_file_alias_selector", "writer_reference:files.go:os.OpenFile", []string{"update_record.go", "= openPrivateFile", "= os.OpenFile", "files.go", appendBlock, appendBlock + reopen("openUpdateJournalFile(path, os.O_WRONLY|os.O_APPEND, 0)", "err")}},
+		{"renamed_import", "writer_reference:files.go:os.ReadFile", []string{"files.go", "import (\n", "import (\n\tstdos \"os\"\n", "files.go", progress, "var journalRead = stdos.ReadFile\n\n" + progress}},
+		{"other_names", "writer_reference:files.go:localcell.readPostgresFile writer_reference:files.go:localcell.readPrivateFile writer_reference:files.go:os.Create writer_reference:files.go:os.WriteFile",
+			[]string{"files.go", progress, "var journalNames = []any{os.Create, os.WriteFile, readPrivateFile, readPostgresFile}\n\n" + progress}},
+		{"pinned_open_changed", "writer_reference:files.go:os.Open", []string{"files.go", writerPinnedOpen, "os.Open(path)"}},
+		{"pinned_open_twice", "writer_reference:files.go:os.Open", []string{"files.go", "\td, err := " + writerPinnedOpen, "\t_, _ = " + writerPinnedOpen + "\n\td, err := " + writerPinnedOpen}},
+		{"unresolved_reference", "writer_reference_types", []string{"removal_retention.go", boundary, "var journalUnresolved = readers6Unresolved\n\n" + boundary}},
+		{"non_standard_import", "", []string{"files.go", "import (\n", "import (\n\t\"example.com/readers6\"\n", "files.go", progress, "var journalExample = readers6.Value\n\n" + progress}},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			mutated := maps.Clone(sources)
+			for index := 0; index+2 < len(row.edits); index += 3 {
+				name, anchor := row.edits[index], row.edits[index+1]
+				if strings.Count(mutated[name], anchor) != 1 {
+					t.Fatal("writer reference contract mutation anchor is not unique")
+				}
+				mutated[name] = strings.Replace(mutated[name], anchor, row.edits[index+2], 1)
+			}
+			for _, ending := range []string{"\n", "\r\n"} {
+				if failures := writerOpenContract(ended(mutated, ending)); strings.Join(failures, " ") != row.want {
+					t.Fatalf("writer reference contract reported keys %v for the row", failures)
 				}
 			}
 		})

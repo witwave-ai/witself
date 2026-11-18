@@ -21,18 +21,19 @@ func init() {
 	}})
 }
 
-// writerLease is a read lease taken through a second, read-only open, maybe
-// from the call's own goroutine; do runs fn on its descriptor while it is held.
+// writerLease is a read lease taken through a second, read-only open (mode zero) or a write
+// lease through a write-only one, maybe from the call's own goroutine; do runs fn on its descriptor while held.
 type writerLease struct {
 	mu   sync.Mutex
 	file *os.File
+	mode int
 }
 
 func (l *writerLease) take(name string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	f, err := os.Open(name)
-	if _, leaseErr := unix.FcntlInt(f.Fd(), unix.F_SETLEASE, unix.F_RDLCK); err == nil && leaseErr == nil {
+	f, err := os.OpenFile(name, l.mode, 0)
+	if _, leaseErr := unix.FcntlInt(f.Fd(), unix.F_SETLEASE, map[int]int{os.O_RDONLY: unix.F_RDLCK, os.O_WRONLY: unix.F_WRLCK}[l.mode]); err == nil && leaseErr == nil {
 		l.file = f
 	} else {
 		_ = f.Close()
@@ -148,6 +149,57 @@ func TestWriterLeaseCheckpointVerbs(t *testing.T) {
 					t.Fatal("the leased verb made a checkpoint or changed the one it named")
 				}
 			})
+		}
+	}
+}
+
+// The journal lease of docs/cli-command-surface.md, run as the command runs it (Inspect, then
+// the verb when Inspect lists): a write lease stops it at Inspect, a read lease at the verb's
+// journal write, at once, with the operation failure class and no reason; nothing is journaled,
+// create makes no checkpoint and delete keeps its own. Once the holder lets go, both succeed.
+func TestWriterLeaseCheckpointRetry(t *testing.T) {
+	for _, lease := range []string{"read", "write"} {
+		for _, verb := range []string{"create", "delete"} {
+			for _, layout := range []string{"legacy", "selected"} {
+				t.Run(lease+"/"+verb+"/"+layout, func(t *testing.T) {
+					f, _ := checkpointFixture(t, layout, false)
+					c, ids, l := f.cell, []string(nil), &writerLease{mode: map[string]int{"read": os.O_RDONLY, "write": os.O_WRONLY}[lease]}
+					call := func() error {
+						if verb == "create" {
+							return c.Checkpoint(t.Context(), checkpointOptions(f))
+						}
+						return c.DeleteCheckpoint(t.Context(), DeleteCheckpointOptions{CheckpointID: ids[0]})
+					}
+					if verb == "delete" && (c.Checkpoint(t.Context(), checkpointOptions(f)) != nil || len(checkpointIDs(t, c)) != 1) {
+						t.Fatal("cannot prepare the one checkpoint to delete")
+					}
+					ids = checkpointIDs(t, c)
+					before, err := os.ReadFile(readerJournalPath(c))
+					t.Cleanup(l.close)
+					l.take(readerJournalPath(c))
+					if err != nil || !l.do(func(uintptr) {}) {
+						t.Fatal("this kernel or sandbox refused the lease the writer row needs")
+					}
+					var observed, called error
+					_ = readerWatchdog(t, func() error {
+						if _, observed = c.Inspect(t.Context()); observed == nil {
+							called = call()
+						}
+						return nil
+					}, l.release)
+					l.close()
+					after, readErr := os.ReadFile(readerJournalPath(c))
+					got, want := errors.Join(observed, called), map[string]string{"read": "cannot open local cell journal", "write": "cannot read local cell journal"}[lease]
+					stopped := (observed == nil) == (lease == "read") && got != nil && got.Error() == want
+					kept := readErr == nil && bytes.Equal(before, after) && slices.Equal(checkpointIDs(t, c), ids) && (verb == "create" || checkpointSummaryOf(t, c, ids[0]).Complete)
+					if !stopped || ClassifyCheckpointFailure(got) != (CheckpointFailure{Class: "local_checkpoint_operation_failed"}) || !kept {
+						t.Fatalf("the leased checkpoint %s stopped at its step %t, journal and checkpoints kept %t", verb, stopped, kept)
+					}
+					if _, err := c.Inspect(t.Context()); err != nil || call() != nil || len(checkpointIDs(t, c)) != 1-len(ids) {
+						t.Fatal("the checkpoint verb did not succeed once the holder released the lease")
+					}
+				})
+			}
 		}
 	}
 }

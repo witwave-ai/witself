@@ -6335,6 +6335,14 @@ journaled) or the system breaks the lease (`/proc/sys/fs/lease-break-time`, 45
 seconds by default) and `create` goes on; the first signal ends that wait. The
 refused open asks the holder to let go; retrying after it has done so succeeds.
 Nothing ordinary holds such a lease on the files of a stopped database.
+On Linux, if another process holds a lease on `journal/operations.jsonl` from
+before `create` or `delete` starts, the verb stops at once instead of waiting
+for the lease to end, with exit 1 and `local_checkpoint_operation_failed`
+without a reason: nothing is journaled, `create` makes no checkpoint directory
+and `delete` keeps the checkpoint it names. A read lease stops it at its first
+journal write, outcome `failed`; a write lease stops it at its first
+observation, outcome `refused` with `before.status: unavailable`. Run again
+after the holder has released the lease, either verb succeeds.
 
 On Windows, `delete` also removes a checkpoint whose witness file is read-only,
 has been replaced by an empty directory, or changed after `delete` checked the
