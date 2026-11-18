@@ -243,6 +243,9 @@ func (c *Cell) checkpointDir(checkpointID string) (string, error) {
 // is started: pg_controldata runs at admission and again at the witness step.
 // A failed call removes only the witness-less directory it created.
 func (c *Cell) Checkpoint(ctx context.Context, options CheckpointOptions) error {
+	if err := c.refuseBeforeLockNames(func() error { return c.admitCheckpointDry(ctx, options) }); err != nil {
+		return err
+	}
 	lock, err := c.own(false)
 	if err != nil {
 		return err
@@ -257,6 +260,9 @@ func (c *Cell) Checkpoint(ctx context.Context, options CheckpointOptions) error 
 // DeleteCheckpoint deletes exactly the checkpoint its identifier names: the
 // witness first, so an interruption leaves it incomplete, then the directory.
 func (c *Cell) DeleteCheckpoint(ctx context.Context, options DeleteCheckpointOptions) error {
+	if err := c.refuseBeforeLockNames(func() error { return c.admitDeleteCheckpoint(options) }); err != nil {
+		return err
+	}
 	lock, err := c.own(false)
 	if err != nil {
 		return err
@@ -266,6 +272,64 @@ func (c *Cell) DeleteCheckpoint(ctx context.Context, options DeleteCheckpointOpt
 		return err
 	}
 	return c.deleteCheckpointLocked(ctx, options)
+}
+
+// errCheckpointDryAdmitted ends admitCheckpointDry at the control boundary; it
+// is never returned outside this file.
+var errCheckpointDryAdmitted = errors.New("local cell checkpoint dry admission passed")
+
+// refuseBeforeLockNames lets a verb whose own(false) would create a missing
+// .owner.lock, run/ or run/operation.lock run its admission first, read-only,
+// with only the locks whose names exist, so a refusal decided by what stood in
+// the root creates none of them. It never admits: nil leads to own(false), the
+// fence and the admission, unchanged under the full lock. It never reads the
+// maintenance fence and never runs pg_controldata (admitCheckpointDry).
+func (c *Cell) refuseBeforeLockNames(admit func() error) error {
+	// The gate: with both names present own(false) creates nothing, so today's
+	// path alone runs. A not-exist here only selects the checks below.
+	_, owner := os.Lstat(c.path(".owner.lock"))
+	_, run := os.Lstat(c.path("run", "operation.lock"))
+	// Ownership refusals recur in own(false), which classifies them before it
+	// creates anything; here they defer and are never classified.
+	if (owner == nil && run == nil) || c.validateRoot(false) != nil {
+		return nil
+	}
+	// No create. Its not-exists (no owner lock, no run/, no run lock) stand on
+	// validateRoot just above: the root and any run are real private
+	// directories, so a file at run was refused there, on Windows too.
+	held, err := acquireLock(c.cfg.Root, false)
+	if err != nil {
+		return nil
+	}
+	defer func() { _ = held.Close() }()
+	if err := c.validateRoot(false); err != nil {
+		return err
+	}
+	// Only the fence's approved owners read it, under the full lock: a leaf not
+	// proven absent defers. validateRoot just above proved journal absent or a
+	// real private directory, so this not-exist is an absence.
+	if _, err := os.Lstat(c.path("journal", "maintenance.json")); !errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	// Without the owner lock nothing below recovery/ is read: admit runs only if
+	// recovery/ was absent here (as Inspect lists it), and an existing run lock
+	// is left to own(false), after the owner lock. The same validateRoot proved
+	// recovery absent or a real private directory.
+	if _, err := os.Lstat(c.recoveryDir()); held == nil && (run == nil || !errors.Is(err, fs.ErrNotExist)) {
+		return nil
+	}
+	return admit()
+}
+
+// admitCheckpointDry is the unchanged admitCheckpoint with its control
+// boundary replaced, so it returns before pg_controldata or free space.
+func (c *Cell) admitCheckpointDry(ctx context.Context, options CheckpointOptions) error {
+	ops := c.checkpointOps()
+	ops.control = func(context.Context) (pgControlData, error) { return pgControlData{}, errCheckpointDryAdmitted }
+	if _, err := c.admitCheckpoint(ctx, options, ops); !errors.Is(err, errCheckpointDryAdmitted) {
+		return err
+	}
+	return nil
 }
 
 // checkpointEntry is one planned directory or file, by slash path below the
@@ -890,7 +954,9 @@ func (c *Cell) closeCheckpointLeftover() error {
 	return c.journal(progress.pending.Operation, "operation", "done")
 }
 
-func (c *Cell) deleteCheckpointLocked(_ context.Context, options DeleteCheckpointOptions) error {
+// admitDeleteCheckpoint is DeleteCheckpoint's admission: it writes nothing and
+// ends before the hold.
+func (c *Cell) admitDeleteCheckpoint(options DeleteCheckpointOptions) error {
 	// The identifier's shape is checked before any filesystem access.
 	if !checkpointIDPattern.MatchString(options.CheckpointID) {
 		return errCheckpointIdentity
@@ -924,6 +990,13 @@ func (c *Cell) deleteCheckpointLocked(_ context.Context, options DeleteCheckpoin
 	}
 	if err != nil || !recoveryEntryCanonical(names, options.CheckpointID) {
 		return errCheckpointIdentity
+	}
+	return nil
+}
+
+func (c *Cell) deleteCheckpointLocked(_ context.Context, options DeleteCheckpointOptions) error {
+	if err := c.admitDeleteCheckpoint(options); err != nil {
+		return err
 	}
 	// recovery/ and the checkpoint are held as directories; every removal goes
 	// through them once both names are bound (checkpoint_root.go).

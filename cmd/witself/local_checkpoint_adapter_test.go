@@ -691,11 +691,20 @@ func TestLocalCheckpointAdapter(t *testing.T) {
 		before := lcaTree(t, parent)
 		listed := `{"status":"listed","count":1,"unknown_count":0,"entries":[{"id":"ckpt_abcdefghijklmnop","complete":false,"verification":"not_performed"}]}`
 		lcaRun(t, []string{"delete", "--checkpoint-mode=cold-v1", "--root=" + root, "--checkpoint-id=" + lcID}, localCheckpointOpen, 1, `{"operation":"delete","outcome":"failed","failure":{"class":"local_maintenance_fence_active","cleanup_incomplete":false},"before":`+listed+`,"after":`+listed+`,"target":"ckpt_abcdefghijklmnop","presence":"present","verification":"not_performed","notice":"NOTICE"}`)
-		after := lcaTree(t, parent)
-		delete(after, filepath.Join(root, "run"))
-		delete(after, filepath.Join(root, "run", "operation.lock"))
-		if !maps.Equal(before, after) {
-			t.Fatal("fenced delete changed checkpoint, journal or manifest bytes")
+		// A fence beside a missing lock name defers to own(false): exactly run/
+		// and run/operation.lock are added (OQ1(a)), nothing else changes.
+		want := maps.Clone(before)
+		want[filepath.Join(root, "run")], want[filepath.Join(root, "run", "operation.lock")] = fs.ModeDir.String(), fs.FileMode(0).String()
+		if !maps.Equal(want, lcaTree(t, parent)) {
+			t.Fatal("fenced delete changed the root beyond its two run names")
+		}
+	})
+	t.Run("lockless", func(t *testing.T) {
+		parent, root := lcaRoot(t)
+		before := lcaTree(t, parent)
+		lcaRun(t, []string{"delete", "--checkpoint-mode=cold-v1", "--root=" + root, "--checkpoint-id=" + lcID}, localCheckpointOpen, 1, `{"operation":"delete","outcome":"failed","failure":{"class":"local_checkpoint_identity_mismatch","cleanup_incomplete":false},"before":{"status":"listed","count":0,"unknown_count":0},"after":{"status":"listed","count":0,"unknown_count":0},"target":"ckpt_abcdefghijklmnop","presence":"absent","verification":"not_performed","notice":"NOTICE"}`)
+		if !maps.Equal(before, lcaTree(t, parent)) {
+			t.Fatal("refused delete created a lock name in a fresh private root")
 		}
 	})
 }
