@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/fs"
 	"math"
+	"syscall"
 	"testing"
 )
 
@@ -28,6 +29,11 @@ func TestDrillReservePlatform(t *testing.T) {
 			{[]drillExtent{{0, 4096, 0x7}}, 4096, false},
 			{[]drillExtent{{0, 4096, 0x200 | last}}, 4096, false},
 			{[]drillExtent{{0, 4096, 0x8 | last}}, 4096, false},
+			{[]drillExtent{{0, 4096, 0x2}}, 4096, false},           // unknown alone
+			{[]drillExtent{{0, 4096, 0x80 | last}}, 4096, false},   // data encrypted
+			{[]drillExtent{{0, 4096, 0x100 | last}}, 4096, false},  // not aligned
+			{[]drillExtent{{0, 4096, 0x400 | last}}, 4096, false},  // data tail
+			{[]drillExtent{{0, 4096, 0x1000 | last}}, 4096, false}, // merged
 			{[]drillExtent{{0, 0, last}}, 4096, false},
 			{[]drillExtent{{0, 2048, unwritten | last}}, 4096, false},
 			{[]drillExtent{{0, 4096, 0}, {4096, 4096, 0x2000 | last}}, 4096, true},
@@ -45,5 +51,7 @@ func TestDrillReservePlatform(t *testing.T) {
 			drillReserveReason(fs.ErrExist, "x") == "allocation_collision" &&
 			drillReserveReason(fmt.Errorf("drill reserve fixture: %w", fs.ErrExist), "x") == "allocation_collision" &&
 			drillReserveReason(errors.New("other"), "fallback") == "fallback", "the reservation reason mapping misjudged an error")
+		drillAssert(t, drillReserveReason(fs.ErrNotExist, "fallback") == "fallback" &&
+			drillReserveReason(&fs.PathError{Op: "openat", Path: "x", Err: syscall.ENOENT}, "fallback") == "fallback", "the reservation reason mapping misjudged a missing name")
 	})
 }

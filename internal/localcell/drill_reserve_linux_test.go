@@ -23,10 +23,13 @@ import (
 
 const drillReservePlatformExtents = 0x80000 // FS_EXTENT_FL, linux/fs.h: the inode maps its blocks by extents
 
-// drillReservePlatformFile is the row's own private file in its own directory, held read-write.
+// drillReservePlatformFile is the row's own private file in its own directory, held read-write. A row that
+// allocates or proves needs that directory on ext4 and fails first, never skips, anywhere else.
 func drillReservePlatformFile(t *testing.T) (*os.File, string) {
 	t.Helper()
-	name := filepath.Join(t.TempDir(), "reserved")
+	dir, volume := t.TempDir(), unix.Statfs_t{}
+	drillAssert(t, unix.Statfs(dir, &volume) == nil && volume.Type == unix.EXT4_SUPER_MAGIC, "the reservation rows need an ext4 temporary directory")
+	name := filepath.Join(dir, "reserved")
 	f, err := os.OpenFile(name, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
 	drillAssert(t, err == nil, "cannot create the drill reserve fixture file")
 	t.Cleanup(func() { _ = f.Close() })
@@ -40,6 +43,63 @@ func drillReservePlatformMap(t *testing.T, f *os.File, length uint64) drillFiema
 	_, _, errno := unix.Syscall(unix.SYS_IOCTL, f.Fd(), drillFiemapIoctl, uintptr(unsafe.Pointer(&m)))
 	drillAssert(t, errno == 0 && m.mapped <= 32, "the row's own extent map failed")
 	return m
+}
+
+// drillReserveHeld holds the directory at name as a root until the row ends.
+func drillReserveHeld(t *testing.T, name string) *os.Root {
+	t.Helper()
+	root, err := os.OpenRoot(name)
+	drillAssert(t, err == nil, "cannot hold the drill reserve fixture root")
+	t.Cleanup(func() { _ = root.Close() })
+	return root
+}
+
+// drillReserveTree is the type of every name below top, links unfollowed.
+func drillReserveTree(t *testing.T, top string) map[string]fs.FileMode {
+	t.Helper()
+	tree := map[string]fs.FileMode{}
+	err := filepath.WalkDir(top, func(name string, entry fs.DirEntry, err error) error {
+		if err == nil {
+			tree[name] = entry.Type()
+		}
+		return err
+	})
+	drillAssert(t, err == nil, "cannot read the drill reserve fixture tree")
+	return tree
+}
+
+// drillReserveRefused reports err a bare errno, which carries no name, whose closed reason is want,
+// "fallback" being the caller's own.
+func drillReserveRefused(err error, want string) bool {
+	errno, bare := err.(unix.Errno)
+	return bare && errno != 0 && drillReserveReason(err, "fallback") == want
+}
+
+// drillReserveWatched creates the file file and makes the directory dir through drill, never waiting: a
+// creation still running after ten seconds fails the row, and the FIFO at fifo is opened read-write until
+// both return, so nothing is left blocked.
+func drillReserveWatched(t *testing.T, drill *os.Root, fifo, dir, file string) (error, error) {
+	t.Helper()
+	done, waited := make(chan [2]error, 1), false
+	go func() {
+		created, fileErr := drillPlatformCreate(nil, nil, drill, "", file)
+		if created != nil {
+			_ = created.Close()
+		}
+		done <- [2]error{drillPlatformMkdir(nil, nil, drill, "", dir), fileErr}
+	}()
+	for {
+		select {
+		case errs := <-done:
+			drillAssert(t, !waited, "a drill reserve creation waited at a FIFO")
+			return errs[0], errs[1]
+		case <-time.After(10 * time.Second):
+			if f, err := os.OpenFile(fifo, os.O_RDWR|unix.O_NONBLOCK, 0); err == nil {
+				_ = f.Close()
+			}
+			waited = true
+		}
+	}
 }
 
 // TestDrillReservePlatformChild is efbig_child's child and does nothing unless its variable names the
@@ -106,6 +166,12 @@ func TestDrillReservePlatformLinux(t *testing.T) {
 		f, _ := drillReservePlatformFile(t)
 		drillAssert(t, drillPlatformAllocate(f, 0, 8192) == nil && drillPlatformVerify(f, 8192) == nil, "cannot prove the drill reserve fixture")
 		drillStorageReason(t, drillPlatformVerify(f, 4096), "allocation_unproved", "a file longer than its size was proved")
+	})
+	t.Run("shorter", func(t *testing.T) {
+		f, _ := drillReservePlatformFile(t)
+		fd := int(f.Fd())
+		drillAssert(t, unix.Fallocate(fd, 0, 0, 4096) == nil && unix.Fallocate(fd, unix.FALLOC_FL_KEEP_SIZE, 4096, 4096) == nil, "cannot prepare the shorter drill reserve fixture")
+		drillStorageReason(t, drillPlatformVerify(f, 8192), "allocation_unproved", "a file shorter than its size was proved")
 	})
 	t.Run("hole_within", func(t *testing.T) {
 		f, _ := drillReservePlatformFile(t)
@@ -187,6 +253,8 @@ func TestDrillReservePlatformLinux(t *testing.T) {
 		for _, err := range []error{again, drillPlatformMkdir(v.c, boundary, nil, drillID, ""), drillPlatformMkdir(v.c, boundary, drill, drillID, "sub")} {
 			drillAssert(t, drillReserveReason(err, "x") == "allocation_collision", "a repeated creation was not refused as a collision")
 		}
+		_, below := drillPlatformCreate(v.c, boundary, drill, drillID, "absent/clone")
+		drillAssert(t, drillReserveRefused(below, "fallback"), "a create below an absent directory was not refused with the fallback")
 		file, fileErr := drill.Lstat("clone")
 		dir, dirErr := boundary.Lstat(drillID)
 		sub, subErr := drill.Lstat("sub")
@@ -195,6 +263,95 @@ func TestDrillReservePlatformLinux(t *testing.T) {
 		// The row removes its own drill: the cell is left as it was.
 		drillAssert(t, drill.Close() == nil && os.RemoveAll(filepath.Join(v.c.recoveryDir(), drillID)) == nil &&
 			reflect.DeepEqual(before, checkpointTreeState(t, v.c)), "the row's drill directory was not removed")
+	})
+	// A link, a regular file or a FIFO before the last component is refused without waiting, and an existing
+	// name at the last is a collision; nothing is created anywhere, in the link's target least of all.
+	for _, row := range []struct{ name, plant, dir, file, want string }{
+		{"link_component", "inside", "a/x", "a/y", "fallback"}, {"link_dangling", "dangling", "a/x", "a/y", "fallback"},
+		{"link_outside", "outside", "a/x", "a/y", "fallback"}, {"file_component", "file", "a/x", "a/y", "fallback"},
+		{"fifo_component", "fifo", "a/x", "a/y", "fallback"}, {"fifo_last", "fifo", "a", "a", "allocation_collision"},
+		{"dangling_last", "dangling", "a", "a", "allocation_collision"},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			top := t.TempDir()
+			drillDir, outside, planted := filepath.Join(top, "drill"), filepath.Join(top, "outside"), filepath.Join(top, "drill", "a")
+			err := errors.Join(os.MkdirAll(filepath.Join(drillDir, "b"), 0o700), os.Mkdir(outside, 0o700))
+			switch row.plant {
+			case "inside":
+				err = errors.Join(err, os.Symlink("b", planted))
+			case "dangling":
+				err = errors.Join(err, os.Symlink("missing", planted))
+			case "outside":
+				err = errors.Join(err, os.Symlink(outside, planted))
+			case "file":
+				err = errors.Join(err, os.WriteFile(planted, nil, 0o600))
+			default:
+				err = errors.Join(err, unix.Mkfifo(planted, 0o600))
+			}
+			drillAssert(t, err == nil, "cannot plant the drill reserve fixture component")
+			drill, before := drillReserveHeld(t, drillDir), drillReserveTree(t, top)
+			dirErr, fileErr := drillReserveWatched(t, drill, planted, row.dir, row.file)
+			drillAssert(t, drillReserveRefused(dirErr, row.want) && drillReserveRefused(fileErr, row.want) && reflect.DeepEqual(before, drillReserveTree(t, top)),
+				"a creation went through a planted component or past its refusal")
+		})
+	}
+	t.Run("malformed", func(t *testing.T) {
+		top := t.TempDir()
+		drillAssert(t, os.MkdirAll(filepath.Join(top, "b", "a"), 0o700) == nil, "cannot prepare the drill reserve fixture tree")
+		live, closed, before := drillReserveHeld(t, top), drillReserveHeld(t, top), drillReserveTree(t, top)
+		// A closed root refuses EBADF once opened: EINVAL from it shows no system call was reached.
+		drillAssert(t, closed.Close() == nil, "cannot close the drill reserve fixture root")
+		for _, root := range []*os.Root{live, closed} {
+			for _, name := range []string{"", "/x", "x/", "a//x", "./x", "b/./x", ".", "b/../x", "b/a/..", "..", "../x"} {
+				_, fileErr := drillPlatformCreate(nil, nil, root, "", name)
+				drillAssert(t, drillPlatformMkdir(nil, nil, root, "", name) == unix.EINVAL && fileErr == unix.EINVAL, "a malformed name was not refused before any system call")
+			}
+			for _, drillID := range []string{"b/x", "", ".", "..", "/x", "x/"} {
+				drillAssert(t, drillPlatformMkdir(nil, root, nil, drillID, "") == unix.EINVAL, "an identifier of other than one plain component was not refused")
+			}
+		}
+		drillAssert(t, drillPlatformMkdir(nil, nil, closed, "", "x") == unix.EBADF, "a closed root's refusal was not a bare errno")
+		drillAssert(t, reflect.DeepEqual(before, drillReserveTree(t, top)), "a malformed name or identifier created something")
+	})
+	t.Run("device", func(t *testing.T) {
+		drillAssert(t, drillPlatformDevice(7, 7) == nil && drillPlatformDevice(7, 8) == unix.EXDEV && drillReserveRefused(drillPlatformDevice(7, 8), "fallback"),
+			"the device comparison misjudged two devices")
+		// No mount can be made here, but proc is one below the system root everywhere: the walk refuses it.
+		slash := drillReserveHeld(t, "/")
+		_, fileErr := drillPlatformCreate(nil, nil, slash, "", "proc/drill_reserve")
+		drillAssert(t, drillPlatformMkdir(nil, nil, slash, "", "proc/drill_reserve") == unix.EXDEV && fileErr == unix.EXDEV, "a creation crossed onto another device")
+	})
+	t.Run("descriptors", func(t *testing.T) {
+		top := t.TempDir()
+		drillAssert(t, os.MkdirAll(filepath.Join(top, "d", "kept"), 0o700) == nil && os.Symlink("kept", filepath.Join(top, "d", "link")) == nil, "cannot prepare the drill reserve fixture tree")
+		drill, slash := drillReserveHeld(t, top), drillReserveHeld(t, "/")
+		top, err := filepath.EvalSymlinks(top)
+		drillAssert(t, err == nil, "cannot resolve the drill reserve fixture tree")
+		// Each round makes four (two of three components) and refuses four: a link and a collision after an
+		// opened directory, another device, a malformed name. Only descriptors on the fixture, the system root
+		// or proc are counted, so another test's file closed by the collector cannot disturb the comparison.
+		rounds := func(from, to int) (open int) {
+			for round := from; round < to; round++ {
+				suffix := fmt.Sprint(round)
+				made, madeErr := drillPlatformCreate(nil, nil, drill, "", "d/kept/f"+suffix)
+				file, fileErr := drillPlatformCreate(nil, nil, drill, "", "d/f"+suffix)
+				_, existing := drillPlatformCreate(nil, nil, drill, "", "d/kept")
+				_, malformed := drillPlatformCreate(nil, nil, drill, "", "d//f")
+				drillAssert(t, errors.Join(madeErr, fileErr, made.Close(), file.Close(), drillPlatformMkdir(nil, nil, drill, "", "d/m"+suffix),
+					drillPlatformMkdir(nil, nil, drill, "", "d/kept/m"+suffix)) == nil && existing != nil && malformed != nil &&
+					drillPlatformMkdir(nil, nil, drill, "", "d/link/m") != nil && drillPlatformMkdir(nil, nil, slash, "", "proc/m") != nil, "a creation of the descriptor rounds misbehaved")
+			}
+			entries, err := os.ReadDir("/proc/self/fd")
+			drillAssert(t, err == nil, "cannot list the row's open descriptors")
+			for _, entry := range entries {
+				if target, _ := os.Readlink("/proc/self/fd/" + entry.Name()); target == "/" || target == "/proc" || strings.HasPrefix(target+"/", top+"/") {
+					open++
+				}
+			}
+			return open
+		}
+		before := rounds(0, 0) // the two held roots at least
+		drillAssert(t, before >= 2 && before == rounds(0, 50), "the creators leaked a descriptor over the refused and the made rounds")
 	})
 	t.Run("layout", func(t *testing.T) {
 		var m drillFiemap
