@@ -6322,11 +6322,9 @@ directory of that exact name.
 On Linux and macOS, `create` writes its copy by pathname: a same-user process
 renaming a directory inside the cell during the copy can make the private copy,
 password files included, land outside the cell while `create` reports success.
-Such a process can already read those files. There, a same-user process that
-puts a FIFO at `journal/operations.jsonl` after the command's checks can make
-`create` or `delete` wait, while it holds the cell lock, when it appends to
-the journal. `inspect` does not append. The first signal does not end such a
-wait; a signal after the window above does, leaving what a kill leaves. A FIFO
+Such a process can already read those files. There, a FIFO or a link put at
+`journal/operations.jsonl` after the command's checks is refused at once, with
+nothing written to it. A FIFO
 put at the database directory `pg/`, or at a directory the command syncs after
 creating or changing it, is refused at once and is not waited on. A FIFO put at `pg/global/pg_control` after `create` has
 planned its copy makes its `pg_controldata` run wait instead, also under the
@@ -6335,25 +6333,43 @@ too, a link put inside the database directory during
 the copy is followed, but only within it; one put at the manifest, a kept
 password file or a copy being inventoried is refused.
 
-On Linux, if another process holds a write lease on a database file from
-before `create` starts, `create` is refused at once instead of waiting for the
-lease to end: on `PG_VERSION` with `local_checkpoint_source_unsupported` before
-anything is journaled, on any other copied file except `global/pg_control` with
+On Linux, another process can hold a lease on a file (`fcntl(2)`): a process
+running as the cell's user, or a privileged one such as a file server that
+exports the cell root. When `create`, `inspect` or `delete` opens a file that
+is leased (a database file, the manifest, a password file, the cell's lock
+files, a checkpoint's `witness.json` or `journal/operations.jsonl`), the open
+asks the holder to let go and the command waits, holding the cell lock, until
+the lease ends, for at most 60 seconds each time it opens the file; it then
+goes on as if no lease had been held. A holder that lets go when asked delays
+the command by a moment; one that never answers loses the lease when the
+system breaks it (`/proc/sys/fs/lease-break-time`, 45 seconds by default).
+While it waits, another `create`, `inspect` or `delete` of the same root stops
+at once with exit 1 and its observation's status `busy`. The wait does not end
+at `--timeout` or at the first signal: a `create` whose wait outlasts its
+`--timeout` then fails as an out-of-time `create` does, and a first signal
+takes effect only when the wait ends; a second signal ends the process at
+once, leaving what a kill leaves.
+A lease on `global/pg_control` is different: `pg_controldata` waits on it
+until `--timeout` ends the run (`local_checkpoint_operation_failed`, nothing
+journaled) or the system breaks the lease and `create` goes on; the first
+signal ends that wait. Nothing ordinary holds such a lease on the files of a
+stopped cell.
+
+A holder that takes the lease again each time it lets go keeps the open
+refused, and after 60 seconds the command stops with the outcome it gives when
+that open fails: on `PG_VERSION` `local_checkpoint_source_unsupported` before
+anything is journaled; on any other copied file
 `local_checkpoint_copy_failed`, its partial copy removed and its operation
-closed. A lease on `global/pg_control` is different: `pg_controldata` waits on
-it until `--timeout` ends the run (`local_checkpoint_operation_failed`, nothing
-journaled) or the system breaks the lease (`/proc/sys/fs/lease-break-time`, 45
-seconds by default) and `create` goes on; the first signal ends that wait. The
-refused open asks the holder to let go; retrying after it has done so succeeds.
-Nothing ordinary holds such a lease on the files of a stopped database.
-On Linux, if another process holds a lease on `journal/operations.jsonl` from
-before `create` or `delete` starts, the verb stops at once instead of waiting
-for the lease to end, with exit 1 and `local_checkpoint_operation_failed`
-without a reason: nothing is journaled, `create` makes no checkpoint directory
-and `delete` keeps the checkpoint it names. A read lease stops it at its first
-journal write, outcome `failed`; a write lease stops it at its first
-observation, outcome `refused` with `before.status: unavailable`. Run again
-after the holder has released the lease, either verb succeeds.
+closed; on `journal/operations.jsonl` exit 1 and
+`local_checkpoint_operation_failed` without a reason, with nothing journaled,
+no checkpoint directory made and the checkpoint named by `delete` kept (a read
+lease stops the verb at its first journal write, outcome `failed`; a write
+lease stops it at its first observation, outcome `refused` with
+`before.status: unavailable`, or `after.status: unavailable` for `inspect`).
+Such a lease on a checkpoint's `witness.json` makes that checkpoint list as
+`"complete": false`, and `create` beside it refuses with
+`local_checkpoint_incomplete`. Run again after the holder has let go, each
+command succeeds.
 
 On Windows, `delete` also removes a checkpoint whose witness file is read-only,
 has been replaced by an empty directory, or changed after `delete` checked the

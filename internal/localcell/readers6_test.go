@@ -42,12 +42,31 @@ func writerCalls(node ast.Node) (calls []*ast.CallExpr) {
 
 // writerReturn prints name's one declaration's body when it is one return.
 func writerReturn(functions map[string][]*ast.FuncDecl, name string) string {
-	if declarations := functions[name]; len(declarations) == 1 && len(declarations[0].Body.List) == 1 {
-		if ret, ok := declarations[0].Body.List[0].(*ast.ReturnStmt); ok && len(ret.Results) == 1 {
-			return "return " + types.ExprString(ret.Results[0])
-		}
+	if declarations := functions[name]; len(declarations) == 1 {
+		return writerOneReturn(declarations[0].Body)
 	}
 	return ""
+}
+
+// writerOneReturn prints body when it is one return of one result, a function
+// literal there as its own one return (types.ExprString prints a literal's type).
+func writerOneReturn(body *ast.BlockStmt) string {
+	if len(body.List) != 1 {
+		return ""
+	}
+	ret, ok := body.List[0].(*ast.ReturnStmt)
+	if !ok || len(ret.Results) != 1 {
+		return ""
+	}
+	text := types.ExprString(ret.Results[0])
+	ast.Inspect(ret.Results[0], func(n ast.Node) bool {
+		literal, ok := n.(*ast.FuncLit)
+		if ok {
+			text = strings.Replace(text, types.ExprString(literal), types.ExprString(literal.Type)+" { "+writerOneReturn(literal.Body)+" }", 1)
+		}
+		return !ok
+	})
+	return "return " + text
 }
 
 // writerCheckOrder: openRegularWriter's first statement opens, the next is its
@@ -199,7 +218,7 @@ func writerOpenContract(sources map[string]string) (result []string) {
 			}
 		}
 	}
-	failures["writer_unix_open"] = writerReturn(other, "openPrivateWriter") != "return os.OpenFile(path, flags | syscall.O_NONBLOCK | syscall.O_NOFOLLOW, mode)"
+	failures["writer_unix_open"] = writerReturn(other, "openPrivateWriter") != "return waitOutLease(path, os.Lstat, func() (*os.File, error) { return os.OpenFile(path, flags | syscall.O_NONBLOCK | syscall.O_NOFOLLOW, mode) })"
 	failures["writer_blocking_unix"] = len(other["blockingWriter"]) != 1 || !slices.Equal(syscalls, []string{"syscall.SetNonblock(int(fd), false)"})
 	failures["writer_windows_open"] = writerReturn(windows, "openPrivateWriter") != "return openPrivateFile(path, flags, mode)" || writerReturn(windows, "blockingWriter") != "return nil"
 	failures["writer_check_order"] = !writerCheckOrder(parsed["files.go"]["openRegularWriter"])
@@ -238,8 +257,8 @@ func TestWriterOpenSourceContract(t *testing.T) {
 		{"journal_open_flags", "files.go", "os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600, irregular", "os.O_WRONLY|os.O_CREATE, 0o600, irregular", `writer_open:journalCause:openRegularWriter(path, os.O_WRONLY | os.O_CREATE, 0o600, irregular, errors.New("cannot open local cell journal"))`},
 		{"discard_open_private_writer", "files.go", `openRegularWriter(c.path("journal", "operations.jsonl"), os.O_WRONLY, 0, torn, torn)`, `openPrivateWriter(c.path("journal", "operations.jsonl"), os.O_WRONLY, 0)`, "writer_open_caller:files.go:discardJournalTail"},
 		{"retained_open_private_file", "removal_retention.go", `openRegularWriter(c.path("journal", "operations.jsonl"), os.O_WRONLY, 0, unavailable, unavailable)`, `openPrivateFile(c.path("journal", "operations.jsonl"), os.O_WRONLY, 0)`, "writer_open_count:finishRetainedRemoval"},
-		{"unix_no_nonblock", "files_other.go", "flags|syscall.O_NONBLOCK|syscall.O_NOFOLLOW", "flags|syscall.O_NOFOLLOW", "writer_unix_open"},
-		{"unix_no_nofollow", "files_other.go", "flags|syscall.O_NONBLOCK|syscall.O_NOFOLLOW", "flags|syscall.O_NONBLOCK", "writer_unix_open"},
+		{"unix_no_nonblock", "files_other.go", "return os.OpenFile(path, flags|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, mode)", "return os.OpenFile(path, flags|syscall.O_NOFOLLOW, mode)", "writer_unix_open"},
+		{"unix_no_nofollow", "files_other.go", "return os.OpenFile(path, flags|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, mode)", "return os.OpenFile(path, flags|syscall.O_NONBLOCK, mode)", "writer_unix_open"},
 		{"unix_blocking_kept", "files_other.go", "syscall.SetNonblock(int(fd), false)", "syscall.SetNonblock(int(fd), true)", "writer_blocking_unix"},
 		{"windows_plain_open", "files_windows.go", "return openPrivateFile(path, flags, mode)", "return os.OpenFile(path, flags, mode)", "writer_windows_open"},
 		{"check_by_name", "files.go", "if info, err := f.Stat(); err != nil || !info.Mode().IsRegular() {", "if info, err := os.Lstat(path); err != nil || !info.Mode().IsRegular() {", "writer_check_order"},

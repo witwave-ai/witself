@@ -3,8 +3,10 @@
 package localcell
 
 import (
+	"errors"
 	"os"
 	"syscall"
+	"time"
 )
 
 // Preserve the existing Unix filesystem operations and permission checks.
@@ -15,16 +17,52 @@ func openPrivateFile(path string, flags int, mode os.FileMode) (*os.File, error)
 }
 
 // openPrivateReader opens path read-only without waiting on what stands at the
-// name, so a FIFO opens at once, and refuses a link at its last element.
+// name, so a FIFO opens at once, and refuses a link at its last element; a
+// leased file is waited out by repeating that same open (waitOutLease).
 func openPrivateReader(path string) (*os.File, error) {
-	return os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, 0)
+	return waitOutLease(path, os.Lstat, func() (*os.File, error) {
+		return os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, 0)
+	})
 }
 
 // openPrivateWriter opens path for writing without waiting on what stands at
-// the name, so a FIFO with no reader or a leased file fails at once, and
-// refuses a link at its last element.
+// the name, so a FIFO with no reader fails at once, and refuses a link at its
+// last element; a leased file is waited out by repeating that same open
+// (waitOutLease).
 func openPrivateWriter(path string, flags int, mode os.FileMode) (*os.File, error) {
-	return os.OpenFile(path, flags|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, mode)
+	return waitOutLease(path, os.Lstat, func() (*os.File, error) {
+		return os.OpenFile(path, flags|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, mode)
+	})
+}
+
+// leaseWait bounds waitOutLease. Its ceiling exceeds the kernel's default
+// lease-break time (/proc/sys/fs/lease-break-time, 45 seconds), after which a
+// holder that never lets go has lost its lease. Only tests change it.
+var leaseWait = struct{ ceiling, first, longest time.Duration }{60 * time.Second, time.Millisecond, 100 * time.Millisecond}
+
+// waitOutLease returns open's result unless open failed with EWOULDBLOCK and
+// lstat shows a regular file at path: on Linux the refusal of a non-blocking
+// open of a leased file, which has asked the holder to let go (open(2),
+// fcntl(2)). It then sleeps and repeats the same open, the interval doubling
+// from leaseWait.first to at most leaseWait.longest, while the next interval
+// ends by leaseWait.ceiling; the last refusal is returned unchanged. It never
+// opens otherwise, never blocks and sees no context: anything at the name but
+// a regular file is refused at once, on every attempt.
+func waitOutLease[T any](path string, lstat func(string) (os.FileInfo, error), open func() (T, error)) (T, error) {
+	deadline, delay := time.Now().Add(leaseWait.ceiling), leaseWait.first
+	for {
+		result, err := open()
+		if !errors.Is(err, syscall.EWOULDBLOCK) {
+			return result, err
+		}
+		if info, statErr := lstat(path); statErr != nil || !info.Mode().IsRegular() || time.Now().Add(delay).After(deadline) {
+			return result, err
+		}
+		time.Sleep(delay)
+		if delay *= 2; delay > leaseWait.longest {
+			delay = leaseWait.longest
+		}
+	}
 }
 
 // blockingWriter clears openPrivateWriter's non-blocking flag: today's open

@@ -13,7 +13,7 @@ func openLockFile(path string, create bool) (*os.File, error) {
 	if create {
 		flags |= syscall.O_CREAT
 	}
-	fd, err := syscall.Open(path, flags, 0o600)
+	fd, err := waitOutLease(path, os.Lstat, func() (int, error) { return syscall.Open(path, flags, 0o600) })
 	if err != nil {
 		return nil, err
 	}
