@@ -50,8 +50,18 @@ func TestLeaseWaitHelper(t *testing.T) {
 				}
 				l, started := leaseTaken(t, leaseHolder(t, holder, leaseSide[side].lease), name), time.Now()
 				err := readerWatchdog(t, func() error { return leaseSide[side].call(name) }, l.release)
-				if !l.broken() || holder == "lets_go" && err != nil || holder != "lets_go" && (err != errWriterFailed || time.Since(started) < leaseKeptAfter) {
-					t.Fatal("the shared open did not wait out a lease that ends, or refuse one kept past the ceiling")
+				elapsed := time.Since(started)
+				if !l.broken() {
+					t.Error("the holder never saw the shared open break its lease")
+				}
+				if holder == "lets_go" && err != nil {
+					t.Error("the shared open did not wait out a lease whose holder let go at the break")
+				}
+				if holder != "lets_go" && err != errWriterFailed {
+					t.Errorf("the shared open did not refuse a lease kept or taken again with the failed text: no error %t after %v", err == nil, elapsed.Round(10*time.Microsecond))
+				}
+				if holder != "lets_go" && elapsed < leaseKeptAfter {
+					t.Error("the shared open returned on a lease kept or taken again sooner than leaseKeptAfter")
 				}
 			})
 		}

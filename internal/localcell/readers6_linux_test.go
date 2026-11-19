@@ -8,6 +8,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -24,8 +25,8 @@ func init() {
 }
 
 // writerLease is a lease taken through a second, read-only open, maybe from the call's own goroutine;
-// do runs fn on its descriptor while held. Its holder polls F_GETLEASE every 100 µs and at a break
-// records it and lets go, lets go and takes the lease again, or keeps it.
+// do runs fn on its descriptor while held. Its holder polls F_GETLEASE (hold) and at a break records
+// it and lets go, lets go and takes the lease again (retaken), or keeps it.
 type writerLease struct {
 	mu                 sync.Mutex
 	file               *os.File
@@ -54,27 +55,59 @@ func (l *writerLease) take(name string) {
 	f, err := os.Open(name)
 	if _, leaseErr := unix.FcntlInt(f.Fd(), unix.F_SETLEASE, l.lease); err == nil && leaseErr == nil {
 		l.file = f
-		go l.hold(f)
+		go l.hold(f, l.retake, leaseWait.first, time.Now())
 	} else {
 		_ = f.Close()
 	}
 }
 
-func (l *writerLease) hold(f *os.File) {
+// hold polls every 100 µs until the file is closed. A Go sleep under 1 ms lasts about 1 ms (the
+// runtime's poller waits whole milliseconds), the opener's first pause, so a retaking holder let go
+// just as the opener tried again (FLAKE-64): it polls about every first/50 by nanosleep, with a 1 µs
+// timer slack, on a thread locked for good, which ends with the holder. fresh is when it last saw
+// its lease held and unbroken (taken, at first).
+func (l *writerLease) hold(f *os.File, retaking bool, first time.Duration, fresh time.Time) {
+	nap, lost := func() { time.Sleep(100 * time.Microsecond) }, false
+	if retaking {
+		runtime.LockOSThread()
+		_ = unix.Prctl(unix.PR_SET_TIMERSLACK, uintptr(time.Microsecond), 0, 0, 0)
+		pause := unix.NsecToTimespec(int64(first / 50))
+		nap = func() { _ = unix.Nanosleep(&pause, nil) }
+	}
 	for open := true; open; l.mu.Unlock() {
-		time.Sleep(100 * time.Microsecond)
+		nap()
 		l.mu.Lock()
+		polled := time.Now()
 		if held, err := unix.FcntlInt(f.Fd(), unix.F_GETLEASE, 0); l.file == f && err == nil && held != l.lease {
 			l.saw = true
-			if l.letGo || l.retake {
+			if l.letGo {
 				_, _ = unix.FcntlInt(f.Fd(), unix.F_SETLEASE, unix.F_UNLCK)
 			}
 			if l.retake {
-				_, _ = unix.FcntlInt(f.Fd(), unix.F_SETLEASE, l.lease)
+				fresh, lost = l.retaken(f.Fd(), fresh, lost, first)
 			}
+		} else if err == nil {
+			fresh = polled
 		}
 		open = l.file == f
 	}
+}
+
+// retaken lets go and takes the lease again by raw fcntl calls, which the Go scheduler cannot run
+// between, only within first/2 of fresh: the break came later, and the opener tries again at least
+// first after it, so the gap closes before. Seen later (the holder held up), the broken lease is
+// kept; one lost is taken again at once. The kernel refuses the re-take (EAGAIN) while it still
+// counts the opener's failed open, so a refusal is retried for at most first/4.
+func (l *writerLease) retaken(fd uintptr, fresh time.Time, lost bool, first time.Duration) (time.Time, bool) {
+	if !lost && time.Since(fresh) > first/2 {
+		return fresh, false
+	}
+	_, _, _ = unix.RawSyscall(unix.SYS_FCNTL, fd, unix.F_SETLEASE, unix.F_UNLCK)
+	_, _, errno := unix.RawSyscall(unix.SYS_FCNTL, fd, unix.F_SETLEASE, uintptr(l.lease))
+	for end := time.Now().Add(first / 4); errno == unix.EAGAIN && time.Now().Before(end); {
+		_, _, errno = unix.RawSyscall(unix.SYS_FCNTL, fd, unix.F_SETLEASE, uintptr(l.lease))
+	}
+	return time.Now(), errno != 0
 }
 
 func (l *writerLease) do(fn func(fd uintptr)) bool {
