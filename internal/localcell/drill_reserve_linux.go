@@ -4,6 +4,7 @@ package localcell
 
 import (
 	"errors"
+	"math"
 	"os"
 	"strings"
 	"unsafe"
@@ -105,10 +106,51 @@ func drillPlatformCreate(_ *Cell, _, drill *os.Root, _, name string) (*os.File, 
 	return created, err
 }
 
+// drillPlatformOpen opens an existing directory or regular file for reading
+// through the same walk: the last component is not followed either, a file is
+// opened without blocking, so a planted FIFO is never waited on but refused,
+// and never as a controlling terminal, and the object must be on its parent's
+// device. The error is a bare errno.
+func drillPlatformOpen(root *os.Root, name string, directory bool) (*os.File, error) {
+	kind := 0
+	if directory {
+		kind = unix.O_DIRECTORY
+	}
+	var opened *os.File
+	err := drillPlatformAt(root, name, func(dir int, last string) error {
+		fd, err := unix.Openat(dir, last, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_NOCTTY|unix.O_CLOEXEC|kind, 0)
+		if err != nil {
+			return err
+		}
+		var parent, stat unix.Stat_t
+		if err = unix.Fstat(dir, &parent); err == nil {
+			err = unix.Fstat(fd, &stat)
+		}
+		if err == nil {
+			err = drillPlatformDevice(uint64(parent.Dev), uint64(stat.Dev))
+		}
+		if err == nil && !directory && stat.Mode&unix.S_IFMT != unix.S_IFREG {
+			err = unix.EINVAL // a FIFO or another special file, opened without waiting
+		}
+		if err != nil {
+			_ = unix.Close(fd)
+			return err
+		}
+		opened = os.NewFile(uintptr(fd), "drill reserve file")
+		return nil
+	})
+	return opened, err
+}
+
 // drillPlatformAllocate allocates [offset, offset+length) with fallocate mode
 // 0, which extends the size when the range passes the end of the file; a
-// failed call keeps what it allocated.
+// failed call keeps what it allocated. Callers allocate in increasing order;
+// mode 0 never shrinks the file. A range ending past the largest file offset
+// is storage_exhausted before any system call, as on Windows.
 func drillPlatformAllocate(f *os.File, offset, length uint64) error {
+	if length > math.MaxInt64 || offset > math.MaxInt64-length {
+		return drillStorageError{reason: "storage_exhausted"}
+	}
 	return unix.Fallocate(int(f.Fd()), 0, int64(offset), int64(length))
 }
 

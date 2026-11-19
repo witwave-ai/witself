@@ -239,9 +239,15 @@ var drillStorageCallees = []string{"(context.Context).Err", "(*regexp.Regexp).Ma
 	"(*localcell.Cell).recoveryDir", "(*localcell.Cell).checkpointDir", "(*localcell.Cell).checkpointOps"}
 
 // drillReserveCallees are drillStorageCallees' counterpart for the reservation files (G4B1: the Linux
-// platform layer); x/sys members do not resolve here, and the checkpoint contract pins them.
+// platform layer); x/sys and runtimeconfig members do not resolve here, and the checkpoint contract pins them.
 var drillReserveCallees = []string{"errors.As", "errors.Is", "(*os.Root).Open", "(*os.File).Close", "(*os.File).Fd", "(*os.File).Stat",
-	"(io/fs.FileInfo).Size", "os.NewFile", "strings.Contains", "strings.Split", "localcell.drillStorageAdd"}
+	"(io/fs.FileInfo).Size", "os.NewFile", "strings.Contains", "strings.Split", "localcell.drillStorageAdd", "path/filepath.FromSlash", "path/filepath.Join",
+	"strings.Repeat", "localcell.checkpointPathFits", "os.SameFile", "(*os.Root).OpenRoot", "(*os.Root).Stat", "(*os.Root).Close"}
+
+// drillReservePlatformCallees hold the platform files (drill_reserve_<system>.go) to G4B1's list and the two decisions of
+// drill_reserve.go they call: a name only drill_reserve.go needs stays refused in them (drill_reserve__callee:<file>:<name>).
+var drillReservePlatformCallees = []string{"errors.As", "errors.Is", "(*os.Root).Open", "(*os.File).Close", "(*os.File).Fd", "(*os.File).Stat",
+	"(io/fs.FileInfo).Size", "os.NewFile", "strings.Contains", "strings.Split", "localcell.drillStorageAdd", "localcell.drillExtentsCover", "localcell.drillWindowsProved"}
 
 // drillStorageReferences returns drill_storage_callee:<file>:<name> per name outside drillStorageCallees.
 func drillStorageReferences(sources map[string]string) []string {
@@ -386,10 +392,24 @@ func TestDrillReserveSourceContract(t *testing.T) {
 				for name, source := range input {
 					input[name] = strings.ReplaceAll(source, "\n", ending)
 				}
-				if failures := drillCalleeReferences(input, "drill_reserve", drillReserveCallees); !slices.Equal(failures, want) {
+				failures := append(drillCalleeReferences(input, "drill_reserve", drillReserveCallees), drillCalleeReferences(input, "drill_reserve_", drillReservePlatformCallees)...)
+				if !slices.Equal(failures, want) {
 					t.Fatalf("drill reserve source contract reported %v", failures)
 				}
 			}
 		})
 	}
+	// The platform files keep G4B1's names: a name only drill_reserve.go needs is refused in the host's own.
+	t.Run("platform_close", func(t *testing.T) {
+		for _, ending := range []string{"\n", "\r\n"} {
+			input := maps.Clone(sources)
+			for _, name := range []string{"drill_reserve_linux.go", "drill_reserve_windows.go", "drill_reserve_other.go"} {
+				drillAssert(t, strings.Count(input[name], "func drillPlatformAllocate(") == 1, "drill reserve contract anchor is not unique")
+				input[name] = strings.ReplaceAll(strings.Replace(input[name], "func drillPlatformAllocate(", "func drillReserveProbe(r *os.Root) { _ = r.Close() }\n\nfunc drillPlatformAllocate(", 1), "\n", ending)
+			}
+			failures := drillCalleeReferences(input, "drill_reserve_", drillReservePlatformCallees)
+			drillAssert(t, len(failures) == 1 && strings.HasPrefix(failures[0], "drill_reserve__callee:drill_reserve_") && strings.HasSuffix(failures[0], ".go:(*os.Root).Close"),
+				"a name only the portable file needs was admitted in a platform file")
+		}
+	})
 }

@@ -21,7 +21,7 @@ import (
 // checkpointFiles are the files that implement checkpoints.
 var checkpointFiles = []string{"checkpoint.go", "checkpoint_unix.go", "checkpoint_windows.go", "checkpoint_other.go", "checkpoint_verify.go", "drill_root.go",
 	"checkpoint_root.go", "drill_storage.go", "drill_storage_linux.go", "drill_storage_darwin.go", "drill_storage_windows.go", "drill_storage_other.go",
-	"drill_reserve.go", "drill_reserve_linux.go", "drill_reserve_other.go"}
+	"drill_reserve.go", "drill_reserve_linux.go", "drill_reserve_windows.go", "drill_reserve_other.go"}
 
 // checkpointForbiddenOS are calls the checkpoint files may not make (C7(e));
 // os.RemoveAll is counted by (a); os.OpenRoot is the Unix opener's, the drill
@@ -362,18 +362,38 @@ var checkpointSystemSelectors = map[string][]string{"checkpoint_unix.go": {"sysc
 	"drill_storage_windows.go": {"windows.Handle", "windows.NewLazySystemDLL", "windows.ByHandleFileInformation", "windows.GetVolumeInformationByHandle",
 		"windows.GetFileInformationByHandle", "windows.IO_STATUS_BLOCK", "windows.UTF16ToString", "windows.FILE_ATTRIBUTE_COMPRESSED"},
 	"drill_reserve_linux.go": {"unix.ENOSPC", "unix.EDQUOT", "unix.EFBIG", "unix.EOPNOTSUPP", "unix.SYS_IOCTL", "unix.EINVAL", "unix.EBADF", "unix.EXDEV",
-		"unix.Stat_t", "unix.O_NOFOLLOW", "unix.O_DIRECTORY", "unix.O_CLOEXEC", "unix.O_WRONLY", "unix.O_CREAT", "unix.O_EXCL"}}
+		"unix.Stat_t", "unix.O_NOFOLLOW", "unix.O_DIRECTORY", "unix.O_CLOEXEC", "unix.O_WRONLY", "unix.O_CREAT", "unix.O_EXCL", "unix.O_RDONLY", "unix.O_NONBLOCK",
+		"unix.S_IFMT", "unix.S_IFREG", "unix.O_NOCTTY"},
+	"drill_reserve_windows.go": {"windows.Handle", "windows.ERROR_INVALID_NAME", "windows.ERROR_DISK_FULL", "windows.ERROR_HANDLE_DISK_FULL",
+		"windows.ERROR_DISK_QUOTA_EXCEEDED", "windows.ERROR_FILE_TOO_LARGE", "windows.ByHandleFileInformation", "windows.FileStandardInfo"}}
 
-// drillReserveCalls are the reservation files' system calls by file, exact
+// drillReserveCalls are the reservation files' system, runtimeconfig and name-resolving calls by file, exact
 // text and count: rule (d) admits a system function there only as the function
 // of a listed call, and a count that differs is drill_reserve_call:<file>:<text>.
 var drillReserveCalls = map[string]map[string]int{"drill_reserve_linux.go": {"unix.Fstat(dir, &device)": 1, "unix.Fstat(next, &stat)": 1, "unix.Close(next)": 1,
 	"unix.Openat(dir, part, unix.O_NOFOLLOW | unix.O_DIRECTORY | unix.O_CLOEXEC, 0)": 1, "unix.Mkdirat(dir, last, 0o700)": 1,
 	"unix.Fallocate(int(f.Fd()), 0, int64(offset), int64(length))": 1, "unix.Syscall(unix.SYS_IOCTL, uintptr(fd), drillFiemapIoctl, uintptr(unsafe.Pointer(&m)))": 1,
-	"unix.Openat(dir, last, unix.O_WRONLY | unix.O_CREAT | unix.O_EXCL | unix.O_NOFOLLOW | unix.O_CLOEXEC, 0o600)": 1}}
+	"unix.Openat(dir, last, unix.O_WRONLY | unix.O_CREAT | unix.O_EXCL | unix.O_NOFOLLOW | unix.O_CLOEXEC, 0o600)": 1, "unix.Fstat(dir, &parent)": 1, "unix.Fstat(fd, &stat)": 1,
+	"unix.Openat(dir, last, unix.O_RDONLY | unix.O_NOFOLLOW | unix.O_NONBLOCK | unix.O_NOCTTY | unix.O_CLOEXEC | kind, 0)": 1, "unix.Close(fd)": 1,
+	`root.Open(".")`: 1, "f.Stat()": 1, `os.NewFile(uintptr(fd), "drill reserve file")`: 2},
+	"drill_reserve_windows.go": {"runtimeconfig.WindowsPrivateBeneath(root, name, true, true)": 1, "runtimeconfig.WindowsPrivateBeneath(drill, name, true, false)": 1,
+		"runtimeconfig.WindowsPrivateBeneath(root, name, false, directory)": 1, "windows.Ftruncate(windows.Handle(f.Fd()), int64(offset + length))": 1,
+		"windows.GetFileInformationByHandleEx(handle, windows.FileStandardInfo, (*byte)(unsafe.Pointer(&standard)), uint32(unsafe.Sizeof(standard)))": 1,
+		"windows.GetFileInformationByHandle(handle, &info)": 1},
+	"drill_reserve.go": {"parent.OpenRoot(filepath.FromSlash(name) + drillRootHere)": 1, `root.Stat(".")`: 1, "f.Stat()": 1}}
+
+// drillReserveNamed are the methods that resolve or change a name; in every reservation
+// file each such call must be a listed text and none is a value (drill_reserve_unlisted:<file>:<text>).
+var drillReserveNamed = []string{"Open", "OpenFile", "OpenRoot", "Stat", "Lstat", "Readlink", "ReadDir", "ReadFile", "Rename", "Remove", "RemoveAll",
+	"Mkdir", "MkdirAll", "Create", "Link", "Symlink", "Chmod", "Chown", "Lchown", "Chtimes", "Truncate", "Write", "WriteAt", "WriteString", "WriteFile"}
+
+// drillReserveRootSteps are drillReserveRoot's assignments of err and its returns, in order (P1): only
+// the anchor's error is returned as it came, every other refusal is fixed (drill_reserve_root_returns).
+var drillReserveRootSteps = []string{"drillPlatformOpen(parent, name, true)", "return nil, err", "parent.OpenRoot(filepath.FromSlash(name) + drillRootHere)",
+	`return nil, drillStorageError{reason: "boundary_refused"}`, `root.Stat(".")`, `return nil, drillStorageError{reason: "boundary_refused"}`, "return root, nil"}
 
 // drillRootShared are the drill_root.go declarations another checkpoint file may name.
-var drillRootShared = map[string][]string{"drill_storage.go": {"drillRootHere", "drillRootNames"}}
+var drillRootShared = map[string][]string{"drill_storage.go": {"drillRootHere", "drillRootNames"}, "drill_reserve.go": {"drillRootHere"}}
 
 // (d) no drill storage file selects a drillStorageWrites name, called or not, but
 // (b)'s os.OpenRoot, names a drillStorageHelpers name, or resolves another ntdll procedure.
@@ -420,7 +440,8 @@ func checkpointHeldContract(parsed map[string]*ast.File, failures map[string]boo
 			continue
 		}
 		for _, spec := range file.Imports {
-			if path := checkpointLiteral(spec.Path); spec.Name != nil && slices.Contains([]string{"os", "syscall", "golang.org/x/sys/unix", "golang.org/x/sys/windows"}, path) {
+			if path := checkpointLiteral(spec.Path); spec.Name != nil && (slices.Contains([]string{"os", "syscall", "golang.org/x/sys/unix", "golang.org/x/sys/windows"}, path) ||
+				path == "github.com/witwave-ai/witself/internal/runtimeconfig" && strings.HasPrefix(name, "drill_reserve")) {
 				failures["system_import:"+name+":"+path] = true // (d)
 			}
 		}
@@ -446,7 +467,8 @@ func checkpointHeldContract(parsed map[string]*ast.File, failures map[string]boo
 					failures["pathname_removal:"+name+":"+node.Sel.Name] = true
 				}
 				failures["forbidden_call:"+name+":"+text] = failures["forbidden_call:"+name+":"+text] || slices.Contains(checkpointForbiddenOS, text) // (c)
-				if slices.Contains([]string{"syscall", "unix", "windows"}, receiver) && !slices.Contains(checkpointSystemSelectors[name], text) && !reserved[node] {
+				if (slices.Contains([]string{"syscall", "unix", "windows"}, receiver) || receiver == "runtimeconfig" && strings.HasPrefix(name, "drill_reserve")) &&
+					!slices.Contains(checkpointSystemSelectors[name], text) && !reserved[node] {
 					failures["system_call:"+name+":"+text] = true // (d)
 				}
 				failures["root_open:"+name] = failures["root_open:"+name] || text == "os.OpenRoot" && !opens[node] // (e)
@@ -666,6 +688,8 @@ func checkpointSourceContract(sources map[string]string) []string {
 	witnessSpellings, inventorySpellings, journalCreates, inspectSummaries, drillHooks, drillOpenRoots := 0, 0, 0, 0, 0, 0
 	drillRootCalled, drillReserveCalled := map[string]int{}, map[string]int{}
 	storageOpenRoots, storageCalls, storageProcs := 0, map[ast.Node]string{}, []string(nil)
+	reserveFuns := map[ast.Node]bool{}
+	reserveSteps := []string(nil)
 	for name, file := range parsed {
 		checkpointFile := slices.Contains(checkpointFiles, name)
 		values, read := checkpointAssignments(file), map[ast.Node]bool{}
@@ -831,6 +855,18 @@ func checkpointSourceContract(sources map[string]string) []string {
 						storageProcs = append(storageProcs, storageCalls[selector])
 					}
 				}
+				if call, isCall := node.(*ast.CallExpr); isCall {
+					reserveFuns[call.Fun] = true
+				}
+				if selector, isSelector := node.(*ast.SelectorExpr); isSelector && strings.HasPrefix(name, "drill_reserve") && !reserveFuns[selector] &&
+					slices.Contains(drillReserveNamed, selector.Sel.Name) && !slices.Contains([]string{"os", "filepath", "path", "strings", "errors", "json"}, types.ExprString(selector.X)) {
+					failures["drill_reserve_unlisted:"+name+":"+types.ExprString(selector)] = true // a method value escapes the call rule
+				}
+				if assign, isAssign := node.(*ast.AssignStmt); isAssign && name == "drill_reserve.go" && owner == "drillReserveRoot" && types.ExprString(assign.Lhs[len(assign.Lhs)-1]) == "err" {
+					reserveSteps = append(reserveSteps, types.ExprString(assign.Rhs[0]))
+				} else if returned, isReturn := node.(*ast.ReturnStmt); isReturn && name == "drill_reserve.go" && owner == "drillReserveRoot" { // the parse's offsets
+					reserveSteps = append(reserveSteps, strings.ReplaceAll(sources[name], "\r\n", "\n")[returned.Pos()-1:returned.End()-1])
+				}
 				call, ok := node.(*ast.CallExpr)
 				if !ok {
 					return true
@@ -841,6 +877,11 @@ func checkpointSourceContract(sources map[string]string) []string {
 				}
 				if _, listed := drillReserveCalls[name][types.ExprString(call)]; listed {
 					drillReserveCalled[name+":"+types.ExprString(call)]++
+				}
+				if selector, ok := call.Fun.(*ast.SelectorExpr); ok && strings.HasPrefix(name, "drill_reserve") && slices.Contains(drillReserveNamed, selector.Sel.Name) &&
+					!slices.Contains([]string{"os", "filepath", "path", "strings", "errors", "json"}, types.ExprString(selector.X)) && drillReserveCalls[name][types.ExprString(call)] == 0 ||
+					strings.HasPrefix(name, "drill_reserve") && strings.HasPrefix(function, "os.") && function != "os.SameFile" && function != "os.OpenRoot" && drillReserveCalls[name][types.ExprString(call)] == 0 {
+					failures["drill_reserve_unlisted:"+name+":"+types.ExprString(call)] = true
 				}
 				if name == "drill_storage.go" && function == "os.OpenRoot" { // (b) the one held recovery/, as a directory only
 					storageOpenRoots++
@@ -976,6 +1017,7 @@ func checkpointSourceContract(sources map[string]string) []string {
 	}
 	failures["drill_call_count:os.OpenRoot"], failures["drill_hook_count"] = drillOpenRoots != 1, drillHooks != 1
 	failures["drill_storage_openroot_count"], failures["drill_storage_proc"] = storageOpenRoots != 1, !slices.Equal(storageProcs, []string{drillStorageProc})
+	failures["drill_reserve_root_returns"] = !slices.Equal(reserveSteps, drillReserveRootSteps)
 	failures["journal_create_count"], failures["witness_name_spelling"], failures["inspect_summaries"] = journalCreates != 1, witnessSpellings != 1, inspectSummaries != 1
 	checkpointHeldContract(parsed, failures)
 	checkpointWaitingContract(parsed, failures)
@@ -1020,6 +1062,26 @@ func TestCheckpointSourceContract(t *testing.T) {
 		{"drill_reserve_system", "drill_reserve_linux.go", reserveTail, "func drillReserveProbe(f *os.File) { _ = unix.Ftruncate(int(f.Fd()), 0) }\n\n" + reserveTail, "system_call:drill_reserve_linux.go:unix.Ftruncate"},
 		{"drill_reserve_caller", "lifecycle.go", "func (c *Cell) begin(", "func (c *Cell) drillReserveCaller() { _ = drillPlatformAllocate(nil, 0, 0) }\n\nfunc (c *Cell) begin(", "reference:lifecycle.go:drillPlatformAllocate"},
 		{"drill_reserve_openroot", "drill_reserve_linux.go", reserveTail, "func (c *Cell) drillReserveProbe() { _, _ = os.OpenRoot(c.recoveryDir() + drillRootHere) }\n\n" + reserveTail, "forbidden_call:drill_reserve_linux.go:os.OpenRoot"},
+		{"drill_reserve_windows_system", "drill_reserve_windows.go", reserveTail, "func drillReserveProbe() { _ = windows.CloseHandle(0) }\n\n" + reserveTail, "system_call:drill_reserve_windows.go:windows.CloseHandle"},
+		{"drill_reserve_pathname_creator", "drill_reserve_windows.go", reserveTail, "func drillReserveProbe() { _ = runtimeconfig.WindowsPrivateMkdir(\"x\") }\n\n" + reserveTail,
+			"system_call:drill_reserve_windows.go:runtimeconfig.WindowsPrivateMkdir"},
+		{"drill_reserve_windows_mode", "drill_reserve_windows.go", "runtimeconfig.WindowsPrivateBeneath(root, name, false, directory)", "runtimeconfig.WindowsPrivateBeneath(root, name, true, directory)",
+			"drill_reserve_call:drill_reserve_windows.go:runtimeconfig.WindowsPrivateBeneath(root, name, false, directory)"},
+		{"drill_reserve_open_follow", "drill_reserve_linux.go", "unix.O_RDONLY|unix.O_NOFOLLOW|", "unix.O_RDONLY|",
+			"drill_reserve_call:drill_reserve_linux.go:unix.Openat(dir, last, unix.O_RDONLY | unix.O_NOFOLLOW | unix.O_NONBLOCK | unix.O_NOCTTY | unix.O_CLOEXEC | kind, 0)"},
+		{"drill_reserve_follow_root", "drill_reserve.go", "// drillReserveSame reports", "func drillReserveProbe(r *os.Root) { _, _ = r.OpenRoot(\"x\") }\n\n// drillReserveSame reports",
+			"drill_reserve_unlisted:drill_reserve.go:r.OpenRoot(\"x\")"},
+		{"drill_reserve_platform_stat", "drill_reserve_linux.go", reserveTail, "func drillReserveProbe(r *os.Root) { _, _ = r.Stat(\"x\") }\n\n" + reserveTail, "drill_reserve_unlisted:drill_reserve_linux.go:r.Stat(\"x\")"},
+		{"drill_reserve_platform_stat_value", "drill_reserve_linux.go", reserveTail, "func drillReserveProbe(r *os.Root) { stat := r.Stat; _, _ = stat(\"x\") }\n\n" + reserveTail,
+			"drill_reserve_unlisted:drill_reserve_linux.go:r.Stat"},
+		{"drill_reserve_stat_value", "drill_reserve.go", "// drillReserveSame reports", "func drillReserveProbe(r *os.Root) { stat := r.Stat; _, _ = stat(\"x\") }\n\n// drillReserveSame reports",
+			"drill_reserve_unlisted:drill_reserve.go:r.Stat"},
+		{"drill_reserve_windows_lstat", "drill_reserve_windows.go", reserveTail, "func drillReserveProbe(r *os.Root) { _, _ = r.Lstat(\"x\") }\n\n" + reserveTail, "drill_reserve_unlisted:drill_reserve_windows.go:r.Lstat(\"x\")"},
+		{"drill_reserve_renamed_walk", "drill_reserve_windows.go", "\t\"github.com/witwave-ai/witself/internal/runtimeconfig\"\n",
+			"\t\"github.com/witwave-ai/witself/internal/runtimeconfig\"\n\trc \"github.com/witwave-ai/witself/internal/runtimeconfig\"\n",
+			"system_import:drill_reserve_windows.go:github.com/witwave-ai/witself/internal/runtimeconfig"},
+		{"drill_reserve_root_raw", "drill_reserve.go", "drillRootHere)\n\tif err != nil {\n\t\treturn nil, drillStorageError{reason: \"boundary_refused\"}",
+			"drillRootHere)\n\tif err != nil {\n\t\treturn nil, err", "drill_reserve_root_returns"},
 		{"drill_storage_write_seed", "drill_storage.go", storageTail, "func (c *Cell) drillStorageProbe(r *os.Root) { _ = r.Mkdir(\"x\", 0o700) }\n\n" + storageTail, "drill_storage_write:drill_storage.go:Mkdir"},
 		{"drill_storage_second_openroot", "drill_storage.go", storageTail, "func drillStorageProbe(c *Cell) { _, _ = os.OpenRoot(c.recoveryDir() + drillRootHere) }\n\n" + storageTail, "drill_storage_openroot_count"},
 		{"drill_storage_openroot_plain", "drill_storage.go", "os.OpenRoot(c.recoveryDir() + drillRootHere)", "os.OpenRoot(c.recoveryDir())", "drill_storage_openroot_target"},
