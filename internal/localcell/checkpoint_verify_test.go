@@ -56,7 +56,7 @@ func openCheckpointVerifyCase(t *testing.T, c *Cell, id string) *checkpointVerif
 	if err != nil {
 		t.Fatal("fixture directory resolution failed")
 	}
-	lock, err := acquireLock(c.cfg.Root, false)
+	lock, err := acquireLock(context.Background(), c.cfg.Root, false)
 	if err != nil || lock == nil {
 		t.Fatal("fixture lock acquisition failed")
 	}

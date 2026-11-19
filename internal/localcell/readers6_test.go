@@ -20,9 +20,9 @@ import (
 
 // writerOpenSites: each journal write open's file, function and checked open (R5).
 var writerOpenSites = [][3]string{
-	{"files.go", "journalCause", `openRegularWriter(path, os.O_WRONLY | os.O_CREATE | os.O_APPEND, 0o600, irregular, errors.New("cannot open local cell journal"))`},
-	{"files.go", "discardJournalTail", `openRegularWriter(c.path("journal", "operations.jsonl"), os.O_WRONLY, 0, torn, torn)`},
-	{"removal_retention.go", "finishRetainedRemoval", `openRegularWriter(c.path("journal", "operations.jsonl"), os.O_WRONLY, 0, unavailable, unavailable)`},
+	{"files.go", "journalCause", `openRegularWriter(context.Background(), path, os.O_WRONLY | os.O_CREATE | os.O_APPEND, 0o600, irregular, errors.New("cannot open local cell journal"))`},
+	{"files.go", "discardJournalTail", `openRegularWriter(context.Background(), c.path("journal", "operations.jsonl"), os.O_WRONLY, 0, torn, torn)`},
+	{"removal_retention.go", "finishRetainedRemoval", `openRegularWriter(context.Background(), c.path("journal", "operations.jsonl"), os.O_WRONLY, 0, unavailable, unavailable)`},
 }
 
 // writerOpeners are the calls that open, read or write a name.
@@ -69,9 +69,9 @@ func writerOneReturn(body *ast.BlockStmt) string {
 	return "return " + text
 }
 
-// writerCheckOrder: openRegularWriter's first statement opens, the next is its
-// failure branch holding the Lstat; then Stat and blockingWriter, nothing else
-// (context.Background, Close, errors.Is, Mode, IsRegular aside) and never a write, truncate or sync.
+// writerCheckOrder: openRegularWriter's first statement opens, the next returns
+// a lease wait's cut, the next is its failure branch holding the Lstat; then Stat
+// and blockingWriter, nothing else (Close, errors.Is, Mode, IsRegular aside) and never a write, truncate or sync.
 func writerCheckOrder(declarations []*ast.FuncDecl) bool {
 	if len(declarations) != 1 {
 		return false
@@ -81,19 +81,21 @@ func writerCheckOrder(declarations []*ast.FuncDecl) bool {
 		selector, ok := call.Fun.(*ast.SelectorExpr)
 		if ok && slices.Contains([]string{"Write", "WriteString", "WriteAt", "ReadFrom", "Truncate", "Sync"}, selector.Sel.Name) {
 			return false
-		} else if ok && slices.Contains([]string{"Close", "Mode", "IsRegular"}, selector.Sel.Name) || types.ExprString(call.Fun) == "errors.Is" || types.ExprString(call) == "context.Background()" {
+		} else if ok && slices.Contains([]string{"Close", "Mode", "IsRegular"}, selector.Sel.Name) || types.ExprString(call.Fun) == "errors.Is" {
 			continue
 		}
 		if order = append(order, types.ExprString(call)); types.ExprString(call) == "os.Lstat(path)" {
 			lstat = call
 		}
 	}
-	if !slices.Equal(order, []string{"openPrivateWriter(context.Background(), path, flags, mode)", "os.Lstat(path)", "f.Stat()", "blockingWriter(f)"}) || len(body.List) < 2 {
+	if !slices.Equal(order, []string{"openPrivateWriter(ctx, path, flags, mode)", "(*leaseWaitCut)(nil)", "errors.As(err, &cut)", "os.Lstat(path)", "f.Stat()", "blockingWriter(f)"}) || len(body.List) < 3 {
 		return false
 	}
 	open, isAssign := body.List[0].(*ast.AssignStmt)
-	branch, isIf := body.List[1].(*ast.IfStmt)
-	return isAssign && len(open.Rhs) == 1 && types.ExprString(open.Rhs[0]) == "openPrivateWriter(context.Background(), path, flags, mode)" && isIf && branch.Init == nil &&
+	cut, isCut := body.List[1].(*ast.IfStmt)
+	branch, isIf := body.List[2].(*ast.IfStmt)
+	return isAssign && len(open.Rhs) == 1 && types.ExprString(open.Rhs[0]) == "openPrivateWriter(ctx, path, flags, mode)" && isCut && cut.Else == nil &&
+		checkpointWitnessStatement(cut) == "cut;(*leaseWaitCut)(nil);errors.As(err, &cut);nil;cut;" && isIf && branch.Init == nil &&
 		types.ExprString(branch.Cond) == "err != nil" && lstat.Pos() > branch.Body.Pos() && lstat.End() < branch.Body.End()
 }
 
@@ -251,12 +253,12 @@ func TestWriterOpenSourceContract(t *testing.T) {
 			t.Fatalf("writer open source contract failed with keys %v", failures)
 		}
 	}
-	const journalOpen = `openRegularWriter(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600, irregular, errors.New("cannot open local cell journal"))`
+	const journalOpen = `openRegularWriter(context.Background(), path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600, irregular, errors.New("cannot open local cell journal"))`
 	for _, row := range []struct{ name, file, before, after, want string }{
 		{"journal_open_private_file", "files.go", journalOpen, "openPrivateFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)", "writer_open:journalCause:openPrivateFile(path, os.O_WRONLY | os.O_CREATE | os.O_APPEND, 0o600)"},
-		{"journal_open_flags", "files.go", "os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600, irregular", "os.O_WRONLY|os.O_CREATE, 0o600, irregular", `writer_open:journalCause:openRegularWriter(path, os.O_WRONLY | os.O_CREATE, 0o600, irregular, errors.New("cannot open local cell journal"))`},
-		{"discard_open_private_writer", "files.go", `openRegularWriter(c.path("journal", "operations.jsonl"), os.O_WRONLY, 0, torn, torn)`, `openPrivateWriter(c.path("journal", "operations.jsonl"), os.O_WRONLY, 0)`, "writer_open_caller:files.go:discardJournalTail"},
-		{"retained_open_private_file", "removal_retention.go", `openRegularWriter(c.path("journal", "operations.jsonl"), os.O_WRONLY, 0, unavailable, unavailable)`, `openPrivateFile(c.path("journal", "operations.jsonl"), os.O_WRONLY, 0)`, "writer_open_count:finishRetainedRemoval"},
+		{"journal_open_flags", "files.go", "os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600, irregular", "os.O_WRONLY|os.O_CREATE, 0o600, irregular", `writer_open:journalCause:openRegularWriter(context.Background(), path, os.O_WRONLY | os.O_CREATE, 0o600, irregular, errors.New("cannot open local cell journal"))`},
+		{"discard_open_private_writer", "files.go", `openRegularWriter(context.Background(), c.path("journal", "operations.jsonl"), os.O_WRONLY, 0, torn, torn)`, `openPrivateWriter(c.path("journal", "operations.jsonl"), os.O_WRONLY, 0)`, "writer_open_caller:files.go:discardJournalTail"},
+		{"retained_open_private_file", "removal_retention.go", `openRegularWriter(context.Background(), c.path("journal", "operations.jsonl"), os.O_WRONLY, 0, unavailable, unavailable)`, `openPrivateFile(c.path("journal", "operations.jsonl"), os.O_WRONLY, 0)`, "writer_open_count:finishRetainedRemoval"},
 		{"unix_no_nonblock", "files_other.go", "return os.OpenFile(path, flags|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, mode)", "return os.OpenFile(path, flags|syscall.O_NOFOLLOW, mode)", "writer_unix_open"},
 		{"unix_no_nofollow", "files_other.go", "return os.OpenFile(path, flags|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, mode)", "return os.OpenFile(path, flags|syscall.O_NONBLOCK, mode)", "writer_unix_open"},
 		{"unix_blocking_kept", "files_other.go", "syscall.SetNonblock(int(fd), false)", "syscall.SetNonblock(int(fd), true)", "writer_blocking_unix"},
@@ -280,8 +282,8 @@ func TestWriterOpenSourceContract(t *testing.T) {
 	// G1: the review's six reopens (rows 1 to 6), aliases declared in another file, a renamed
 	// import, the other names, the pin, a type error, a non-standard import left unresolved.
 	appendBlock := "\tf, err := " + journalOpen + "\n\tif err != nil {\n\t\treturn err\n\t}\n"
-	discardBlock := "\tf, err := openRegularWriter(c.path(\"journal\", \"operations.jsonl\"), os.O_WRONLY, 0, torn, torn)\n\tif err != nil {\n\t\treturn err\n\t}\n"
-	retainedBlock := "\t\tf, err := openRegularWriter(c.path(\"journal\", \"operations.jsonl\"), os.O_WRONLY, 0, unavailable, unavailable)\n\t\tif err != nil {\n\t\t\treturn err\n\t\t}\n"
+	discardBlock := "\tf, err := openRegularWriter(context.Background(), c.path(\"journal\", \"operations.jsonl\"), os.O_WRONLY, 0, torn, torn)\n\tif err != nil {\n\t\treturn err\n\t}\n"
+	retainedBlock := "\t\tf, err := openRegularWriter(context.Background(), c.path(\"journal\", \"operations.jsonl\"), os.O_WRONLY, 0, unavailable, unavailable)\n\t\tif err != nil {\n\t\t\treturn err\n\t\t}\n"
 	const progress, boundary, journalName = "// journalProgress contains only", "func (c *Cell) removalBoundary(step string) error {", `c.path("journal", "operations.jsonl")`
 	reopen := func(open, failure string) string {
 		return "\t_ = f.Close()\n\tif f, err = " + open + "; err != nil {\n\t\treturn " + failure + "\n\t}\n"

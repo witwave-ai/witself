@@ -115,7 +115,7 @@ func TestOwnershipFailureProbeRealLock(t *testing.T) {
 	openLock := func(path string, create bool) (*os.File, error) {
 		return openLockFile(context.Background(), path, create)
 	}
-	owner, err := acquireLock(root, true)
+	owner, err := acquireLock(context.Background(), root, true)
 	if err != nil {
 		t.Fatal("cannot acquire ownership probe real fixture lock")
 	}
@@ -133,7 +133,7 @@ func TestOwnershipFailureProbeRealLock(t *testing.T) {
 		if got := probeOwnershipFailure(root, original, lockDirectory, openLock, lockFile, unlockFile); got != original {
 			t.Fatal("real free owner changed original error identity")
 		}
-		next, err := acquireLock(root, true)
+		next, err := acquireLock(context.Background(), root, true)
 		if err != nil {
 			t.Fatal("real free probe retained the stable owner lock")
 		}
@@ -157,7 +157,7 @@ func TestOwnershipFailureProbeRealLock(t *testing.T) {
 
 func TestClassifyOwnershipFailureGate(t *testing.T) {
 	root := testPrivateRoot(t)
-	owner, err := acquireLock(root, true)
+	owner, err := acquireLock(context.Background(), root, true)
 	if err != nil {
 		t.Fatal("cannot acquire ownership classifier gate fixture lock")
 	}
@@ -422,9 +422,9 @@ func TestOwnershipFailureWrapperWiringRejectsMutations(t *testing.T) {
 		want string
 	}{
 		{"own_validation", "if err := c.validateRoot(create); err != nil {\n\t\t" + wrapper, "if err := c.validateRoot(create); err != nil {\n\t\treturn nil, err", "own initial validation refusal lacks its classifier"},
-		{"own_lock", "lock, err := acquireLock(c.cfg.Root, true)\n\tif err != nil {\n\t\t" + wrapper, "lock, err := acquireLock(c.cfg.Root, true)\n\tif err != nil {\n\t\treturn nil, err", "own lock acquisition refusal lacks its classifier"},
+		{"own_lock", "lock, err := acquireLock(context.Background(), c.cfg.Root, true)\n\tif err != nil {\n\t\t" + wrapper, "lock, err := acquireLock(context.Background(), c.cfg.Root, true)\n\tif err != nil {\n\t\treturn nil, err", "own lock acquisition refusal lacks its classifier"},
 		{"existing_validation", "func (c *Cell) ownExisting() (*operationLock, error) {\n\tif err := c.validateRoot(false); err != nil {\n\t\t" + wrapper, "func (c *Cell) ownExisting() (*operationLock, error) {\n\tif err := c.validateRoot(false); err != nil {\n\t\treturn nil, err", "ownExisting initial validation refusal lacks its classifier"},
-		{"existing_lock", "lock, err := acquireLock(c.cfg.Root, false)\n\tif err != nil {\n\t\t" + wrapper, "lock, err := acquireLock(c.cfg.Root, false)\n\tif err != nil {\n\t\treturn nil, err", "ownExisting lock acquisition refusal lacks its classifier"},
+		{"existing_lock", "lock, err := acquireLock(context.Background(), c.cfg.Root, false)\n\tif err != nil {\n\t\t" + wrapper, "lock, err := acquireLock(context.Background(), c.cfg.Root, false)\n\tif err != nil {\n\t\treturn nil, err", "ownExisting lock acquisition refusal lacks its classifier"},
 		{"post_acquisition", "_ = lock.Close()\n\t\treturn nil, err", "_ = lock.Close()\n\t\t" + wrapper, "post acquisition validation refusal must retain its original return"},
 		{"inspect", "func (c *Cell) Inspect(_ context.Context) (Inspection, error) {", "func (c *Cell) Inspect(_ context.Context) (Inspection, error) {\n\t_ = classifyOwnershipFailure(c.cfg.Root, nil)", "ownership classifier call appeared outside ownership wrappers"},
 		{"direct_probe", "\treturn lock, nil\n}\n\nfunc (c *Cell) ownExisting", "\t_ = probeOwnershipFailure(c.cfg.Root, nil, lockDirectory, openLockFile, lockFile, unlockFile)\n\treturn lock, nil\n}\n\nfunc (c *Cell) ownExisting", "ownership probe call appeared outside its classifier"},

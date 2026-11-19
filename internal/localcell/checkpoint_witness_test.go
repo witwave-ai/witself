@@ -106,7 +106,7 @@ func TestCheckpointWitnessOpen(t *testing.T) {
 		t.Run(row.name, func(t *testing.T) {
 			f, _ := checkpointFixture(t, "legacy", false)
 			row.plant(t, f.cell)
-			if _, complete, err := checkpointComplete(f.cell.path("recovery", id), id); complete || !errors.Is(err, row.err) {
+			if _, complete, err := checkpointComplete(context.Background(), f.cell.path("recovery", id), id); complete || !errors.Is(err, row.err) {
 				t.Fatal("witness open reported another completeness or error")
 			}
 		})
@@ -123,7 +123,7 @@ func TestCheckpointWitnessHandleStat(t *testing.T) {
 	const id = "ckpt_abcdefghijklmnop"
 	fixture, _ := checkpointFixture(t, "legacy", false)
 	dir := checkpointPlant(t, fixture.cell, id, id)
-	if _, complete, err := checkpointComplete(dir, id); !complete || err != nil {
+	if _, complete, err := checkpointComplete(context.Background(), dir, id); !complete || err != nil {
 		t.Fatal("the planted witness does not read complete through the real open")
 	}
 	inspect, irregular, open := errors.New("synthetic inspect"), errors.New("synthetic irregular"), errors.New("synthetic open")
@@ -193,7 +193,7 @@ func checkpointWitnessContract(source string) []string {
 	var failures []string
 	for key, ok := range map[string]bool{
 		"witness_open": len(bodies["checkpointComplete"]) == 4 &&
-			statement("checkpointComplete", 0) == "f;err;openRegular(filepath.Join(dir, checkpointWitnessName), errCheckpointWitnessUnread, errCheckpointWitnessIrregular, errCheckpointWitnessUnread);",
+			statement("checkpointComplete", 0) == "f;err;openRegular(ctx, filepath.Join(dir, checkpointWitnessName), errCheckpointWitnessUnread, errCheckpointWitnessIrregular, errCheckpointWitnessUnread);",
 		"witness_proven": statement("checkpointComplete", 1) == "errors.Is(err, os.ErrNotExist) || errors.Is(err, errCheckpointWitnessIrregular);checkpointWitness{};false;nil;err != nil;checkpointWitness{};false;err;",
 		"witness_bound":  statement("checkpointWitnessRead", 0) == "data;err;io.ReadAll(io.LimitReader(r, 1 << 20));",
 		"witness_unread": statement("checkpointWitnessRead", 1) == "err != nil;checkpointWitness{};false;errCheckpointWitnessUnread;",
@@ -208,7 +208,7 @@ func checkpointWitnessContract(source string) []string {
 		ast.Inspect(&ast.BlockStmt{List: bodies["listCheckpoints"]}, func(node ast.Node) bool {
 			if block, ok := node.(*ast.BlockStmt); ok {
 				for index, current := range block.List {
-					if checkpointWitnessStatement(current) != "witness;complete;err;checkpointComplete(dir, entry.Name());" {
+					if checkpointWitnessStatement(current) != "witness;complete;err;checkpointComplete(context.Background(), dir, entry.Name());" {
 						continue
 					}
 					if calls++; index+1 < len(block.List) && checkpointWitnessStatement(block.List[index+1]) == "err != nil;nil;0;err;" {
@@ -238,7 +238,7 @@ func TestCheckpointWitnessSourceContract(t *testing.T) {
 		{"open_error_incomplete", "\t\treturn checkpointWitness{}, false, err\n", "\t\treturn checkpointWitness{}, false, nil\n", "witness_proven"},
 		{"read_error_incomplete", "\t\treturn checkpointWitness{}, false, errCheckpointWitnessUnread\n", "\t\treturn checkpointWitness{}, false, nil\n", "witness_unread"},
 		{"bound_changed", "io.LimitReader(r, 1<<20)", "io.LimitReader(r, 1<<10)", "witness_bound"},
-		{"waiting_open", "openRegular(filepath.Join(dir, checkpointWitnessName),", "openRegularBy(openPrivateFile, nil, filepath.Join(dir, checkpointWitnessName),", "witness_open"},
+		{"waiting_open", "openRegular(ctx, filepath.Join(dir, checkpointWitnessName),", "openRegularBy(ctx, openPrivateFile, nil, filepath.Join(dir, checkpointWitnessName),", "witness_open"},
 		{"unread_listed", "\t\t\treturn nil, 0, err\n", "\t\t\tcontinue\n", "witness_listed"},
 	} {
 		t.Run(row.name, func(t *testing.T) {

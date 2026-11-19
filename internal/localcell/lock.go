@@ -19,7 +19,8 @@ type operationLock struct {
 // root lock is deliberately retained even by purge: unlinking a locked file
 // would let another owner lock a replacement inode while the first still runs.
 // A read-only probe never creates directories or files.
-func acquireLock(root string, create bool) (_ *operationLock, err error) {
+// A lease wait that ctx ended is returned wrapped, never read as absent.
+func acquireLock(ctx context.Context, root string, create bool) (_ *operationLock, err error) {
 	if err := validatePrivateTree(root); err != nil {
 		return nil, err
 	}
@@ -32,7 +33,7 @@ func acquireLock(root string, create bool) (_ *operationLock, err error) {
 			_ = lock.Close()
 		}
 	}()
-	stable, err := openLockFile(context.Background(), filepath.Join(root, ".owner.lock"), create)
+	stable, err := openLockFile(ctx, filepath.Join(root, ".owner.lock"), create)
 	if errors.Is(err, os.ErrNotExist) && !create {
 		return nil, nil
 	}
@@ -55,7 +56,7 @@ func acquireLock(root string, create bool) (_ *operationLock, err error) {
 		}
 		return nil, err
 	}
-	operation, err := openLockFile(context.Background(), filepath.Join(run, "operation.lock"), create)
+	operation, err := openLockFile(ctx, filepath.Join(run, "operation.lock"), create)
 	if errors.Is(err, os.ErrNotExist) && !create {
 		return lock, nil
 	}

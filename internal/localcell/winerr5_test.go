@@ -82,7 +82,7 @@ func TestWinerr5ReadersParentFile(t *testing.T) {
 			return err == nil && pid == 0, err
 		}},
 		{"service_record", "service", "service_record_not_private", func(c *Cell) (bool, error) {
-			f, err := openServiceRecord(c.path("service", "control.secret"), errors.New("cannot open the synthetic record"))
+			f, err := openServiceRecord(context.Background(), c.path("service", "control.secret"), errors.New("cannot open the synthetic record"))
 			if f != nil {
 				_ = f.Close()
 			}

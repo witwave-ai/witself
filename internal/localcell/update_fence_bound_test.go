@@ -2,6 +2,7 @@ package localcell
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -46,7 +47,7 @@ func TestUpdateFenceBound(t *testing.T) {
 				t.Fatal("cannot prepare bounded fence fixture")
 			}
 			before := serviceMaintenanceSnapshot(t, c)
-			got, err := c.readMaintenanceFence()
+			got, err := c.readMaintenanceFence(context.Background())
 			serviceMaintenanceUnchanged(t, c, before)
 			if fixture.allowed {
 				if err != nil || got == nil || !got.valid() || *got != want {
@@ -121,7 +122,7 @@ func TestUpdateFenceBoundValueFreeErrors(t *testing.T) {
 		t.Fatal("reader failure exposed variable error detail")
 	}
 	c, _ := unitCell(t)
-	if err := readMaintenanceFenceJSON(c.path("journal", "missing.json"), &fence); err == nil || err.Error() != "cannot open local cell record" {
+	if err := readMaintenanceFenceJSON(context.Background(), c.path("journal", "missing.json"), &fence); err == nil || err.Error() != "cannot open local cell record" {
 		t.Fatal("open failure exposed variable error detail")
 	}
 }

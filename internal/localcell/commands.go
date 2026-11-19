@@ -136,7 +136,7 @@ func (c *Cell) logFile(component string) (*os.File, error) {
 	if info, err := os.Lstat(path); err == nil && !info.Mode().IsRegular() {
 		return nil, irregular
 	}
-	return openRegularWriter(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600, irregular, errors.New("cannot open local cell log"))
+	return openRegularWriter(context.Background(), path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600, irregular, errors.New("cannot open local cell log"))
 }
 
 func (c *Cell) pgCommand(ctx context.Context, tool string, args ...string) error {

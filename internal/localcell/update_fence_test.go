@@ -2,6 +2,7 @@ package localcell
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -23,7 +24,7 @@ func updateTestFence(t *testing.T, c *Cell) maintenanceFence {
 func TestUpdateFenceReadResults(t *testing.T) {
 	t.Run("absent_leaf", func(t *testing.T) {
 		c, _ := unitCell(t)
-		fence, err := c.readMaintenanceFence()
+		fence, err := c.readMaintenanceFence(context.Background())
 		if err != nil || fence != nil || c.maintenanceFenceAllows(0) != nil {
 			t.Fatal("absent fence refused ordinary predicate")
 		}
@@ -36,7 +37,7 @@ func TestUpdateFenceReadResults(t *testing.T) {
 		if err := os.Remove(c.path("journal")); err != nil {
 			t.Fatal("cannot prepare absent parent fixture")
 		}
-		fence, err := c.readMaintenanceFence()
+		fence, err := c.readMaintenanceFence(context.Background())
 		if err != nil || fence != nil {
 			t.Fatal("missing fence parent was not absent")
 		}
@@ -48,7 +49,7 @@ func TestUpdateFenceReadResults(t *testing.T) {
 		if err != nil {
 			t.Fatal("cannot read fixture fence")
 		}
-		got, err := c.readMaintenanceFence()
+		got, err := c.readMaintenanceFence(context.Background())
 		if err != nil || got == nil || !reflect.DeepEqual(*got, want) {
 			t.Fatal("valid fence was not returned")
 		}
@@ -74,7 +75,7 @@ func TestUpdateFenceInvalidParent(t *testing.T) {
 		if want == nil {
 			t.Fatal("fixture parent unexpectedly valid")
 		}
-		fence, err := c.readMaintenanceFence()
+		fence, err := c.readMaintenanceFence(context.Background())
 		if fence != nil || err == nil || errors.Is(err, errMaintenanceFenceActive) || err.Error() != want.Error() {
 			t.Fatal("absent leaf lost its distinct parent validation error")
 		}
@@ -124,7 +125,7 @@ func TestUpdateFenceCorruptionFailsClosed(t *testing.T) {
 			if err != nil {
 				t.Fatal("cannot inspect fixture fence")
 			}
-			fence, err := c.readMaintenanceFence()
+			fence, err := c.readMaintenanceFence(context.Background())
 			if fence != nil || !errors.Is(err, errMaintenanceFenceActive) ||
 				!errors.Is(c.maintenanceFenceAllows(0), errMaintenanceFenceActive) ||
 				!errors.Is(c.maintenanceFenceAllows(1), errMaintenanceFenceActive) {
@@ -141,7 +142,7 @@ func TestUpdateFenceCorruptionFailsClosed(t *testing.T) {
 		if err := testWriteFile(c.path("journal", "maintenance.json"), []byte("{"), 0o600); err != nil {
 			t.Fatal("cannot prepare malformed fixture")
 		}
-		fence, err := c.readMaintenanceFence()
+		fence, err := c.readMaintenanceFence(context.Background())
 		if fence != nil || !errors.Is(err, errMaintenanceFenceActive) {
 			t.Fatal("malformed present fence was treated as absent")
 		}
@@ -151,7 +152,7 @@ func TestUpdateFenceCorruptionFailsClosed(t *testing.T) {
 		if err := testMkdir(c.path("journal", "maintenance.json"), 0o700); err != nil {
 			t.Fatal("cannot prepare unsafe fixture leaf")
 		}
-		fence, err := c.readMaintenanceFence()
+		fence, err := c.readMaintenanceFence(context.Background())
 		if fence != nil || !errors.Is(err, errMaintenanceFenceActive) {
 			t.Fatal("unsafe present fence was not refused")
 		}
@@ -171,7 +172,7 @@ func TestUpdateFenceCorruptionFailsClosed(t *testing.T) {
 			if err := os.Chmod(c.path("journal"), 0o755); err != nil {
 				t.Fatal("cannot prepare unsafe fence parent")
 			}
-			fence, err := c.readMaintenanceFence()
+			fence, err := c.readMaintenanceFence(context.Background())
 			if fence != nil || !errors.Is(err, errMaintenanceFenceActive) {
 				t.Fatal("unsafe parent of a present fence was not refused")
 			}
@@ -182,7 +183,7 @@ func TestUpdateFenceCorruptionFailsClosed(t *testing.T) {
 			if err := os.Chmod(c.path("journal", "maintenance.json"), 0o644); err != nil {
 				t.Fatal("cannot prepare unsafe fence mode")
 			}
-			fence, err := c.readMaintenanceFence()
+			fence, err := c.readMaintenanceFence(context.Background())
 			if fence != nil || !errors.Is(err, errMaintenanceFenceActive) {
 				t.Fatal("non-private present fence was not refused")
 			}
@@ -224,7 +225,7 @@ func TestUpdateFenceSymlinkEvidence(t *testing.T) {
 			if err := os.Symlink(target, c.path("journal", "maintenance.json")); err != nil {
 				t.Fatal("cannot prepare symlink fence fixture")
 			}
-			got, err := c.readMaintenanceFence()
+			got, err := c.readMaintenanceFence(context.Background())
 			if got != nil || !errors.Is(err, errMaintenanceFenceActive) ||
 				!errors.Is(c.maintenanceFenceAllows(fence.Generation), errMaintenanceFenceActive) {
 				t.Fatal("symlink leaf granted target fence authority")
@@ -260,7 +261,7 @@ func TestUpdateFenceSymlinkEvidence(t *testing.T) {
 				if err := os.Symlink(target, c.path("journal")); err != nil {
 					t.Fatal("cannot prepare symlink parent fixture")
 				}
-				got, err := c.readMaintenanceFence()
+				got, err := c.readMaintenanceFence(context.Background())
 				if present {
 					if got != nil || !errors.Is(err, errMaintenanceFenceActive) {
 						t.Fatal("present fence below symlink parent was not refused")

@@ -214,7 +214,7 @@ func TestCheckpointLocklessRefusal(t *testing.T) {
 			if checkpointUnchanged(t, c, before); !checkpointSameError(err, row.want) {
 				t.Fatal("lockless refusal returned another class")
 			}
-			if _, complete, err := checkpointComplete(c.path("recovery", locklessTarget), locklessTarget); strings.HasPrefix(row.name, "mid_purge") && (err != nil || !complete) {
+			if _, complete, err := checkpointComplete(context.Background(), c.path("recovery", locklessTarget), locklessTarget); strings.HasPrefix(row.name, "mid_purge") && (err != nil || !complete) {
 				t.Fatal("refused call left the target checkpoint incomplete")
 			}
 		})
@@ -397,7 +397,7 @@ var locklessFirst = map[string]string{
 
 // refuseBeforeLockNames's calls in source order, errors.Is aside.
 var locklessOrder = []string{`os.Lstat(c.path(".owner.lock"))`, `os.Lstat(c.path("run", "operation.lock"))`, `c.validateRoot(false)`,
-	`acquireLock(c.cfg.Root, false)`, `defer held.Close()`, `c.validateRoot(false)`, `os.Lstat(c.path("journal", "maintenance.json"))`,
+	`acquireLock(context.Background(), c.cfg.Root, false)`, `defer held.Close()`, `c.validateRoot(false)`, `os.Lstat(c.path("journal", "maintenance.json"))`,
 	`os.Lstat(c.recoveryDir())`, `admit()`}
 
 // locklessCallees closes what each dry function may call, resolved by type: a
@@ -405,7 +405,7 @@ var locklessOrder = []string{`os.Lstat(c.path(".owner.lock"))`, `os.Lstat(c.path
 // package variable, field or other local is called, nothing unresolved is, and
 // no function or package variable holding one is named as a value.
 var locklessCallees = map[string][]string{
-	"refuseBeforeLockNames": {"os.Lstat", "errors.Is", "localcell.acquireLock", "(*localcell.operationLock).Close", "(*localcell.Cell).path",
+	"refuseBeforeLockNames": {"os.Lstat", "errors.Is", "context.Background", "localcell.acquireLock", "(*localcell.operationLock).Close", "(*localcell.Cell).path",
 		"(*localcell.Cell).validateRoot", "(*localcell.Cell).recoveryDir", "param admit"},
 	"admitCheckpointDry": {"errors.Is", "(*localcell.Cell).checkpointOps", "(*localcell.Cell).admitCheckpoint"},
 	"admitDeleteCheckpoint": {"os.Lstat", "os.ReadDir", "errors.Is", "localcell.privateDir", "localcell.checkpointLeftover",
@@ -587,9 +587,9 @@ func TestCheckpointLocklessSourceContract(t *testing.T) {
 	for _, row := range []struct{ name, before, after, key string }{
 		{"control", "", "", ""},
 		{"gate_removed", "\tif (owner == nil && run == nil) || c.validateRoot(false) != nil {\n\t\treturn nil\n\t}\n", "", "lockless_order"},
-		{"acquire_creates", "held, err := acquireLock(c.cfg.Root, false)", "held, err := acquireLock(c.cfg.Root, true)", "lockless_order"},
+		{"acquire_creates", "held, err := acquireLock(context.Background(), c.cfg.Root, false)", "held, err := acquireLock(context.Background(), c.cfg.Root, true)", "lockless_order"},
 		{"fence_helper", "if _, err := os.Lstat(c.path(\"journal\", \"maintenance.json\")); !errors.Is(err, fs.ErrNotExist) {\n\t\treturn nil", "if err := c.maintenanceFenceAllows(0); err != nil {\n\t\treturn err", "lockless_writer:refuseBeforeLockNames"},
-		{"classified", "acquireLock(c.cfg.Root, false)\n\tif err != nil {\n\t\treturn nil", "acquireLock(c.cfg.Root, false)\n\tif err != nil {\n\t\treturn classifyOwnershipFailure(c.cfg.Root, err)", "lockless_writer:refuseBeforeLockNames"},
+		{"classified", "acquireLock(context.Background(), c.cfg.Root, false)\n\tif err != nil {\n\t\treturn nil", "acquireLock(context.Background(), c.cfg.Root, false)\n\tif err != nil {\n\t\treturn classifyOwnershipFailure(c.cfg.Root, err)", "lockless_writer:refuseBeforeLockNames"},
 		{"fence_refuses", "\"maintenance.json\")); !errors.Is(err, fs.ErrNotExist) {\n\t\treturn nil", "\"maintenance.json\")); !errors.Is(err, fs.ErrNotExist) {\n\t\treturn errMaintenanceFenceActive", "lockless_defer"},
 		{"control_kept", "\tops.control = func(context.Context) (pgControlData, error) { return pgControlData{}, errCheckpointDryAdmitted }\n", "", "lockless_control"},
 		{"hold_in_admission", "\treturn nil\n}\n\nfunc (c *Cell) deleteCheckpointLocked(", "\t_, _, _ = c.holdCheckpoint(options.CheckpointID)\n\treturn nil\n}\n\nfunc (c *Cell) deleteCheckpointLocked(", "lockless_writer:admitDeleteCheckpoint"},

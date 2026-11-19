@@ -298,7 +298,7 @@ func (c *Cell) refuseBeforeLockNames(admit func() error) error {
 	// No create. Its not-exists (no owner lock, no run/, no run lock) stand on
 	// validateRoot just above: the root and any run are real private
 	// directories, so a file at run was refused there, on Windows too.
-	held, err := acquireLock(c.cfg.Root, false)
+	held, err := acquireLock(context.Background(), c.cfg.Root, false)
 	if err != nil {
 		return nil
 	}
@@ -1049,9 +1049,9 @@ var errCheckpointWitnessIrregular = errors.New("local cell checkpoint witness is
 // stands there examined and not a regular file (its Lstat after a failed open,
 // or the opened handle's stat), or its whole bounded content read and not that
 // witness. Every other open, inspect or read failure is returned, a failed
-// stat of the opened handle too.
-func checkpointComplete(dir, checkpointID string) (checkpointWitness, bool, error) {
-	f, err := openRegular(filepath.Join(dir, checkpointWitnessName), errCheckpointWitnessUnread, errCheckpointWitnessIrregular, errCheckpointWitnessUnread)
+// stat of the opened handle too, and a lease wait that ctx ended.
+func checkpointComplete(ctx context.Context, dir, checkpointID string) (checkpointWitness, bool, error) {
+	f, err := openRegular(ctx, filepath.Join(dir, checkpointWitnessName), errCheckpointWitnessUnread, errCheckpointWitnessIrregular, errCheckpointWitnessUnread)
 	if errors.Is(err, os.ErrNotExist) || errors.Is(err, errCheckpointWitnessIrregular) {
 		return checkpointWitness{}, false, nil
 	} else if err != nil {
@@ -1097,7 +1097,7 @@ func (c *Cell) listCheckpoints() ([]CheckpointSummary, int, error) {
 			continue
 		}
 		summary := CheckpointSummary{ID: entry.Name()}
-		witness, complete, err := checkpointComplete(dir, entry.Name())
+		witness, complete, err := checkpointComplete(context.Background(), dir, entry.Name())
 		if err != nil {
 			// A witness that may exist and was not read is never listed.
 			return nil, 0, err

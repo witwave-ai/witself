@@ -2,6 +2,7 @@ package localcell
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -28,14 +29,17 @@ func (f maintenanceFence) valid() bool {
 	return f.Generation > 0 && validUpdateOperationID(f.OperationID) && !f.Since.IsZero()
 }
 
-func (c *Cell) readMaintenanceFence() (*maintenanceFence, error) {
-	return c.readMaintenanceFenceWith(readMaintenanceFenceJSON)
+func (c *Cell) readMaintenanceFence(ctx context.Context) (*maintenanceFence, error) {
+	return c.readMaintenanceFenceWith(func(path string, dst any) error { return readMaintenanceFenceJSON(ctx, path, dst) })
 }
 
-func readMaintenanceFenceJSON(path string, dst any) error {
+// readMaintenanceFenceJSON returns a wait that ctx ended as its cut, never refused.
+func readMaintenanceFenceJSON(ctx context.Context, path string, dst any) error {
 	refused := errors.New("cannot open local cell record")
-	f, err := openRegular(path, refused, refused, refused)
-	if err != nil {
+	f, err := openRegular(ctx, path, refused, refused, refused)
+	if cut := (*leaseWaitCut)(nil); errors.As(err, &cut) {
+		return cut
+	} else if err != nil {
 		return refused
 	}
 	defer func() { _ = f.Close() }()
@@ -113,6 +117,7 @@ func checkMaintenanceFenceShape(data []byte) error {
 // fences. An invalid parent without an observed leaf returns the original parent
 // error separately, so callers can preserve their legacy error ordering.
 // Once observed, a fence disappearing during validation is always refused.
+// A read that a lease wait's context ended returns its cut, never an active fence.
 func (c *Cell) readMaintenanceFenceWith(read func(string, any) error) (*maintenanceFence, error) {
 	path := c.path("journal", "maintenance.json")
 	info, leafErr := os.Lstat(path)
@@ -136,7 +141,9 @@ func (c *Cell) readMaintenanceFenceWith(read func(string, any) error) (*maintena
 		return nil, errMaintenanceFenceActive
 	}
 	var fence maintenanceFence
-	if err := read(path, &fence); err != nil || !fence.valid() {
+	if err := read(path, &fence); errors.As(err, new(*leaseWaitCut)) {
+		return nil, err
+	} else if err != nil || !fence.valid() {
 		return nil, errMaintenanceFenceActive
 	}
 	return &fence, nil
@@ -152,7 +159,7 @@ func (c *Cell) readMaintenanceFenceWith(read func(string, any) error) (*maintena
 // Zero denotes an ordinary caller; a positive generation requires an exact
 // durable fence match, including when no fence exists anymore.
 func (c *Cell) maintenanceFenceAllows(generation int) error {
-	fence, err := c.readMaintenanceFence()
+	fence, err := c.readMaintenanceFence(context.Background())
 	if err != nil {
 		return err
 	}

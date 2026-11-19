@@ -23,7 +23,7 @@ var leaseSide = map[string]struct {
 	lease int
 	call  func(string) error
 }{"reader": {unix.F_WRLCK, func(name string) error {
-	f, err := openRegular(name, errWriterFailed, errWriterIrregular, errWriterFailed)
+	f, err := openRegular(context.Background(), name, errWriterFailed, errWriterIrregular, errWriterFailed)
 	_ = f.Close()
 	return err
 }}, "writer": {unix.F_RDLCK, writerOpenRow}}

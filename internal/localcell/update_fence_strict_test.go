@@ -2,6 +2,7 @@ package localcell
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"os"
 	"reflect"
@@ -165,7 +166,7 @@ func TestUpdateFenceStrictDecoding(t *testing.T) {
 			}
 			// The root snapshot includes the leaf bytes and every journal entry.
 			before := serviceMaintenanceSnapshot(t, c)
-			got, err := c.readMaintenanceFence()
+			got, err := c.readMaintenanceFence(context.Background())
 			if fixture.reader {
 				if err != nil || got == nil || *got != fixture.want {
 					t.Error("Reader level did not return the exact expected fields")

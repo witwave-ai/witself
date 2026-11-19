@@ -1,6 +1,7 @@
 package localcell
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base32"
 	"encoding/json"
@@ -106,7 +107,7 @@ func (c *Cell) readServiceControlEndpointRecord() (endpoint serviceControlEndpoi
 	if privateDir(c.path("service"), false) != nil {
 		return serviceControlEndpointRecord{}, serviceEndpointRefused("record")
 	}
-	f, err := openServiceRecord(c.path("service", "control-endpoint.json"), serviceEndpointRefused("record"))
+	f, err := openServiceRecord(context.Background(), c.path("service", "control-endpoint.json"), serviceEndpointRefused("record"))
 	if err != nil {
 		return serviceControlEndpointRecord{}, serviceEndpointRefused("record")
 	}

@@ -183,7 +183,7 @@ func serviceRestartStoppedArtifacts(t *testing.T, c *Cell, d ServiceDescriptor, 
 			t.Fatal("restart fixture retained a record without private ownership")
 		}
 	}
-	operation, err := acquireLock(c.cfg.Root, false)
+	operation, err := acquireLock(context.Background(), c.cfg.Root, false)
 	if err != nil || operation == nil {
 		t.Fatal("restart fixture shutdown retained an operation lock")
 	}

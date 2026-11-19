@@ -341,7 +341,7 @@ reinstall.go
 	(*Cell).reinstallLocked writeAtomic
 	(*Cell).startRetainedPostgres (*Cell).bindServiceProcessBoot
 removal_retention.go
-	import errors os time
+	import context errors os time
 	(*Cell).finishRetainedRemoval (*Cell).journal x3 openRegularWriter syncDirectory writeAtomic x2
 	(*Cell).retainRemoval writeAtomic
 rollback_policy.go
@@ -375,7 +375,7 @@ service_control.go
 	startServiceControlServer (*os.File).Write
 	writeServiceControlResponse (*os.File).Write
 service_control_endpoint.go
-	import crypto/rand encoding/base32 encoding/json io os strings
+	import context crypto/rand encoding/base32 encoding/json io os strings
 	(*Cell).publishServiceControlEndpointWithBoot readJSON writeAtomic
 	(*Cell).readServiceControlEndpointRecord openServiceRecord privateDir
 	(*Cell).readServiceControlEndpointWithBoot readJSON
@@ -530,12 +530,12 @@ types.go
 	import context errors github.com/witwave-ai/witself/internal/runtimeconfig net net/http os path/filepath sync time
 	CanonicalRoot path/filepath.EvalSymlinks
 update_fence.go
-	import bytes encoding/json errors io os time
+	import bytes context encoding/json errors io os time
 	(*Cell).readMaintenanceFence readMaintenanceFenceJSON
 	(*Cell).readMaintenanceFenceWith privateDir
 	readMaintenanceFenceJSON openRegular
 update_record.go
-	import bytes encoding/hex encoding/json errors io os strings time
+	import bytes context encoding/hex encoding/json errors io os strings time
 	(*Cell).appendUpdateJournalEntry (*os.File).Write openPrivateFile syncDirectory
 	(*Cell).authenticateUpdateInstallation privateDir
 	(*Cell).readDerivedUpdateRecord openServiceRecord

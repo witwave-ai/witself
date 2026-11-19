@@ -22,7 +22,7 @@ import (
 var errWriterIrregular, errWriterFailed = errors.New("writer row irregular"), errors.New("writer row failed")
 
 func writerOpenRow(name string) error {
-	f, err := openRegularWriter(name, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600, errWriterIrregular, errWriterFailed)
+	f, err := openRegularWriter(context.Background(), name, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600, errWriterIrregular, errWriterFailed)
 	if err == nil {
 		_ = f.Close()
 	}
@@ -135,7 +135,7 @@ func TestWriterOpenRegular(t *testing.T) {
 			}
 			var f *os.File
 			err := readerWatchdog(t, func() (err error) {
-				f, err = openRegularWriter(name, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600, errWriterIrregular, errWriterFailed)
+				f, err = openRegularWriter(context.Background(), name, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600, errWriterIrregular, errWriterFailed)
 				return err
 			}, func() {})
 			defer func() { _ = f.Close() }()

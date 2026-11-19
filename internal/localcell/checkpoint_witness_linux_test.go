@@ -3,6 +3,7 @@
 package localcell
 
 import (
+	"context"
 	"errors"
 	"path/filepath"
 	"reflect"
@@ -28,7 +29,7 @@ func TestCheckpointWitnessLease(t *testing.T) {
 			dir, before, controls := c.path("recovery", id), checkpointTreeState(t, c), r.calls["control"]
 			lease := leaseTaken(t, leaseHolder(t, holder, unix.F_WRLCK), filepath.Join(dir, checkpointWitnessName))
 			complete := false
-			read := readerWatchdog(t, func() (err error) { _, complete, err = checkpointComplete(dir, id); return err }, lease.release)
+			read := readerWatchdog(t, func() (err error) { _, complete, err = checkpointComplete(context.Background(), dir, id); return err }, lease.release)
 			inspected := readerWatchdog(t, func() error { _, err := c.Inspect(t.Context()); return err }, lease.release)
 			created := readerWatchdog(t, func() error { return c.Checkpoint(t.Context(), checkpointOptions(f)) }, lease.release)
 			if holder == "lets_go" {
