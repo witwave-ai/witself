@@ -73,6 +73,17 @@ func TestDrillReservePlatform(t *testing.T) {
 			}
 		}
 	})
+	// N9: a directory whose new files inherit compression or encryption, beside every other attribute.
+	t.Run("windows_inherits", func(t *testing.T) {
+		for index, row := range []struct {
+			attributes uint32
+			want       bool
+		}{{0x10, false}, {0x10 | 0x800, true}, {0x10 | 0x4000, true}, {0x20 | 0x80, false}, {0x10 | 0x200 | 0x400 | 0x1000 | 0x8000 | 0x400000, false}} {
+			if drillWindowsInherits(row.attributes) != row.want {
+				t.Fatalf("the inherited attribute decision misjudged case %d", index)
+			}
+		}
+	})
 	t.Run("paths_fit", func(t *testing.T) {
 		base := string(filepath.Separator) + strings.Repeat("b", 150)
 		for index, row := range []struct {

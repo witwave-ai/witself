@@ -20,3 +20,4 @@ func drillPlatformAllocate(*os.File, uint64, uint64) error {
 }
 func drillPlatformVerify(*os.File, uint64) error { return drillStorageError{reason: "unsupported_fs"} }
 func drillPlatformRefusal(error) string          { return "" }
+func drillPlatformInherits(*os.File) bool        { return false }

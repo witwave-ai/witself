@@ -154,6 +154,10 @@ func drillPlatformAllocate(f *os.File, offset, length uint64) error {
 	return unix.Fallocate(int(f.Fd()), 0, int64(offset), int64(length))
 }
 
+// drillPlatformInherits: on ext4 no attribute a new file inherits from its
+// directory keeps the proof from mapping its extents.
+func drillPlatformInherits(*os.File) bool { return false }
+
 // drillPlatformRefusal: no space, a quota or the file size limit is
 // storage_exhausted; a file without extents (ext2 or ext3 format) is unsupported_fs.
 func drillPlatformRefusal(err error) string {
