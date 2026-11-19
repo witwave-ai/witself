@@ -62,17 +62,20 @@ func drillStorageRound(size, unit uint64) uint64 {
 func drillCloneBytes(entries []checkpointInventoryEntry, unit uint64) uint64 {
 	total := drillStorageAdd(drillStorageFixed, drillStorageAdd(unit, unit))
 	for _, entry := range entries {
-		total = drillStorageAdd(total, drillStorageEntry)
-		switch {
-		case entry.Type == "dir":
-			total = drillStorageAdd(total, unit)
-		case entry.Type == "file" && entry.Size != nil && *entry.Size >= 0:
-			total = drillStorageAdd(total, drillStorageRound(uint64(*entry.Size), unit))
-		default:
-			return math.MaxUint64
-		}
+		total = drillStorageAdd(total, drillCloneShare(entry, unit))
 	}
 	return total
+}
+
+// drillCloneShare is one entry's share of drillCloneBytes, which the reservation also counts once the entry is made.
+func drillCloneShare(entry checkpointInventoryEntry, unit uint64) uint64 {
+	switch {
+	case entry.Type == "dir":
+		return drillStorageAdd(drillStorageEntry, unit)
+	case entry.Type == "file" && entry.Size != nil && *entry.Size >= 0:
+		return drillStorageAdd(drillStorageEntry, drillStorageRound(uint64(*entry.Size), unit))
+	}
+	return math.MaxUint64
 }
 
 // drillStorageAdmits reports whether free covers need plus the floor.

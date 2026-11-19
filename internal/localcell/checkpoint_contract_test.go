@@ -382,7 +382,8 @@ var drillReserveCalls = map[string]map[string]int{"drill_reserve_linux.go": {"un
 		"windows.GetFileInformationByHandle(handle, &info)": 1, "windows.GetFileInformationByHandle(windows.Handle(held.Fd()), &info)": 1},
 	"drill_reserve.go": {"parent.OpenRoot(filepath.FromSlash(name) + drillRootHere)": 1, `root.Stat(".")`: 1, "f.Stat()": 1, "os.Lstat(c.recoveryDir())": 1,
 		`boundary.Open(".")`: 1, "reopened.Stat()": 1, "drill.Lstat(drillReservePending)": 1, "drill.Lstat(drillRootRecordName)": 1, "f.Write(data)": 1,
-		"drill.Rename(drillReservePending, drillRootRecordName)": 1, "drill.Remove(drillReservePending)": 1}}
+		"drill.Rename(drillReservePending, drillRootRecordName)": 1, "drill.Remove(drillReservePending)": 1, "drillRootNames(drill)": 1,
+		"f.Sync()": 2, "drillRootSync(boundary)": 1, "drillRootSync(drill)": 2, "drillRootSync(sub)": 1}} // G1: every fsync and directory sync
 
 // drillReserveNamed are the methods that resolve or change a name; in every reservation
 // file each such call must be a listed text and none is a value (drill_reserve_unlisted:<file>:<text>).
@@ -394,9 +395,27 @@ var drillReserveNamed = []string{"Open", "OpenFile", "OpenRoot", "Stat", "Lstat"
 var drillReserveRootSteps = []string{"drillPlatformOpen(parent, name, true)", "return nil, err", "parent.OpenRoot(filepath.FromSlash(name) + drillRootHere)",
 	`return nil, drillStorageError{reason: "boundary_refused"}`, `root.Stat(".")`, `return nil, drillStorageError{reason: "boundary_refused"}`, "return root, nil"}
 
+// drillReserveFileProof are drillReserveFile's last statements, in order (G5): the reopen through the walk, the identity
+// compared while the writer is open, the writer closed, then the proof on the reopened handle (drill_reserve_file_proof).
+var drillReserveFileProof = []string{`c.drillRootStage("reserve_verify")`, "reopened, err := drillPlatformOpen(drill, name, false)",
+	`if err != nil { _ = f.Close() return "allocation_unproved" }`, "defer func() { _ = reopened.Close() }()", "info, err := reopened.Stat()",
+	"same := drillReserveSame(f, info, err)", `if closed := f.Close(); !same || closed != nil || drillPlatformVerify(reopened, size) != nil { return "allocation_unproved" }`, `return ""`}
+
+// drillReserveFileTail is the last n statements of drillReserveFile, each with its white space collapsed.
+func drillReserveFileTail(file *ast.File, source string, n int) (tail []string) {
+	for _, declaration := range file.Decls {
+		if fn, ok := declaration.(*ast.FuncDecl); ok && fn.Name.Name == "drillReserveFile" && fn.Body != nil {
+			for _, statement := range fn.Body.List[max(0, len(fn.Body.List)-n):] {
+				tail = append(tail, strings.Join(strings.Fields(strings.ReplaceAll(source, "\r\n", "\n")[statement.Pos()-1:statement.End()-1]), " "))
+			}
+		}
+	}
+	return tail
+}
+
 // drillRootShared are the drill_root.go declarations another checkpoint file may name.
 var drillRootShared = map[string][]string{"drill_storage.go": {"drillRootHere", "drillRootNames"},
-	"drill_reserve.go": {"drillRootHere", "drillRootRecordName", "drillRootStage", "drillRootSync", "deleteDrillLocked"}}
+	"drill_reserve.go": {"drillRootHere", "drillRootNames", "drillRootRecordName", "drillRootStage", "drillRootSync", "deleteDrillLocked"}}
 
 // (d) no drill storage file selects a drillStorageWrites name, called or not, but
 // (b)'s os.OpenRoot, names a drillStorageHelpers name, or resolves another ntdll procedure.
@@ -737,6 +756,8 @@ func checkpointSourceContract(sources map[string]string) []string {
 			owner := ""
 			if fn, ok := declaration.(*ast.FuncDecl); ok {
 				owner = fn.Name.Name
+				// G13: an init could wire the dark reservation into a package variable another file calls through.
+				failures["drill_reserve_init:"+name] = failures["drill_reserve_init:"+name] || strings.HasPrefix(name, "drill_reserve") && fn.Recv == nil && owner == "init"
 			}
 			constantNames := map[*ast.Ident]bool{}
 			declarationNames := map[ast.Node]string{}
@@ -1034,6 +1055,8 @@ func checkpointSourceContract(sources map[string]string) []string {
 	failures["drill_storage_openroot_count"], failures["drill_storage_proc"] = storageOpenRoots != 1, !slices.Equal(storageProcs, []string{drillStorageProc})
 	failures["drill_reserve_openroot_count"] = reserveOpenRoots != 1
 	failures["drill_reserve_root_returns"] = !slices.Equal(reserveSteps, drillReserveRootSteps)
+	failures["drill_reserve_file_proof"] = parsed["drill_reserve.go"] == nil ||
+		!slices.Equal(drillReserveFileTail(parsed["drill_reserve.go"], sources["drill_reserve.go"], len(drillReserveFileProof)), drillReserveFileProof)
 	failures["journal_create_count"], failures["witness_name_spelling"], failures["inspect_summaries"] = journalCreates != 1, witnessSpellings != 1, inspectSummaries != 1
 	checkpointHeldContract(parsed, failures)
 	checkpointWaitingContract(parsed, failures)
@@ -1100,6 +1123,10 @@ func TestCheckpointSourceContract(t *testing.T) {
 		{"drill_reserve_root_raw", "drill_reserve.go", "drillRootHere)\n\tif err != nil {\n\t\treturn nil, drillStorageError{reason: \"boundary_refused\"}",
 			"drillRootHere)\n\tif err != nil {\n\t\treturn nil, err", "drill_reserve_root_returns"},
 		// The sequence (G4B2): one held recovery/, every name-resolving or mutating call by exact text, and no caller.
+		{"drill_reserve_sync_dropped", "drill_reserve.go", "errors.Join(err, f.Sync())", "errors.Join(err, nil)", "drill_reserve_call:drill_reserve.go:f.Sync()"}, // G1
+		{"drill_reserve_proof_writer", "drill_reserve.go", "if closed := f.Close(); !same || closed != nil || drillPlatformVerify(reopened, size) != nil {",
+			"if verified := drillPlatformVerify(f, size); f.Close() != nil || !same || verified != nil {", "drill_reserve_file_proof"}, // G5
+		{"drill_reserve_init", "drill_reserve.go", reserveSame, "func init() { _ = drillReserveChunk }\n\n" + reserveSame, "drill_reserve_init:drill_reserve.go"}, // G13
 		{"drill_reserve_second_openroot", "drill_reserve.go", reserveSame, "func (c *Cell) drillReserveProbe() { _, _ = os.OpenRoot(c.recoveryDir() + drillRootHere) }\n\n" + reserveSame,
 			"drill_reserve_openroot_count"},
 		{"drill_reserve_openroot_plain", "drill_reserve.go", "os.OpenRoot(c.recoveryDir() + drillRootHere)", "os.OpenRoot(c.recoveryDir())", "drill_reserve_openroot_target"},

@@ -65,8 +65,8 @@ func drillPlatformAllocate(f *os.File, offset, length uint64) error {
 // drillPlatformRefusal: the disk-full, quota and file-too-large codes are
 // storage_exhausted. NTFS answers an end of file above its maximum file size
 // with STATUS_INVALID_PARAMETER (ERROR_INVALID_PARAMETER), which is not mapped:
-// there a size limit is the caller's own reason, unreachable after admission
-// because such a file cannot fit the volume.
+// it is reachable, admission bounding the allowance, the caller's own value,
+// by MaxInt64 only, and the caller's reason, allocation_unproved, stands.
 func drillPlatformRefusal(err error) string {
 	switch {
 	case errors.Is(err, windows.ERROR_DISK_FULL), errors.Is(err, windows.ERROR_HANDLE_DISK_FULL),

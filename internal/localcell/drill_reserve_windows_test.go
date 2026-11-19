@@ -401,17 +401,27 @@ func drillReserveWindowsNone(t *testing.T, f *os.File, message string) {
 }
 
 // drillReserveFull is the platform's raw lack of space; drillReserveSparse marks a file sparse through its own
-// writer at its first chunk (FILE_SET_SPARSE_BUFFER{TRUE}, sparse_attribute's control) and sets its end.
+// writer at its first chunk (FILE_SET_SPARSE_BUFFER{TRUE}, sparse_attribute's control) and sets its end; a control
+// that fails fails the row, which would otherwise pass on the unmapped error without a sparse file (G9).
 const drillReserveFull = windows.ERROR_DISK_FULL
 
-func drillReserveSparse(f *os.File, offset, length uint64) error {
-	sparse, returned := byte(1), uint32(0)
-	if offset == 0 {
-		if err := windows.DeviceIoControl(windows.Handle(f.Fd()), windows.FSCTL_SET_SPARSE, &sparse, 1, nil, 0, &returned, nil); err != nil {
-			return err
+func drillReserveSparse(t *testing.T) func(f *os.File, offset, length uint64) error {
+	return func(f *os.File, offset, length uint64) error {
+		sparse, returned := byte(1), uint32(0)
+		if offset == 0 {
+			err := windows.DeviceIoControl(windows.Handle(f.Fd()), windows.FSCTL_SET_SPARSE, &sparse, 1, nil, 0, &returned, nil)
+			drillReserveWindowsCheck(t, err == nil, err, "the sparse fixture could not mark the file sparse")
 		}
+		return f.Truncate(int64(offset + length))
 	}
-	return f.Truncate(int64(offset + length))
+}
+
+// drillReserveReplace removes the empty directory to and renames from to its name: on NTFS a rename cannot replace a
+// directory, a removal and a rename in the same window can.
+func drillReserveReplace(t *testing.T, from, to string) {
+	t.Helper()
+	err := errors.Join(os.Remove(to), os.Rename(from, to))
+	drillReserveWindowsCheck(t, err == nil, err, "cannot put the replacing directory at the drill directory's name")
 }
 
 // drillReserveLink moves the object at name to target through a root held on its directory (the toolchain's rename
@@ -476,6 +486,44 @@ func TestDrillReservationWindows(t *testing.T) {
 			drillReserveWindowsCheck(t, reflect.DeepEqual(r.before, checkpointTreeState(t, r.c)), nil, "the discard left the tree changed")
 		})
 	}
+	// G6: the file under proof, its writer open sharing delete, replaced at reserve_verify by a private file of its size
+	// whose end of file was set, renamed over it through a root held on its directory (the toolchain's POSIX rename).
+	t.Run("verify_replaced", func(t *testing.T) {
+		r := drillReserveStart(t)
+		entry := r.file()
+		name := filepath.Join(r.fixed(), drillReserveClone, filepath.FromSlash(entry.Path))
+		r.on["reserve_verify"] = func() {
+			parent, err := os.OpenRoot(filepath.Dir(name))
+			drillReserveWindowsCheck(t, err == nil, err, "cannot hold the directory of the file under proof")
+			defer func() { _ = parent.Close() }()
+			other := drillReserveWindowsFile(t, parent, filepath.Base(name)+".other", uint64(*entry.Size))
+			drillReserveWindowsCheck(t, other.Close() == nil, nil, "cannot close the replacing file")
+			err = parent.Rename(filepath.Base(name)+".other", filepath.Base(name))
+			drillReserveWindowsCheck(t, err == nil, err, "cannot rename the replacing file over the file under proof")
+		}
+		drillID, err := r.reserve()
+		listing, listErr := r.c.drillRootList()
+		drillReserveWindowsCheck(t, err == error(drillStorageError{reason: "allocation_unproved"}), err, "a file replaced under its proof was not refused as unproved")
+		drillReserveWindowsCheck(t, drillID == "", nil, "a discarded reservation returned an identifier")
+		drillReserveWindowsCheck(t, r.stages["directory"] > 0, nil, "the drill directory was not discarded")
+		drillReserveWindowsCheck(t, listErr == nil && reflect.DeepEqual(listing, drillRootListing{}), listErr, "the discard left a drill listed")
+		drillReserveWindowsCheck(t, reflect.DeepEqual(r.before, checkpointTreeState(t, r.c)), nil, "the discard left the tree changed")
+	})
+	// G7: an entry whose drill path, seven units longer than below the checkpoint, is the first past the bound.
+	t.Run("path_bound", func(t *testing.T) {
+		r, name := drillReserveStart(t), "zz-"
+		for sample := filepath.Join(r.c.recoveryDir(), "drill_"+strings.Repeat("a", 16), drillReserveClone); checkpointPathFits(filepath.Join(sample, name), false); {
+			name += "l"
+		}
+		dir, err := r.c.checkpointDir(r.id)
+		drillReserveWindowsCheck(t, err == nil && checkpointPathFits(filepath.Join(dir, name), false), err, "the row's entry does not fit below the checkpoint")
+		r.unsound(name)
+		drillID, err := r.reserve()
+		drillReserveWindowsCheck(t, err == error(drillStorageError{reason: "path_too_long"}), err, "an entry past the drill's path bound was not refused")
+		drillReserveWindowsCheck(t, drillID == "", nil, "a refused reservation returned an identifier")
+		drillReserveWindowsCheck(t, r.stages["reserve_mkdir"] == 0, nil, "an entry past the drill's path bound was refused only after a write")
+		drillReserveWindowsCheck(t, reflect.DeepEqual(r.before, checkpointTreeState(t, r.c)), nil, "the refused reservation changed the tree")
+	})
 	// N9: a compressed recovery/ (FSCTL_SET_COMPRESSION, COMPRESSION_FORMAT_DEFAULT, as compressed_refused) is refused by
 	// the reservation's admission with the proof's reason before any write; the volume is faked so that G4A's
 	// identification, which refuses a compressed directory as unsupported_fs, does not answer first.

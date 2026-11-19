@@ -544,8 +544,15 @@ func TestDrillReservePlatformLinux(t *testing.T) {
 // drillReserveFull is the platform's raw lack of space; drillReserveSparse sets a file's end without allocating it.
 const drillReserveFull = unix.ENOSPC
 
-func drillReserveSparse(f *os.File, offset, length uint64) error {
-	return f.Truncate(int64(offset + length))
+func drillReserveSparse(*testing.T) func(f *os.File, offset, length uint64) error {
+	return func(f *os.File, offset, length uint64) error { return f.Truncate(int64(offset + length)) }
+}
+
+// drillReserveReplace renames the directory from over the empty directory to by the system call: os.Rename refuses an
+// existing directory as its target.
+func drillReserveReplace(t *testing.T, from, to string) {
+	t.Helper()
+	drillAssert(t, unix.Rename(from, to) == nil, "cannot rename the replacing directory over the drill directory")
 }
 
 // drillReserveLink moves the object at name to target and plants at name a relative symbolic link to it.

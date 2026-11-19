@@ -249,7 +249,7 @@ var drillReserveCallees = []string{"errors.As", "errors.Is", "(*os.Root).Open", 
 	"(*localcell.Cell).checkpointDir", "(*localcell.Cell).checkpointOps", "(*localcell.Cell).recoveryDir", "localcell.readManifest",
 	"localcell.verifyCheckpointDocuments", "localcell.checkpointVerifyShape", "localcell.drillCloneBytes", "localcell.drillStorageAdmits",
 	"localcell.drillValidOperationID", "localcell.drillValidID", "localcell.drillParseRecord", "(*localcell.Cell).drillRootStage", "localcell.drillRootSync",
-	"(*localcell.Cell).deleteDrillLocked"}
+	"(*localcell.Cell).deleteDrillLocked", "localcell.drillCloneShare", "localcell.drillStorageRound", "localcell.drillRootNames", "path.Dir", "io/fs.ErrExist"}
 
 // drillReservePlatformCallees hold the platform files (drill_reserve_<system>.go) to G4B1's list and the two decisions of
 // drill_reserve.go they call: a name only drill_reserve.go needs stays refused in them (drill_reserve__callee:<file>:<name>).
@@ -310,8 +310,8 @@ func drillCalleeReferences(sources map[string]string, prefix string, allowed []s
 			switch object := object.(type) {
 			case *types.Func:
 				key = object.FullName()
-			case *types.Var:
-				if _, function := object.Type().Underlying().(*types.Signature); function && object.Pkg() != nil {
+			case *types.Var: // a function-typed variable or field; from a reservation file any package variable (G13)
+				if _, function := object.Type().Underlying().(*types.Signature); object.Pkg() != nil && (function || strings.HasPrefix(prefix, "drill_reserve") && object.Parent() == object.Pkg().Scope()) {
 					key = object.Pkg().Path() + "." + object.Name()
 				}
 			}
@@ -383,6 +383,8 @@ func TestDrillReserveSourceContract(t *testing.T) {
 		{"lock", "localcell.acquireLock", "func (c *Cell) drillReserveProbe() { _, _ = acquireLock(c.cfg.Root, true) }\n\n"},
 		{"remove_all", "(*os.Root).RemoveAll", "func drillReserveProbe(r *os.Root) { _ = r.RemoveAll(\"x\") }\n\n"},
 		{"truncate", "(*os.File).Truncate", "func drillReserveProbe(f *os.File) { _ = f.Truncate(0) }\n\n"},
+		{"package_variable", "localcell.checkpointIDPattern", "func drillReserveProbe() { checkpointIDPattern = nil }\n\n"}, // G13: any type
+		{"variable_initializer", "localcell.checkpointIDPattern", "var drillReserveProbe = func() int { checkpointIDPattern = nil; return 0 }()\n\n"},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			var want []string

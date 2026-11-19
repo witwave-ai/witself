@@ -153,7 +153,8 @@ func drillReserveRoot(parent *os.Root, name string) (*os.Root, error) {
 // reopened handle after the writer's close; it then syncs every created
 // directory, deepest first. The proof shows the space allocated by the file
 // system and claims nothing about the device below it. On any failure after
-// the directory exists it discards the drill by exact-identifier deletion;
+// the directory exists it discards the drill by exact-identifier deletion,
+// unless the held directory is not the empty one it made (refused, kept);
 // when that fails the error is drillCleanupError and the identifier is
 // returned. A crash leaves the drill visible and charged until that deletion.
 // No journal entry is written and the checkpoint storage rule is unchanged.
@@ -165,6 +166,7 @@ func (c *Cell) reserveDrillLocked(ctx context.Context, checkpointID, operationID
 	if err != nil {
 		return "", err
 	}
+	c.drillRootStage("reserve_boundary")
 	boundary, err := os.OpenRoot(c.recoveryDir() + drillRootHere)
 	if err != nil {
 		return "", drillStorageError{reason: "boundary_refused"}
@@ -221,6 +223,14 @@ func (c *Cell) reserveDrillLocked(ctx context.Context, checkpointID, operationID
 		drillCloneBytes(inventory.Entries, volume.unit) != estimate.clone {
 		return "", drillStorageError{reason: "checkpoint_unverified"}
 	}
+	// Each entry's parent is a directory listed before it, or the tree cannot be made.
+	listed := map[string]bool{".": true}
+	for _, entry := range inventory.Entries {
+		if !listed[path.Dir(entry.Path)] {
+			return "", drillStorageError{reason: "checkpoint_unverified"}
+		}
+		listed[entry.Path] = entry.Type == "dir"
+	}
 	if runtime.GOOS == "windows" && !drillReservePathsFit(c.recoveryDir(), inventory.Entries) {
 		return "", drillStorageError{reason: "path_too_long"}
 	}
@@ -237,6 +247,9 @@ func (c *Cell) reserveDrillLocked(ctx context.Context, checkpointID, operationID
 	}
 	if _, err := drillParseRecord(data); err != nil {
 		return "", drillStorageError{reason: "checkpoint_unverified"}
+	}
+	if ctx.Err() != nil {
+		return "", drillStorageError{reason: "cancelled"}
 	}
 	c.drillRootStage("reserve_mkdir")
 	if err := drillPlatformMkdir(c, boundary, nil, drillID, ""); err != nil {
@@ -256,6 +269,10 @@ func (c *Cell) reserveDrillLocked(ctx context.Context, checkpointID, operationID
 	if drill, err = drillReserveRoot(boundary, drillID); err != nil {
 		return fail("boundary_refused")
 	}
+	// A directory put at the name since mkdir is not this call's: refused, never discarded.
+	if names, err := drillRootNames(drill); err != nil || len(names) != 0 {
+		return "", drillStorageError{reason: "allocation_collision"}
+	}
 	c.drillRootStage("reserve_record")
 	if reason := c.drillReserveRecord(boundary, drill, drillID, data); reason != "" {
 		return fail(reason)
@@ -268,7 +285,8 @@ func (c *Cell) reserveDrillLocked(ctx context.Context, checkpointID, operationID
 	if err := drillPlatformMkdir(c, boundary, drill, drillID, drillReserveClone); err != nil {
 		return fail(drillReserveReason(err, "boundary_refused"))
 	}
-	allocated := uint64(0)
+	// The estimate's own share of each step done: the drill directory, the record and clone/, then each entry.
+	counted := drillCloneBytes(nil, estimate.unit)
 	for _, entry := range inventory.Entries {
 		name := path.Join(drillReserveClone, entry.Path)
 		if entry.Type == "dir" {
@@ -276,12 +294,13 @@ func (c *Cell) reserveDrillLocked(ctx context.Context, checkpointID, operationID
 				return fail(drillReserveReason(err, "boundary_refused"))
 			}
 			created = append(created, name)
-		} else if reason := c.drillReserveFile(ctx, boundary, drill, held, drillID, name, uint64(*entry.Size), estimate.need, &allocated); reason != "" {
+		} else if reason := c.drillReserveFile(ctx, boundary, drill, held, drillID, name, uint64(*entry.Size), estimate, drillStorageAdd(counted, drillStorageEntry)); reason != "" {
 			return fail(reason)
 		}
+		counted = drillStorageAdd(counted, drillCloneShare(entry, estimate.unit))
 	}
 	c.drillRootStage("reserve_allowance")
-	if reason := c.drillReserveFile(ctx, boundary, drill, held, drillID, drillReserveAllowance, estimate.allowance, estimate.need, &allocated); reason != "" {
+	if reason := c.drillReserveFile(ctx, boundary, drill, held, drillID, drillReserveAllowance, estimate.allowance, estimate, counted); reason != "" {
 		return fail(reason)
 	}
 	c.drillRootStage("reserve_sync")
@@ -334,7 +353,10 @@ func (c *Cell) drillReserveRecord(boundary, drill *os.Root, drillID string, data
 // the writer is open, closes the writer and proves the allocation on the
 // reopened handle; it returns a closed reason or "". Each chunk starts where
 // the last one ended, so no allocation asks for an end below the current one.
-func (c *Cell) drillReserveFile(ctx context.Context, boundary, drill *os.Root, held *os.File, drillID, name string, size, need uint64, allocated *uint64) string {
+// counted is the estimate's own share of the steps done before this file's
+// chunks; the floor is re-checked against the estimate's need less counted
+// and less this file's chunks so far, rounded up to the unit.
+func (c *Cell) drillReserveFile(ctx context.Context, boundary, drill *os.Root, held *os.File, drillID, name string, size uint64, estimate drillStorageEstimate, counted uint64) string {
 	f, err := drillPlatformCreate(c, boundary, drill, drillID, name)
 	if err != nil {
 		return drillReserveReason(err, "boundary_refused")
@@ -344,18 +366,19 @@ func (c *Cell) drillReserveFile(ctx context.Context, boundary, drill *os.Root, h
 	for offset := uint64(0); offset < size && reason == ""; {
 		c.drillRootStage("reserve_chunk")
 		volume, err := drillStorageVolume(held)
+		done := drillStorageAdd(counted, drillStorageRound(offset, estimate.unit))
 		switch length := min(drillReserveChunk, size-offset); {
 		case ctx.Err() != nil:
 			reason = "cancelled"
 		case err != nil:
 			reason = drillReserveReason(err, "boundary_refused")
-		case !drillStorageAdmits(volume.free, need-min(need, *allocated)):
+		case !drillStorageAdmits(volume.free, estimate.need-min(estimate.need, done)):
 			reason = "storage_insufficient"
 		default:
 			if err := drillReserveAllocate(f, offset, length); err != nil {
 				reason = drillReserveReason(err, "allocation_unproved")
 			}
-			offset, *allocated = offset+length, drillStorageAdd(*allocated, length)
+			offset += length
 		}
 	}
 	if reason == "" && f.Sync() != nil {

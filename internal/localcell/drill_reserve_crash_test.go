@@ -188,7 +188,8 @@ func TestDrillReservationCrash(t *testing.T) {
 			r := drillReserveStart(t)
 			before := checkpointTreeState(t, r.c)
 			lines, exit := drillReserveChild(t, r, row.cut)
-			drillAssert(t, drillReserveKilled(exit) && len(lines) == 0, "the reservation's child was not killed at its cut; got ["+strings.Join(lines, ", ")+"]")
+			drillAssert(t, drillReserveKilled(exit), "the reservation's child was not killed at its cut; got ["+strings.Join(lines, ", ")+"]")
+			drillAssert(t, len(lines) == 0, "the reservation's child printed a line at its cut")
 			listing, err := r.c.drillRootList()
 			ids := []string{drillReserveCrashID}
 			want := map[string]drillRootListing{"declared": {declared: ids}, "remainder": {remainder: ids}, "unknown": {unknown: 1}}[row.kind]
