@@ -164,7 +164,7 @@ function assertLocalcellWindowsJob(ci) {
   assert.equal(expression(job.if), "needs.changes.outputs.application == 'true'");
   assert.equal(job['runs-on'], 'windows-latest');
   assert.deepEqual(job.permissions, {contents: 'read'});
-  assert.equal(job['timeout-minutes'], 45);
+  assert.equal(job['timeout-minutes'], 60);
   for (const key of ['continue-on-error', 'environment', 'env', 'services', 'secrets', 'strategy', 'defaults']) {
     assert.equal(job[key], undefined, `${label}: no ${key}`);
   }
@@ -199,7 +199,7 @@ function assertLocalcellWindowsJob(ci) {
     './scripts/ci-postgres16-windows.ps1',
     [
       "$proofJSON = Join-Path $env:RUNNER_TEMP 'lc-pg16\\proof.json'",
-      "go test -json ./internal/localcell -run '^TestRealLifecycle$' -count=1 -timeout=15m > $proofJSON 2>&1",
+      "go test -json ./internal/localcell -run '^TestRealLifecycle$' -count=1 -timeout=25m > $proofJSON 2>&1",
       '$goExit = $LASTEXITCODE',
       'node scripts/ci-go-test-json-check.mjs --input $proofJSON --diagnose --require TestRealLifecycle,TestRealLifecycle/InstallStartRestartRemove,TestRealLifecycle/TwoCellsAreIndependent,TestRealLifecycle/InterruptedStartRepair,TestRealLifecycle/WaitsForReadiness,TestRealLifecycle/InstallerPrincipals,TestRealLifecycle/RetainedReinstall,TestRealLifecycle/Checkpoint,TestRealLifecycle/CheckpointCommand',
       '$parserExit = $LASTEXITCODE',
@@ -1440,6 +1440,7 @@ const mutations = [
   ['Windows proof leaks output instead of capturing its file', data => { const step = data['ci.yml'].jobs['localcell-windows'].steps.find(step => step.name === 'Prove native PostgreSQL sixteen lifecycle'); step.run = step.run.replace(' > $proofJSON 2>&1', ''); }],
   ['Windows proof leaves its file outside the cleanup tree', data => { const step = data['ci.yml'].jobs['localcell-windows'].steps.find(step => step.name === 'Prove native PostgreSQL sixteen lifecycle'); step.run = step.run.replace('lc-pg16\\proof.json', 'proof.json'); }],
   ['Windows proof loses the separate native exit capture', data => { const step = data['ci.yml'].jobs['localcell-windows'].steps.find(step => step.name === 'Prove native PostgreSQL sixteen lifecycle'); step.run = step.run.replace('$goExit = $LASTEXITCODE', '$goExit = 0'); }],
+  ['Windows proof loses its Go limit', data => { const step = data['ci.yml'].jobs['localcell-windows'].steps.find(step => step.name === 'Prove native PostgreSQL sixteen lifecycle'); step.run = step.run.replace(' -timeout=25m', ''); }],
   ['Windows service proof step removed', data => {
     const job = data['ci.yml'].jobs['localcell-windows'];
     job.steps = job.steps.filter(step => step.name !== 'Prove native service restart or record adapter capability');
@@ -1499,6 +1500,7 @@ const mutations = [
     ['runs-on', 'ubuntu-24.04'], ['needs', []], ['permissions', {contents: 'write'}],
     ['timeout-minutes', 26], ['environment', 'production'], ['env', {WITSELF_LOCALCELL_PGBIN: 'synthetic'}],
   ].map(([key, value]) => [`Windows ${key} boundary changed`, data => { data['ci.yml'].jobs['localcell-windows'][key] = value; }]),
+  ['Windows job loses its timeout-minutes', data => { delete data['ci.yml'].jobs['localcell-windows']['timeout-minutes']; }],
   ['main pushes share a cancellation or queue group', data => { data['ci.yml'].concurrency.group = 'ci-${{ github.ref }}'; }],
   ['concurrency cancellation disabled', data => { data['ci.yml'].concurrency['cancel-in-progress'] = false; }],
   ['missing Go application dependency', data => { data['ci.yml'].jobs.go.needs = data['ci.yml'].jobs.go.needs.filter(id => id !== 'go-store'); }],
