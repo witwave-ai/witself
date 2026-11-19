@@ -142,16 +142,22 @@ doc.go
 drill_record.go
 	import bytes encoding/json errors io strings
 drill_reserve.go
-	import errors io/fs
+	import errors io/fs os path/filepath strings
+	drillReserveRoot (*os.Root).OpenRoot
 drill_reserve_linux.go
-	import errors golang.org/x/sys/unix os strings unsafe
+	import errors golang.org/x/sys/unix math os strings unsafe
 	drillPlatformAllocate golang.org/x/sys/unix.Fallocate
 	drillPlatformAt (*os.Root).Open golang.org/x/sys/unix.Openat
 	drillPlatformCreate golang.org/x/sys/unix.Openat os.NewFile
 	drillPlatformMkdir golang.org/x/sys/unix.Mkdirat
+	drillPlatformOpen golang.org/x/sys/unix.Openat os.NewFile
 	drillPlatformVerify golang.org/x/sys/unix.Syscall unsafe.Pointer
 drill_reserve_other.go
 	import os
+drill_reserve_windows.go
+	import errors github.com/witwave-ai/witself/internal/runtimeconfig golang.org/x/sys/windows math os strings unsafe
+	drillPlatformAllocate golang.org/x/sys/windows.Ftruncate
+	drillPlatformVerify unsafe.Pointer
 drill_root.go
 	import errors io os path/filepath runtime strings syscall
 	(*Cell).deleteDrillLocked (*os.Root).Open x2 (*os.Root).OpenRoot (*os.Root).Remove x2 drillRootSweep x2 os.OpenRoot
