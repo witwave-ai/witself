@@ -4,6 +4,7 @@ package localcell
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -251,7 +252,7 @@ func TestWindowsLaunchParentCrashWindows(t *testing.T) {
 	for _, stage := range []string{"created", "published", "resumed", "confirmed", "transferred"} {
 		t.Run(stage, func(t *testing.T) {
 			c, _ := unitCell(t)
-			if c.makePassword() != nil || c.journal("start", "operation", "started") != nil || c.journal("start", "server", "started") != nil {
+			if c.makePassword() != nil || c.journal(context.Background(), "start", "operation", "started") != nil || c.journal(context.Background(), "start", "server", "started") != nil {
 				t.Fatal("cannot prepare crash journal")
 			}
 			parent := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestWindowsLaunchCrashParentHelper$", "--", "localcell-launch-crash", c.cfg.Root, stage, binary)
@@ -297,7 +298,7 @@ func TestWindowsLaunchParentCrashWindows(t *testing.T) {
 			if err := c.Repair(t.Context()); err != nil {
 				t.Fatal("Repair failed to settle crashed launch")
 			}
-			progress, err := c.readJournal()
+			progress, err := c.readJournal(context.Background())
 			if err != nil || progress.pending != nil {
 				t.Fatal("Repair left launch journal interrupted")
 			}

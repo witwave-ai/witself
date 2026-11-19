@@ -203,8 +203,8 @@ func TestWriterRepairSitesRefuseSwapped(t *testing.T) {
 			name := readerJournalPath(c)
 			size, s := writerSize(name), &writerSwap{kind: kind}
 			s.put(name)
-			s.check(t, readerWatchdog(t, func() error { return c.discardJournalTail(progress) }, s.unblock), "cannot open torn local cell journal", size)
-			if c.discardJournalTail(progress) != nil || writerSize(name) != progress.durableBytes {
+			s.check(t, readerWatchdog(t, func() error { return c.discardJournalTail(context.Background(), progress) }, s.unblock), "cannot open torn local cell journal", size)
+			if c.discardJournalTail(context.Background(), progress) != nil || writerSize(name) != progress.durableBytes {
 				t.Fatal("the journal moved back was not truncated to its durable prefix")
 			}
 		})
@@ -243,7 +243,7 @@ func TestWriterAppendsStayWhole(t *testing.T) {
 				invalid = errors.Join(err, errors.New("a read was not a prefix of the next"))
 			} else {
 				last = data
-				_, invalid = c.readJournal()
+				_, invalid = c.readJournal(context.Background())
 			}
 			closeReady()
 		}
@@ -254,7 +254,7 @@ func TestWriterAppendsStayWhole(t *testing.T) {
 		for w := range 2 {
 			writers.Go(func() {
 				for n := 0; n < 50 && errs[w] == nil; n++ {
-					errs[w] = c.journalCause("install", "configure", "started", fmt.Sprintf("w%d:%d", w, n))
+					errs[w] = c.journalCause(context.Background(), "install", "configure", "started", fmt.Sprintf("w%d:%d", w, n))
 				}
 			})
 		}

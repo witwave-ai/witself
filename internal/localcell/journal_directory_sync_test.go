@@ -2,6 +2,7 @@ package localcell
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -107,7 +108,7 @@ func TestJournalDirectorySyncFirstAppendAfterFileSync(t *testing.T) {
 		t.Fatal("fresh cell fixture already has an ordinary journal")
 	}
 	trace := traceJournalDirectorySync(t, c)
-	if err := c.journal("stop", "operation", "started"); err != nil {
+	if err := c.journal(context.Background(), "stop", "operation", "started"); err != nil {
 		t.Fatal(err)
 	}
 	if !slices.Equal(trace.events, []string{"file", "directory"}) {
@@ -125,10 +126,10 @@ func TestJournalDirectorySyncSkipsExistingFile(t *testing.T) {
 	t.Run("second_append", func(t *testing.T) {
 		c, _ := unitCell(t)
 		trace := traceJournalDirectorySync(t, c)
-		if err := c.journal("stop", "operation", "started"); err != nil {
+		if err := c.journal(context.Background(), "stop", "operation", "started"); err != nil {
 			t.Fatal(err)
 		}
-		if err := c.journal("stop", "stop", "started"); err != nil {
+		if err := c.journal(context.Background(), "stop", "stop", "started"); err != nil {
 			t.Fatal(err)
 		}
 		if !slices.Equal(trace.events, []string{"file", "directory", "file"}) {
@@ -143,7 +144,7 @@ func TestJournalDirectorySyncSkipsExistingFile(t *testing.T) {
 			t.Fatal(err)
 		}
 		trace := traceJournalDirectorySync(t, c)
-		if err := c.journal("stop", "operation", "started"); err != nil {
+		if err := c.journal(context.Background(), "stop", "operation", "started"); err != nil {
 			t.Fatal(err)
 		}
 		if !slices.Equal(trace.events, []string{"file"}) {
@@ -182,7 +183,7 @@ func TestJournalDirectorySyncFailureKeepsRecordForRepair(t *testing.T) {
 	if err != nil || !journalDirectorySyncSingleRecord(data, "stop", "operation", "started") {
 		t.Fatal("directory sync failure removed, rewrote or extended the file-synced first record")
 	}
-	progress, err := c.readJournal()
+	progress, err := c.readJournal(context.Background())
 	if err != nil || progress.tornTail || progress.cleanupOnly || progress.pending == nil ||
 		*progress.pending != (Interruption{Operation: "stop", Step: "operation"}) || len(progress.done) != 0 ||
 		progress.durableBytes != int64(len(data)) {
@@ -210,7 +211,7 @@ func TestJournalDirectorySyncFailureKeepsRecordForRepair(t *testing.T) {
 		entries[len(entries)-1].Step != "operation" || entries[len(entries)-1].State != "done" {
 		t.Fatal("Repair did not settle the operation whose first record it retained")
 	}
-	progress, err = c.readJournal()
+	progress, err = c.readJournal(context.Background())
 	if err != nil || progress.pending != nil || progress.tornTail {
 		t.Fatal("journal remained unsettled after Repair")
 	}
@@ -223,7 +224,7 @@ func TestJournalDirectorySyncNotCalledAfterFileSyncFailure(t *testing.T) {
 	c, _ := unitCell(t)
 	trace := traceJournalDirectorySync(t, c)
 	trace.fileErr = errors.New("synthetic private sync details")
-	err := c.journal("stop", "operation", "started")
+	err := c.journal(context.Background(), "stop", "operation", "started")
 	if err == nil || err.Error() != "cannot sync local cell journal" {
 		t.Fatal("first-append file sync failure did not return the existing value-free journal error")
 	}

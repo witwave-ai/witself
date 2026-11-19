@@ -2,6 +2,7 @@ package localcell
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"go/ast"
 	"go/parser"
@@ -65,7 +66,7 @@ var drillRootCounts = map[string]int{"Stat": 2, "Lstat": 1, "Open": 2, "OpenFile
 // drillRootImports are drill_root.go's only imports, none renamed; from os and
 // syscall it names only drillRootSelectors, called or not, and a root's
 // removal, write or open method (drillRootMutators) only as a typed root call.
-var drillRootImports = []string{"errors", "io", "os", "path/filepath", "runtime", "strings", "syscall"}
+var drillRootImports = []string{"context", "errors", "io", "os", "path/filepath", "runtime", "strings", "syscall"}
 var drillRootSelectors = map[string][]string{"os": {"DirEntry", "ErrNotExist", "Lstat", "O_RDONLY", "OpenRoot", "ReadDir", "Root", "SameFile"}, "syscall": {"O_NONBLOCK"}}
 var drillRootMutators = []string{"Chmod", "Chown", "Chtimes", "Create", "Lchown", "Link", "Mkdir", "MkdirAll", "Open", "OpenFile", "OpenRoot", "Remove", "RemoveAll", "Rename", "Symlink", "WriteFile"}
 
@@ -1175,7 +1176,7 @@ func TestCheckpointSourceContract(t *testing.T) {
 		{"escape_by_literal", "checkpoint.go", "writeAtomic(filepath.Join(dir, checkpointWitnessName), witness, nil)", "writeAtomic(filepath.Join(dir, \"..\", \"..\", \"manifest.json\"), witness, nil)", "writer_root:checkpoint.go:writeAtomic"},
 		{"temporary_in_run", "checkpoint.go", "createPrivateTemp(filepath.Join(dir, filepath.FromSlash(path.Dir(entry.path))))", "createPrivateTemp(c.path(\"run\"))", "live_path_not_read:checkpoint.go:run"},
 		{"recovery_joined_sync", "checkpoint.go", tail, "func checkpointProbe(c *Cell, checkpointID string) error { return syncCheckpointDirectory(filepath.Join(c.recoveryDir(), checkpointID)) }\n\n" + tail, "writer_root:checkpoint.go:syncCheckpointDirectory"},
-		{"second_journal_create", "checkpoint.go", "\tif err := c.begin(\"checkpoint\"); err != nil {", "\t_ = privateDir(c.path(\"journal\"), true)\n\tif err := c.begin(\"checkpoint\"); err != nil {", "writer_root:checkpoint.go:privateDir"},
+		{"second_journal_create", "checkpoint.go", "\tif err := c.begin(context.Background(), \"checkpoint\"); err != nil {", "\t_ = privateDir(c.path(\"journal\"), true)\n\tif err := c.begin(context.Background(), \"checkpoint\"); err != nil {", "writer_root:checkpoint.go:privateDir"},
 		{"manifest_opened_for_write", "checkpoint.go", "openPrivateReader(context.Background(), c.path(\"manifest.json\"))", "openPrivateFile(c.path(\"manifest.json\"), os.O_RDWR, 0)", "live_path_not_read:checkpoint.go:manifest.json"},
 		{"root_open_for_write", "checkpoint_unix.go", "root.OpenFile(name, os.O_RDONLY|syscall.O_NONBLOCK, 0)", "root.OpenFile(name, os.O_RDWR|syscall.O_NONBLOCK, 0)", "root_open_not_read_only:checkpoint_unix.go"},
 		{"checkpoint_root_name_made", "checkpoint_unix.go", "name := filepath.FromSlash(rel)", "name := rel", "pgdata_root_name:checkpoint_unix.go"},
@@ -1372,7 +1373,7 @@ func checkpointJournalVocabulary(t *testing.T) {
 			t.Fatal("a checkpoint journal line is accepted by the predecessor or refused by this reader")
 		}
 	}
-	if _, err := c.readJournal(); err != nil || len(lines) != len(checkpointRecords)+len(checkpointDeleteRecords) {
+	if _, err := c.readJournal(context.Background()); err != nil || len(lines) != len(checkpointRecords)+len(checkpointDeleteRecords) {
 		t.Fatal("the current reader refused the checkpoint journal lines")
 	}
 }

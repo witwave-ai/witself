@@ -2,6 +2,7 @@ package localcell
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"maps"
@@ -69,7 +70,7 @@ func TestPurgedCheckpointJournal(t *testing.T) {
 		if !slices.Equal(triples(t, data), want) {
 			t.Fatal("journal sequence differs")
 		}
-		progress, err := c.readJournal()
+		progress, err := c.readJournal(context.Background())
 		if err != nil || progress.tornTail || (progress.pending != nil) != pending ||
 			(pending && progress.pending.Operation != "checkpoint_delete") {
 			t.Fatal("journal pending state differs")
@@ -266,7 +267,7 @@ func TestPurgedCheckpointJournal(t *testing.T) {
 					c, _ = repaired(t, state)
 				}
 				data := retainedRead(t, c, "journal/operations.jsonl")
-				if _, err := c.readJournal(); err != nil || len(triples(t, data)) < len(checkpointDeleteRecords) {
+				if _, err := c.readJournal(context.Background()); err != nil || len(triples(t, data)) < len(checkpointDeleteRecords) {
 					t.Fatal("current reader refused final deletion journal")
 				}
 				for _, line := range bytes.Split(data[:len(data)-1], []byte("\n")) {

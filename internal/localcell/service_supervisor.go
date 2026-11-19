@@ -151,7 +151,7 @@ func (c *Cell) Run(ctx context.Context, policy SupervisorPolicy) (result error) 
 			return
 		}
 		if ctx.Err() != nil {
-			progress, journalErr := c.readJournal()
+			progress, journalErr := c.readJournal(context.Background())
 			// Only fixed supervisor labels and journal shape cross stderr.
 			if s.operation == "health" {
 				fmt.Fprintf(os.Stderr, "service_shutdown phase=%s operation=health site=%s journal_pending=%t journal_read_ok=%t\n",

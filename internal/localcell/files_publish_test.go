@@ -2,6 +2,7 @@ package localcell
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"go/ast"
 	"go/parser"
@@ -124,7 +125,7 @@ func TestStopManifestPublicationSingleAttemptRefusal(t *testing.T) {
 			if attempts != 1 {
 				t.Fatalf("Stop manifest publication attempts=%d", attempts)
 			}
-			progress, journalErr := c.readJournal()
+			progress, journalErr := c.readJournal(context.Background())
 			if fail {
 				data, readErr := os.ReadFile(path)
 				if err == nil || err.Error() != "cannot persist local cell record" || readErr != nil || !bytes.Equal(data, before) {

@@ -61,7 +61,7 @@ func (c *Cell) reinstallLocked(ctx context.Context, options ReinstallOptions) er
 	if err := c.layout(); err != nil {
 		return err
 	}
-	if err := c.begin("reinstall"); err != nil {
+	if err := c.begin(context.Background(), "reinstall"); err != nil {
 		return err
 	}
 	if err := c.reinstallBoundary("operation_started"); err != nil {
@@ -87,7 +87,7 @@ func (c *Cell) reinstallLocked(ctx context.Context, options ReinstallOptions) er
 		}},
 	}
 	for _, step := range steps {
-		err := c.step("reinstall", step.name, func() error {
+		err := c.step(context.Background(), "reinstall", step.name, func() error {
 			stepCtx, cancel := context.WithTimeout(ctx, c.cfg.Timeout)
 			defer cancel()
 			return step.run(stepCtx)
@@ -130,7 +130,7 @@ func (c *Cell) admitReinstall(options ReinstallOptions) (*Manifest, error) {
 	if m.InstallationID != options.InstallationID {
 		return nil, errReinstallIdentity
 	}
-	progress, err := c.readJournal()
+	progress, err := c.readJournal(context.Background())
 	if err != nil {
 		return nil, err
 	}
@@ -265,7 +265,7 @@ func (c *Cell) finishReinstall(m *Manifest) error {
 	if err := c.reinstallBoundary("operation_manifest"); err != nil {
 		return err
 	}
-	return c.journal("reinstall", "operation", "done")
+	return c.journal(context.Background(), "reinstall", "operation", "done")
 }
 
 func (c *Cell) reinstallBoundary(name string) error {

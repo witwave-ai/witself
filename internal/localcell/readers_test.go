@@ -1,6 +1,7 @@
 package localcell
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
@@ -24,7 +25,7 @@ var readerRows = []struct {
 		}
 		return err
 	}},
-	{"readJournal", "invalid local cell journal", readerJournalPath, func(c *Cell) error { return readerJournalRead(c.readJournal()) }},
+	{"readJournal", "invalid local cell journal", readerJournalPath, func(c *Cell) error { return readerJournalRead(c.readJournal(context.Background())) }},
 	{"readUpdateJournal", "invalid local cell journal", readerJournalPath, func(c *Cell) error { return readerJournalRead(c.readUpdateJournal()) }},
 }
 

@@ -88,7 +88,7 @@ if m != nil && m.PrincipalLayoutVersion != 0 {
  ctx = selected
 }
 ` + maintenanceAdmissionStatement + `
-progress, err := c.readJournal()`,
+progress, err := c.readJournal(context.Background())`,
 	"Remove": `ctx, cancel := c.serviceShutdownDeadline(ctx)
 defer cancel()
 if err := c.exitServiceHostForRemoval(ctx); err != nil { return err }

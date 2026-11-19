@@ -143,7 +143,7 @@ func reinstallChanged(before, after map[string]retainedEntry) []string {
 // operation and with custody and PGDATA bytes identical to the fixture.
 func reinstallAssertRemoved(t *testing.T, f *retainedFixture) {
 	t.Helper()
-	p, err := f.cell.readJournal()
+	p, err := f.cell.readJournal(context.Background())
 	m, manifestErr := readManifest(f.cell.cfg.Root)
 	if err != nil || manifestErr != nil || p.pending != nil || p.tornTail || !m.RemovalRetained {
 		t.Fatal("reinstall left an open operation or cleared the retained marker")
@@ -238,7 +238,7 @@ func TestReinstallAdmissionRefusals(t *testing.T) {
 		// An older build's data stays retained: the next legacy Start would migrate it with no recovery point.
 		{"schema-older", both, manifest(func(m *Manifest) { m.LastVerifiedSchemaVersion = store.SchemaVersion() - 1 }), errReinstallVersion},
 		{"pending-operation", both, func(t *testing.T, c *Cell, _ *ReinstallOptions) {
-			if c.begin("stop") != nil {
+			if c.begin(context.Background(), "stop") != nil {
 				t.Fatal("cannot prepare pending operation")
 			}
 		}, errReinstallState},
@@ -493,7 +493,7 @@ func TestReinstallVerificationFailure(t *testing.T) {
 			}
 			err := c.Reinstall(t.Context(), reinstallOptions(f))
 			syncFile, c.cfg.Failpoint = original, nil
-			p, journalErr := c.readJournal()
+			p, journalErr := c.readJournal(context.Background())
 			if err == nil || err.Error() != want || journalErr != nil || p.pending == nil || p.pending.Operation != "reinstall" || p.pending.Step != step {
 				t.Fatal("failed reinstall did not leave its operation open for Repair")
 			}
@@ -542,7 +542,7 @@ func TestReinstallCrashRepair(t *testing.T) {
 						reverts = append(reverts, entry.Operation+"/"+entry.State)
 					}
 				}
-				p, err := c.readJournal()
+				p, err := c.readJournal(context.Background())
 				m, manifestErr := readManifest(c.cfg.Root)
 				marked := index < 4 // The readmitted publication is durable from C4 on.
 				if err != nil || manifestErr != nil || p.pending != nil || m.RemovalRetained != marked || !slices.Equal(reverts, []string{"reinstall/started", "reinstall/done"}) {
@@ -714,7 +714,7 @@ func TestReinstallCompatibility(t *testing.T) {
 			reinstallLines++
 		}
 	}
-	if _, err := c.readJournal(); err != nil || reinstallLines != len(reinstallRecords) {
+	if _, err := c.readJournal(context.Background()); err != nil || reinstallLines != len(reinstallRecords) {
 		t.Fatal("current reader refused the reinstall records")
 	}
 	want := bytes.Replace(r.preRemoval, []byte(`"last_operation": ""`), []byte(`"last_operation": "reinstall"`), 1)

@@ -291,7 +291,7 @@ func (s *supervisor) finishHostExit(ctx context.Context, delivered <-chan struct
 	s.running = false
 	s.exitDrained = true
 	s.exitDrainResult = err
-	progress, journalErr := s.cell.readJournal()
+	progress, journalErr := s.cell.readJournal(context.Background())
 	fmt.Fprintf(os.Stderr, "service_shutdown phase=control operation=none journal_pending=%t journal_read_ok=%t\n", progress.pending != nil || progress.tornTail, journalErr == nil)
 	return true
 }

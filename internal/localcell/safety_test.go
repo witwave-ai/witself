@@ -4,6 +4,7 @@ package localcell
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -175,7 +176,7 @@ func TestRepairSettlesDeadUnrecordedPostgresAndPreservesData(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, step := range []string{"operation", "postgres"} {
-		if err := c.journal("start", step, "started"); err != nil {
+		if err := c.journal(context.Background(), "start", step, "started"); err != nil {
 			t.Fatal(err)
 		}
 	}

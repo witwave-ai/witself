@@ -122,34 +122,45 @@ func leaseWaitOwnContext(function *ast.FuncDecl, argument ast.Expr) bool {
 }
 
 // leaseWaitOpeners are the declarations that take the operation's context first
-// (LC-LEASE-2A and 2B R5), in the package reference contract's notation.
+// (LC-LEASE-2A, 2B and 2C1 R5), in the package reference contract's notation.
 var leaseWaitOpeners = []string{"waitOutLease", "openPrivateReader", "openPrivateWriter", "openPostgresReader", "openPlainReader", "openLockFile",
 	"(*Cell).openCheckpointSource", "openRegularBy", "readRegular", "openRegular", "openRegularWriter", "openServiceRecord", "checkpointComplete",
-	"readMaintenanceFenceJSON", "(*Cell).readMaintenanceFence", "acquireLock"}
+	"readMaintenanceFenceJSON", "(*Cell).readMaintenanceFence", "acquireLock", "(*Cell).readJournal", "(*Cell).journal", "(*Cell).journalCause",
+	"(*Cell).step", "(*Cell).begin", "(*Cell).finish", "(*Cell).discardJournalTail", "(*Cell).finishRemoval", "(*Cell).finishRetainedRemoval"}
 
 // leaseWaitPlaceholders are the non-test calls into leaseWaitOpeners that pass
 // context.Background() instead of their declaration's own context, by file and
 // declaration with their counts (R6); it grows until the host's slices (OQ-H).
-var leaseWaitPlaceholders = map[string]int{"checkpoint.go:(*Cell).admitCheckpoint": 1, "checkpoint.go:(*Cell).checkpointOps": 1,
-	"checkpoint.go:(*Cell).copyCheckpoint": 1, "checkpoint.go:(*Cell).openCheckpointEntry": 2, "checkpoint.go:(*Cell).witnessCheckpoint": 1,
-	"checkpoint.go:(*Cell).listCheckpoints": 1, "checkpoint.go:(*Cell).refuseBeforeLockNames": 1, "commands.go:(*Cell).password": 1, "commands.go:(*Cell).logFile": 1,
-	"files.go:(*Cell).discardJournalTail": 1, "files.go:(*Cell).journalCause": 1, "files.go:(*Cell).readJournal": 1, "files.go:(*Cell).readUpdateJournal": 1,
-	"files.go:readJSON": 1, "installer_principal_credentials.go:openPrincipalCredentialFile": 1, "lifecycle.go:(*Cell).Inspect": 1, "lifecycle.go:(*Cell).own": 1,
-	"lifecycle.go:(*Cell).ownExisting": 1, "lifecycle.go:(*Cell).postmaster": 1, "lifecycle.go:(*Cell).recoverPostgresRecord": 1, "lock_contention.go:classifyOwnershipFailure": 1,
-	"readiness.go:(*Cell).lastValueFreeDiagnostic": 1, "reinstall.go:(*Cell).reinstallAvailable": 1, "removal_retention.go:(*Cell).finishRetainedRemoval": 1,
-	"service_adapter_admission.go:serviceAdapterRemovalHostLock": 1, "service_control_endpoint.go:(*Cell).readServiceControlEndpointRecord": 1,
-	"service_control_exit.go:(*Cell).serviceHostLeaseHeld": 1, "service_descriptor.go:(*Cell).serviceControlSecret": 1, "service_foreground.go:(*Cell).acquireServiceLeaseWithBoot": 1,
-	"service_launchd.go:(*launchdAgentAdapter).ownedPlist": 1, "service_systemd_adapter.go:(*systemdUserAdapter).ownedUnit": 1, "update_fence.go:(*Cell).maintenanceFenceAllows": 1,
+var leaseWaitPlaceholders = map[string]int{"checkpoint.go:(*Cell).admitCheckpoint": 2, "checkpoint.go:(*Cell).admitDeleteCheckpoint": 1,
+	"checkpoint.go:(*Cell).checkpointLocked": 3, "checkpoint.go:(*Cell).checkpointOps": 1, "checkpoint.go:(*Cell).closeCheckpointFailure": 2,
+	"checkpoint.go:(*Cell).closeCheckpointLeftover": 2, "checkpoint.go:(*Cell).copyCheckpoint": 1, "checkpoint.go:(*Cell).deleteCheckpointLocked": 3,
+	"checkpoint.go:(*Cell).listCheckpoints": 1, "checkpoint.go:(*Cell).openCheckpointEntry": 2, "checkpoint.go:(*Cell).refuseBeforeLockNames": 1,
+	"checkpoint.go:(*Cell).witnessCheckpoint": 1, "commands.go:(*Cell).logFile": 1, "commands.go:(*Cell).password": 1, "drill_root.go:(*Cell).deleteDrillLocked": 1,
+	"drill_storage.go:(*Cell).admitDrillStorageLocked": 1, "files.go:(*Cell).readUpdateJournal": 1, "files.go:readJSON": 1,
+	"installer_principal_credentials.go:openPrincipalCredentialFile": 1, "installer_principals.go:(*Cell).installPrincipals": 1,
+	"installer_principals.go:(*Cell).installerAdmin": 1, "lifecycle.go:(*Cell).Inspect": 2, "lifecycle.go:(*Cell).Install": 3, "lifecycle.go:(*Cell).Remove": 7,
+	"lifecycle.go:(*Cell).Repair": 6, "lifecycle.go:(*Cell).Start": 4, "lifecycle.go:(*Cell).own": 1, "lifecycle.go:(*Cell).ownExisting": 1,
+	"lifecycle.go:(*Cell).postmaster": 1, "lifecycle.go:(*Cell).recoverPostgresRecord": 1, "lifecycle.go:(*Cell).stopWithServiceFence": 3,
+	"lock_contention.go:classifyOwnershipFailure": 1, "port_recovery.go:(*Cell).waitReadyWithPortRecovery": 1, "ports.go:(*Cell).prepareComponentPortsFor": 1,
+	"readiness.go:(*Cell).lastValueFreeDiagnostic": 1, "reinstall.go:(*Cell).admitReinstall": 1, "reinstall.go:(*Cell).finishReinstall": 1,
+	"reinstall.go:(*Cell).reinstallAvailable": 1, "reinstall.go:(*Cell).reinstallLocked": 2, "service_adapter_admission.go:serviceAdapterRemovalHostLock": 1,
+	"service_control_endpoint.go:(*Cell).readServiceControlEndpointRecord": 1, "service_control_exit.go:(*Cell).serviceHostLeaseHeld": 1,
+	"service_control_exit.go:(*supervisor).finishHostExit": 1, "service_descriptor.go:(*Cell).serviceControlSecret": 1,
+	"service_foreground.go:(*Cell).acquireServiceLeaseWithBoot": 1, "service_launchd.go:(*launchdAgentAdapter).ownedPlist": 1,
+	"service_supervisor.go:(*Cell).Run": 1, "service_systemd_adapter.go:(*systemdUserAdapter).ownedUnit": 1, "update_fence.go:(*Cell).maintenanceFenceAllows": 1,
 	"update_record.go:(*Cell).readDerivedUpdateRecord": 1}
 
 // leaseWaitCutText: per file, each text exactly once. files.go's cut, then
 // openRegularBy's and openRegularWriter's opens with the cut returned before
 // any Lstat classifies it (R4); update_fence.go's fence reads return the cut,
-// never the record's refusal or an active fence (LC-LEASE-2B R3).
+// never the record's refusal or an active fence (LC-LEASE-2B R3); files.go's
+// step returns a cut wrapped, never its bare failure (LC-LEASE-2C1 R3).
 var leaseWaitCutText = map[string][]string{"files.go": {"type leaseWaitCut struct{ cause error }\n\nfunc (e *leaseWaitCut) Error() string { return \"local cell lease wait ended: \" + " +
 	"e.cause.Error() }\nfunc (e *leaseWaitCut) Unwrap() error { return e.cause }\n", "open error) (*os.File, error) {\n\tf, err := openReader(ctx, path)\n" +
 	"\tif cut := (*leaseWaitCut)(nil); errors.As(err, &cut) {\n\t\treturn nil, cut\n\t}\n\tif err != nil {\n\t\tinfo, err := os.Lstat(path)\n",
-	"\tf, err := openPrivateWriter(ctx, path, flags, mode)\n\tif cut := (*leaseWaitCut)(nil); errors.As(err, &cut) {\n\t\treturn nil, cut\n\t}\n\tif err != nil {\n\t\tif info, err := os.Lstat(path);"},
+	"\tf, err := openPrivateWriter(ctx, path, flags, mode)\n\tif cut := (*leaseWaitCut)(nil); errors.As(err, &cut) {\n\t\treturn nil, cut\n\t}\n\tif err != nil {\n\t\tif info, err := os.Lstat(path);",
+	"\t\tif cut := (*leaseWaitCut)(nil); errors.As(err, &cut) {\n\t\t\t// A wait that ctx ended crosses as the value-free cut only.\n\t\t\treturn fmt.Errorf(\"local cell %s: %s failed: %w\", operation, step, cut)\n\t\t}\n" +
+		"\t\treturn fmt.Errorf(\"local cell %s: %s failed\", operation, step)\n"},
 	"update_fence.go": {"\tf, err := openRegular(ctx, path, refused, refused, refused)\n\tif cut := (*leaseWaitCut)(nil); errors.As(err, &cut) {\n\t\treturn cut\n\t} else if err != nil {\n\t\treturn refused\n\t}\n",
 		"\tif err := read(path, &fence); errors.As(err, new(*leaseWaitCut)) {\n\t\treturn nil, err\n\t} else if err != nil || !fence.valid() {\n\t\treturn nil, errMaintenanceFenceActive\n\t}\n"}}
 

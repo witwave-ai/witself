@@ -71,7 +71,7 @@ func seedRetainedFixture(t *testing.T, c *Cell, m *Manifest) *retainedFixture {
 	if c.makePassword() != nil || (m.PrincipalLayoutVersion != 0 && c.makePrincipalPasswords(m) != nil) || writeAtomic(c.path("manifest.json"), m, nil) != nil {
 		t.Fatal("cannot prepare generated custody fixture")
 	}
-	if c.begin("stop") != nil || c.journal("stop", "stop", "started") != nil || c.journal("stop", "stop", "done") != nil || c.journal("stop", "operation", "done") != nil {
+	if c.begin(context.Background(), "stop") != nil || c.journal(context.Background(), "stop", "stop", "started") != nil || c.journal(context.Background(), "stop", "stop", "done") != nil || c.journal(context.Background(), "stop", "operation", "done") != nil {
 		t.Fatal("cannot prepare completed journal prefix")
 	}
 	held, err := c.own(false)
@@ -184,7 +184,7 @@ func retainedAssertMaterial(t *testing.T, f *retainedFixture) {
 
 func retainedAssertSettled(t *testing.T, c *Cell) {
 	t.Helper()
-	p, err := c.readJournal()
+	p, err := c.readJournal(context.Background())
 	m, manifestErr := readManifest(c.cfg.Root)
 	if err != nil || manifestErr != nil || p.pending != nil || p.tornTail || m.Cleanup != nil || !m.RemovalRetained {
 		t.Fatal("retained cleanup falsely settled or left unresolved operation")
@@ -592,7 +592,7 @@ func TestRetainedRemovalLegacyCleanup(t *testing.T) {
 			c := f.cell
 			m := f.manifest
 			if state == "completed_journal" {
-				if c.begin("remove") != nil || c.journal("remove", "runtime_cleanup", "started") != nil || c.journal("remove", "runtime_cleanup", "done") != nil || c.journal("remove", "operation", "done") != nil {
+				if c.begin(context.Background(), "remove") != nil || c.journal(context.Background(), "remove", "runtime_cleanup", "started") != nil || c.journal(context.Background(), "remove", "runtime_cleanup", "done") != nil || c.journal(context.Background(), "remove", "operation", "done") != nil {
 					t.Fatal("cannot prepare completed physical removal")
 				}
 			} else if state != "journal_only" && state != "partial_custody" {
@@ -638,7 +638,7 @@ func TestRetainedRemovalLegacyCleanup(t *testing.T) {
 	t.Run("foreign_pending_with_torn_tail", func(t *testing.T) {
 		f := retainedRemovalFixture(t, "selected", false)
 		c := f.cell
-		if c.begin("start") != nil {
+		if c.begin(context.Background(), "start") != nil {
 			t.Fatal("cannot prepare foreign pending operation")
 		}
 		prefix := retainedRead(t, c, "journal/operations.jsonl")
@@ -844,7 +844,7 @@ func TestRetainedRemovalRefusalsPreserveBytes(t *testing.T) {
 					t.Fatal("cannot prepare corrupt journal")
 				}
 			case "foreign_operation":
-				if c.begin("start") != nil {
+				if c.begin(context.Background(), "start") != nil {
 					t.Fatal("cannot prepare unrelated pending operation")
 				}
 			}

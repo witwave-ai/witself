@@ -4,6 +4,7 @@ package localcell
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -31,7 +32,7 @@ func TestRetainedRemovalRepairStopsRecordedTreeBeforeMarker(t *testing.T) {
 			t.Fatal("synthetic component is not a live owned record")
 		}
 	}
-	if c.begin("remove") != nil || c.journal("remove", "stop", "started") != nil {
+	if c.begin(context.Background(), "remove") != nil || c.journal(context.Background(), "remove", "stop", "started") != nil {
 		t.Fatal("cannot prepare a removal interrupted during its stop")
 	}
 	original := syncFile

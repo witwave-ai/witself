@@ -3,6 +3,7 @@
 package localcell
 
 import (
+	"context"
 	"errors"
 	"io"
 	"io/fs"
@@ -86,7 +87,7 @@ func TestCheckpointReadersLeaseWaitedOut(t *testing.T) {
 			started := time.Now()
 			err := readerWatchdog(t, func() error { return c.Checkpoint(t.Context(), checkpointOptions(f)) }, lease.release)
 			failure, ids := ClassifyCheckpointFailure(err), checkpointIDs(t, c)
-			progress, journalErr := c.readJournal()
+			progress, journalErr := c.readJournal(context.Background())
 			closed := journalErr == nil && progress.pending == nil && !progress.tornTail
 			if row.holder == "lets_go" {
 				if err != nil || !lease.broken() || !closed || len(ids) != 1 || !checkpointSummaryOf(t, c, ids[0]).Complete {

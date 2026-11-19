@@ -141,7 +141,7 @@ func checkpointReaderRun(t *testing.T, layout string, row checkpointReaderRow, k
 	}
 	mu.Unlock()
 	failure := ClassifyCheckpointFailure(err)
-	progress, journalErr := c.readJournal()
+	progress, journalErr := c.readJournal(context.Background())
 	closed := journalErr == nil && progress.pending == nil && !progress.tornTail
 	leftover := slices.ContainsFunc(checkpointIDs(t, c), func(name string) bool { return strings.HasPrefix(name, "ckpt_") })
 	if restoreErr != nil || failure.Class != row.want || failure.CleanupIncomplete || !closed || leftover || (row.moment == "before" && r.calls["control"] != 0) {

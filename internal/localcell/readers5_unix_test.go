@@ -108,7 +108,7 @@ func readers5NothingLeft(c *Cell) bool {
 // open operation and no torn tail.
 func readers5JournalClosed(c *Cell) bool {
 	info, statErr := os.Lstat(c.path("journal", "operations.jsonl"))
-	progress, err := c.readJournal()
+	progress, err := c.readJournal(context.Background())
 	return statErr == nil && info.Mode().IsRegular() && err == nil && progress.pending == nil && !progress.tornTail
 }
 
@@ -201,7 +201,7 @@ func TestReaders5DeleteNeverWait(t *testing.T) {
 					}
 					return
 				}
-				progress, journalErr := c.readJournal()
+				progress, journalErr := c.readJournal(context.Background())
 				if journalErr != nil || progress.pending == nil || progress.pending.Operation != "checkpoint_delete" || !checkpointSummaryOf(t, c, ids[0]).Complete {
 					t.Fatal("the refused journal directory sync left no open delete or changed the checkpoint")
 				}

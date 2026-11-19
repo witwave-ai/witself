@@ -225,11 +225,11 @@ func selectedJournalFixture(t *testing.T) (*Cell, *Manifest) {
 	c, m := unitCell(t)
 	m.Installed = false
 	m.PrincipalLayoutVersion, m.PrincipalRoles = PrincipalLayoutVersion, installerRoleNames()
-	if writeAtomic(c.path("manifest.json"), m, nil) != nil || c.begin("install") != nil {
+	if writeAtomic(c.path("manifest.json"), m, nil) != nil || c.begin(context.Background(), "install") != nil {
 		t.Fatal("selected journal fixture failed")
 	}
 	for _, name := range []string{"manifest", "password", "initdb", "configure", "postgres", "database"} {
-		if c.step("install", name, func() error { return nil }) != nil {
+		if c.step(context.Background(), "install", name, func() error { return nil }) != nil {
 			t.Fatal("selected journal prefix failed")
 		}
 	}
@@ -326,14 +326,14 @@ func TestInstallerPrincipalsMigrationOrder(t *testing.T) {
 func TestInstallerPrincipalsRepairFence(t *testing.T) {
 	for cut := 0; cut <= len(selectedInstallSteps); cut++ {
 		c, m := selectedJournalFixture(t)
-		prefix, err := c.readJournal()
+		prefix, err := c.readJournal(context.Background())
 		if err != nil || prefix.installComplete(m) {
 			t.Fatal("old four-phase predicate completed selected installation")
 		}
 		calls := 0
 		c.installerPrincipals = recordingPrincipalOperations(&calls)
 		for _, step := range selectedInstallSteps[:cut] {
-			if c.step("install", step, func() error { return nil }) != nil {
+			if c.step(context.Background(), "install", step, func() error { return nil }) != nil {
 				t.Fatal("repair durable phase fixture failed")
 			}
 		}
@@ -416,7 +416,7 @@ func (c *installerCloseFixture) Close(ctx context.Context) error {
 func TestInstallerPrincipalsRepairPublishedManifest(t *testing.T) {
 	c, m := selectedJournalFixture(t)
 	for _, step := range selectedInstallSteps {
-		if c.step("install", step, func() error { return nil }) != nil {
+		if c.step(context.Background(), "install", step, func() error { return nil }) != nil {
 			t.Fatal("published repair durable fixture failed")
 		}
 	}
@@ -433,7 +433,7 @@ func TestInstallerPrincipalsRepairPublishedManifest(t *testing.T) {
 	if c.Repair(t.Context()) != nil {
 		t.Fatal("published manifest interruption failed repair")
 	}
-	progress, err := c.readJournal()
+	progress, err := c.readJournal(context.Background())
 	if err != nil || progress.pending != nil {
 		t.Fatal("published manifest repair did not close install journal")
 	}

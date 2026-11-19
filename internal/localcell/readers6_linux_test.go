@@ -4,6 +4,7 @@ package localcell
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -112,12 +113,12 @@ func TestWriterLeaseWaitedOut(t *testing.T) {
 		{"journal_append", "cannot open local cell journal", func(t *testing.T, l *writerLease) (string, func() error) {
 			c := readerCell(t)
 			l.take(readerJournalPath(c))
-			return readerJournalPath(c), func() error { return c.journal("stop", "operation", "started") }
+			return readerJournalPath(c), func() error { return c.journal(context.Background(), "stop", "operation", "started") }
 		}},
 		{"discard_tail", "cannot open torn local cell journal", func(t *testing.T, l *writerLease) (string, func() error) {
 			c, progress := writerTornCell(t)
 			l.take(readerJournalPath(c))
-			return readerJournalPath(c), func() error { return c.discardJournalTail(progress) }
+			return readerJournalPath(c), func() error { return c.discardJournalTail(context.Background(), progress) }
 		}},
 		{"retained_sync", "cannot open local cell journal", func(t *testing.T, l *writerLease) (string, func() error) {
 			c := writerRetainedCleanup(t)

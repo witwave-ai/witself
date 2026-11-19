@@ -112,7 +112,7 @@ func (c *Cell) admitDrillStorageLocked(ctx context.Context, checkpointID string,
 	if ctx.Err() != nil {
 		return drillStorageEstimate{}, drillStorageError{reason: "cancelled"}
 	}
-	if progress, err := c.readJournal(); err != nil || progress.pending != nil || progress.tornTail {
+	if progress, err := c.readJournal(context.Background()); err != nil || progress.pending != nil || progress.tornTail {
 		return drillStorageEstimate{}, drillStorageError{reason: "journal_pending"}
 	}
 	if c.validateRecovery() != nil {

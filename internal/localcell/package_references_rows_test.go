@@ -18,8 +18,8 @@ const (
 	referencesAtPending  = "func (c *Cell) sweepPostgresPending() {"
 	referencesAtImports  = "import (\n"
 	referencesAtVersion  = "\tif version, err := readRegular(context.Background(), openPostgresReader, func(info os.FileInfo) bool { return info.Size() <= 64 }, c.path(\"pg\", \"PG_VERSION\"), errCheckpointSource"
-	referencesAtJournal  = "\tf, err := openRegularWriter(context.Background(), path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600, irregular, errors.New(\"cannot open local cell journal\"))\n\tif err != nil {\n\t\treturn err\n\t}\n"
-	referencesAtTail     = "\tf, err := openRegularWriter(context.Background(), c.path(\"journal\", \"operations.jsonl\"), os.O_WRONLY, 0, torn, torn)\n"
+	referencesAtJournal  = "\tf, err := openRegularWriter(ctx, path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600, irregular, errors.New(\"cannot open local cell journal\"))\n\tif err != nil {\n\t\treturn err\n\t}\n"
+	referencesAtTail     = "\tf, err := openRegularWriter(ctx, c.path(\"journal\", \"operations.jsonl\"), os.O_WRONLY, 0, torn, torn)\n"
 	referencesAtVars     = "var (\n"
 	referencesAtIdentity = "func processIdentity("
 	referencesAtVerify   = "\tvar data []byte\n\tvar oversized bool\n"
@@ -143,8 +143,8 @@ var packageReferencesRows = []struct {
 		{"drill_root.go", "after", referencesAtDrill, "\t_ = zzHelperWrite(c.recoveryDir())\n"}}, []string{"ref:postgres_pending.go:zzHelperWrite:writeAtomicBytes"}},
 	{"remover_helper_other_file", [][4]string{{"postgres_pending.go", "before", referencesAtPending, "func zzHelperRemove(path string) error { return os.RemoveAll(path) }\n\n"},
 		{"drill_root.go", "after", referencesAtDrill, "\t_ = zzHelperRemove(c.recoveryDir())\n"}}, []string{"ref:postgres_pending.go:zzHelperRemove:os.RemoveAll"}},
-	{"writer_wrapper_elsewhere", [][4]string{{"drill_root.go", "after", referencesAtDrill, "\t_ = c.journal(\"remove\", \"runtime_cleanup\", \"started\")\n"}}, []string{"ref:drill_root.go:(*Cell).deleteDrillLocked:(*Cell).journal"}},
-	{"remover_wrapper_elsewhere", [][4]string{{"drill_root.go", "after", referencesAtDrill, "\t_ = c.finishRemoval(manifest, false)\n"}}, []string{"ref:drill_root.go:(*Cell).deleteDrillLocked:(*Cell).finishRemoval"}},
+	{"writer_wrapper_elsewhere", [][4]string{{"drill_root.go", "after", referencesAtDrill, "\t_ = c.journal(context.Background(), \"remove\", \"runtime_cleanup\", \"started\")\n"}}, []string{"ref:drill_root.go:(*Cell).deleteDrillLocked:(*Cell).journal"}},
+	{"remover_wrapper_elsewhere", [][4]string{{"drill_root.go", "after", referencesAtDrill, "\t_ = c.finishRemoval(context.Background(), manifest, false)\n"}}, []string{"ref:drill_root.go:(*Cell).deleteDrillLocked:(*Cell).finishRemoval"}},
 	{"writer_held_root_method", [][4]string{{"drill_root.go", "after", referencesAtDrill, "\trename := drill.Rename\n\t_ = rename(\"zz\", drillRootRecordName)\n"}}, []string{"ref:drill_root.go:(*Cell).deleteDrillLocked:(*os.Root).Rename"}},
 	{"remover_held_root_method", [][4]string{{"checkpoint_root.go", "after", "\tc.checkpointStage(\"unseal\")\n", "\tremove := recovery.RemoveAll\n\t_ = remove(checkpointID)\n"}},
 		[]string{"ref:checkpoint_root.go:(*Cell).unsealCheckpointHeld:(*os.Root).RemoveAll"}},

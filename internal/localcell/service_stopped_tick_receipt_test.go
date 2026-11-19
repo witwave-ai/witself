@@ -135,7 +135,7 @@ func TestServiceStoppedTickCancellationReceipt(t *testing.T) {
 
 func assertStoppedTickJournal(t *testing.T, cell *Cell) {
 	t.Helper()
-	progress, err := cell.readJournal()
+	progress, err := cell.readJournal(context.Background())
 	if err != nil || progress.pending != nil || progress.tornTail {
 		t.Fatal("stopped tick receipt fixture lost its clean readable journal")
 	}

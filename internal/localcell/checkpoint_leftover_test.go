@@ -80,7 +80,7 @@ func leftoverSubtree(tree map[string]retainedEntry, checkpointID string) map[str
 // leftoverOpen requires the journal to hold exactly this open operation.
 func leftoverOpen(t *testing.T, c *Cell, operation, step string) {
 	t.Helper()
-	if p, err := c.readJournal(); err != nil || p.tornTail || p.pending == nil || *p.pending != (Interruption{Operation: operation, Step: step}) {
+	if p, err := c.readJournal(context.Background()); err != nil || p.tornTail || p.pending == nil || *p.pending != (Interruption{Operation: operation, Step: step}) {
 		t.Fatal("the journal does not hold the expected open operation")
 	}
 }
@@ -122,7 +122,7 @@ func TestCheckpointLeftover(t *testing.T) {
 			c, target := f.cell, leftoverDelete(t, f.cell, ids[0])
 			if cut != "operation" {
 				leftoverCrash(t, c, "checkpoint_delete", cut, target)
-			} else if c.begin("checkpoint_delete") != nil {
+			} else if c.begin(context.Background(), "checkpoint_delete") != nil {
 				t.Fatal("cannot plant an open deletion record")
 			}
 			if cut == "remove" {
@@ -158,8 +158,8 @@ func TestCheckpointLeftover(t *testing.T) {
 	t.Run("residue/failed-step", func(t *testing.T) {
 		f, _, _ := leftoverFixture(t, "legacy", 0)
 		c := f.cell
-		if errors.Join(c.begin("checkpoint"), c.journal("checkpoint", "copy", "started"),
-			c.journalCause("checkpoint", "copy", "failed", "local_checkpoint_copy_failed")) != nil {
+		if errors.Join(c.begin(context.Background(), "checkpoint"), c.journal(context.Background(), "checkpoint", "copy", "started"),
+			c.journalCause(context.Background(), "checkpoint", "copy", "failed", "local_checkpoint_copy_failed")) != nil {
 			t.Fatal("cannot plant a failed copy step")
 		}
 		if leftoverStep(t, f, leftoverCreate(t, f), checkpointLeftoverClose, checkpointRecords) != nil {
@@ -200,7 +200,7 @@ func TestCheckpointLeftover(t *testing.T) {
 		f, _, ids := leftoverFixture(t, "legacy", 1)
 		c, target := f.cell, leftoverDelete(t, f.cell, ids[0])
 		leftoverCrash(t, c, "checkpoint_delete", "unseal", target)
-		if errors.Join(c.journal("checkpoint_delete", "unseal", "done"), c.journal("checkpoint_delete", "remove", "started"),
+		if errors.Join(c.journal(context.Background(), "checkpoint_delete", "unseal", "done"), c.journal(context.Background(), "checkpoint_delete", "remove", "started"),
 			os.RemoveAll(c.path("recovery", ids[0], "pg", "base"))) != nil {
 			t.Fatal("cannot plant a partial removal")
 		}
@@ -238,18 +238,18 @@ func TestCheckpointLeftover(t *testing.T) {
 			}
 			plant := map[string]func() error{"cleanup-only": cleanup, "torn-only": torn,
 				"repair-step": func() error {
-					return errors.Join(c.begin("checkpoint"), c.journal("checkpoint", "revert_stop", "started"))
+					return errors.Join(c.begin(context.Background(), "checkpoint"), c.journal(context.Background(), "checkpoint", "revert_stop", "started"))
 				},
-				"torn-open":            func() error { return errors.Join(c.begin("checkpoint"), torn()) },
-				"cleanup-and-leftover": func() error { return errors.Join(c.begin("checkpoint_delete"), cleanup()) },
+				"torn-open":            func() error { return errors.Join(c.begin(context.Background(), "checkpoint"), torn()) },
+				"cleanup-and-leftover": func() error { return errors.Join(c.begin(context.Background(), "checkpoint_delete"), cleanup()) },
 				"repair-step-delete": func() error {
-					return errors.Join(c.begin("checkpoint_delete"), c.journal("checkpoint_delete", "revert_stop", "started"))
+					return errors.Join(c.begin(context.Background(), "checkpoint_delete"), c.journal(context.Background(), "checkpoint_delete", "revert_stop", "started"))
 				},
-				"torn-open-delete":            func() error { return errors.Join(c.begin("checkpoint_delete"), torn()) },
-				"cleanup-and-leftover-create": func() error { return errors.Join(c.begin("checkpoint"), cleanup()) },
+				"torn-open-delete":            func() error { return errors.Join(c.begin(context.Background(), "checkpoint_delete"), torn()) },
+				"cleanup-and-leftover-create": func() error { return errors.Join(c.begin(context.Background(), "checkpoint"), cleanup()) },
 			}[kind]
 			if plant == nil {
-				plant = func() error { return c.begin(kind) }
+				plant = func() error { return c.begin(context.Background(), kind) }
 			}
 			if plant() != nil {
 				t.Fatal("cannot plant the foreign journal state")
@@ -309,7 +309,7 @@ func TestCheckpointLeftover(t *testing.T) {
 				} else if row.target != "" {
 					call = leftoverDelete(t, c, row.target)
 				}
-				if row.setup(t, f, r); leftover && c.begin("checkpoint") != nil {
+				if row.setup(t, f, r); leftover && c.begin(context.Background(), "checkpoint") != nil {
 					t.Fatal("cannot plant an open checkpoint record")
 				}
 				before := checkpointTreeState(t, c)
@@ -325,7 +325,7 @@ func TestCheckpointLeftover(t *testing.T) {
 	t.Run("closer-sync-fails", func(t *testing.T) {
 		f, _, _ := leftoverFixture(t, "legacy", 0)
 		c, create := f.cell, leftoverCreate(t, f)
-		if c.begin("checkpoint") != nil {
+		if c.begin(context.Background(), "checkpoint") != nil {
 			t.Fatal("cannot plant an open checkpoint record")
 		}
 		original, failed := syncFile, false

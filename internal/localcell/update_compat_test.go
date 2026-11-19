@@ -2,6 +2,7 @@ package localcell
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -320,7 +321,7 @@ func TestUpdateHEADJournalLineShapes(t *testing.T) {
 		if !validJournalStep(entry.Operation, entry.Step) {
 			t.Fatal("legacy journal vocabulary changed")
 		}
-		if err := c.journalCause(entry.Operation, entry.Step, entry.State, entry.Cause); err != nil {
+		if err := c.journalCause(context.Background(), entry.Operation, entry.Step, entry.State, entry.Cause); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -488,7 +489,7 @@ func TestUpdateLegacyJournalReaderParity(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			shipped, shippedErr := c.readJournal()
+			shipped, shippedErr := c.readJournal(context.Background())
 			private, privateErr := c.readUpdateJournal()
 			if !reflect.DeepEqual(shipped.pending, private.pending) || !reflect.DeepEqual(shipped.done, private.done) ||
 				shipped.durableBytes != private.durableBytes || shipped.tornTail != private.tornTail ||
@@ -560,7 +561,7 @@ func TestUpdatePrivateJournalContentRefusedByShippedReader(t *testing.T) {
 			if err := testWriteFile(path, []byte(tc.line), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			shipped, err := c.readJournal()
+			shipped, err := c.readJournal(context.Background())
 			if err == nil || err.Error() != "invalid local cell journal; manual recovery required" || shipped.durableBytes != 0 {
 				t.Fatalf("shipped reader accepted update content: %v", err)
 			}
@@ -625,7 +626,7 @@ func TestUpdateHEADOptionalFieldsDowngrade(t *testing.T) {
 		if err := testWriteFile(c.path("journal", "operations.jsonl"), append(line, '\n'), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		progress, err := c.readJournal()
+		progress, err := c.readJournal(context.Background())
 		if err == nil || err.Error() != "invalid local cell journal; manual recovery required" || progress.durableBytes != 0 {
 			t.Fatal("ordinary journal reader accepted an update operation")
 		}
@@ -645,7 +646,7 @@ func TestUpdateOrdinaryReadersRejectOptionalJournalField(t *testing.T) {
 		if err := testWriteFile(c.path("journal", "operations.jsonl"), append(line, '\n'), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		progress, err := c.readJournal()
+		progress, err := c.readJournal(context.Background())
 		if err == nil || err.Error() != "invalid local cell journal; manual recovery required" || progress.durableBytes != 0 {
 			t.Fatal("ordinary journal reader accepted an optional update field")
 		}

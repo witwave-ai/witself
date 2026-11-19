@@ -2,6 +2,7 @@ package localcell
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"go/ast"
@@ -20,9 +21,9 @@ import (
 
 // writerOpenSites: each journal write open's file, function and checked open (R5).
 var writerOpenSites = [][3]string{
-	{"files.go", "journalCause", `openRegularWriter(context.Background(), path, os.O_WRONLY | os.O_CREATE | os.O_APPEND, 0o600, irregular, errors.New("cannot open local cell journal"))`},
-	{"files.go", "discardJournalTail", `openRegularWriter(context.Background(), c.path("journal", "operations.jsonl"), os.O_WRONLY, 0, torn, torn)`},
-	{"removal_retention.go", "finishRetainedRemoval", `openRegularWriter(context.Background(), c.path("journal", "operations.jsonl"), os.O_WRONLY, 0, unavailable, unavailable)`},
+	{"files.go", "journalCause", `openRegularWriter(ctx, path, os.O_WRONLY | os.O_CREATE | os.O_APPEND, 0o600, irregular, errors.New("cannot open local cell journal"))`},
+	{"files.go", "discardJournalTail", `openRegularWriter(ctx, c.path("journal", "operations.jsonl"), os.O_WRONLY, 0, torn, torn)`},
+	{"removal_retention.go", "finishRetainedRemoval", `openRegularWriter(ctx, c.path("journal", "operations.jsonl"), os.O_WRONLY, 0, unavailable, unavailable)`},
 }
 
 // writerOpeners are the calls that open, read or write a name.
@@ -253,12 +254,12 @@ func TestWriterOpenSourceContract(t *testing.T) {
 			t.Fatalf("writer open source contract failed with keys %v", failures)
 		}
 	}
-	const journalOpen = `openRegularWriter(context.Background(), path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600, irregular, errors.New("cannot open local cell journal"))`
+	const journalOpen = `openRegularWriter(ctx, path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600, irregular, errors.New("cannot open local cell journal"))`
 	for _, row := range []struct{ name, file, before, after, want string }{
 		{"journal_open_private_file", "files.go", journalOpen, "openPrivateFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)", "writer_open:journalCause:openPrivateFile(path, os.O_WRONLY | os.O_CREATE | os.O_APPEND, 0o600)"},
-		{"journal_open_flags", "files.go", "os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600, irregular", "os.O_WRONLY|os.O_CREATE, 0o600, irregular", `writer_open:journalCause:openRegularWriter(context.Background(), path, os.O_WRONLY | os.O_CREATE, 0o600, irregular, errors.New("cannot open local cell journal"))`},
-		{"discard_open_private_writer", "files.go", `openRegularWriter(context.Background(), c.path("journal", "operations.jsonl"), os.O_WRONLY, 0, torn, torn)`, `openPrivateWriter(c.path("journal", "operations.jsonl"), os.O_WRONLY, 0)`, "writer_open_caller:files.go:discardJournalTail"},
-		{"retained_open_private_file", "removal_retention.go", `openRegularWriter(context.Background(), c.path("journal", "operations.jsonl"), os.O_WRONLY, 0, unavailable, unavailable)`, `openPrivateFile(c.path("journal", "operations.jsonl"), os.O_WRONLY, 0)`, "writer_open_count:finishRetainedRemoval"},
+		{"journal_open_flags", "files.go", "os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600, irregular", "os.O_WRONLY|os.O_CREATE, 0o600, irregular", `writer_open:journalCause:openRegularWriter(ctx, path, os.O_WRONLY | os.O_CREATE, 0o600, irregular, errors.New("cannot open local cell journal"))`},
+		{"discard_open_private_writer", "files.go", `openRegularWriter(ctx, c.path("journal", "operations.jsonl"), os.O_WRONLY, 0, torn, torn)`, `openPrivateWriter(c.path("journal", "operations.jsonl"), os.O_WRONLY, 0)`, "writer_open_caller:files.go:discardJournalTail"},
+		{"retained_open_private_file", "removal_retention.go", `openRegularWriter(ctx, c.path("journal", "operations.jsonl"), os.O_WRONLY, 0, unavailable, unavailable)`, `openPrivateFile(c.path("journal", "operations.jsonl"), os.O_WRONLY, 0)`, "writer_open_count:finishRetainedRemoval"},
 		{"unix_no_nonblock", "files_other.go", "return os.OpenFile(path, flags|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, mode)", "return os.OpenFile(path, flags|syscall.O_NOFOLLOW, mode)", "writer_unix_open"},
 		{"unix_no_nofollow", "files_other.go", "return os.OpenFile(path, flags|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, mode)", "return os.OpenFile(path, flags|syscall.O_NONBLOCK, mode)", "writer_unix_open"},
 		{"unix_blocking_kept", "files_other.go", "syscall.SetNonblock(int(fd), false)", "syscall.SetNonblock(int(fd), true)", "writer_blocking_unix"},
@@ -282,8 +283,8 @@ func TestWriterOpenSourceContract(t *testing.T) {
 	// G1: the review's six reopens (rows 1 to 6), aliases declared in another file, a renamed
 	// import, the other names, the pin, a type error, a non-standard import left unresolved.
 	appendBlock := "\tf, err := " + journalOpen + "\n\tif err != nil {\n\t\treturn err\n\t}\n"
-	discardBlock := "\tf, err := openRegularWriter(context.Background(), c.path(\"journal\", \"operations.jsonl\"), os.O_WRONLY, 0, torn, torn)\n\tif err != nil {\n\t\treturn err\n\t}\n"
-	retainedBlock := "\t\tf, err := openRegularWriter(context.Background(), c.path(\"journal\", \"operations.jsonl\"), os.O_WRONLY, 0, unavailable, unavailable)\n\t\tif err != nil {\n\t\t\treturn err\n\t\t}\n"
+	discardBlock := "\tf, err := openRegularWriter(ctx, c.path(\"journal\", \"operations.jsonl\"), os.O_WRONLY, 0, torn, torn)\n\tif err != nil {\n\t\treturn err\n\t}\n"
+	retainedBlock := "\t\tf, err := openRegularWriter(ctx, c.path(\"journal\", \"operations.jsonl\"), os.O_WRONLY, 0, unavailable, unavailable)\n\t\tif err != nil {\n\t\t\treturn err\n\t\t}\n"
 	const progress, boundary, journalName = "// journalProgress contains only", "func (c *Cell) removalBoundary(step string) error {", `c.path("journal", "operations.jsonl")`
 	reopen := func(open, failure string) string {
 		return "\t_ = f.Close()\n\tif f, err = " + open + "; err != nil {\n\t\treturn " + failure + "\n\t}\n"
@@ -351,7 +352,7 @@ func writerTornCell(t *testing.T) (*Cell, journalProgress) {
 	t.Helper()
 	c, _ := unitCell(t)
 	err := testWriteFile(readerJournalPath(c), []byte(readerJournalLine+`{"operation":"install","st`), 0o600)
-	progress, readErr := c.readJournal()
+	progress, readErr := c.readJournal(context.Background())
 	if err != nil || readErr != nil || !progress.tornTail {
 		t.Fatal("cannot prepare the torn journal")
 	}
@@ -385,22 +386,22 @@ func TestJournalWritersStillWrite(t *testing.T) {
 	}
 	t.Run("absent", func(t *testing.T) {
 		c, _ := unitCell(t)
-		if calls := syncs(t); c.journal("stop", "operation", "started") != nil || writerRecords(c) != 1 || *calls != 1 {
+		if calls := syncs(t); c.journal(context.Background(), "stop", "operation", "started") != nil || writerRecords(c) != 1 || *calls != 1 {
 			t.Fatal("an absent journal was not created with one whole record and one directory sync")
 		}
 	})
 	t.Run("complete", func(t *testing.T) {
 		c, _ := unitCell(t)
-		if c.journal("stop", "operation", "started") != nil || c.journal("stop", "operation", "done") != nil {
+		if c.journal(context.Background(), "stop", "operation", "started") != nil || c.journal(context.Background(), "stop", "operation", "done") != nil {
 			t.Fatal("cannot prepare the complete journal")
 		}
-		if calls := syncs(t); c.journal("stop", "operation", "started") != nil || writerRecords(c) != 3 || *calls != 0 {
+		if calls := syncs(t); c.journal(context.Background(), "stop", "operation", "started") != nil || writerRecords(c) != 3 || *calls != 0 {
 			t.Fatal("a complete journal did not gain one whole record without a directory sync")
 		}
 	})
 	t.Run("torn", func(t *testing.T) {
 		c, progress := writerTornCell(t)
-		if c.discardJournalTail(progress) != nil {
+		if c.discardJournalTail(context.Background(), progress) != nil {
 			t.Fatal("the torn journal tail was not discarded")
 		}
 		if info, err := os.Lstat(readerJournalPath(c)); err != nil || info.Size() != progress.durableBytes || writerRecords(c) != 1 {
@@ -445,7 +446,7 @@ func TestJournalWritersStillWrite(t *testing.T) {
 			got, want := error(nil), "cannot open torn local cell journal"
 			if site == "torn" {
 				replace()
-				got = c.discardJournalTail(progress)
+				got = c.discardJournalTail(context.Background(), progress)
 			} else {
 				want, c.cfg.Failpoint = "cannot open local cell journal", func(op, step string) error {
 					if op == "remove" && step == "cleanup_journal" {
@@ -469,7 +470,7 @@ func TestJournalWritersStillWrite(t *testing.T) {
 		if os.RemoveAll(c.path("journal")) != nil || testWriteFile(c.path("journal"), []byte("planted"), 0o600) != nil {
 			t.Fatal("cannot put a regular file at the journal directory")
 		}
-		appendErr, discardErr := c.journal("stop", "operation", "started"), c.discardJournalTail(journalProgress{tornTail: true})
+		appendErr, discardErr := c.journal(context.Background(), "stop", "operation", "started"), c.discardJournalTail(context.Background(), journalProgress{tornTail: true})
 		data, err := os.ReadFile(c.path("journal"))
 		if appendErr == nil || appendErr.Error() != "cannot open local cell journal" || discardErr == nil ||
 			discardErr.Error() != "cannot open torn local cell journal" || err != nil || string(data) != "planted" {

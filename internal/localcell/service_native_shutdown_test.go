@@ -172,15 +172,15 @@ func TestServiceRunInterruptedTickShutdownRepairsBeforeStop(t *testing.T) {
 				}
 				if stops == 2 {
 					// Exercise the real journal boundary with no live processes.
-					if err := c.begin("stop"); err != nil {
+					if err := c.begin(context.Background(), "stop"); err != nil {
 						t.Fatal(err)
 					}
-					err := c.step("stop", "stop", func() error {
+					err := c.step(context.Background(), "stop", "stop", func() error {
 						cancel()
 						ticks <- time.Now() // A ready tick races the canceled context.
 						return opCtx.Err()
 					})
-					progress, journalErr := c.readJournal()
+					progress, journalErr := c.readJournal(context.Background())
 					if err == nil || journalErr != nil || progress.pending == nil || progress.pending.Operation != "stop" || progress.pending.Step != "stop" || progress.tornTail {
 						t.Fatal("canceled stop did not leave the expected recoverable journal")
 					}
@@ -188,7 +188,7 @@ func TestServiceRunInterruptedTickShutdownRepairsBeforeStop(t *testing.T) {
 					if readErr != nil || !bytes.Contains(data, []byte(`"state":"failed"`)) {
 						t.Fatal("canceled step did not record failure")
 					}
-					if refusal := c.begin("stop"); refusal == nil || refusal.Error() != "local cell operation interrupted; run repair first" {
+					if refusal := c.begin(context.Background(), "stop"); refusal == nil || refusal.Error() != "local cell operation interrupted; run repair first" {
 						t.Fatal("pending journal did not reproduce the old shutdown refusal")
 					}
 					t.Log("reproduction: operation=stop step=stop state=failed pending=true torn_tail=false; direct stop begin refused")
@@ -196,7 +196,7 @@ func TestServiceRunInterruptedTickShutdownRepairsBeforeStop(t *testing.T) {
 				}
 				assertFresh(opCtx)
 				events = append(events, "stop")
-				progress, err := c.readJournal()
+				progress, err := c.readJournal(context.Background())
 				if err == nil && progress.pending != nil {
 					// Exercise the production shutdown entry before reporting the
 					// ordering failure. Emit only its validated, fixed refusal.
@@ -231,7 +231,7 @@ func TestServiceRunInterruptedTickShutdownRepairsBeforeStop(t *testing.T) {
 				// automatic stop with fresh escalation time. Preserve its
 				// journal and durable fault until explicit repair.
 				descriptor, descriptorErr := c.ServiceDescriptor()
-				progress, journalErr := c.readJournal()
+				progress, journalErr := c.readJournal(context.Background())
 				if !errors.Is(err, context.Canceled) || descriptorErr != nil || !descriptor.Faulted || journalErr != nil || progress.pending == nil {
 					t.Fatal("canceled Windows stop did not preserve fault and journal")
 				}
