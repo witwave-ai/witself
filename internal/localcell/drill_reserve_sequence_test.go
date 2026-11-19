@@ -12,6 +12,7 @@ import (
 	"reflect"
 	"runtime"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -110,12 +111,39 @@ func (r *drillReserveRun) fault(err error) {
 	}
 }
 
+// at runs act at call of stage, once the fixture has counted that call.
+func (r *drillReserveRun) at(stage string, call int, act func()) {
+	counted := r.c.drillRootTest.stage
+	r.c.drillRootTest.stage = func(name string) {
+		if counted(name); name == stage && r.stages[name] == call {
+			act()
+		}
+	}
+}
+
+// swap replaces the record's temporary in the drill directory dir, its writer open, by a private file of the same
+// bytes: the writer's file is moved aside through a root held on dir and the replacement created through the walk.
+func (r *drillReserveRun) swap(dir string) os.FileInfo {
+	root, err := os.OpenRoot(dir)
+	drillAssert(r.t, err == nil, "cannot hold the drill directory for the swap")
+	defer func() { _ = root.Close() }()
+	data, err := root.ReadFile(drillReservePending)
+	drillAssert(r.t, err == nil && len(data) > 0 && root.Rename(drillReservePending, drillReservePending+"-moved") == nil,
+		"cannot move the record's temporary aside")
+	f, err := drillPlatformCreate(nil, nil, root, "", drillReservePending)
+	drillAssert(r.t, err == nil, "cannot create the replacing temporary")
+	_, err = f.Write(data)
+	info, statErr := f.Stat()
+	drillAssert(r.t, errors.Join(err, statErr, f.Close()) == nil, "cannot write the replacing temporary")
+	return info
+}
+
 // refused requires the closed reason want, no identifier, the tree as before the call and no drill listed; made
 // says the drill directory was made and then discarded, else nothing was written.
 func (r *drillReserveRun) refused(drillID string, err error, want string, made bool) {
 	r.t.Helper()
 	listing, listErr := r.c.drillRootList()
-	drillStorageReason(r.t, err, want, "the reservation gave another outcome")
+	drillReserveExpect(r.t, err == error(drillStorageError{reason: want}), err, "the reservation gave another outcome")
 	drillAssert(r.t, drillID == "" && r.stages["reserve_mkdir"] == map[bool]int{true: 1}[made] && (r.stages["directory"] > 0) == made,
 		"the reservation returned an identifier, or wrote or discarded other than its row says")
 	drillAssert(r.t, listErr == nil && reflect.DeepEqual(listing, drillRootListing{}) && reflect.DeepEqual(r.before, checkpointTreeState(r.t, r.c)),
@@ -280,5 +308,118 @@ func TestDrillReservation(t *testing.T) {
 		drillAssert(t, errors.As(err, &cleanup) && cleanup.cause == drillStorageError{reason: "allocation_collision"} && drillID == filepath.Base(dir),
 			"a refused publication was not an incomplete cleanup of a collision")
 		drillAssert(t, listErr == nil && len(entries) == 1 && entries[0].Name() == drillRootRecordName && entries[0].IsDir(), "the record's temporary was left or the planted directory not kept")
+	})
+	// The planted-link rows (moved here by G4B2's cut, OQ7). Each link is relative and stays inside the cell, so an open
+	// that followed it would reach the moved object; the binds and the no-follow walk refuse it, and a discard refuses
+	// a tree holding it (OQ6).
+	t.Run("boundary_link", func(t *testing.T) {
+		r := drillReserveStart(t)
+		recovery := r.c.recoveryDir()
+		plant := func() { drillReserveLink(t, recovery+"-moved", recovery); r.before = checkpointTreeState(t, r.c) }
+		if runtime.GOOS == "windows" {
+			// Admission's os.OpenRoot handle on recovery/ shares no delete (syscall.Open), so recovery/ cannot move inside
+			// admission on Windows: there the link stands before the call and admission refuses it first.
+			plant()
+		} else {
+			volume, calls := drillStorageVolume, 0
+			drillStorageSeam(t, &drillStorageVolume, func(f *os.File) (drillVolume, error) {
+				if calls++; calls == 1 {
+					plant()
+				}
+				return volume(f)
+			})
+		}
+		drillID, err := r.reserve()
+		drillReserveExpect(t, err == error(drillStorageError{reason: "boundary_refused"}), err, "a link at the name of recovery was not refused")
+		drillAssert(t, drillID == "" && r.stages["reserve_mkdir"] == 0 && reflect.DeepEqual(r.before, checkpointTreeState(t, r.c)),
+			"the reservation wrote through a link at the name of recovery or in the directory it names")
+	})
+	t.Run("drill_link", func(t *testing.T) {
+		r, planted, sync := drillReserveStart(t), false, drillRootSync
+		dir := r.fixed()
+		t.Cleanup(func() { drillRootSync = sync })
+		drillRootSync = func(root *os.Root) error { // its first call follows the drill directory's mkdir
+			if !planted {
+				planted = true
+				drillReserveLink(t, dir+"-moved", dir)
+			}
+			return sync(root)
+		}
+		drillID, err := r.reserve()
+		var cleanup drillCleanupError
+		entries, readErr := os.ReadDir(dir + "-moved")
+		drillReserveExpect(t, errors.As(err, &cleanup) && cleanup.cause == drillStorageError{reason: "boundary_refused"} && drillID == filepath.Base(dir), err,
+			"a link at the drill's name was not refused with its discard refused")
+		drillAssert(t, readErr == nil && len(entries) == 0, "the reservation wrote through a link at the drill's name")
+	})
+	t.Run("record_swap", func(t *testing.T) {
+		r := drillReserveStart(t)
+		dir := r.fixed()
+		r.on["reserve_publish"] = func() { r.swap(dir) }
+		drillID, err := r.reserve()
+		r.refused(drillID, err, "boundary_refused", true)
+	})
+	t.Run("publish_swapped", func(t *testing.T) {
+		r, replacement := drillReserveStart(t), os.FileInfo(nil)
+		dir := r.fixed()
+		r.on["reserve_publish"] = func() {
+			replacement = r.swap(dir)
+			drillAssert(t, privateDir(filepath.Join(dir, drillRootRecordName), true) == nil, "cannot plant a directory at the record's name")
+		}
+		drillID, err := r.reserve()
+		var cleanup drillCleanupError
+		info, statErr := os.Lstat(filepath.Join(dir, drillReservePending))
+		// As publish_refused: os.Root.Rename refuses the planted directory with EEXIST, an allocation collision.
+		drillReserveExpect(t, errors.As(err, &cleanup) && cleanup.cause == drillStorageError{reason: "allocation_collision"} && drillID == filepath.Base(dir), err,
+			"a refused publication of a swapped temporary was not an incomplete cleanup of a collision")
+		drillAssert(t, statErr == nil && os.SameFile(replacement, info), "the replacing temporary, not the writer's, was removed")
+	})
+	// An added file entry sorts after the created directory pg and before pg's first child, so at that file's
+	// reserve_file stage nothing below pg is open (NTFS refuses to rename a directory with an open file below it) and
+	// pg's children are still to come: the next creation below pg meets the link.
+	t.Run("tree_link", func(t *testing.T) {
+		r, files := drillReserveStart(t), 0
+		drillAssert(t, r.entry("pg").Type == "dir", "the reservation fixture holds no pg directory")
+		r.inventory.Entries = append(r.inventory.Entries, checkpointInventoryEntry{Path: "pg-later", Type: "file", Size: new(int64), SHA256: strings.Repeat("0", 64)})
+		slices.SortFunc(r.inventory.Entries, func(a, b checkpointInventoryEntry) int { return strings.Compare(a.Path, b.Path) })
+		r.witness.Files++
+		r.inventorySeal()
+		for _, entry := range r.inventory.Entries {
+			if files += map[bool]int{true: 1}[entry.Type == "file"]; entry.Path == "pg-later" {
+				break
+			}
+		}
+		dir := r.fixed()
+		moved := filepath.Join(dir, drillReserveClone, "pg")
+		r.at("reserve_file", files, func() { drillReserveLink(t, moved+"-moved", moved) })
+		drillID, err := r.reserve()
+		var cleanup drillCleanupError
+		entries, readErr := os.ReadDir(moved + "-moved")
+		drillReserveExpect(t, errors.As(err, &cleanup) && cleanup.cause == drillStorageError{reason: "boundary_refused"} && drillID == filepath.Base(dir), err,
+			"a creation below a link at a created directory was not refused with its discard refused")
+		drillAssert(t, readErr == nil && len(entries) == 0, "the reservation created something through a link at a created directory")
+	})
+	// The last file below a directory D, its writer open at its proof's reopen: D, or on Windows the file itself (NTFS
+	// refuses to rename a directory with an open file below it), replaced by a link the no-follow reopen refuses.
+	t.Run("verify_link", func(t *testing.T) {
+		r, call, files, name := drillReserveStart(t), 0, 0, ""
+		for _, entry := range r.inventory.Entries {
+			if entry.Type == "file" {
+				if files++; path.Dir(entry.Path) != "." {
+					call, name = files, entry.Path
+				}
+			}
+		}
+		drillAssert(t, call > 0, "the reservation fixture holds no file below a directory")
+		if runtime.GOOS != "windows" {
+			name = path.Dir(name)
+		}
+		dir := r.fixed()
+		planted := filepath.Join(dir, drillReserveClone, filepath.FromSlash(name))
+		r.at("reserve_verify", call, func() { drillReserveLink(t, planted+"-moved", planted) })
+		drillID, err := r.reserve()
+		var cleanup drillCleanupError
+		drillReserveExpect(t, errors.As(err, &cleanup) && cleanup.cause == drillStorageError{reason: "allocation_unproved"} && drillID == filepath.Base(dir), err,
+			"a link on the reopened file's path was not refused at its proof with its discard refused")
 	})
 }

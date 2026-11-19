@@ -16,6 +16,7 @@ import (
 	"runtime/debug"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 	"unsafe"
@@ -547,6 +548,48 @@ func drillReserveSparse(f *os.File, offset, length uint64) error {
 	return f.Truncate(int64(offset + length))
 }
 
+// drillReserveLink moves the object at name to target and plants at name a relative symbolic link to it.
+func drillReserveLink(t *testing.T, target, name string) {
+	t.Helper()
+	drillAssert(t, os.Rename(name, target) == nil && os.Symlink(filepath.Base(target), name) == nil, "cannot plant the link fixture")
+}
+
+// drillReserveKill ends the crash child by SIGKILL; drillReserveKilled reports a child that ended so.
+func drillReserveKill() { _ = unix.Kill(os.Getpid(), unix.SIGKILL) }
+
+func drillReserveKilled(err error) bool {
+	var exit *exec.ExitError
+	status, ok := syscall.WaitStatus(0), errors.As(err, &exit)
+	if ok {
+		status, ok = exit.Sys().(syscall.WaitStatus)
+	}
+	return ok && status.Signaled() && status.Signal() == unix.SIGKILL
+}
+
+// drillReserveCharged is the space the file system allocated to f: st_blocks, in 512-byte units.
+func drillReserveCharged(t *testing.T, f *os.File) uint64 {
+	var stat unix.Stat_t
+	drillAssert(t, unix.Fstat(int(f.Fd()), &stat) == nil, "cannot read the allocated blocks of a residue file")
+	return uint64(stat.Blocks) * 512
+}
+
+// drillReserveLimit lowers this process's own file size limit to 128 KiB when asked and returns the limit's restore,
+// nil when it cannot be lowered.
+func drillReserveLimit(lower bool) func() error {
+	var prior unix.Rlimit
+	if !lower {
+		return func() error { return nil }
+	}
+	if unix.Getrlimit(unix.RLIMIT_FSIZE, &prior) != nil {
+		return nil
+	}
+	limit := prior
+	if limit.Cur = 128 << 10; unix.Setrlimit(unix.RLIMIT_FSIZE, &limit) != nil {
+		return nil
+	}
+	return func() error { return unix.Setrlimit(unix.RLIMIT_FSIZE, &prior) }
+}
+
 // The sequence's Linux-only rows on the runner's ext4.
 func TestDrillReservationLinux(t *testing.T) {
 	// R4: a file of exactly the same size, fully allocated, put at the name while the writer is open is refused.
@@ -576,5 +619,15 @@ func TestDrillReservationLinux(t *testing.T) {
 		}
 		drillID, err := r.reserve()
 		r.refused(drillID, err, "unsupported_fs", true)
+	})
+	// A real EFBIG: the child's own file size limit, 128 KiB, refuses the allowance's third 64 KiB chunk, and the
+	// reservation is discarded with what it had allocated.
+	t.Run("efbig_child", func(t *testing.T) {
+		r := drillReserveStart(t)
+		before := checkpointTreeState(t, r.c)
+		lines, exit := drillReserveChild(t, r, "- 0 limit")
+		drillAssert(t, exit == nil && slices.Equal(lines, []string{"drill-child storage_exhausted false"}),
+			"the size-limited child did not exit 0 refused as storage_exhausted")
+		drillAssert(t, reflect.DeepEqual(before, checkpointTreeState(t, r.c)), "the size-limited reservation was not discarded")
 	})
 }

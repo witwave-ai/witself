@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"math"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -411,6 +412,39 @@ func drillReserveSparse(f *os.File, offset, length uint64) error {
 		}
 	}
 	return f.Truncate(int64(offset + length))
+}
+
+// drillReserveLink moves the object at name to target through a root held on its directory (the toolchain's rename
+// opens it sharing delete, so a file whose writer is open moves) and plants at name a relative symbolic link to it,
+// which needs the symbolic-link privilege a hosted runner has; without it the row fails, never skips.
+func drillReserveLink(t *testing.T, target, name string) {
+	t.Helper()
+	parent, err := os.OpenRoot(filepath.Dir(name))
+	drillAssert(t, err == nil, "cannot hold the link fixture's directory")
+	err = errors.Join(parent.Rename(filepath.Base(name), filepath.Base(target)), parent.Close())
+	drillReserveWindowsCheck(t, err == nil, err, "cannot move the object at the link fixture's name aside")
+	drillAssert(t, os.Symlink(filepath.Base(target), name) == nil, "the link rows need the symbolic-link privilege")
+}
+
+// drillReserveKill ends the crash child with exit code 77; drillReserveKilled reports a child that ended so.
+func drillReserveKill() { _ = windows.TerminateProcess(windows.CurrentProcess(), 77) }
+
+func drillReserveKilled(err error) bool {
+	var exit *exec.ExitError
+	return errors.As(err, &exit) && exit.ExitCode() == 77
+}
+
+// drillReserveCharged is the space the file system allocated to f: FILE_STANDARD_INFO's AllocationSize.
+func drillReserveCharged(t *testing.T, f *os.File) uint64 {
+	return uint64(drillReserveWindowsSizes(t, f).allocation)
+}
+
+// drillReserveLimit: Windows has no per-process file size limit to lower; the size-limited child is Linux's.
+func drillReserveLimit(lower bool) func() error {
+	if lower {
+		return nil
+	}
+	return func() error { return nil }
 }
 
 // The sequence's Windows-only rows (CI's localcell-windows job, the owner's Windows host); one check, one fixed text per
