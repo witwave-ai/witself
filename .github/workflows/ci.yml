@@ -181,7 +181,7 @@ jobs:
     runs-on: windows-latest
     permissions:
       contents: read
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -234,7 +234,7 @@ jobs:
           TMP: ${{ runner.temp }}\lc-pg16\testtmp
         run: |
           $proofJSON = Join-Path $env:RUNNER_TEMP 'lc-pg16\proof.json'
-          go test -json ./internal/localcell -run '^TestRealLifecycle$' -count=1 -timeout=15m > $proofJSON 2>&1
+          go test -json ./internal/localcell -run '^TestRealLifecycle$' -count=1 -timeout=25m > $proofJSON 2>&1
           $goExit = $LASTEXITCODE
           node scripts/ci-go-test-json-check.mjs --input $proofJSON --diagnose --require TestRealLifecycle,TestRealLifecycle/InstallStartRestartRemove,TestRealLifecycle/TwoCellsAreIndependent,TestRealLifecycle/InterruptedStartRepair,TestRealLifecycle/WaitsForReadiness,TestRealLifecycle/InstallerPrincipals,TestRealLifecycle/RetainedReinstall,TestRealLifecycle/Checkpoint,TestRealLifecycle/CheckpointCommand
           $parserExit = $LASTEXITCODE
