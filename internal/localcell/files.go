@@ -3,6 +3,7 @@ package localcell
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -109,15 +110,28 @@ func (c *Cell) layout() error {
 // os.ErrNotExist when absent below a directory, else inspect, irregular (a
 // refused link too) or open. Nothing is read on that path.
 func openRegular(path string, inspect, irregular, open error) (*os.File, error) {
-	return openRegularBy(openPrivateReader, nil, path, inspect, irregular, open)
+	return openRegularBy(context.Background(), openPrivateReader, nil, path, inspect, irregular, open)
 }
+
+// leaseWaitCut is a lease wait ended by its context: it unwraps to the
+// context's own error, never to would-block or not-exist, so it is never
+// read as a lease refusal or as an absent file.
+type leaseWaitCut struct{ cause error }
+
+func (e *leaseWaitCut) Error() string { return "local cell lease wait ended: " + e.cause.Error() }
+func (e *leaseWaitCut) Unwrap() error { return e.cause }
 
 // openRegularBy is openRegular through openReader, a per-OS open that never
 // waits either (openPostgresReader below pg/). A reader whose check before the
 // open also bounded the size or required privacy passes it as accept, which
 // judges the same stat on both paths: a regular file it refuses is irregular.
-func openRegularBy(openReader func(string) (*os.File, error), accept func(os.FileInfo) bool, path string, inspect, irregular, open error) (*os.File, error) {
-	f, err := openReader(path)
+// A lease wait that ctx ended returns its cut as it is, before any Lstat, so
+// it never reads as absent, inspect, irregular or open.
+func openRegularBy(ctx context.Context, openReader func(context.Context, string) (*os.File, error), accept func(os.FileInfo) bool, path string, inspect, irregular, open error) (*os.File, error) {
+	f, err := openReader(ctx, path)
+	if cut := (*leaseWaitCut)(nil); errors.As(err, &cut) {
+		return nil, cut
+	}
 	if err != nil {
 		info, err := os.Lstat(path)
 		switch {
@@ -174,7 +188,7 @@ func nearestAncestorIsDirectory(path string) bool {
 // failed open is irregular when Lstat shows what is not a regular file at the
 // name, else failed: an absent name too is a refusal, never success.
 func openRegularWriter(path string, flags int, mode os.FileMode, irregular, failed error) (*os.File, error) {
-	f, err := openPrivateWriter(path, flags, mode)
+	f, err := openPrivateWriter(context.Background(), path, flags, mode)
 	if err != nil {
 		if info, err := os.Lstat(path); err == nil && !info.Mode().IsRegular() {
 			return nil, irregular
@@ -193,8 +207,8 @@ func openRegularWriter(path string, flags int, mode os.FileMode, irregular, fail
 }
 
 // readRegular reads all of what openRegularBy opened; a failed read is open.
-func readRegular(openReader func(string) (*os.File, error), accept func(os.FileInfo) bool, path string, inspect, irregular, open error) ([]byte, error) {
-	f, err := openRegularBy(openReader, accept, path, inspect, irregular, open)
+func readRegular(ctx context.Context, openReader func(context.Context, string) (*os.File, error), accept func(os.FileInfo) bool, path string, inspect, irregular, open error) ([]byte, error) {
+	f, err := openRegularBy(ctx, openReader, accept, path, inspect, irregular, open)
 	if err != nil {
 		return nil, err
 	}

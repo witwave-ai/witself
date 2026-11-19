@@ -3,6 +3,7 @@
 package localcell
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -23,7 +24,7 @@ func readPostgresFile(path string) ([]byte, error) {
 }
 
 // openPostgresReader is readPostgresFile's guarded open without the read.
-func openPostgresReader(path string) (*os.File, error) {
+func openPostgresReader(_ context.Context, path string) (*os.File, error) {
 	return runtimeconfig.WindowsPrivatePostgresOpen(filepath.Dir(path), path)
 }
 

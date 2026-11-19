@@ -71,7 +71,7 @@ func writerOneReturn(body *ast.BlockStmt) string {
 
 // writerCheckOrder: openRegularWriter's first statement opens, the next is its
 // failure branch holding the Lstat; then Stat and blockingWriter, nothing else
-// (Close, errors.Is, Mode, IsRegular aside) and never a write, truncate or sync.
+// (context.Background, Close, errors.Is, Mode, IsRegular aside) and never a write, truncate or sync.
 func writerCheckOrder(declarations []*ast.FuncDecl) bool {
 	if len(declarations) != 1 {
 		return false
@@ -81,19 +81,19 @@ func writerCheckOrder(declarations []*ast.FuncDecl) bool {
 		selector, ok := call.Fun.(*ast.SelectorExpr)
 		if ok && slices.Contains([]string{"Write", "WriteString", "WriteAt", "ReadFrom", "Truncate", "Sync"}, selector.Sel.Name) {
 			return false
-		} else if ok && slices.Contains([]string{"Close", "Mode", "IsRegular"}, selector.Sel.Name) || types.ExprString(call.Fun) == "errors.Is" {
+		} else if ok && slices.Contains([]string{"Close", "Mode", "IsRegular"}, selector.Sel.Name) || types.ExprString(call.Fun) == "errors.Is" || types.ExprString(call) == "context.Background()" {
 			continue
 		}
 		if order = append(order, types.ExprString(call)); types.ExprString(call) == "os.Lstat(path)" {
 			lstat = call
 		}
 	}
-	if !slices.Equal(order, []string{"openPrivateWriter(path, flags, mode)", "os.Lstat(path)", "f.Stat()", "blockingWriter(f)"}) || len(body.List) < 2 {
+	if !slices.Equal(order, []string{"openPrivateWriter(context.Background(), path, flags, mode)", "os.Lstat(path)", "f.Stat()", "blockingWriter(f)"}) || len(body.List) < 2 {
 		return false
 	}
 	open, isAssign := body.List[0].(*ast.AssignStmt)
 	branch, isIf := body.List[1].(*ast.IfStmt)
-	return isAssign && len(open.Rhs) == 1 && types.ExprString(open.Rhs[0]) == "openPrivateWriter(path, flags, mode)" && isIf && branch.Init == nil &&
+	return isAssign && len(open.Rhs) == 1 && types.ExprString(open.Rhs[0]) == "openPrivateWriter(context.Background(), path, flags, mode)" && isIf && branch.Init == nil &&
 		types.ExprString(branch.Cond) == "err != nil" && lstat.Pos() > branch.Body.Pos() && lstat.End() < branch.Body.End()
 }
 
@@ -218,7 +218,7 @@ func writerOpenContract(sources map[string]string) (result []string) {
 			}
 		}
 	}
-	failures["writer_unix_open"] = writerReturn(other, "openPrivateWriter") != "return waitOutLease(path, os.Lstat, func() (*os.File, error) { return os.OpenFile(path, flags | syscall.O_NONBLOCK | syscall.O_NOFOLLOW, mode) })"
+	failures["writer_unix_open"] = writerReturn(other, "openPrivateWriter") != "return waitOutLease(ctx, path, os.Lstat, func() (*os.File, error) { return os.OpenFile(path, flags | syscall.O_NONBLOCK | syscall.O_NOFOLLOW, mode) })"
 	failures["writer_blocking_unix"] = len(other["blockingWriter"]) != 1 || !slices.Equal(syscalls, []string{"syscall.SetNonblock(int(fd), false)"})
 	failures["writer_windows_open"] = writerReturn(windows, "openPrivateWriter") != "return openPrivateFile(path, flags, mode)" || writerReturn(windows, "blockingWriter") != "return nil"
 	failures["writer_check_order"] = !writerCheckOrder(parsed["files.go"]["openRegularWriter"])

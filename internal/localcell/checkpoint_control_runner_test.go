@@ -96,7 +96,7 @@ func runCheckpointControlHelper(dir, script string) int {
 		// Production stdin is null. This lock follows the parent's lifetime
 		// without requiring a restricted Windows child to query its parent.
 		// CommandContext kills this child, so no exit marker is promised.
-		parent, err := openLockFile(filepath.Join(dir, "parent"), false)
+		parent, err := openLockFile(context.Background(), filepath.Join(dir, "parent"), false)
 		if err != nil {
 			return 125
 		}
@@ -140,7 +140,7 @@ func controlFixture(t *testing.T, steps ...controlScript) *retainedFixture {
 	recorder.production = true
 	dir := testPrivateRoot(t)
 	f.cell.cfg.Binaries.PostgresDir = dir
-	parent, err := openLockFile(filepath.Join(dir, "parent"), true)
+	parent, err := openLockFile(context.Background(), filepath.Join(dir, "parent"), true)
 	if err != nil {
 		t.Fatal("cannot create stand-in parent lock")
 	}

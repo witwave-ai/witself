@@ -27,9 +27,10 @@ const leaseWaitExcluded, leaseWaitPlain = "drill_root.go:drillRootHeld", "files_
 
 // leaseWaitBody and leaseWaitValues are waitOutLease and leaseWait's value as
 // gofmt prints them, comments aside: calls time.Now(), open(), lstat(path),
-// time.Now(), time.Sleep(delay) (errors.Is, Add, After, Mode, IsRegular aside),
-// EWOULDBLOCK only inside errors.Is, no other open, Stat or context.
-const leaseWaitBody = `func waitOutLease[T any](path string, lstat func(string) (os.FileInfo, error), open func() (T, error)) (T, error) {
+// time.Now(), time.NewTimer(delay), ctx.Done(), pause.Stop(), ctx.Err()
+// (errors.Is, Add, After, Mode, IsRegular aside), EWOULDBLOCK only inside
+// errors.Is, no other open or Stat, ctx only to end a pause with the cut.
+const leaseWaitBody = `func waitOutLease[T any](ctx context.Context, path string, lstat func(string) (os.FileInfo, error), open func() (T, error)) (T, error) {
 	deadline, delay := time.Now().Add(leaseWait.ceiling), leaseWait.first
 	for {
 		result, err := open()
@@ -39,7 +40,13 @@ const leaseWaitBody = `func waitOutLease[T any](path string, lstat func(string) 
 		if info, statErr := lstat(path); statErr != nil || !info.Mode().IsRegular() || time.Now().Add(delay).After(deadline) {
 			return result, err
 		}
-		time.Sleep(delay)
+		pause := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			pause.Stop()
+			return result, &leaseWaitCut{cause: ctx.Err()}
+		case <-pause.C:
+		}
 		if delay *= 2; delay > leaseWait.longest {
 			delay = leaseWait.longest
 		}
@@ -49,12 +56,12 @@ const leaseWaitValues = "struct{ ceiling, first, longest time.Duration }{60 * ti
 
 // leaseWaitLock is lock_unix.go's openLockFile as gofmt prints it (G1): its
 // never-waiting flags and the one open, through waitOutLease, nothing else.
-const leaseWaitLock = `func openLockFile(path string, create bool) (*os.File, error) {
+const leaseWaitLock = `func openLockFile(ctx context.Context, path string, create bool) (*os.File, error) {
 	flags := syscall.O_RDWR | syscall.O_CLOEXEC | syscall.O_NOFOLLOW | syscall.O_NONBLOCK
 	if create {
 		flags |= syscall.O_CREAT
 	}
-	fd, err := waitOutLease(path, os.Lstat, func() (int, error) { return syscall.Open(path, flags, 0o600) })
+	fd, err := waitOutLease(ctx, path, os.Lstat, func() (int, error) { return syscall.Open(path, flags, 0o600) })
 	if err != nil {
 		return nil, err
 	}
@@ -72,31 +79,111 @@ func leaseWaitPrint(fset *token.FileSet, node any) string {
 	return printed.String()
 }
 
+// leaseWaitLiteral prints an opener, a function literal as its type and its one
+// return (types.ExprString prints only a literal's type).
+func leaseWaitLiteral(opener ast.Expr) string {
+	if literal, ok := opener.(*ast.FuncLit); ok {
+		return types.ExprString(literal.Type) + " { " + writerOneReturn(literal.Body) + " }"
+	}
+	return types.ExprString(opener)
+}
+
 // leaseWaitThrough: open is the one return of the function literal passed to a
-// waitOutLease call among calls, with open's path and its namespace's Lstat.
-func leaseWaitThrough(calls []*ast.CallExpr, open *ast.CallExpr) bool {
+// waitOutLease call among calls, with function's own context (nothing else),
+// open's path and its namespace's Lstat.
+func leaseWaitThrough(function *ast.FuncDecl, calls []*ast.CallExpr, open *ast.CallExpr) bool {
 	lstat, selector := "os.Lstat", open.Fun.(*ast.SelectorExpr)
 	if selector.Sel.Name == "OpenFile" && types.ExprString(selector.X) != "os" {
 		lstat = types.ExprString(selector.X) + ".Lstat"
 	}
 	return len(open.Args) > 0 && slices.ContainsFunc(calls, func(wait *ast.CallExpr) bool {
-		if len(wait.Args) != 3 || types.ExprString(wait.Fun) != "waitOutLease" || types.ExprString(wait.Args[0]) != types.ExprString(open.Args[0]) ||
-			types.ExprString(wait.Args[1]) != lstat {
+		if len(wait.Args) != 4 || types.ExprString(wait.Fun) != "waitOutLease" || !leaseWaitOwnContext(function, wait.Args[0]) ||
+			types.ExprString(wait.Args[1]) != types.ExprString(open.Args[0]) || types.ExprString(wait.Args[2]) != lstat {
 			return false
 		}
-		literal, ok := wait.Args[2].(*ast.FuncLit)
+		literal, ok := wait.Args[3].(*ast.FuncLit)
 		return ok && literal.Pos() < open.Pos() && open.End() < literal.End() && writerOneReturn(literal.Body) == "return "+types.ExprString(open)
 	})
 }
 
+// leaseWaitOwnContext: argument is the identifier the parser resolved to a
+// context.Context parameter of function itself.
+func leaseWaitOwnContext(function *ast.FuncDecl, argument ast.Expr) bool {
+	identifier, ok := argument.(*ast.Ident)
+	for _, field := range function.Type.Params.List {
+		for _, name := range field.Names {
+			if ok && identifier.Obj != nil && identifier.Obj == name.Obj && types.ExprString(field.Type) == "context.Context" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// leaseWaitOpeners are the declarations that take the operation's context first
+// (LC-LEASE-2A R5); openCheckpointSource is a method.
+var leaseWaitOpeners = []string{"waitOutLease", "openPrivateReader", "openPrivateWriter", "openPostgresReader", "openPlainReader", "openLockFile",
+	"openCheckpointSource", "openRegularBy", "readRegular"}
+
+// leaseWaitPlaceholders are the non-test calls into leaseWaitOpeners that pass
+// context.Background() instead of their declaration's own context, by file and
+// declaration with their counts (R6); each later slice shrinks it.
+var leaseWaitPlaceholders = map[string]int{"checkpoint.go:(*Cell).admitCheckpoint": 1, "checkpoint.go:(*Cell).checkpointOps": 1,
+	"checkpoint.go:(*Cell).copyCheckpoint": 1, "checkpoint.go:(*Cell).openCheckpointEntry": 2, "checkpoint.go:(*Cell).witnessCheckpoint": 1,
+	"commands.go:(*Cell).password": 1, "files.go:openRegular": 1, "files.go:openRegularWriter": 1, "installer_principal_credentials.go:openPrincipalCredentialFile": 1,
+	"lifecycle.go:(*Cell).postmaster": 1, "lifecycle.go:(*Cell).recoverPostgresRecord": 1, "lock.go:acquireLock": 2, "lock_contention.go:classifyOwnershipFailure": 1,
+	"readiness.go:(*Cell).lastValueFreeDiagnostic": 1, "reinstall.go:(*Cell).reinstallAvailable": 1, "service_adapter_admission.go:serviceAdapterRemovalHostLock": 1,
+	"service_control_exit.go:(*Cell).serviceHostLeaseHeld": 1, "service_descriptor.go:openServiceRecord": 1, "service_foreground.go:(*Cell).acquireServiceLeaseWithBoot": 1,
+	"service_launchd.go:(*launchdAgentAdapter).ownedPlist": 1, "service_systemd_adapter.go:(*systemdUserAdapter).ownedUnit": 1}
+
+// leaseWaitCutText is files.go's cut, then openRegularBy's open with the cut
+// returned before any Lstat classifies it (R4), each exactly once.
+var leaseWaitCutText = []string{"type leaseWaitCut struct{ cause error }\n\nfunc (e *leaseWaitCut) Error() string { return \"local cell lease wait ended: \" + " +
+	"e.cause.Error() }\nfunc (e *leaseWaitCut) Unwrap() error { return e.cause }\n", "open error) (*os.File, error) {\n\tf, err := openReader(ctx, path)\n" +
+	"\tif cut := (*leaseWaitCut)(nil); errors.As(err, &cut) {\n\t\treturn nil, cut\n\t}\n\tif err != nil {\n\t\tinfo, err := os.Lstat(path)\n"}
+
 // leaseWaitContract returns every failed key of R6 over the non-test sources,
-// read without build constraints and with CRLF normalised.
+// read without build constraints and with CRLF normalised; LC-LEASE-2A adds
+// lease_wait_placeholder and lease_wait_cut.
 func leaseWaitContract(sources map[string]string) (result []string) {
 	failures, fset, counts, found := map[string]bool{}, token.NewFileSet(), map[string]int{}, map[string]bool{}
+	placeholders := map[string]int{}
 	for _, name := range slices.Sorted(maps.Keys(sources)) {
 		file, err := parser.ParseFile(fset, name, strings.ReplaceAll(sources[name], "\r\n", "\n"), parser.ParseComments)
 		if failures["parse:"+name] = err != nil; err != nil {
 			continue
+		}
+		// lease_wait_placeholder: a call into leaseWaitOpeners whose first argument
+		// is not its declaration's own context is a site, by file and declaration.
+		for _, declaration := range file.Decls {
+			function, _ := declaration.(*ast.FuncDecl)
+			referencesDeclarations(declaration, func(owner string, node ast.Node) {
+				ast.Inspect(node, func(node ast.Node) bool {
+					call, ok := node.(*ast.CallExpr)
+					if !ok {
+						return true
+					}
+					callee, fun := "", ast.Unparen(call.Fun)
+					if generic, ok := fun.(*ast.IndexExpr); ok {
+						fun = generic.X
+					}
+					switch fun := fun.(type) {
+					case *ast.Ident:
+						if fun.Obj == nil || fun.Obj.Kind == ast.Fun {
+							callee = fun.Name
+						}
+					case *ast.SelectorExpr:
+						if fun.Sel.Name == "openCheckpointSource" {
+							callee = fun.Sel.Name
+						}
+					}
+					if site := name + ":" + owner; slices.Contains(leaseWaitOpeners, callee) && (function == nil || len(call.Args) == 0 || !leaseWaitOwnContext(function, call.Args[0])) {
+						placeholders[site]++
+						failures["lease_wait_placeholder:"+site] = failures["lease_wait_placeholder:"+site] || len(call.Args) == 0 || types.ExprString(call.Args[0]) != "context.Background()"
+					}
+					return true
+				})
+			})
 		}
 		windows := strings.HasSuffix(name, "_windows.go") // or a build line only Windows meets
 		for _, group := range file.Comments {
@@ -168,7 +255,7 @@ func leaseWaitContract(sources map[string]string) (result []string) {
 			}
 			for _, call := range calls {
 				if selector, ok := call.Fun.(*ast.SelectorExpr); ok && (slices.Contains([]string{"os.Open", "os.OpenFile", "syscall.Open", "unix.Open"}, types.ExprString(selector)) || selector.Sel.Name == "OpenFile") {
-					failures["lease_wait_caller:"+site] = failures["lease_wait_caller:"+site] || !leaseWaitThrough(calls, call)
+					failures["lease_wait_caller:"+site] = failures["lease_wait_caller:"+site] || !leaseWaitThrough(function, calls, call)
 					found[site+":open"] = true
 				}
 			}
@@ -180,6 +267,12 @@ func leaseWaitContract(sources map[string]string) (result []string) {
 	failures["lease_wait_body"] = failures["lease_wait_body"] || counts["waitOutLease"] != 1
 	failures["lease_wait_values"] = failures["lease_wait_values"] || counts["leaseWait"] != 1
 	failures["lease_wait_lock"] = failures["lease_wait_lock"] || counts["openLockFile"] != 1
+	for _, site := range slices.Concat(slices.Collect(maps.Keys(placeholders)), slices.Collect(maps.Keys(leaseWaitPlaceholders))) {
+		failures["lease_wait_placeholder:"+site] = failures["lease_wait_placeholder:"+site] || placeholders[site] != leaseWaitPlaceholders[site]
+	}
+	for _, text := range leaseWaitCutText {
+		failures["lease_wait_cut"] = failures["lease_wait_cut"] || strings.Count(strings.ReplaceAll(sources["files.go"], "\r\n", "\n"), text) != 1
+	}
 	for key, failed := range failures {
 		if failed {
 			result = append(result, key)
@@ -188,6 +281,10 @@ func leaseWaitContract(sources map[string]string) (result []string) {
 	slices.Sort(result)
 	return result
 }
+
+// leaseWaitCutStub declares the cut files.go declares, so that files_other.go
+// type-checks alone.
+const leaseWaitCutStub = "\ntype leaseWaitCut struct{ cause error }\n\nfunc (e *leaseWaitCut) Error() string { return e.cause.Error() }\n"
 
 // leaseWaitGate type-checks files_other.go alone as goos builds it, standard
 // packages from source, and returns the constant value of the gate that comes
@@ -262,7 +359,7 @@ func TestLeaseWaitSourceContract(t *testing.T) {
 	sources = ended(sources, "\n")
 	const reader, writer = "os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, 0)", "os.OpenFile(path, flags|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, mode)"
 	waited := func(open string) string {
-		return "return waitOutLease(path, os.Lstat, func() (*os.File, error) {\n\t\treturn " + open + "\n\t})"
+		return "return waitOutLease(ctx, path, os.Lstat, func() (*os.File, error) {\n\t\treturn " + open + "\n\t})"
 	}
 	for _, row := range []struct{ name, file, before, after, want string }{
 		{"wait_any_error", "files_other.go", "!errors.Is(err, syscall.EWOULDBLOCK)", "false", "lease_wait_body"},
@@ -271,15 +368,15 @@ func TestLeaseWaitSourceContract(t *testing.T) {
 		{"wait_ceiling", "files_other.go", "60 * time.Second", "600 * time.Second", "lease_wait_values"},
 		{"reader_direct", "files_other.go", waited(reader), "return " + reader, "lease_wait_caller:files_other.go:openPrivateReader"},
 		{"writer_direct", "files_other.go", waited(writer), "return " + writer, "lease_wait_caller:files_other.go:openPrivateWriter"},
-		{"checkpoint_direct", "checkpoint_unix.go", "waitOutLease(name, root.Lstat, func() (*os.File, error) { return root.OpenFile(name, os.O_RDONLY|syscall.O_NONBLOCK, 0) })",
+		{"checkpoint_direct", "checkpoint_unix.go", "waitOutLease(ctx, name, root.Lstat, func() (*os.File, error) { return root.OpenFile(name, os.O_RDONLY|syscall.O_NONBLOCK, 0) })",
 			"root.OpenFile(name, os.O_RDONLY|syscall.O_NONBLOCK, 0)", "lease_wait_caller:checkpoint_unix.go:openCheckpointSource"},
-		{"checkpoint_other_lstat", "checkpoint_unix.go", "waitOutLease(name, root.Lstat,", "waitOutLease(name, os.Lstat,", "lease_wait_caller:checkpoint_unix.go:openCheckpointSource"},
-		{"lock_direct", "lock_unix.go", "waitOutLease(path, os.Lstat, func() (int, error) { return syscall.Open(path, flags, 0o600) })", "syscall.Open(path, flags, 0o600)",
+		{"checkpoint_other_lstat", "checkpoint_unix.go", "waitOutLease(ctx, name, root.Lstat,", "waitOutLease(ctx, name, os.Lstat,", "lease_wait_caller:checkpoint_unix.go:openCheckpointSource"},
+		{"lock_direct", "lock_unix.go", "waitOutLease(ctx, path, os.Lstat, func() (int, error) { return syscall.Open(path, flags, 0o600) })", "syscall.Open(path, flags, 0o600)",
 			"lease_wait_caller:lock_unix.go:openLockFile"},
 		{"new_never_waiting_open", "files.go", "func regularFile(", "func readLeased(path string) (*os.File, error) { return os.OpenFile(path, syscall.O_NONBLOCK, 0) }\nfunc regularFile(",
 			"lease_wait_caller:files.go:readLeased"},
-		{"windows_wait", "files_windows.go", "(*os.File, error) { return openPrivateFile(path, os.O_RDONLY, 0) }",
-			"(*os.File, error) { return waitOutLease(path, os.Lstat, func() (*os.File, error) { return openPrivateFile(path, os.O_RDONLY, 0) }) }", "lease_wait_windows"},
+		{"windows_wait", "files_windows.go", "\treturn openPrivateFile(path, os.O_RDONLY, 0)\n",
+			"\treturn waitOutLease(context.Background(), path, os.Lstat, func() (*os.File, error) { return openPrivateFile(path, os.O_RDONLY, 0) })\n", "lease_wait_windows"},
 		{"values_assigned", "files.go", "func regularFile(", "func leaseLonger() { leaseWait.ceiling *= 10 }\nfunc regularFile(", "lease_wait_values"},
 		{"parse_error", "files_other.go", "func waitOutLease[T any](", "func waitOutLease[T any]((", "parse:files_other.go"},
 		{"wait_not_gated", "files_other.go", `runtime.GOOS != "linux" || `, "", "lease_wait_body"},
@@ -307,7 +404,7 @@ func TestLeaseWaitSourceContract(t *testing.T) {
 	// true, so the first open's result returns; as linux builds it, false.
 	for goos, first := range map[string]bool{"darwin": true, "linux": false} {
 		t.Run("gate_"+goos, func(t *testing.T) {
-			if got, ok := leaseWaitGate(goos, sources["files_other.go"]); !ok || got != first {
+			if got, ok := leaseWaitGate(goos, sources["files_other.go"]+leaseWaitCutStub); !ok || got != first {
 				t.Fatal("waitOutLease does not return its first result exactly where the target is not Linux")
 			}
 		})

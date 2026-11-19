@@ -1,6 +1,9 @@
 package localcell
 
-import "os"
+import (
+	"context"
+	"os"
+)
 
 // NativeServiceControlCapability bridges the explicit native foreground fixture
 // to the private capability seam without adding a production API.
@@ -9,7 +12,7 @@ func NativeServiceControlCapability() error { return serviceControlCapability() 
 // NativeServiceLeaseReleased checks the stable lock directly, preserving the
 // lease JSON and the inode that supplies lifetime ownership authority.
 func NativeServiceLeaseReleased(c *Cell) bool {
-	f, err := openLockFile(c.path(".service-host.lock"), false)
+	f, err := openLockFile(context.Background(), c.path(".service-host.lock"), false)
 	if err != nil {
 		return false
 	}

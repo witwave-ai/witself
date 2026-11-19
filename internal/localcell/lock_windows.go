@@ -3,13 +3,14 @@
 package localcell
 
 import (
+	"context"
 	"errors"
 	"os"
 
 	"golang.org/x/sys/windows"
 )
 
-func openLockFile(path string, create bool) (*os.File, error) {
+func openLockFile(_ context.Context, path string, create bool) (*os.File, error) {
 	flags := os.O_RDWR
 	if create {
 		flags |= os.O_CREATE

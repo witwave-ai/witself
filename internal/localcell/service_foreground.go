@@ -1,6 +1,7 @@
 package localcell
 
 import (
+	"context"
 	"errors"
 	"os"
 )
@@ -27,7 +28,7 @@ func (c *Cell) acquireServiceLeaseWithBoot(d ServiceDescriptor, readBoot func() 
 	if err := servicePrivateRecord(c.path(".service-host.lock")); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, serviceFailureAt(err, "lease_record")
 	}
-	f, err := openLockFile(c.path(".service-host.lock"), true)
+	f, err := openLockFile(context.Background(), c.path(".service-host.lock"), true)
 	if err != nil {
 		return nil, errors.New("localcell: service_lease_unavailable")
 	}

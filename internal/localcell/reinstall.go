@@ -193,7 +193,7 @@ func (c *Cell) reinstallAvailable(m *Manifest, progress journalProgress) error {
 	// regular file: the open never waits, so a FIFO at the name, even one renamed
 	// in after any earlier check, cannot block the lock holder, and a symlink at
 	// the name is refused, never followed.
-	version, err := readRegular(openPostgresReader, func(info os.FileInfo) bool { return info.Size() <= 64 }, c.path("pg", "PG_VERSION"),
+	version, err := readRegular(context.Background(), openPostgresReader, func(info os.FileInfo) bool { return info.Size() <= 64 }, c.path("pg", "PG_VERSION"),
 		errReinstallState, errReinstallState, errReinstallState)
 	if err != nil {
 		return errReinstallState

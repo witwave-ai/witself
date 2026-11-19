@@ -3,6 +3,7 @@
 package localcell
 
 import (
+	"context"
 	"errors"
 	"io"
 	"os"
@@ -30,11 +31,13 @@ func openPrivateFile(path string, flags int, _ os.FileMode) (*os.File, error) {
 
 // openPrivateReader is the guarded open: no FIFO can stand at a file-system
 // name here, and it opens a link at the last element as itself and refuses it.
-func openPrivateReader(path string) (*os.File, error) { return openPrivateFile(path, os.O_RDONLY, 0) }
+func openPrivateReader(_ context.Context, path string) (*os.File, error) {
+	return openPrivateFile(path, os.O_RDONLY, 0)
+}
 
 // openPrivateWriter is the guarded open too: it refuses flags outside its list,
 // so the Unix non-blocking and no-follow flags never reach it.
-func openPrivateWriter(path string, flags int, mode os.FileMode) (*os.File, error) {
+func openPrivateWriter(_ context.Context, path string, flags int, mode os.FileMode) (*os.File, error) {
 	return openPrivateFile(path, flags, mode)
 }
 
@@ -43,7 +46,7 @@ func blockingWriter(*os.File) error { return nil }
 
 // openPlainReader keeps os.Open for a service manager file outside the root,
 // which the guarded open would refuse; no FIFO can stand at its name here.
-func openPlainReader(path string) (*os.File, error) { return os.Open(path) }
+func openPlainReader(_ context.Context, path string) (*os.File, error) { return os.Open(path) }
 
 func readPrivateFile(path string) ([]byte, error) {
 	f, err := openPrivateFile(path, os.O_RDONLY, 0)

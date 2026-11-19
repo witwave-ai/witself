@@ -109,7 +109,7 @@ checkpoint.go
 	checkpointComplete openRegular
 	syncCheckpointDirectory syncDirectory
 checkpoint_other.go
-	import os
+	import context os
 checkpoint_root.go
 	import errors io/fs os path/filepath runtime
 	(*Cell).discardOwnCheckpoint (*Cell).holdCheckpoint (*Cell).removeCheckpointHeld (*os.Root).Remove
@@ -118,14 +118,14 @@ checkpoint_root.go
 	(*Cell).unsealCheckpointHeld (*os.Root).Remove
 	syncRootDirectory (*os.Root).Open
 checkpoint_unix.go
-	import errors io/fs os path/filepath reflect syscall
+	import context errors io/fs os path/filepath reflect syscall
 	(*Cell).openCheckpointSource (*os.Root).OpenFile os.OpenRoot
 checkpoint_verify.go
 	import bytes context crypto/sha256 encoding/hex encoding/json io io/fs math os path/filepath reflect strings time unicode/utf8
 	checkpointVerifyRead openPrivateReader
 	checkpointVerifyTree path/filepath.WalkDir
 checkpoint_windows.go
-	import github.com/witwave-ai/witself/internal/runtimeconfig golang.org/x/sys/windows os path/filepath
+	import context github.com/witwave-ai/witself/internal/runtimeconfig golang.org/x/sys/windows os path/filepath
 	(*Cell).openCheckpointSource github.com/witwave-ai/witself/internal/runtimeconfig.WindowsPrivatePostgresOpen
 commands.go
 	import bytes context crypto/rand encoding/base64 errors fmt io net net/http net/url os os/exec path/filepath regexp runtime strconv strings time
@@ -177,7 +177,7 @@ environment_unix.go
 environment_windows.go
 	import errors golang.org/x/sys/windows path/filepath strings
 files.go
-	import bufio bytes encoding/json errors fmt github.com/witwave-ai/witself/internal/runtimeconfig io os path/filepath runtime strings time
+	import bufio bytes context encoding/json errors fmt github.com/witwave-ai/witself/internal/runtimeconfig io os path/filepath runtime strings time
 	(*Cell).discardJournalTail (*os.File).Truncate openRegularWriter
 	(*Cell).journal (*Cell).journalCause
 	(*Cell).journalCause (*os.File).Write openRegularWriter syncDirectory
@@ -200,7 +200,7 @@ files.go
 	writeAtomicBytesOnce (*os.File).Write createPrivateTemp publishPrivateFile removePrivateFile syncDirectory
 	writeAtomicOnce writeAtomicBytesOnce
 files_other.go
-	import errors os runtime syscall time
+	import context errors os runtime syscall time
 	(*Cell).validatePostgresDirectory privateDir
 	(*Cell).writePostgresConfig writeAtomicBytes
 	createPrivateTemp os.CreateTemp
@@ -215,7 +215,7 @@ files_other.go
 	readPrivateFile os.ReadFile
 	removePrivateFile os.Remove
 files_windows.go
-	import errors github.com/witwave-ai/witself/internal/runtimeconfig io os path/filepath
+	import context errors github.com/witwave-ai/witself/internal/runtimeconfig io os path/filepath
 	createPrivateTemp github.com/witwave-ai/witself/internal/runtimeconfig.WindowsPrivateCreateTemp
 	makePrivateDir github.com/witwave-ai/witself/internal/runtimeconfig.WindowsPrivateMkdir
 	openPlainReader os.Open
@@ -230,7 +230,7 @@ fixed_cause.go
 installation_identity.go
 	import github.com/witwave-ai/witself/internal/id strings
 installer_principal_credentials.go
-	import crypto/rand encoding/base64 errors github.com/witwave-ai/witself/internal/store io net/url os reflect runtime strings
+	import context crypto/rand encoding/base64 errors github.com/witwave-ai/witself/internal/store io net/url os reflect runtime strings
 	(*Cell).credentialPassword openPrivateReader privateDir
 	(*Cell).makePrincipalPasswords os.ReadDir privateDir x3 writeAtomicBytes
 	(*Cell).validatePrincipalPasswords os.ReadDir privateDir
@@ -266,18 +266,18 @@ lifecycle.go
 	(*Cell).stopSelectedLegacy (*Cell).terminateChild
 	(*Cell).verifyStartAccount writeAtomic
 lock.go
-	import errors fmt os path/filepath
+	import context errors fmt os path/filepath
 	acquireLock makePrivateDir openLockFile x2
 lock_contention.go
-	import errors os path/filepath runtime
+	import context errors os path/filepath runtime
 	classifyOwnershipFailure openLockFile
 lock_unix.go
-	import errors os syscall
+	import context errors os syscall
 	openLockFile os.NewFile syscall.Open
 lock_unsupported.go
-	import errors os
+	import context errors os
 lock_windows.go
-	import errors golang.org/x/sys/windows os
+	import context errors golang.org/x/sys/windows os
 	openLockFile openPrivateFile
 port_recovery.go
 	import context errors time
@@ -288,7 +288,7 @@ ports.go
 	allocatePorts (*net.UnixListener).Close net.Listen
 	probePorts (*net.UnixListener).Close net.Listen
 postgres_files_windows.go
-	import errors github.com/witwave-ai/witself/internal/runtimeconfig os path/filepath
+	import context errors github.com/witwave-ai/witself/internal/runtimeconfig os path/filepath
 	(*Cell).preparePostgresDirectory github.com/witwave-ai/witself/internal/runtimeconfig.WindowsPrivatePostgresMkdir
 	(*Cell).writePostgresConfig (*os.File).Write github.com/witwave-ai/witself/internal/runtimeconfig.WindowsPrivateCreateTemp github.com/witwave-ai/witself/internal/runtimeconfig.WindowsPrivatePostgresRename removePrivateFile
 	openPostgresReader github.com/witwave-ai/witself/internal/runtimeconfig.WindowsPrivatePostgresOpen
@@ -348,7 +348,7 @@ rollback_policy.go
 service.go
 	import context errors
 service_adapter_admission.go
-	import errors os path/filepath reflect runtime strings time
+	import context errors os path/filepath reflect runtime strings time
 	serviceAdapterCanonicalPath path/filepath.EvalSymlinks
 	serviceAdapterRemovalHostLock openLockFile
 service_boot.go
@@ -427,7 +427,7 @@ service_descriptor.go
 service_failure_site.go
 	import errors fmt io sync/atomic
 service_foreground.go
-	import errors os
+	import context errors os
 	(*Cell).acquireServiceLeaseWithBoot (*Cell).publishServiceLease openLockFile privateDir
 service_health.go
 	import context crypto/rand encoding/base64 encoding/json errors github.com/witwave-ai/witself/internal/runtimeconfig github.com/witwave-ai/witself/internal/store io net/http net/url os time

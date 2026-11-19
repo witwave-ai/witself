@@ -3,6 +3,7 @@
 package localcell
 
 import (
+	"context"
 	"errors"
 	"os"
 	"runtime"
@@ -20,8 +21,8 @@ func openPrivateFile(path string, flags int, mode os.FileMode) (*os.File, error)
 // openPrivateReader opens path read-only without waiting on what stands at the
 // name, so a FIFO opens at once, and refuses a link at its last element; a
 // leased file is waited out by repeating that same open (waitOutLease).
-func openPrivateReader(path string) (*os.File, error) {
-	return waitOutLease(path, os.Lstat, func() (*os.File, error) {
+func openPrivateReader(ctx context.Context, path string) (*os.File, error) {
+	return waitOutLease(ctx, path, os.Lstat, func() (*os.File, error) {
 		return os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, 0)
 	})
 }
@@ -30,8 +31,8 @@ func openPrivateReader(path string) (*os.File, error) {
 // the name, so a FIFO with no reader fails at once, and refuses a link at its
 // last element; a leased file is waited out by repeating that same open
 // (waitOutLease).
-func openPrivateWriter(path string, flags int, mode os.FileMode) (*os.File, error) {
-	return waitOutLease(path, os.Lstat, func() (*os.File, error) {
+func openPrivateWriter(ctx context.Context, path string, flags int, mode os.FileMode) (*os.File, error) {
+	return waitOutLease(ctx, path, os.Lstat, func() (*os.File, error) {
 		return os.OpenFile(path, flags|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, mode)
 	})
 }
@@ -49,12 +50,15 @@ var leaseWait = struct{ ceiling, first, longest time.Duration }{60 * time.Second
 // fcntl(2)). It then sleeps and repeats the same open, the interval doubling
 // from leaseWait.first to at most leaseWait.longest, while the next interval
 // ends by leaseWait.ceiling; the last refusal is returned unchanged. It never
-// opens otherwise, never blocks and sees no context: anything at the name but
-// a regular file is refused at once, on every attempt. A FUSE file system or a
-// storage manager that answers would-block for a regular file is waited out
-// like a lease. Other systems get the first result: macOS breaks a lease only
-// for a blocking open, so a repeat there could only wait and then refuse.
-func waitOutLease[T any](path string, lstat func(string) (os.FileInfo, error), open func() (T, error)) (T, error) {
+// opens otherwise and never blocks: anything at the name but a regular file is
+// refused at once, on every attempt. Each sleep ends early when ctx is done,
+// and the wait then returns a leaseWaitCut of ctx's error with no further
+// attempt; the first attempt is always made, so a done ctx never refuses an
+// unleased file. A FUSE file system or a storage manager that answers
+// would-block for a regular file is waited out like a lease. Other systems get
+// the first result: macOS breaks a lease only for a blocking open, so a repeat
+// there could only wait and then refuse.
+func waitOutLease[T any](ctx context.Context, path string, lstat func(string) (os.FileInfo, error), open func() (T, error)) (T, error) {
 	deadline, delay := time.Now().Add(leaseWait.ceiling), leaseWait.first
 	for {
 		result, err := open()
@@ -64,7 +68,13 @@ func waitOutLease[T any](path string, lstat func(string) (os.FileInfo, error), o
 		if info, statErr := lstat(path); statErr != nil || !info.Mode().IsRegular() || time.Now().Add(delay).After(deadline) {
 			return result, err
 		}
-		time.Sleep(delay)
+		pause := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			pause.Stop()
+			return result, &leaseWaitCut{cause: ctx.Err()}
+		case <-pause.C:
+		}
 		if delay *= 2; delay > leaseWait.longest {
 			delay = leaseWait.longest
 		}
@@ -88,8 +98,12 @@ func blockingWriter(f *os.File) error {
 
 // A file below pg/ and a service manager file outside the root open the same
 // way here; only Windows needs their different guarded or plain opens.
-func openPostgresReader(path string) (*os.File, error) { return openPrivateReader(path) }
-func openPlainReader(path string) (*os.File, error)    { return openPrivateReader(path) }
+func openPostgresReader(ctx context.Context, path string) (*os.File, error) {
+	return openPrivateReader(ctx, path)
+}
+func openPlainReader(ctx context.Context, path string) (*os.File, error) {
+	return openPrivateReader(ctx, path)
+}
 
 func readPrivateFile(path string) ([]byte, error) { return os.ReadFile(path) }
 

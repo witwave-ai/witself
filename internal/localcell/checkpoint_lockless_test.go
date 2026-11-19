@@ -1,6 +1,7 @@
 package localcell
 
 import (
+	"context"
 	"errors"
 	"go/ast"
 	"go/build"
@@ -56,7 +57,7 @@ func locklessPurge(t *testing.T, c *Cell, cut string) *Cell {
 // process (flock and LockFileEx belong to the open file) until cleanup.
 func locklessLock(t *testing.T, c *Cell, name string, hold bool) {
 	t.Helper()
-	file, err := openLockFile(c.path(filepath.FromSlash(name)), true)
+	file, err := openLockFile(context.Background(), c.path(filepath.FromSlash(name)), true)
 	if err != nil {
 		t.Fatal("cannot prepare the lockless fixture lock")
 	}

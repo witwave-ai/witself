@@ -1,6 +1,7 @@
 package localcell
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -31,7 +32,7 @@ func acquireLock(root string, create bool) (_ *operationLock, err error) {
 			_ = lock.Close()
 		}
 	}()
-	stable, err := openLockFile(filepath.Join(root, ".owner.lock"), create)
+	stable, err := openLockFile(context.Background(), filepath.Join(root, ".owner.lock"), create)
 	if errors.Is(err, os.ErrNotExist) && !create {
 		return nil, nil
 	}
@@ -54,7 +55,7 @@ func acquireLock(root string, create bool) (_ *operationLock, err error) {
 		}
 		return nil, err
 	}
-	operation, err := openLockFile(filepath.Join(run, "operation.lock"), create)
+	operation, err := openLockFile(context.Background(), filepath.Join(run, "operation.lock"), create)
 	if errors.Is(err, os.ErrNotExist) && !create {
 		return lock, nil
 	}

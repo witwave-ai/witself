@@ -162,7 +162,7 @@ func TestServiceRunRestartAfterIdleShutdown(t *testing.T) {
 		progress, _ := c.readJournal()
 		previousJournal = progress.durableBytes
 		// Test the released OS lock without overwriting the diagnostic lease.
-		file, openErr := openLockFile(c.path(".service-host.lock"), false)
+		file, openErr := openLockFile(context.Background(), c.path(".service-host.lock"), false)
 		if openErr != nil {
 			t.Fatal("restart fixture could not reopen the stable lifetime lock")
 		}

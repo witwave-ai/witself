@@ -1,6 +1,7 @@
 package localcell
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"go/ast"
@@ -111,6 +112,9 @@ func TestOwnershipFailureProbe(t *testing.T) {
 
 func TestOwnershipFailureProbeRealLock(t *testing.T) {
 	root := testPrivateRoot(t)
+	openLock := func(path string, create bool) (*os.File, error) {
+		return openLockFile(context.Background(), path, create)
+	}
 	owner, err := acquireLock(root, true)
 	if err != nil {
 		t.Fatal("cannot acquire ownership probe real fixture lock")
@@ -118,7 +122,7 @@ func TestOwnershipFailureProbeRealLock(t *testing.T) {
 	t.Cleanup(func() { _ = owner.Close() })
 	original := errors.New("real ownership probe original refusal")
 	t.Run("held", func(t *testing.T) {
-		if got := probeOwnershipFailure(root, original, lockDirectory, openLockFile, lockFile, unlockFile); got != ErrLocked {
+		if got := probeOwnershipFailure(root, original, lockDirectory, openLock, lockFile, unlockFile); got != ErrLocked {
 			t.Fatal("real held owner did not return bare ErrLocked")
 		}
 	})
@@ -126,7 +130,7 @@ func TestOwnershipFailureProbeRealLock(t *testing.T) {
 		t.Fatal("cannot release ownership probe real fixture lock")
 	}
 	t.Run("free", func(t *testing.T) {
-		if got := probeOwnershipFailure(root, original, lockDirectory, openLockFile, lockFile, unlockFile); got != original {
+		if got := probeOwnershipFailure(root, original, lockDirectory, openLock, lockFile, unlockFile); got != original {
 			t.Fatal("real free owner changed original error identity")
 		}
 		next, err := acquireLock(root, true)
@@ -139,7 +143,7 @@ func TestOwnershipFailureProbeRealLock(t *testing.T) {
 	})
 	t.Run("owner_missing", func(t *testing.T) {
 		empty := testPrivateRoot(t)
-		if got := probeOwnershipFailure(empty, original, lockDirectory, openLockFile, lockFile, unlockFile); got != original {
+		if got := probeOwnershipFailure(empty, original, lockDirectory, openLock, lockFile, unlockFile); got != original {
 			t.Fatal("real missing owner changed original error identity")
 		}
 		if _, err := os.Lstat(filepath.Join(empty, ".owner.lock")); !errors.Is(err, os.ErrNotExist) {
@@ -261,6 +265,10 @@ func ownershipClosedBeforeReturn(block *ast.BlockStmt) bool {
 
 // This checker accepts only supplied source text and deliberately parses files
 // for every platform. Normalizing here also covers directly supplied CRLF text.
+// ownershipLockOpener is the probe's lock open: openLockFile given the
+// placeholder context, the one closure its dependency list admits.
+const ownershipLockOpener = "func(path string, create bool) (*os.File, error) { return openLockFile(context.Background(), path, create) }"
+
 func ownershipFailureWiring(sources map[string]string) string {
 	names := make([]string, 0, len(sources))
 	for name := range sources {
@@ -370,13 +378,13 @@ func ownershipFailureWiring(sources map[string]string) string {
 					failure = "ownership probe call appeared outside its classifier"
 					return true
 				}
-				want := []string{"root", "original", "lockDirectory", "openLockFile", "lockFile", "unlockFile"}
+				want := []string{"root", "original", "lockDirectory", ownershipLockOpener, "lockFile", "unlockFile"}
 				if len(call.Args) != len(want) {
 					failure = "ownership probe dependency argument count changed"
 					return true
 				}
 				for i, name := range want {
-					if !ownershipIdent(call.Args[i], name) {
+					if !ownershipIdent(call.Args[i], name) && leaseWaitLiteral(call.Args[i]) != name {
 						failure = "ownership probe literal dependency list changed"
 						break
 					}

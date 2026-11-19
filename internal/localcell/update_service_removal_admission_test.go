@@ -13,7 +13,7 @@ import (
 
 func serviceRemovalHoldHost(t *testing.T, c *Cell) func() {
 	t.Helper()
-	file, err := openLockFile(c.path(".service-host.lock"), true)
+	file, err := openLockFile(context.Background(), c.path(".service-host.lock"), true)
 	if err != nil {
 		t.Fatal("Removal host contender open failed")
 	}
@@ -50,7 +50,7 @@ func serviceRemovalLocksHeld(t *testing.T, c *Cell) {
 	if err != ErrLocked {
 		t.Fatal("Removal effect escaped its operation lock")
 	}
-	file, err := openLockFile(c.path(".service-host.lock"), false)
+	file, err := openLockFile(context.Background(), c.path(".service-host.lock"), false)
 	if err != nil {
 		t.Fatal("Removal host contender could not open stable lock")
 	}

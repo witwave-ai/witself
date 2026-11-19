@@ -219,7 +219,7 @@ func maintenanceRemovalSourceContract(sources map[string]string) []string {
 			if fn.Name.Name == "serviceAdapterRemovalHostLock" {
 				owners["host"]++
 				text := admissionNodeText(fn)
-				if !strings.Contains(text, "servicePrivateRecord(") || !strings.Contains(text, `openLockFile(c.path(".service-host.lock"), true)`) || !strings.Contains(text, "lockFile(") {
+				if !strings.Contains(text, "servicePrivateRecord(") || !strings.Contains(text, `openLockFile(context.Background(), c.path(".service-host.lock"), true)`) || !strings.Contains(text, "lockFile(") {
 					failures = append(failures, "host_acquisition")
 				}
 				ast.Inspect(fn.Body, func(node ast.Node) bool {

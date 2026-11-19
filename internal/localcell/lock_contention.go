@@ -1,6 +1,7 @@
 package localcell
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -15,7 +16,9 @@ func classifyOwnershipFailure(root string, original error) error {
 	if runtime.GOOS != "windows" {
 		return original
 	}
-	return probeOwnershipFailure(root, original, lockDirectory, openLockFile, lockFile, unlockFile)
+	return probeOwnershipFailure(root, original, lockDirectory, func(path string, create bool) (*os.File, error) {
+		return openLockFile(context.Background(), path, create)
+	}, lockFile, unlockFile)
 }
 
 func probeOwnershipFailure(root string, original error, checkDir func(string) error,

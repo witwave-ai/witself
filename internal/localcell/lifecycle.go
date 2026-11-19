@@ -767,7 +767,7 @@ func (c *Cell) processStateWithRecord(component string) (ProcessState, ProcessRe
 
 func (c *Cell) postmaster() (int, error) {
 	invalid := errors.New("invalid PostgreSQL process record")
-	data, err := readRegular(openPostgresReader, postmasterBounded, c.path("pg", "postmaster.pid"),
+	data, err := readRegular(context.Background(), openPostgresReader, postmasterBounded, c.path("pg", "postmaster.pid"),
 		invalid, invalid, errors.New("cannot read PostgreSQL process record"))
 	if errors.Is(err, os.ErrNotExist) {
 		return 0, nil
@@ -841,7 +841,7 @@ func (c *Cell) recoverPostgresRecord() error {
 	// The re-read opens as the first read does: without waiting, refusing a
 	// link at the name and within the same bound. Every failure is one cause.
 	unreadable := fixedCause("cannot read PostgreSQL recovery identity")
-	data, err := readRegular(openPostgresReader, postmasterBounded, c.path("pg", "postmaster.pid"), unreadable, unreadable, unreadable)
+	data, err := readRegular(context.Background(), openPostgresReader, postmasterBounded, c.path("pg", "postmaster.pid"), unreadable, unreadable, unreadable)
 	if err != nil {
 		return unreadable
 	}

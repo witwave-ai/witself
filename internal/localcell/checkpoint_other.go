@@ -2,12 +2,15 @@
 
 package localcell
 
-import "os"
+import (
+	"context"
+	"os"
+)
 
 // Checkpoints are unsupported on this platform: every boundary refuses.
 func checkpointFreeSpace(string) (uint64, uint64, error) { return 0, 0, errCheckpointState }
 
-func (c *Cell) openCheckpointSource() (func(string) (*os.File, error), func(), error) {
+func (c *Cell) openCheckpointSource(_ context.Context) (func(string) (*os.File, error), func(), error) {
 	return nil, nil, errCheckpointState
 }
 
