@@ -38,8 +38,9 @@ func drillExtentsCover(extents []drillExtent, size uint64) bool {
 
 // drillWindowsRefused are the attributes that keep an end-of-file allocation
 // from proving its range: directory 0x10, sparse 0x200, reparse point 0x400,
-// compressed 0x800, encrypted 0x4000, integrity stream 0x8000.
-const drillWindowsRefused = 0x10 | 0x200 | 0x400 | 0x800 | 0x4000 | 0x8000
+// compressed 0x800, offline 0x1000, encrypted 0x4000, integrity stream 0x8000,
+// recall on data access 0x400000 (a placeholder whose data is elsewhere).
+const drillWindowsRefused = 0x10 | 0x200 | 0x400 | 0x800 | 0x1000 | 0x4000 | 0x8000 | 0x400000
 
 // drillWindowsProved: a file exactly size long whose allocation covers its end
 // and that carries no refused attribute.
@@ -83,10 +84,14 @@ func drillReserveSame(f *os.File, info os.FileInfo, err error) bool {
 	return err == nil && statErr == nil && os.SameFile(mine, info)
 }
 
-// drillReserveRoot opens name below parent as a root and proves it is the
-// directory at that name, not a link's target: a handle opened through the
-// no-follow walk, still open, must be the same directory. The anchor serves
-// identity only; a parent renamed meanwhile is followed as its directory object.
+// drillReserveRoot opens name below parent as a root and proves that the root
+// is the directory object the no-follow walk reached at that name: the anchor,
+// opened through the walk, and the root are compared while both are open. That
+// object renamed between the two opens and reached again through an in-root
+// link is accepted, being the same object; any other is boundary_refused, and
+// so is the proved directory failing to open as a root (that error would carry
+// the name). The anchor serves identity only; a parent renamed meanwhile is
+// followed as its directory object.
 func drillReserveRoot(parent *os.Root, name string) (*os.Root, error) {
 	anchor, err := drillPlatformOpen(parent, name, true)
 	if err != nil {
@@ -95,7 +100,7 @@ func drillReserveRoot(parent *os.Root, name string) (*os.Root, error) {
 	defer func() { _ = anchor.Close() }()
 	root, err := parent.OpenRoot(filepath.FromSlash(name) + drillRootHere)
 	if err != nil {
-		return nil, err
+		return nil, drillStorageError{reason: "boundary_refused"}
 	}
 	info, err := root.Stat(".")
 	if !drillReserveSame(anchor, info, err) {

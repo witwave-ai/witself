@@ -8,10 +8,12 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime/debug"
 	"slices"
 	"strings"
 	"testing"
@@ -128,6 +130,19 @@ func drillReserveOpened(t *testing.T, root *os.Root, fifo, name string, director
 			waited = true
 		}
 	}
+}
+
+// drillReserveBelow counts this process's descriptors on top or below it.
+func drillReserveBelow(t *testing.T, top string) (open int) {
+	t.Helper()
+	entries, err := os.ReadDir("/proc/self/fd")
+	drillAssert(t, err == nil, "cannot list the row's open descriptors")
+	for _, entry := range entries {
+		if target, _ := os.Readlink("/proc/self/fd/" + entry.Name()); strings.HasPrefix(target+"/", top+"/") {
+			open++
+		}
+	}
+	return open
 }
 
 // drillReservePlant makes, at planted, a link to target when one is given, else the object kind names.
@@ -483,6 +498,34 @@ func TestDrillReservePlatformLinux(t *testing.T) {
 			drillAssert(t, root == nil && err == want, "an anchor was not refused with its errno")
 		}
 		drillAssert(t, reflect.DeepEqual(before, drillReserveTree(t, top)), "the anchor changed the fixture tree")
+	})
+	// The anchor is closed on every path: the descriptors on the fixture are the same before and after 200 held
+	// and 200 refused calls. The collector is off, so no finalizer can close a leaked anchor for the row.
+	t.Run("anchor_descriptors", func(t *testing.T) {
+		top := t.TempDir()
+		err := errors.Join(os.Mkdir(filepath.Join(top, "d"), 0o700), os.Symlink("d", filepath.Join(top, "link")), os.WriteFile(filepath.Join(top, "file"), nil, 0o600))
+		drillAssert(t, err == nil, "cannot prepare the drill reserve anchor fixture")
+		parent := drillReserveHeld(t, top)
+		top, err = filepath.EvalSymlinks(top)
+		drillAssert(t, err == nil, "cannot resolve the drill reserve fixture tree")
+		defer debug.SetGCPercent(debug.SetGCPercent(-1))
+		before := drillReserveBelow(t, top)
+		for round := range 200 {
+			root, err := drillReserveRoot(parent, "d")
+			drillAssert(t, err == nil && root.Close() == nil, "a plain directory was not held as a root")
+			refused, err := drillReserveRoot(parent, []string{"link", "absent", "file"}[round%3])
+			drillAssert(t, refused == nil && err != nil, "a link, an absent name or a file was held as a root")
+		}
+		drillAssert(t, before >= 1 && before == drillReserveBelow(t, top), "the anchor leaked a descriptor over the held and the refused calls")
+	})
+	// A range ending past the largest file offset is refused before any system call: with no file, only the range
+	// that ends exactly there reaches fallocate and its EBADF.
+	t.Run("allocate_overflow", func(t *testing.T) {
+		for _, sizes := range [][2]uint64{{math.MaxInt64, 1}, {1, math.MaxInt64}, {0, math.MaxUint64}, {math.MaxUint64, 0}, {math.MaxUint64 - 4095, 8192}} {
+			drillStorageReason(t, drillPlatformAllocate(nil, sizes[0], sizes[1]), "storage_exhausted", "a range past the largest file offset was not refused first")
+		}
+		drillAssert(t, drillPlatformAllocate(nil, math.MaxInt64-1, 1) == unix.EBADF, "a range ending at the largest file offset did not reach its system call")
+		drillAssert(t, drillPlatformAllocate(nil, math.MaxInt64, 0) == unix.EBADF, "an empty range at the largest file offset did not reach its system call")
 	})
 	t.Run("layout", func(t *testing.T) {
 		var m drillFiemap

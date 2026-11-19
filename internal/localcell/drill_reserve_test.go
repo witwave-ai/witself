@@ -66,6 +66,7 @@ func TestDrillReservePlatform(t *testing.T) {
 			{8192, 4096, 0, 4096, true}, {8192, 4096, 0x20 | 0x80, 4096, true}, {8192, 8192, 0, 4096, false}, {8192, 4096, 0, 8192, false},
 			{4095, 4096, 0, 4096, false}, {8192, -1, 0, math.MaxUint64, false}, {8192, 4096, 0x10, 4096, false}, {8192, 4096, 0x200, 4096, false},
 			{8192, 4096, 0x400, 4096, false}, {8192, 4096, 0x800, 4096, false}, {8192, 4096, 0x4000, 4096, false}, {8192, 4096, 0x8000, 4096, false},
+			{8192, 4096, 0x1000, 4096, false}, {8192, 4096, 0x400000, 4096, false}, // offline, recall on data access
 		} {
 			if drillWindowsProved(row.allocation, row.end, row.attributes, row.size) != row.want {
 				t.Fatalf("the windows allocation decision misjudged case %d", index)
@@ -82,6 +83,11 @@ func TestDrillReservePlatform(t *testing.T) {
 			{base, []checkpointInventoryEntry{{Path: "pg/base", Type: "dir"}}, true}, {base, []checkpointInventoryEntry{{Path: "pg/" + strings.Repeat("c", 80), Type: "file"}}, false},
 			{base, []checkpointInventoryEntry{{Path: "pg/" + strings.Repeat("c", 50), Type: "file"}}, true},
 			{base, []checkpointInventoryEntry{{Path: "pg/" + strings.Repeat("c", 50), Type: "dir"}}, false}, {strings.Repeat("b", 230), nil, false},
+			// The bounds (184 units before the entry's own): a file of 75 fits and 76 does not, a directory of 41 and 42;
+			// every entry counts, not only the last.
+			{base, []checkpointInventoryEntry{{Path: "pg/" + strings.Repeat("c", 75), Type: "file"}}, true}, {base, []checkpointInventoryEntry{{Path: "pg/" + strings.Repeat("c", 76), Type: "file"}}, false},
+			{base, []checkpointInventoryEntry{{Path: "pg/" + strings.Repeat("c", 41), Type: "dir"}}, true}, {base, []checkpointInventoryEntry{{Path: "pg/" + strings.Repeat("c", 42), Type: "dir"}}, false},
+			{base, []checkpointInventoryEntry{{Path: "pg/" + strings.Repeat("c", 80), Type: "file"}, {Path: "pg/base", Type: "dir"}}, false},
 		} {
 			if drillReservePathsFit(row.base, row.entries) != row.want {
 				t.Fatalf("the drill layout path bound misjudged case %d", index)

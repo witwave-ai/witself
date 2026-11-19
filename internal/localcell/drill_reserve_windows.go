@@ -4,6 +4,7 @@ package localcell
 
 import (
 	"errors"
+	"math"
 	"os"
 	"strings"
 	"unsafe"
@@ -50,11 +51,22 @@ func drillPlatformOpen(root *os.Root, name string, directory bool) (*os.File, er
 // drillPlatformAllocate sets the end of file to offset+length: on a file that
 // is neither sparse nor compressed NTFS allocates the clusters to the file, and
 // the allocation outlives the handle (allocation information alone does not).
+// Callers allocate in increasing order: an end below the current one would
+// truncate the file and free its allocation, and so would a wrapped end. A
+// range ending past the largest file offset is therefore storage_exhausted
+// before any system call.
 func drillPlatformAllocate(f *os.File, offset, length uint64) error {
+	if length > math.MaxInt64 || offset > math.MaxInt64-length {
+		return drillStorageError{reason: "storage_exhausted"}
+	}
 	return windows.Ftruncate(windows.Handle(f.Fd()), int64(offset+length))
 }
 
-// drillPlatformRefusal: a full disk, a quota or a size limit is storage_exhausted.
+// drillPlatformRefusal: the disk-full, quota and file-too-large codes are
+// storage_exhausted. NTFS answers an end of file above its maximum file size
+// with STATUS_INVALID_PARAMETER (ERROR_INVALID_PARAMETER), which is not mapped:
+// there a size limit is the caller's own reason, unreachable after admission
+// because such a file cannot fit the volume.
 func drillPlatformRefusal(err error) string {
 	switch {
 	case errors.Is(err, windows.ERROR_DISK_FULL), errors.Is(err, windows.ERROR_HANDLE_DISK_FULL),
@@ -64,19 +76,25 @@ func drillPlatformRefusal(err error) string {
 	return ""
 }
 
+// drillWindowsStandard is FILE_STANDARD_INFO (winbase.h), 24 bytes: AllocationSize
+// at 0, EndOfFile at 8, NumberOfLinks at 16, DeletePending at 20, Directory at 21.
+type drillWindowsStandard struct {
+	allocation, end          int64
+	links                    uint32
+	deletePending, directory bool
+}
+
 // drillPlatformVerify proves [0, size) of f allocated by the file system: it
 // reads FileStandardInfo (FILE_STANDARD_INFO, winbase.h) and the attributes by
-// handle, and drillWindowsProved decides; no claim about the device below.
+// handle, refuses a file whose deletion is pending, and drillWindowsProved
+// decides; no claim about the device below.
 func drillPlatformVerify(f *os.File, size uint64) error {
 	handle := windows.Handle(f.Fd())
-	var standard struct {
-		allocation, end          int64
-		links                    uint32
-		deletePending, directory bool
-	}
+	var standard drillWindowsStandard
 	var info windows.ByHandleFileInformation
 	if windows.GetFileInformationByHandleEx(handle, windows.FileStandardInfo, (*byte)(unsafe.Pointer(&standard)), uint32(unsafe.Sizeof(standard))) != nil ||
-		windows.GetFileInformationByHandle(handle, &info) != nil || !drillWindowsProved(standard.allocation, standard.end, info.FileAttributes, size) {
+		windows.GetFileInformationByHandle(handle, &info) != nil || standard.deletePending ||
+		!drillWindowsProved(standard.allocation, standard.end, info.FileAttributes, size) {
 		return drillStorageError{reason: "allocation_unproved"}
 	}
 	return nil

@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"errors"
 	"io/fs"
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -17,13 +18,6 @@ import (
 	"github.com/witwave-ai/witself/internal/runtimeconfig"
 	"golang.org/x/sys/windows"
 )
-
-// drillReserveWindowsStandard is FILE_STANDARD_INFO (winbase.h), the production layout read by the rows.
-type drillReserveWindowsStandard struct {
-	allocation, end          int64
-	links                    uint32
-	deletePending, directory bool
-}
 
 // drillReserveWindowsClass names err by a fixed text per known value, never by its own text.
 func drillReserveWindowsClass(err error) string {
@@ -78,10 +72,10 @@ func drillReserveWindowsFile(t *testing.T, root *os.Root, name string, size uint
 	return f
 }
 
-// drillReserveWindowsSizes reads f's FILE_STANDARD_INFO through its handle.
-func drillReserveWindowsSizes(t *testing.T, f *os.File) drillReserveWindowsStandard {
+// drillReserveWindowsSizes reads f's FILE_STANDARD_INFO through its handle, in the production type.
+func drillReserveWindowsSizes(t *testing.T, f *os.File) drillWindowsStandard {
 	t.Helper()
-	var standard drillReserveWindowsStandard
+	var standard drillWindowsStandard
 	err := windows.GetFileInformationByHandleEx(windows.Handle(f.Fd()), windows.FileStandardInfo, (*byte)(unsafe.Pointer(&standard)), uint32(unsafe.Sizeof(standard)))
 	drillReserveWindowsCheck(t, err == nil, err, "cannot read the drill reserve fixture's standard information")
 	return standard
@@ -199,6 +193,39 @@ func TestDrillReservePlatformWindows(t *testing.T) {
 		err = drillPlatformVerify(f, 16384)
 		drillReserveWindowsCheck(t, err == error(drillStorageError{reason: "allocation_unproved"}), err, "a file shorter than its size was proved")
 	})
+	// G2: a size that is not a cluster multiple tells the allocation from the end of file, so a swapped read fails.
+	t.Run("unaligned", func(t *testing.T) {
+		_, drill := drillReserveWindowsRoot(t)
+		f := drillReserveWindowsFile(t, drill, "clone", 5000)
+		sizes := drillReserveWindowsSizes(t, f)
+		drillReserveWindowsCheck(t, sizes.end == 5000, nil, "the unaligned fixture's end of file is not its size")
+		drillReserveWindowsCheck(t, sizes.allocation > sizes.end, nil, "the unaligned fixture's allocation does not exceed its end")
+		err := drillPlatformVerify(f, 5000)
+		drillReserveWindowsCheck(t, err == nil, err, "an unaligned allocated file was not proved")
+	})
+	// N3: the writer holds delete access (the walk's creator); once its deletion is pending the file is not proved.
+	t.Run("delete_pending", func(t *testing.T) {
+		_, drill := drillReserveWindowsRoot(t)
+		f := drillReserveWindowsFile(t, drill, "clone", 64<<10)
+		remove := byte(1) // FILE_DISPOSITION_INFO is one BOOLEAN, as runtimeconfig's rollback sends it
+		err := windows.SetFileInformationByHandle(windows.Handle(f.Fd()), windows.FileDispositionInfo, &remove, 1)
+		drillReserveWindowsCheck(t, err == nil, err, "cannot mark the drill reserve fixture for deletion")
+		drillReserveWindowsCheck(t, drillReserveWindowsSizes(t, f).deletePending, nil, "the marked fixture's deletion is not pending")
+		err = drillPlatformVerify(f, 64<<10)
+		drillReserveWindowsCheck(t, err == error(drillStorageError{reason: "allocation_unproved"}), err, "a file whose deletion is pending was proved")
+	})
+	// N1: a range ending past the largest file offset is refused before any system call; a wrapped end would truncate.
+	t.Run("allocate_overflow", func(t *testing.T) {
+		_, drill := drillReserveWindowsRoot(t)
+		f := drillReserveWindowsFile(t, drill, "clone", 64<<10)
+		err := drillPlatformAllocate(f, math.MaxUint64-4095, 8192)
+		drillReserveWindowsCheck(t, err == error(drillStorageError{reason: "storage_exhausted"}), err, "a range whose end wraps was not refused")
+		err = drillPlatformAllocate(f, math.MaxInt64, 1)
+		drillReserveWindowsCheck(t, err == error(drillStorageError{reason: "storage_exhausted"}), err, "a range ending past the largest file offset was not refused")
+		err = drillPlatformAllocate(f, 0, math.MaxUint64)
+		drillReserveWindowsCheck(t, err == error(drillStorageError{reason: "storage_exhausted"}), err, "a length past the largest file offset was not refused")
+		drillReserveWindowsCheck(t, drillReserveWindowsSizes(t, f).end == 64<<10, nil, "a refused range moved the end of file")
+	})
 	t.Run("sparse_attribute", func(t *testing.T) {
 		dir, drill := drillReserveWindowsRoot(t)
 		err := drillReserveWindowsFile(t, drill, "clone", 0).Close()
@@ -220,7 +247,7 @@ func TestDrillReservePlatformWindows(t *testing.T) {
 		err := drillReserveWindowsFile(t, drill, "clone", 0).Close()
 		drillReserveWindowsCheck(t, err == nil, err, "the drill reserve fixture did not close")
 		f := drillReserveWindowsControl(t, filepath.Join(dir, "clone"), windows.FSCTL_SET_COMPRESSION, []byte{1, 0},
-			"cannot compress the drill reserve fixture (NTFS compression needs clusters of at most 4 KiB)")
+			"cannot compress the drill reserve fixture (NTFS compression needs clusters of at most 4 KiB and must be enabled)")
 		err = drillPlatformAllocate(f, 0, 64<<10)
 		drillReserveWindowsCheck(t, err == nil, err, "a compressed file's end of file was not set")
 		err = drillPlatformVerify(f, 64<<10)
@@ -347,13 +374,18 @@ func TestDrillReservePlatformWindows(t *testing.T) {
 			drillAssert(t, drillPlatformRefusal(&os.SyscallError{Syscall: "SetFileInformationByHandle", Err: errno}) == want, message+" when wrapped")
 		}
 	})
+	// The production read against FILE_STANDARD_INFO (winbase.h), one field per check.
 	t.Run("constants", func(t *testing.T) {
-		drillAssert(t, drillWindowsRefused == windows.FILE_ATTRIBUTE_DIRECTORY|windows.FILE_ATTRIBUTE_SPARSE_FILE|windows.FILE_ATTRIBUTE_REPARSE_POINT|
-			windows.FILE_ATTRIBUTE_COMPRESSED|windows.FILE_ATTRIBUTE_ENCRYPTED|windows.FILE_ATTRIBUTE_INTEGRITY_STREAM, "the refused attributes differ from the system's")
-		var standard drillReserveWindowsStandard
-		drillAssert(t, unsafe.Sizeof(standard) == 24, "the standard information is not FILE_STANDARD_INFO's 24 bytes")
-		drillAssert(t, unsafe.Offsetof(standard.end) == 8 && unsafe.Offsetof(standard.links) == 16, "the standard information sizes are not where FILE_STANDARD_INFO has them")
-		drillAssert(t, unsafe.Offsetof(standard.deletePending) == 20 && unsafe.Offsetof(standard.directory) == 21, "the standard information flags are not where FILE_STANDARD_INFO has them")
+		drillAssert(t, drillWindowsRefused == windows.FILE_ATTRIBUTE_DIRECTORY|windows.FILE_ATTRIBUTE_SPARSE_FILE|windows.FILE_ATTRIBUTE_REPARSE_POINT|windows.FILE_ATTRIBUTE_COMPRESSED|
+			windows.FILE_ATTRIBUTE_OFFLINE|windows.FILE_ATTRIBUTE_ENCRYPTED|windows.FILE_ATTRIBUTE_INTEGRITY_STREAM|windows.FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS,
+			"the refused attributes differ from the system's")
+		var standard drillWindowsStandard
+		drillAssert(t, unsafe.Sizeof(standard) == 24, "the standard information is not FILE_STANDARD_INFO's size")
+		drillAssert(t, unsafe.Offsetof(standard.allocation) == 0, "the allocation size is not where FILE_STANDARD_INFO has it")
+		drillAssert(t, unsafe.Offsetof(standard.end) == 8, "the end of file is not where FILE_STANDARD_INFO has it")
+		drillAssert(t, unsafe.Offsetof(standard.links) == 16, "the link count is not where FILE_STANDARD_INFO has it")
+		drillAssert(t, unsafe.Offsetof(standard.deletePending) == 20, "the delete-pending flag is not where FILE_STANDARD_INFO has it")
+		drillAssert(t, unsafe.Offsetof(standard.directory) == 21, "the directory flag is not where FILE_STANDARD_INFO has it")
 	})
 }
 
