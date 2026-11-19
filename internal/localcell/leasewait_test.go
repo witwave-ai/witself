@@ -11,6 +11,7 @@ import (
 	"go/types"
 	"io"
 	"maps"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -505,6 +506,130 @@ func TestLeaseWaitSourceContract(t *testing.T) {
 		t.Run("gate_"+goos, func(t *testing.T) {
 			if got, ok := leaseWaitGate(goos, sources["files_other.go"]+leaseWaitCutStub); !ok || got != first {
 				t.Fatal("waitOutLease does not return its first result exactly where the target is not Linux")
+			}
+		})
+	}
+}
+
+// leaseHolderRules are readers6_linux_test.go's holder as gofmt prints it, comments aside
+// (FLAKE-64): take hands hold the kind, the opener's first pause and the time the lease was taken; a
+// retaking holder polls by nanosleep about every first/50 with a 1 µs timer slack on a thread locked
+// for good, and lets go only within first/2 of last seeing its lease unbroken, then takes it again by
+// raw fcntl calls, a refused re-take retried for at most first/4.
+var leaseHolderRules = map[string]string{"take": "\tgo l.hold(f, l.retake, leaseWait.first, time.Now())\n", "hold": `func (l *writerLease) hold(f *os.File, retaking bool, first time.Duration, fresh time.Time) {
+	nap, lost := func() { time.Sleep(100 * time.Microsecond) }, false
+	if retaking {
+		runtime.LockOSThread()
+		_ = unix.Prctl(unix.PR_SET_TIMERSLACK, uintptr(time.Microsecond), 0, 0, 0)
+		pause := unix.NsecToTimespec(int64(first / 50))
+		nap = func() { _ = unix.Nanosleep(&pause, nil) }
+	}
+	for open := true; open; l.mu.Unlock() {
+		nap()
+		l.mu.Lock()
+		polled := time.Now()
+		if held, err := unix.FcntlInt(f.Fd(), unix.F_GETLEASE, 0); l.file == f && err == nil && held != l.lease {
+			l.saw = true
+			if l.letGo {
+				_, _ = unix.FcntlInt(f.Fd(), unix.F_SETLEASE, unix.F_UNLCK)
+			}
+			if l.retake {
+				fresh, lost = l.retaken(f.Fd(), fresh, lost, first)
+			}
+		} else if err == nil {
+			fresh = polled
+		}
+		open = l.file == f
+	}
+}`, "retaken": `func (l *writerLease) retaken(fd uintptr, fresh time.Time, lost bool, first time.Duration) (time.Time, bool) {
+	if !lost && time.Since(fresh) > first/2 {
+		return fresh, false
+	}
+	_, _, _ = unix.RawSyscall(unix.SYS_FCNTL, fd, unix.F_SETLEASE, unix.F_UNLCK)
+	_, _, errno := unix.RawSyscall(unix.SYS_FCNTL, fd, unix.F_SETLEASE, uintptr(l.lease))
+	for end := time.Now().Add(first / 4); errno == unix.EAGAIN && time.Now().Before(end); {
+		_, _, errno = unix.RawSyscall(unix.SYS_FCNTL, fd, unix.F_SETLEASE, uintptr(l.lease))
+	}
+	return time.Now(), errno != 0
+}`}
+
+// leaseHolderOld is the holder before FLAKE-64 from take's go statement to do: its time.Sleep lasted
+// about the opener's first pause, and it let go and took the lease again through the scheduler.
+const leaseHolderOld = `go l.hold(f)
+	} else {
+		_ = f.Close()
+	}
+}
+
+func (l *writerLease) hold(f *os.File) {
+	for open := true; open; l.mu.Unlock() {
+		time.Sleep(100 * time.Microsecond)
+		l.mu.Lock()
+		if held, err := unix.FcntlInt(f.Fd(), unix.F_GETLEASE, 0); l.file == f && err == nil && held != l.lease {
+			l.saw = true
+			if l.letGo || l.retake {
+				_, _ = unix.FcntlInt(f.Fd(), unix.F_SETLEASE, unix.F_UNLCK)
+			}
+			if l.retake {
+				_, _ = unix.FcntlInt(f.Fd(), unix.F_SETLEASE, l.lease)
+			}
+		}
+		open = l.file == f
+	}
+}
+
+`
+
+// leaseHolderContract returns the key of each holder rule source breaks.
+func leaseHolderContract(source string) (failures []string) {
+	fset, printed := token.NewFileSet(), map[string]string{}
+	file, err := parser.ParseFile(fset, "readers6_linux_test.go", strings.ReplaceAll(source, "\r\n", "\n"), parser.SkipObjectResolution)
+	if err != nil {
+		return []string{"parse:readers6_linux_test.go"}
+	}
+	for _, decl := range file.Decls {
+		if function, ok := decl.(*ast.FuncDecl); ok && function.Recv != nil {
+			printed[function.Name.Name] = leaseWaitPrint(fset, function)
+		}
+	}
+	for name, rule := range leaseHolderRules {
+		if !strings.Contains(printed[name], rule) {
+			failures = append(failures, "lease_holder:"+name)
+		}
+	}
+	slices.Sort(failures)
+	return failures
+}
+
+// The lease holder's rules (FLAKE-64), with LF and CRLF endings: the source keeps them, and each
+// mutation, the old holder among them, reports its rule's key.
+func TestLeaseHolderSourceContract(t *testing.T) {
+	data, err := os.ReadFile("readers6_linux_test.go")
+	source := strings.ReplaceAll(string(data), "\r\n", "\n")
+	from, to := strings.Index(source, "go l.hold(f, l.retake"), strings.Index(source, "func (l *writerLease) do(")
+	if err != nil || from < 0 || to < from {
+		t.Fatal("cannot read the lease holder from its source")
+	}
+	once := func(before, after string) string {
+		if strings.Count(source, before) != 1 {
+			return ""
+		}
+		return strings.Replace(source, before, after, 1)
+	}
+	for _, row := range []struct{ name, mutated, want string }{
+		{"result", source, ""},
+		{"old_holder", once(source[from:to], leaseHolderOld), "lease_holder:hold"},
+		{"old_poll", once("nap = func() { _ = unix.Nanosleep(&pause, nil) }", "nap = func() { _ = pause; time.Sleep(100 * time.Microsecond) }"), "lease_holder:hold"},
+		{"scheduler_retake", once("_, _, _ = unix.RawSyscall(unix.SYS_FCNTL, fd, unix.F_SETLEASE, unix.F_UNLCK)", "_, _ = unix.FcntlInt(fd, unix.F_SETLEASE, unix.F_UNLCK)"), "lease_holder:retaken"},
+		{"retry_removed", once("errno == unix.EAGAIN && time.Now().Before(end)", "errno == unix.EAGAIN && end.IsZero()"), "lease_holder:retaken"},
+		{"late_release", once("!lost && time.Since(fresh) > first/2", "false"), "lease_holder:retaken"},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			for _, ending := range []string{"\n", "\r\n"} {
+				failures := leaseHolderContract(strings.ReplaceAll(row.mutated, "\n", ending))
+				if row.mutated == "" || row.want == "" && len(failures) != 0 || row.want != "" && !slices.Contains(failures, row.want) {
+					t.Fatalf("lease holder source contract reported keys %v, the row wants %q", failures, row.want)
+				}
 			}
 		})
 	}
