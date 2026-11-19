@@ -373,7 +373,7 @@ func (c *Cell) checkpointLocked(ctx context.Context, options CheckpointOptions) 
 	if err := c.closeCheckpointLeftover(); err != nil {
 		return err
 	}
-	if err := c.begin("checkpoint"); err != nil {
+	if err := c.begin(context.Background(), "checkpoint"); err != nil {
 		return err
 	}
 	if c.cfg.Failpoint != nil && c.cfg.Failpoint("checkpoint", "operation_started") != nil {
@@ -398,14 +398,14 @@ func (c *Cell) checkpointLocked(ctx context.Context, options CheckpointOptions) 
 	} {
 		// A crash leaves the operation open and discards nothing; Repair or the next
 		// admitted Checkpoint or DeleteCheckpoint closes it.
-		if err := c.step("checkpoint", step.name, step.run); errors.Is(err, errInterrupted) {
+		if err := c.step(context.Background(), "checkpoint", step.name, step.run); errors.Is(err, errInterrupted) {
 			return err
 		} else if err != nil {
 			discarded := !created || discard() == nil
 			return c.closeCheckpointFailure("checkpoint", err, discarded, ops.beforeClose)
 		}
 	}
-	return c.journal("checkpoint", "operation", "done")
+	return c.journal(context.Background(), "checkpoint", "operation", "done")
 }
 
 // admitCheckpoint runs under the lock and writes nothing; the control and free
@@ -427,7 +427,7 @@ func (c *Cell) admitCheckpoint(ctx context.Context, options CheckpointOptions, o
 	if !m.Installed || m.Cleanup != nil || !accountPattern.MatchString(m.AccountID) || m.LastVerifiedSchemaVersion < 1 {
 		return nil, errCheckpointState
 	}
-	if progress, err := c.readJournal(); err != nil {
+	if progress, err := c.readJournal(context.Background()); err != nil {
 		return nil, err
 	} else if (progress.pending != nil || progress.tornTail) && !checkpointLeftover(progress) {
 		return nil, errCheckpointState
@@ -911,11 +911,11 @@ func (c *Cell) closeCheckpointFailure(operation string, stepErr error, discarded
 	if beforeClose != nil {
 		beforeClose()
 	}
-	progress, err := c.readJournal()
+	progress, err := c.readJournal(context.Background())
 	if err != nil || progress.tornTail || progress.pending == nil || progress.pending.Operation != operation {
 		return stepErr
 	}
-	if err := c.journal(operation, "operation", "done"); err != nil {
+	if err := c.journal(context.Background(), operation, "operation", "done"); err != nil {
 		return err
 	}
 	var cause fixedCause
@@ -946,7 +946,7 @@ func checkpointLeftover(progress journalProgress) bool {
 // closeCheckpointLeftover, under the verb's lock after its admission, appends
 // only operation/done to such a leftover; a recorded cleanup refuses unwritten.
 func (c *Cell) closeCheckpointLeftover() error {
-	progress, err := c.readJournal()
+	progress, err := c.readJournal(context.Background())
 	if err != nil || !checkpointLeftover(progress) {
 		return err
 	}
@@ -955,7 +955,7 @@ func (c *Cell) closeCheckpointLeftover() error {
 	} else if cleanup != nil {
 		return errCheckpointState
 	}
-	return c.journal(progress.pending.Operation, "operation", "done")
+	return c.journal(context.Background(), progress.pending.Operation, "operation", "done")
 }
 
 // admitDeleteCheckpoint is DeleteCheckpoint's admission: it writes nothing and
@@ -965,7 +965,7 @@ func (c *Cell) admitDeleteCheckpoint(options DeleteCheckpointOptions) error {
 	if !checkpointIDPattern.MatchString(options.CheckpointID) {
 		return errCheckpointIdentity
 	}
-	if progress, err := c.readJournal(); err != nil {
+	if progress, err := c.readJournal(context.Background()); err != nil {
 		return err
 	} else if (progress.pending != nil || progress.tornTail) && !checkpointLeftover(progress) {
 		return errCheckpointState
@@ -1016,7 +1016,7 @@ func (c *Cell) deleteCheckpointLocked(_ context.Context, options DeleteCheckpoin
 	if err := c.closeCheckpointLeftover(); err != nil {
 		return err
 	}
-	if err := c.begin("checkpoint_delete"); err != nil {
+	if err := c.begin(context.Background(), "checkpoint_delete"); err != nil {
 		return err
 	}
 	for _, step := range []struct {
@@ -1026,13 +1026,13 @@ func (c *Cell) deleteCheckpointLocked(_ context.Context, options DeleteCheckpoin
 		{"unseal", func() error { return c.unsealCheckpointHeld(recovery, checkpoint, options.CheckpointID) }},
 		{"remove", func() error { return c.removeCheckpointHeld(recovery, checkpoint, options.CheckpointID) }},
 	} {
-		if err := c.step("checkpoint_delete", step.name, step.run); errors.Is(err, errInterrupted) {
+		if err := c.step(context.Background(), "checkpoint_delete", step.name, step.run); errors.Is(err, errInterrupted) {
 			return err
 		} else if err != nil {
 			return c.closeCheckpointFailure("checkpoint_delete", err, true, nil)
 		}
 	}
-	return c.journal("checkpoint_delete", "operation", "done")
+	return c.journal(context.Background(), "checkpoint_delete", "operation", "done")
 }
 
 // errCheckpointWitnessUnread: a witness that may exist was not read; it is never reported incomplete.

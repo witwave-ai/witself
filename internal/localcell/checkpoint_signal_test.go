@@ -134,7 +134,7 @@ func TestCheckpointSignalCancellation(t *testing.T) {
 				t.Fatal("the signalled call did not end on its own with its class")
 			}
 			retainedAssertRecords(t, f, row.records)
-			if progress, err := c.readJournal(); err != nil || progress.pending != nil || progress.tornTail || c.validateRecovery() != nil {
+			if progress, err := c.readJournal(context.Background()); err != nil || progress.pending != nil || progress.tornTail || c.validateRecovery() != nil {
 				t.Fatal("a signalled call left an open operation or an unsafe recovery tree")
 			}
 			// Beyond the journal only recovery/, which a create's copy makes, and

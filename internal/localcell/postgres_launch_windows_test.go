@@ -3,6 +3,7 @@
 package localcell
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -336,13 +337,13 @@ func TestWindowsRepairReconcilesPartialPendingPostmaster(t *testing.T) {
 			if part == "epoch" {
 				partial += "1"
 			}
-			if writeAtomic(c.path("run", "postgres.json"), record, nil) != nil || testWriteFile(c.path("pg", "postmaster.pid"), []byte(partial), 0o600) != nil || c.journal("start", "operation", "started") != nil || c.journal("start", "postgres", "started") != nil {
+			if writeAtomic(c.path("run", "postgres.json"), record, nil) != nil || testWriteFile(c.path("pg", "postmaster.pid"), []byte(partial), 0o600) != nil || c.journal(context.Background(), "start", "operation", "started") != nil || c.journal(context.Background(), "start", "postgres", "started") != nil {
 				t.Fatal("cannot publish partial postmaster crash state")
 			}
 			if err := c.Repair(t.Context()); err != nil {
 				t.Fatal("Repair could not reconcile prepublished dead postmaster identity")
 			}
-			progress, err := c.readJournal()
+			progress, err := c.readJournal(context.Background())
 			if err != nil || progress.pending != nil {
 				t.Fatal("partial pidfile left launch journal interrupted")
 			}

@@ -1,6 +1,7 @@
 package localcell
 
 import (
+	"context"
 	"errors"
 	"io"
 	"os"
@@ -240,7 +241,7 @@ func (c *Cell) deleteDrillLocked(drillID string) error {
 	if !drillValidID(drillID) {
 		return drillRootError{reason: "identity_invalid"}
 	}
-	if progress, err := c.readJournal(); err != nil || progress.pending != nil || progress.tornTail {
+	if progress, err := c.readJournal(context.Background()); err != nil || progress.pending != nil || progress.tornTail {
 		return drillRootError{reason: "journal_pending"}
 	}
 	if c.validateRecovery() != nil {

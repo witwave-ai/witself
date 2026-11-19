@@ -114,7 +114,7 @@ func TestLeaseWaitKernelBreak(t *testing.T) {
 	size, started := writerSize(readerJournalPath(c)), time.Now()
 	leaseTaken(t, l, readerJournalPath(c))
 	// No ten-second watchdog here: the ceiling itself bounds this call.
-	err, elapsed := c.journal("stop", "operation", "started"), time.Since(started)
+	err, elapsed := c.journal(context.Background(), "stop", "operation", "started"), time.Since(started)
 	broken, low, high := seconds > 0, time.Duration(seconds-5)*time.Second, min(time.Duration(seconds+5)*time.Second, leaseWait.ceiling)
 	if !broken {
 		low, high = leaseWait.ceiling-leaseWait.longest, leaseWait.ceiling+5*time.Second
@@ -182,7 +182,7 @@ func TestLeaseWaitSupervisorTick(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			c := newAdmissionFixture(t, "StartLegacy").cell
 			s := leaseSupervisor(t, c)
-			if c.journal("stop", "operation", "started") != nil || c.journal("stop", "operation", "done") != nil {
+			if c.journal(context.Background(), "stop", "operation", "started") != nil || c.journal(context.Background(), "stop", "operation", "done") != nil {
 				t.Fatal("cannot prepare the closed journal the supervisor row leases")
 			}
 			leaseStep(t, s, readerJournalPath(c), lease)
@@ -276,7 +276,7 @@ func TestLeaseWaitRepairSwap(t *testing.T) {
 				t.Cleanup(func() { leaseWait, syncFile = saved, savedSync; l.close() })
 				var c *Cell
 				if site == "torn" {
-					if c, _ = unitCell(t); c.journal("stop", "operation", "started") != nil || c.journal("stop", "operation", "done") != nil {
+					if c, _ = unitCell(t); c.journal(context.Background(), "stop", "operation", "started") != nil || c.journal(context.Background(), "stop", "operation", "done") != nil {
 						t.Fatal("cannot prepare the closed journal")
 					}
 				} else {

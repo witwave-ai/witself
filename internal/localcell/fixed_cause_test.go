@@ -79,7 +79,7 @@ func TestPGCommandFixedCausesReachJournal(t *testing.T) {
 				ctx, deadlineCancel = context.WithTimeout(ctx, 250*time.Millisecond)
 				defer deadlineCancel()
 			}
-			err := c.step("install", "initdb", func() error {
+			err := c.step(context.Background(), "install", "initdb", func() error {
 				return c.pgCommand(ctx, "fixture", "-test.run=^TestPGCommandFixtureProcess$", "--", "--flake3-command", mode)
 			})
 			assertFixedCauseJournal(t, c, err, tc.want)
@@ -115,7 +115,7 @@ func assertFixedCauseJournal(t *testing.T, c *Cell, err error, want string) {
 func TestStepFixedCauseDropsPrivateWrappers(t *testing.T) {
 	c, _ := unitCell(t)
 	trusted := fixedCause("PostgreSQL command exited with failure")
-	err := c.step("install", "initdb", func() error {
+	err := c.step(context.Background(), "install", "initdb", func() error {
 		return fmt.Errorf("synthetic-private-wrapper: %w", trusted)
 	})
 	assertFixedCauseJournal(t, c, err, trusted.Error())
@@ -123,7 +123,7 @@ func TestStepFixedCauseDropsPrivateWrappers(t *testing.T) {
 
 func TestStepUnknownCauseKeepsJournalEmpty(t *testing.T) {
 	c, _ := unitCell(t)
-	err := c.step("install", "initdb", func() error { return errors.New("synthetic-private-untrusted-error") })
+	err := c.step(context.Background(), "install", "initdb", func() error { return errors.New("synthetic-private-untrusted-error") })
 	if err == nil || err.Error() != "local cell install: initdb failed" {
 		t.Fatal("untrusted command error crossed the fixed cause boundary")
 	}

@@ -44,7 +44,7 @@ func TestWaitReadyRetainsFailureObservation(t *testing.T) {
 				}
 				ctx, cancel := context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
 				defer cancel()
-				err := c.step("start", component+"_ready", func() error { return c.waitReady(ctx, component, 1) })
+				err := c.step(context.Background(), "start", component+"_ready", func() error { return c.waitReady(ctx, component, 1) })
 				if condition != "missing-record" {
 					if err := removePrivateFile(c.path("run", component+".json")); err != nil {
 						t.Fatal("cannot remove readiness process record")
@@ -74,7 +74,7 @@ func TestStepPreservesOnlyTrustedReadinessErrors(t *testing.T) {
 				c, _ := unitCell(t)
 				trusted := &readinessError{component: component, deadlineExceeded: deadline, state: ProcessState{PID: 42}}
 				wrapped := fmt.Errorf("%s: %w", privateValue, trusted)
-				err := c.step("start", component+"_ready", func() error { return wrapped })
+				err := c.step(context.Background(), "start", component+"_ready", func() error { return wrapped })
 				if err == nil || err.Error() != "local cell start: "+component+"_ready failed: "+trusted.Error() || !errors.Is(err, trusted) {
 					t.Fatal("step lost trusted readiness detail or retained a private wrapper")
 				}
@@ -87,7 +87,7 @@ func TestStepPreservesOnlyTrustedReadinessErrors(t *testing.T) {
 		fmt.Errorf("local cell server readiness deadline exceeded: %s", privateValue),
 	} {
 		c, _ := unitCell(t)
-		err := c.step("start", "server_ready", func() error { return injected })
+		err := c.step(context.Background(), "start", "server_ready", func() error { return injected })
 		if err == nil || err.Error() != "local cell start: server_ready failed" || errors.Is(err, injected) {
 			t.Fatal("step exposed an untrusted error")
 		}

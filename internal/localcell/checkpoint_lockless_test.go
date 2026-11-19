@@ -177,7 +177,7 @@ func TestCheckpointLocklessRefusal(t *testing.T) {
 		}},
 		{"never_cell/journal_pending", "delete_absent", state, func(t *testing.T) *Cell {
 			c := locklessDirs(t, locklessRoot(t), "journal")
-			if c.begin("start") != nil {
+			if c.begin(context.Background(), "start") != nil {
 				t.Fatal("cannot open the pending fixture operation")
 			}
 			return c
@@ -408,7 +408,7 @@ var locklessCallees = map[string][]string{
 	"refuseBeforeLockNames": {"os.Lstat", "errors.Is", "context.Background", "localcell.acquireLock", "(*localcell.operationLock).Close", "(*localcell.Cell).path",
 		"(*localcell.Cell).validateRoot", "(*localcell.Cell).recoveryDir", "param admit"},
 	"admitCheckpointDry": {"errors.Is", "(*localcell.Cell).checkpointOps", "(*localcell.Cell).admitCheckpoint"},
-	"admitDeleteCheckpoint": {"os.Lstat", "os.ReadDir", "errors.Is", "localcell.privateDir", "localcell.checkpointLeftover",
+	"admitDeleteCheckpoint": {"os.Lstat", "os.ReadDir", "errors.Is", "context.Background", "localcell.privateDir", "localcell.checkpointLeftover",
 		"localcell.recoveryEntryCanonical", "(*localcell.Cell).readJournal", "(*localcell.Cell).checkpointCold", "(*localcell.Cell).validateRecovery",
 		"(*localcell.Cell).checkpointDir", "(*localcell.Cell).recoveryDir", "(*regexp.Regexp).MatchString", "(io/fs.DirEntry).Name", "append", "len", "make"},
 }

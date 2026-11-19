@@ -99,7 +99,7 @@ func newAdmissionFixture(t *testing.T, name string) admissionFixture {
 		f.run = c.Repair
 	case "RepairCleanup":
 		m.Cleanup = &journalEntry{Operation: "remove", Step: "runtime_cleanup", State: "started", At: time.Date(2026, 11, 10, 0, 0, 0, 0, time.UTC)}
-		if c.begin("remove") != nil || writeAtomic(c.path("manifest.json"), m, nil) != nil || c.journal("remove", "runtime_cleanup", "started") != nil {
+		if c.begin(context.Background(), "remove") != nil || writeAtomic(c.path("manifest.json"), m, nil) != nil || c.journal(context.Background(), "remove", "runtime_cleanup", "started") != nil {
 			t.Fatal("cannot prepare cleanup recovery")
 		}
 		f.run = c.Repair
@@ -793,7 +793,7 @@ func admissionRunShutdownParity(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		err = c.begin("start")
+		err = c.begin(context.Background(), "start")
 		_ = lock.Close()
 		if err != nil {
 			return err
@@ -816,7 +816,7 @@ func admissionRunShutdownParity(t *testing.T) {
 	if !slices.Contains(effects, "worker_ready") || !slices.Contains(effects, "start:revert_stop") {
 		t.Fatal("Run did not reach actual startup and interrupted-journal repair")
 	}
-	progress, err := c.readJournal()
+	progress, err := c.readJournal(context.Background())
 	if err != nil || progress.pending != nil || progress.tornTail {
 		t.Fatal("Run shutdown did not settle the interrupted lifecycle journal")
 	}

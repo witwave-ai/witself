@@ -44,23 +44,23 @@ func (c *Cell) ownExisting() (*operationLock, error) {
 	return lock, nil
 }
 
-func (c *Cell) begin(operation string) error {
-	progress, err := c.readJournal()
+func (c *Cell) begin(ctx context.Context, operation string) error {
+	progress, err := c.readJournal(ctx)
 	if err != nil {
 		return err
 	}
 	if progress.pending != nil || progress.tornTail {
 		return errors.New("local cell operation interrupted; run repair first")
 	}
-	return c.journal(operation, "operation", "started")
+	return c.journal(ctx, operation, "operation", "started")
 }
 
-func (c *Cell) finish(m *Manifest, operation string) error {
+func (c *Cell) finish(ctx context.Context, m *Manifest, operation string) error {
 	m.LastOperation = operation
 	if err := writeAtomic(c.path("manifest.json"), m, nil); err != nil {
 		return err
 	}
-	return c.journal(operation, "operation", "done")
+	return c.journal(ctx, operation, "operation", "done")
 }
 
 // Install creates a new disposable cluster. Existing data is never adopted or
@@ -132,7 +132,7 @@ func (c *Cell) Install(ctx context.Context, options InstallOptions) error {
 		m.PrincipalLayoutVersion = PrincipalLayoutVersion
 		m.PrincipalRoles = installerRoleNames()
 	}
-	if err := c.begin("install"); err != nil {
+	if err := c.begin(context.Background(), "install"); err != nil {
 		return err
 	}
 	steps := []struct {
@@ -176,7 +176,7 @@ func (c *Cell) Install(ctx context.Context, options InstallOptions) error {
 		}{"stop", func() error { return c.stopAll(ctx) }})
 	}
 	for _, step := range steps {
-		if err := c.step("install", step.name, step.run); err != nil {
+		if err := c.step(context.Background(), "install", step.name, step.run); err != nil {
 			if !errors.Is(err, errInterrupted) {
 				rollbackCtx, rollbackCancel := c.deadline(context.Background())
 				defer rollbackCancel()
@@ -186,7 +186,7 @@ func (c *Cell) Install(ctx context.Context, options InstallOptions) error {
 		}
 	}
 	m.Installed = true
-	return c.finish(m, "install")
+	return c.finish(context.Background(), m, "install")
 }
 
 // installerStartOperations replaces only external startup boundaries in package
@@ -278,7 +278,7 @@ func (c *Cell) Start(ctx context.Context) error {
 		}
 		before[component] = state.Alive
 	}
-	if err := c.begin("start"); err != nil {
+	if err := c.begin(context.Background(), "start"); err != nil {
 		return err
 	}
 	launched := make(map[string]bool)
@@ -338,7 +338,7 @@ func (c *Cell) Start(ctx context.Context) error {
 		}},
 	}
 	for _, step := range steps {
-		err := c.step("start", step.name, func() error {
+		err := c.step(context.Background(), "start", step.name, func() error {
 			timeout := c.cfg.Timeout
 			if step.name == "server_ready" {
 				timeout = c.readinessTimeout("server", m)
@@ -363,13 +363,13 @@ func (c *Cell) Start(ctx context.Context) error {
 			if rollbackErr := c.stopSelected(rollbackCtx, before); rollbackErr != nil {
 				return errors.New("local cell startup failed; rollback incomplete, repair required")
 			}
-			if finishErr := c.finish(m, "start"); finishErr != nil {
+			if finishErr := c.finish(context.Background(), m, "start"); finishErr != nil {
 				return finishErr
 			}
 			return err
 		}
 	}
-	return c.finish(m, "start")
+	return c.finish(context.Background(), m, "start")
 }
 
 // Stop refuses all signals if any recorded process has conflicting identity.
@@ -406,13 +406,13 @@ func (c *Cell) stopWithServiceFence(ctx context.Context, fence bool) error {
 	if err := c.layout(); err != nil {
 		return err
 	}
-	if err := c.begin("stop"); err != nil {
+	if err := c.begin(context.Background(), "stop"); err != nil {
 		return err
 	}
-	if err := c.step("stop", "stop", func() error { return c.stopAll(ctx) }); err != nil {
+	if err := c.step(context.Background(), "stop", "stop", func() error { return c.stopAll(ctx) }); err != nil {
 		return err
 	}
-	return c.finish(m, "stop")
+	return c.finish(context.Background(), m, "stop")
 }
 
 // Repair reverts an interrupted operation to stopped state using its journal
@@ -440,14 +440,14 @@ func (c *Cell) Repair(ctx context.Context) error {
 	if err := c.maintenanceFenceAllows(0); err != nil {
 		return err
 	}
-	progress, err := c.readJournal()
+	progress, err := c.readJournal(context.Background())
 	if err != nil {
 		return err
 	}
 	if m != nil && m.Cleanup != nil && progress.pending != nil && progress.pending.Operation != "remove" {
 		return errors.New("mismatched local cell journal operation")
 	}
-	if err := c.discardJournalTail(progress); err != nil {
+	if err := c.discardJournalTail(context.Background(), progress); err != nil {
 		return err
 	}
 	pending := progress.pending
@@ -469,7 +469,7 @@ func (c *Cell) Repair(ctx context.Context) error {
 		if err := c.retainRemoval(m); err != nil {
 			return err
 		}
-		return c.finishRemoval(m, false)
+		return c.finishRemoval(context.Background(), m, false)
 	}
 	if m != nil && m.PrincipalLayoutVersion != 0 && pending.Operation == "install" {
 		// Only this fresh installation's durable database phase authorizes
@@ -501,12 +501,12 @@ func (c *Cell) Repair(ctx context.Context) error {
 			_ = c.stopAll(ctx)
 			return err
 		}
-		progress, err = c.readJournal()
+		progress, err = c.readJournal(context.Background())
 		if err != nil {
 			return err
 		}
 	}
-	if err := c.step(pending.Operation, "revert_stop", func() error { return c.stopAll(ctx) }); err != nil {
+	if err := c.step(context.Background(), pending.Operation, "revert_stop", func() error { return c.stopAll(ctx) }); err != nil {
 		return err
 	}
 	if m != nil {
@@ -518,7 +518,7 @@ func (c *Cell) Repair(ctx context.Context) error {
 			return err
 		}
 	}
-	return c.journal(pending.Operation, "operation", "done")
+	return c.journal(context.Background(), pending.Operation, "operation", "done")
 }
 
 // Remove stops the cell and retains its custody and recovery history. Only a
@@ -556,21 +556,21 @@ func (c *Cell) Remove(ctx context.Context, options RemoveOptions) error {
 	if err := c.layout(); err != nil {
 		return err
 	}
-	if err := c.begin("remove"); err != nil {
+	if err := c.begin(context.Background(), "remove"); err != nil {
 		return err
 	}
-	if err := c.step("remove", "stop", func() error { return c.stopAll(ctx) }); err != nil {
+	if err := c.step(context.Background(), "remove", "stop", func() error { return c.stopAll(ctx) }); err != nil {
 		return err
 	}
 	if !options.Purge {
 		if err := c.retainRemoval(m); err != nil {
 			return err
 		}
-		return c.finishRemoval(m, false)
+		return c.finishRemoval(context.Background(), m, false)
 	}
 	if options.Purge {
 		for _, name := range []string{"spool", "tmp", "logs"} {
-			if err := c.step("remove", name, func() error { return os.RemoveAll(c.path(name)) }); err != nil {
+			if err := c.step(context.Background(), "remove", name, func() error { return os.RemoveAll(c.path(name)) }); err != nil {
 				return err
 			}
 		}
@@ -580,7 +580,7 @@ func (c *Cell) Remove(ctx context.Context, options RemoveOptions) error {
 		if err := writeAtomic(c.path("manifest.json"), m, nil); err != nil {
 			return err
 		}
-		if err := c.step("remove", "purge", func() error { return os.RemoveAll(c.path("pg")) }); err != nil {
+		if err := c.step(context.Background(), "remove", "purge", func() error { return os.RemoveAll(c.path("pg")) }); err != nil {
 			return err
 		}
 	}
@@ -594,15 +594,15 @@ func (c *Cell) Remove(ctx context.Context, options RemoveOptions) error {
 	if err := c.removalBoundary("cleanup_checkpoint"); err != nil {
 		return err
 	}
-	if err := c.journal("remove", "runtime_cleanup", "started"); err != nil {
+	if err := c.journal(context.Background(), "remove", "runtime_cleanup", "started"); err != nil {
 		return err
 	}
-	return c.finishRemoval(m, options.Purge)
+	return c.finishRemoval(context.Background(), m, options.Purge)
 }
 
-func (c *Cell) finishRemoval(m *Manifest, purge bool) error {
+func (c *Cell) finishRemoval(ctx context.Context, m *Manifest, purge bool) error {
 	if !purge {
-		return c.finishRetainedRemoval(m)
+		return c.finishRetainedRemoval(ctx, m)
 	}
 	// The stable root lock remains held while the subordinate lock inode and
 	// journal are removed. Runtime cleanup is repeatable after interruption.
@@ -643,7 +643,7 @@ func (c *Cell) Inspect(_ context.Context) (Inspection, error) {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return result, errors.New("cannot inspect PostgreSQL data")
 	}
-	progress, err := c.readJournal()
+	progress, err := c.readJournal(context.Background())
 	if err != nil {
 		return result, err
 	}

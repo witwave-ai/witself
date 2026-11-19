@@ -750,7 +750,7 @@ func TestServiceMaintenanceProtectivePathsRemainUsable(t *testing.T) {
 		t.Run(fence+"/pending_stop", func(t *testing.T) {
 			c, d := serviceMaintenanceCell(t, true)
 			serviceMaintenanceFence(t, c, fence)
-			if c.journal("start", "operation", "started") != nil {
+			if c.journal(context.Background(), "start", "operation", "started") != nil {
 				t.Fatal("cannot seed pending operation")
 			}
 			before := serviceMaintenanceSnapshot(t, c)

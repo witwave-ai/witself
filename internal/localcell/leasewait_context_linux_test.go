@@ -213,7 +213,7 @@ func TestLeaseWaitContextReleased(t *testing.T) {
 			started := time.Now()
 			err := readerWatchdog(t, func() error { return call(ctx) }, l.release)
 			returned, waited, cut := time.Now(), <-seen, (*leaseWaitCut)(nil)
-			progress, journalErr := c.readJournal()
+			progress, journalErr := c.readJournal(context.Background())
 			if !l.broken() {
 				t.Fatal("the released verb never met the lease")
 			}

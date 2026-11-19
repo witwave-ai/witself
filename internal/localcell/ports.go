@@ -1,6 +1,9 @@
 package localcell
 
-import "net"
+import (
+	"context"
+	"net"
+)
 
 // An empty component selects the complete initial allocation. Start selects
 // exactly one component, preserving even the saved ports of idle peers.
@@ -113,5 +116,5 @@ func (c *Cell) prepareComponentPortsFor(operation string, m *Manifest, component
 			return err
 		}
 	}
-	return c.journalCause(operation, component, "started", "port_reallocated="+component)
+	return c.journalCause(context.Background(), operation, component, "started", "port_reallocated="+component)
 }

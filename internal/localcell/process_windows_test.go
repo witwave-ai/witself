@@ -498,7 +498,7 @@ func TestWindowsRepairTerminatesPublishedSuspendedChild(t *testing.T) {
 	c, m := unitCell(t)
 	c.cfg.Timeout = 10 * time.Second
 	c.cfg.Binaries.Server = buildWindowsLaunchFixture(t)
-	if c.makePassword() != nil || c.journal("start", "operation", "started") != nil || c.journal("start", "server", "started") != nil {
+	if c.makePassword() != nil || c.journal(context.Background(), "start", "operation", "started") != nil || c.journal(context.Background(), "start", "server", "started") != nil {
 		t.Fatal("cannot prepare suspended recovery fixture")
 	}
 	originalCheckpoint := windowsLaunchCheckpoint
@@ -519,7 +519,7 @@ func TestWindowsRepairTerminatesPublishedSuspendedChild(t *testing.T) {
 		if state, err := windows.WaitForSingleObject(process.Process, 0); err != nil || state != windows.WAIT_OBJECT_0 {
 			t.Error("Repair left its suspended component alive")
 		}
-		progress, err := c.readJournal()
+		progress, err := c.readJournal(context.Background())
 		if err != nil || progress.pending != nil {
 			t.Error("Repair did not settle interrupted launch journal")
 		}

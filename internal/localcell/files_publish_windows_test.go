@@ -4,6 +4,7 @@ package localcell
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -124,7 +125,7 @@ func TestWindowsStopManifestPublicationValidatorGuard(t *testing.T) {
 		}
 		windowsManifestUnchanged(t, c, before)
 		// The refusal is clean: the interrupted stop stays pending for Repair.
-		progress, err := c.readJournal()
+		progress, err := c.readJournal(context.Background())
 		if err != nil || progress.pending == nil || progress.pending.Operation != "stop" {
 			t.Fatal("refused Stop did not leave its operation pending for Repair")
 		}
@@ -177,7 +178,7 @@ func windowsManifestStopped(t *testing.T, c *Cell) {
 	if err != nil || m.LastOperation != "stop" {
 		t.Fatal("Stop did not publish its stopped manifest")
 	}
-	progress, err := c.readJournal()
+	progress, err := c.readJournal(context.Background())
 	if err != nil || progress.pending != nil || progress.tornTail {
 		t.Fatal("Stop did not settle its journal operation")
 	}

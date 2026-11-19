@@ -1,6 +1,7 @@
 package localcell
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -273,7 +274,7 @@ func TestDeleteDrill(t *testing.T) {
 	t.Run("journal_pending", func(t *testing.T) {
 		c, v := drillRootFixture(t)
 		drillRootPlant(t, c, v.DrillID, v)
-		drillAssert(t, c.begin("stop") == nil, "cannot prepare the drill root fixture")
+		drillAssert(t, c.begin(context.Background(), "stop") == nil, "cannot prepare the drill root fixture")
 		drillRootRefused(t, c, v.DrillID, "journal_pending", "drill delete ignored a pending journal")
 	})
 	t.Run("journal_torn", func(t *testing.T) {
@@ -286,7 +287,7 @@ func TestDeleteDrill(t *testing.T) {
 	t.Run("journal_before_boundary", func(t *testing.T) {
 		c, v := drillRootFixture(t)
 		drillRootPlant(t, c, v.DrillID, v)
-		drillAssert(t, c.begin("stop") == nil && os.RemoveAll(c.recoveryDir()) == nil && testWriteFile(c.recoveryDir(), []byte("boundary fault"), 0o600) == nil, "cannot prepare the drill root fixture")
+		drillAssert(t, c.begin(context.Background(), "stop") == nil && os.RemoveAll(c.recoveryDir()) == nil && testWriteFile(c.recoveryDir(), []byte("boundary fault"), 0o600) == nil, "cannot prepare the drill root fixture")
 		drillAssert(t, c.validateRecovery() != nil, "cannot prepare the drill root fixture")
 		drillRootRefused(t, c, v.DrillID, "journal_pending", "drill delete ignored a pending journal")
 	})

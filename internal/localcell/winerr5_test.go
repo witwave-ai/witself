@@ -70,7 +70,7 @@ func TestWinerr5ReadersParentFile(t *testing.T) {
 		read               func(c *Cell) (absent bool, err error)
 	}{
 		{"journal", "journal", "invalid local cell journal", func(c *Cell) (bool, error) {
-			progress, err := c.readJournal()
+			progress, err := c.readJournal(context.Background())
 			return err == nil && progress.pending == nil && progress.durableBytes == 0, err
 		}},
 		{"process_record", "run", "cannot inspect local cell record", func(c *Cell) (bool, error) {
@@ -184,7 +184,7 @@ func TestWinerr5RepairCutRemoval(t *testing.T) {
 func TestWinerr5RepairSelectedInstall(t *testing.T) {
 	c, _ := selectedJournalFixture(t)
 	for _, step := range selectedInstallSteps {
-		if c.step("install", step, func() error { return nil }) != nil {
+		if c.step(context.Background(), "install", step, func() error { return nil }) != nil {
 			t.Fatal("cannot prepare the selected install journal")
 		}
 	}

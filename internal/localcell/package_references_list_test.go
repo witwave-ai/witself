@@ -159,7 +159,7 @@ drill_reserve_windows.go
 	drillPlatformAllocate golang.org/x/sys/windows.Ftruncate
 	drillPlatformVerify unsafe.Pointer
 drill_root.go
-	import errors io os path/filepath runtime strings syscall
+	import context errors io os path/filepath runtime strings syscall
 	(*Cell).deleteDrillLocked (*os.Root).Open x2 (*os.Root).OpenRoot (*os.Root).Remove x2 drillRootSweep x2 os.OpenRoot
 	(*Cell).drillRootList os.ReadDir
 	drillRootClassify openPrivateFile os.ReadDir privateDir
@@ -289,7 +289,7 @@ port_recovery.go
 	import context errors time
 	(*Cell).waitReadyWithPortRecovery (*Cell).journalCause (*Cell).startChildContext
 ports.go
-	import net
+	import context net
 	(*Cell).prepareComponentPortsFor (*Cell).journalCause writeAtomic
 	allocatePorts (*net.UnixListener).Close net.Listen
 	probePorts (*net.UnixListener).Close net.Listen

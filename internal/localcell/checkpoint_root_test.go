@@ -1,6 +1,7 @@
 package localcell
 
 import (
+	"context"
 	"errors"
 	"maps"
 	"os"
@@ -97,7 +98,7 @@ func heldOutside(t *testing.T) string {
 func heldRefused(t *testing.T, f *retainedFixture, err error, want string, records []string) {
 	t.Helper()
 	retainedAssertRecords(t, f, records)
-	if p, journalErr := f.cell.readJournal(); !checkpointSameError(err, want) || journalErr != nil || p.pending != nil || p.tornTail {
+	if p, journalErr := f.cell.readJournal(context.Background()); !checkpointSameError(err, want) || journalErr != nil || p.pending != nil || p.tornTail {
 		t.Fatal("a held deletion did not refuse with its fixed error and a closed journal")
 	}
 }

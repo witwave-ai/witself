@@ -44,7 +44,7 @@ func (c *Cell) waitReadyWithPortRecovery(ctx context.Context, m *Manifest, compo
 	if !c.hasRelaunchBudget(ctx, component, m) {
 		return err
 	}
-	if journalErr := c.journalCause("start", component+"_ready", "started", "port_conflict_relaunch="+component); journalErr != nil {
+	if journalErr := c.journalCause(context.Background(), "start", component+"_ready", "started", "port_conflict_relaunch="+component); journalErr != nil {
 		return journalErr
 	}
 	if launchErr := c.startChildContext(ctx, m, component); launchErr != nil {

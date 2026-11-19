@@ -260,7 +260,7 @@ func TestWindowsFreshCellObjectsHaveExactPrivateDACL(t *testing.T) {
 	if err := writeAtomic(c.path("run", "server.json"), map[string]string{"fixture": "synthetic"}, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.journal("install", "operation", "started"); err != nil {
+	if err := c.journal(context.Background(), "install", "operation", "started"); err != nil {
 		t.Fatal(err)
 	}
 	log, err := c.logFile("server")

@@ -159,7 +159,7 @@ func TestServiceRunRestartAfterIdleShutdown(t *testing.T) {
 		}
 		cleanup()
 		serviceRestartStoppedArtifacts(t, c, d, boot, supervisorBefore, previousJournal)
-		progress, _ := c.readJournal()
+		progress, _ := c.readJournal(context.Background())
 		previousJournal = progress.durableBytes
 		// Test the released OS lock without overwriting the diagnostic lease.
 		file, openErr := openLockFile(context.Background(), c.path(".service-host.lock"), false)
@@ -199,7 +199,7 @@ func serviceRestartStoppedArtifacts(t *testing.T, c *Cell, d ServiceDescriptor, 
 	if readJSON(c.path("service", "boot.json"), &bootRecord) != nil || bootRecord.InstallationID != d.InstallationID || bootRecord.BootID != boot {
 		t.Fatal("restart fixture shutdown lost the same-boot installation fence")
 	}
-	progress, err := c.readJournal()
+	progress, err := c.readJournal(context.Background())
 	if err != nil || progress.pending != nil || progress.tornTail || progress.durableBytes <= previousJournal {
 		t.Fatal("restart fixture shutdown did not retain a completed advancing journal")
 	}

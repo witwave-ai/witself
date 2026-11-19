@@ -135,7 +135,7 @@ func TestCheckpointFailureCrashRepairCleanupIncomplete(t *testing.T) {
 		!checkpointSameError(err, "local_checkpoint_witness_mismatch") {
 		t.Fatal("an incomplete discard was not reported with the step cause")
 	}
-	if p, err := c.readJournal(); err != nil || p.pending != nil || p.tornTail || os.Chmod(copied, 0o700) != nil {
+	if p, err := c.readJournal(context.Background()); err != nil || p.pending != nil || p.tornTail || os.Chmod(copied, 0o700) != nil {
 		t.Fatal("an incomplete discard left the operation open")
 	}
 	leftover := filepath.Base(filepath.Dir(copied))

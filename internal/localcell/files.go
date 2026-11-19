@@ -401,8 +401,8 @@ type journalEntry struct {
 // journal appends each value plus its newline in ONE write, then fsyncs before
 // acknowledging success. An unterminated final line was never acknowledged;
 // readJournal identifies the crash signatures that Repair may discard.
-func (c *Cell) journal(operation, step, state string) error {
-	return c.journalCause(operation, step, state, "")
+func (c *Cell) journal(ctx context.Context, operation, step, state string) error {
+	return c.journalCause(ctx, operation, step, state, "")
 }
 
 // journalCause is journal with an optional fixed cause. When the append creates
@@ -410,7 +410,7 @@ func (c *Cell) journal(operation, step, state string) error {
 // directory entry is durable before success; appends to an existing file sync
 // only the file. A failed directory sync leaves the complete, file-synced record
 // in place for Repair, as if the process had stopped right after the append.
-func (c *Cell) journalCause(operation, step, state, cause string) error {
+func (c *Cell) journalCause(ctx context.Context, operation, step, state, cause string) error {
 	path := c.path("journal", "operations.jsonl")
 	irregular := errors.New("local cell journal must be a regular file")
 	info, err := os.Lstat(path)
@@ -421,7 +421,7 @@ func (c *Cell) journalCause(operation, step, state, cause string) error {
 	// never reports not-exist. Journal writers hold the root operation lock, so
 	// nothing else creates or unlinks the file between this Lstat and the open.
 	created := errors.Is(err, os.ErrNotExist)
-	f, err := openRegularWriter(context.Background(), path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600, irregular, errors.New("cannot open local cell journal"))
+	f, err := openRegularWriter(ctx, path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600, irregular, errors.New("cannot open local cell journal"))
 	if err != nil {
 		return err
 	}
@@ -476,10 +476,10 @@ func (p journalProgress) installComplete(manifests ...*Manifest) bool {
 // After trimming trailing crash zero-fill, only an empty tail, a JSON prefix, or
 // exactly one complete JSON value may be discarded, even at byte zero. Committed
 // records and all other corruption remain fail-closed.
-func (c *Cell) readJournal() (journalProgress, error) {
+func (c *Cell) readJournal(ctx context.Context) (journalProgress, error) {
 	var progress journalProgress
 	invalid := errors.New("invalid local cell journal")
-	f, err := openRegular(context.Background(), c.path("journal", "operations.jsonl"), invalid, invalid, errors.New("cannot read local cell journal"))
+	f, err := openRegular(ctx, c.path("journal", "operations.jsonl"), invalid, invalid, errors.New("cannot read local cell journal"))
 	if errors.Is(err, os.ErrNotExist) {
 		progress.pending, err = c.cleanupInterruption()
 		progress.cleanupOnly = progress.pending != nil
@@ -562,12 +562,12 @@ func (c *Cell) readJournal() (journalProgress, error) {
 // record. Inspection only reads the prefix; Repair performs this reconciliation.
 // The opened handle must be the file readJournal measured: another file put at
 // the name since (during a lease wait, say) is refused, never truncated.
-func (c *Cell) discardJournalTail(progress journalProgress) error {
+func (c *Cell) discardJournalTail(ctx context.Context, progress journalProgress) error {
 	if !progress.tornTail {
 		return nil
 	}
 	torn := errors.New("cannot open torn local cell journal")
-	f, err := openRegularWriter(context.Background(), c.path("journal", "operations.jsonl"), os.O_WRONLY, 0, torn, torn)
+	f, err := openRegularWriter(ctx, c.path("journal", "operations.jsonl"), os.O_WRONLY, 0, torn, torn)
 	if err != nil {
 		return err
 	}
@@ -616,39 +616,43 @@ func validJournalStep(operation, step string) bool {
 
 var errInterrupted = errors.New("injected local cell interruption; repair required")
 
-func (c *Cell) step(operation, step string, fn func() error) error {
-	if err := c.journal(operation, step, "started"); err != nil {
+func (c *Cell) step(ctx context.Context, operation, step string, fn func() error) error {
+	if err := c.journal(ctx, operation, step, "started"); err != nil {
 		return err
 	}
 	if err := fn(); err != nil {
 		var exit *readinessExitError
 		if errors.As(err, &exit) {
-			if journalErr := c.journalCause(operation, step, "failed", exit.Error()); journalErr != nil {
+			if journalErr := c.journalCause(ctx, operation, step, "failed", exit.Error()); journalErr != nil {
 				return journalErr
 			}
 			return fmt.Errorf("local cell %s: %s failed: %w", operation, step, exit)
 		}
 		var cause fixedCause
 		if errors.As(err, &cause) {
-			if journalErr := c.journalCause(operation, step, "failed", cause.Error()); journalErr != nil {
+			if journalErr := c.journalCause(ctx, operation, step, "failed", cause.Error()); journalErr != nil {
 				return journalErr
 			}
 			// Only the fixed cause crosses this boundary, never its wrappers.
 			return fmt.Errorf("local cell %s: %s failed: %w", operation, step, cause)
 		}
-		_ = c.journal(operation, step, "failed")
+		_ = c.journal(ctx, operation, step, "failed")
 		var readiness *readinessError
 		if errors.As(err, &readiness) {
 			// Unwrap only our fixed-message failure. A wrapper around it may
 			// contain command output, paths, or other private values.
 			return fmt.Errorf("local cell %s: %s failed: %w", operation, step, readiness)
 		}
+		if cut := (*leaseWaitCut)(nil); errors.As(err, &cut) {
+			// A wait that ctx ended crosses as the value-free cut only.
+			return fmt.Errorf("local cell %s: %s failed: %w", operation, step, cut)
+		}
 		return fmt.Errorf("local cell %s: %s failed", operation, step)
 	}
 	if c.cfg.Failpoint != nil && c.cfg.Failpoint(operation, step) != nil {
 		return errInterrupted
 	}
-	return c.journal(operation, step, "done")
+	return c.journal(ctx, operation, step, "done")
 }
 
 type updateJournalEntry struct {

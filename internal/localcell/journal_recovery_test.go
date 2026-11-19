@@ -2,6 +2,7 @@ package localcell
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -45,7 +46,7 @@ func TestJournalAppendSync(t *testing.T) {
 					}
 					return originalSync(f)
 				}
-				err := c.journal("stop", "operation", state)
+				err := c.journal(context.Background(), "stop", "operation", state)
 				if calls != 1 {
 					t.Fatalf("journal append synced %d times; want exactly one", calls)
 				}

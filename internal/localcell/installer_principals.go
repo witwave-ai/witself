@@ -69,7 +69,7 @@ func (c *Cell) installPrincipals(ctx context.Context, m *Manifest, progress jour
 		if err := ctx.Err(); err != nil {
 			return errPrincipalRepair
 		}
-		if err := c.step("install", step, func() error { return fns[i](ctx, m) }); err != nil {
+		if err := c.step(context.Background(), "install", step, func() error { return fns[i](ctx, m) }); err != nil {
 			return err
 		}
 	}
@@ -86,7 +86,7 @@ func (c *Cell) installerAdmin(ctx context.Context, m *Manifest, fn func(*pgx.Con
 	if err != nil || durable.InstallationID != m.InstallationID || durable.Installed || validatePrincipalLayout(durable) != nil {
 		return errPrincipalProvision
 	}
-	progress, err := c.readJournal()
+	progress, err := c.readJournal(context.Background())
 	if err != nil || progress.pending == nil || progress.pending.Operation != "install" || !progress.done["database"] {
 		return errPrincipalProvision
 	}

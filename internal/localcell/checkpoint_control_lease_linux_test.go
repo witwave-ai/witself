@@ -3,6 +3,7 @@
 package localcell
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -40,7 +41,7 @@ func TestCheckpointControlLease(t *testing.T) {
 	started := time.Now()
 	failure := ClassifyCheckpointFailure(c.Checkpoint(t.Context(), checkpointOptions(f)))
 	elapsed := time.Since(started)
-	progress, journalErr := c.readJournal()
+	progress, journalErr := c.readJournal(context.Background())
 	held, _ := unix.FcntlInt(lease.Fd(), unix.F_GETLEASE, 0)
 	if elapsed < c.cfg.Timeout || failure.Class != "local_checkpoint_operation_failed" || failure.CleanupIncomplete || r.calls["control"] != 1 || journalErr != nil ||
 		progress.pending != nil || progress.tornTail || held != unix.F_RDLCK || !reflect.DeepEqual(checkpointLeasedTree(t, c, lease), before) {

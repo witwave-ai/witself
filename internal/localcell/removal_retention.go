@@ -30,8 +30,8 @@ func (c *Cell) removalBoundary(step string) error {
 // finishRetainedRemoval settles only the actual open operation. A manifest-only
 // checkpoint can outlive the journal (old removal), or its physical completion
 // (crash before checkpoint clear). Neither permits invented or duplicate lines.
-func (c *Cell) finishRetainedRemoval(m *Manifest) error {
-	progress, err := c.readJournal()
+func (c *Cell) finishRetainedRemoval(ctx context.Context, m *Manifest) error {
+	progress, err := c.readJournal(ctx)
 	if err != nil {
 		return err
 	}
@@ -49,7 +49,7 @@ func (c *Cell) finishRetainedRemoval(m *Manifest) error {
 		}
 	}
 	if !progress.cleanupOnly && !progress.done["runtime_cleanup"] && progress.pending.Step != "runtime_cleanup" {
-		if err := c.journal("remove", "runtime_cleanup", "started"); err != nil {
+		if err := c.journal(ctx, "remove", "runtime_cleanup", "started"); err != nil {
 			return err
 		}
 	}
@@ -62,14 +62,14 @@ func (c *Cell) finishRetainedRemoval(m *Manifest) error {
 	}
 	if !progress.cleanupOnly {
 		if !progress.done["runtime_cleanup"] {
-			if err := c.journal("remove", "runtime_cleanup", "done"); err != nil {
+			if err := c.journal(ctx, "remove", "runtime_cleanup", "done"); err != nil {
 				return err
 			}
 			if err := c.removalBoundary("runtime_cleanup"); err != nil {
 				return err
 			}
 		}
-		if err := c.journal("remove", "operation", "done"); err != nil {
+		if err := c.journal(ctx, "remove", "operation", "done"); err != nil {
 			return err
 		}
 		if err := c.removalBoundary("operation_done"); err != nil {
@@ -81,7 +81,7 @@ func (c *Cell) finishRetainedRemoval(m *Manifest) error {
 		// the remaining checkpoint; an absent legacy journal is never created,
 		// and a file put at its name since the read is refused, never synced.
 		unavailable := errors.New("cannot open local cell journal")
-		f, err := openRegularWriter(context.Background(), c.path("journal", "operations.jsonl"), os.O_WRONLY, 0, unavailable, unavailable)
+		f, err := openRegularWriter(ctx, c.path("journal", "operations.jsonl"), os.O_WRONLY, 0, unavailable, unavailable)
 		if err != nil {
 			return err
 		}

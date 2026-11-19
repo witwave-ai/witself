@@ -1,6 +1,7 @@
 package localcell
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -123,10 +124,10 @@ func TestJournalInterruptionRepairPreservesDataAndRepeats(t *testing.T) {
 		}
 		return nil
 	}
-	if err := c.journal("start", "operation", "started"); err != nil {
+	if err := c.journal(context.Background(), "start", "operation", "started"); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.step("start", "postgres", func() error { return nil }); !errors.Is(err, errInterrupted) {
+	if err := c.step(context.Background(), "start", "postgres", func() error { return nil }); !errors.Is(err, errInterrupted) {
 		t.Fatal("journal failure injection did not interrupt the step")
 	}
 	inspection, err := c.Inspect(t.Context())

@@ -298,7 +298,7 @@ func TestCheckpointAdmissionRefusals(t *testing.T) {
 		}), "local_checkpoint_state_unsupported"},
 		{"account-empty", legacy, 5, manifest(func(m *Manifest) { m.AccountID = "" }), "local_checkpoint_state_unsupported"},
 		{"schema-zero", legacy, 5, manifest(func(m *Manifest) { m.LastVerifiedSchemaVersion = 0 }), "local_checkpoint_state_unsupported"},
-		{"pending-operation", legacy, 6, func(k *checkpointCase) { _ = k.c.begin("stop") }, "local_checkpoint_state_unsupported"},
+		{"pending-operation", legacy, 6, func(k *checkpointCase) { _ = k.c.begin(context.Background(), "stop") }, "local_checkpoint_state_unsupported"},
 		{"torn-tail", legacy, 6, func(k *checkpointCase) { write("journal/operations.jsonl", string(k.f.prefix)+`{"operation":`)(k) }, "local_checkpoint_state_unsupported"},
 		{"valid-fence", legacy, 0, func(k *checkpointCase) { updateTestFence(k.t, k.c) }, "local_maintenance_fence_active"},
 		{"invalid-fence", legacy, 0, func(k *checkpointCase) { updateTestFence(k.t, k.c); write("journal/maintenance.json", "{broken\n")(k) }, "local_maintenance_fence_active"},
@@ -563,7 +563,7 @@ func TestCheckpointStorageRule(t *testing.T) {
 		if r.before = func() {}; c.Repair(t.Context()) != nil {
 			t.Fatal("Repair did not settle the torn checkpoint operation")
 		}
-		if p, err := c.readJournal(); err != nil || p.pending != nil || p.tornTail || len(checkpointIDs(t, c)) != 0 {
+		if p, err := c.readJournal(context.Background()); err != nil || p.pending != nil || p.tornTail || len(checkpointIDs(t, c)) != 0 {
 			t.Fatal("torn checkpoint operation remained after Repair")
 		}
 	})
@@ -669,7 +669,7 @@ func TestCheckpointFailureCrashRepair(t *testing.T) {
 			if err == nil || errors.Is(err, errInterrupted) || (row.want != "" && !checkpointSameError(err, row.want)) {
 				t.Fatal("checkpoint failure was not reported with its cause")
 			}
-			p, err := c.readJournal()
+			p, err := c.readJournal(context.Background())
 			if ids := checkpointIDs(t, c); err != nil || p.pending != nil || p.tornTail || len(ids) != map[bool]int{true: 1}[row.want == ""] ||
 				(row.want == "" && !checkpointSummaryOf(t, c, ids[0]).Complete) {
 				t.Fatal("a failure left the operation open or its directory, or discarded a witnessed checkpoint")
@@ -724,7 +724,7 @@ func TestCheckpointFailureCrashRepair(t *testing.T) {
 		defer cancel()
 		r.after = func(string) { cancel() }
 		err := f.cell.Checkpoint(ctx, checkpointOptions(f))
-		if p, journalErr := f.cell.readJournal(); !checkpointSameError(err, "local_checkpoint_copy_failed") || journalErr != nil || p.pending != nil ||
+		if p, journalErr := f.cell.readJournal(context.Background()); !checkpointSameError(err, "local_checkpoint_copy_failed") || journalErr != nil || p.pending != nil ||
 			len(checkpointIDs(t, f.cell)) != 0 {
 			t.Fatal("a cancelled checkpoint was not discarded and closed as a copy failure")
 		}
@@ -748,7 +748,7 @@ func TestCheckpointFailureCrashRepair(t *testing.T) {
 				if repaired != nil || c.Repair(t.Context()) != nil || !reflect.DeepEqual(settled, retainedSnapshot(t, c)) || !maps.Equal(calls, r.calls) {
 					t.Fatal("Repair reached a checkpoint boundary or a second Repair changed bytes")
 				}
-				if p, err := c.readJournal(); err != nil || p.pending != nil || !slices.Equal(checkpointIDs(t, c), ids) {
+				if p, err := c.readJournal(context.Background()); err != nil || p.pending != nil || !slices.Equal(checkpointIDs(t, c), ids) {
 					t.Fatal("Repair left the operation open or changed recovery")
 				}
 				if cut != "operation_started" && checkpointSummaryOf(t, c, ids[0]).Complete != (cut == "witness") {
@@ -803,7 +803,10 @@ func TestDeleteCheckpoint(t *testing.T) {
 		{"dot-dot", func(*testing.T, *Cell, string) string { return ".." }, "local_checkpoint_identity_mismatch"},
 		{"live-pgdata", func(*testing.T, *Cell, string) string { return "../pg" }, "local_checkpoint_identity_mismatch"},
 		{"escaping-id", func(*testing.T, *Cell, string) string { return "ckpt_aaaaaaaaaaaaaaaa/../../pg" }, "local_checkpoint_identity_mismatch"},
-		{"pending-operation", func(_ *testing.T, c *Cell, named string) string { _ = c.begin("stop"); return named }, "local_checkpoint_state_unsupported"},
+		{"pending-operation", func(_ *testing.T, c *Cell, named string) string {
+			_ = c.begin(context.Background(), "stop")
+			return named
+		}, "local_checkpoint_state_unsupported"},
 		{"valid-fence", func(t *testing.T, c *Cell, named string) string { updateTestFence(t, c); return named }, "local_maintenance_fence_active"},
 		{"live-record", func(t *testing.T, c *Cell, named string) string { checkpointRecord(t, c, own); return named }, "local_checkpoint_state_unsupported"},
 		// Another spelling a case-insensitive volume resolves is never deleted (XR1-06).
@@ -1188,7 +1191,7 @@ func TestCheckpointDirectorySyncOrder(t *testing.T) {
 				t.Fatal("a deletion synced a directory other than through its held root")
 			}
 			// A failed unseal sync is returned, closes the operation and leaves the data in place without its witness.
-			if p, journalErr := c.readJournal(); fail != "" && (!checkpointSameError(err, "local cell checkpoint_delete: unseal failed") ||
+			if p, journalErr := c.readJournal(context.Background()); fail != "" && (!checkpointSameError(err, "local cell checkpoint_delete: unseal failed") ||
 				journalErr != nil || p.pending != nil || !reflect.DeepEqual(unsealed, tree(dir))) {
 				t.Fatal("a failed unseal sync was not returned, or did not leave the data in place without its witness")
 			}

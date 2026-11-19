@@ -233,7 +233,7 @@ func TestDrillStorageVolume(t *testing.T) {
 // drillStorageCallees are the only functions, methods and function-typed variables or fields declared
 // elsewhere that the drill storage files name, as built here; x/sys members do not resolve here, and
 // the checkpoint contract pins them as system selectors and the ntdll procedure as drillStorageProc.
-var drillStorageCallees = []string{"(context.Context).Err", "(*regexp.Regexp).MatchString", "errors.As", "strings.ToLower", "strings.EqualFold", "os.OpenRoot",
+var drillStorageCallees = []string{"(context.Context).Err", "context.Background", "(*regexp.Regexp).MatchString", "errors.As", "strings.ToLower", "strings.EqualFold", "os.OpenRoot",
 	"(*os.Root).Open", "(*os.Root).Close", "(*os.File).Close", "(*os.File).Fd", "localcell.readManifest", "localcell.drillRootNames", "localcell.drillValidID",
 	"localcell.verifyCheckpointDocuments", "localcell.checkpointVerifyShape", "(*localcell.Cell).readJournal", "(*localcell.Cell).validateRecovery",
 	"(*localcell.Cell).recoveryDir", "(*localcell.Cell).checkpointDir", "(*localcell.Cell).checkpointOps"}
