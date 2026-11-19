@@ -96,10 +96,18 @@ func (c *Cell) validateRoot(create bool) error {
 // validateRootTree runs validate(root), one complete read-only private-tree
 // walk, as an attempt of the shared bounded retry: on Windows a concurrent
 // private creation, publication or removal holds what it changes with delete
-// access, which the walk's guard does not share (slice FLAKE-63). A holder kept
-// past the budget, like any other failure, returns the last walk's error.
-func validateRootTree(root string, validate func(string) error, retryable func(error) bool, h leasePublishHooks) error {
+// access, which the walk's guard does not share (slice FLAKE-63). A walk that
+// met a vanished object (os.ErrNotExist) is an incomplete pass, never an absence:
+// it is walked again with the same backoff inside the same budget, and still
+// incomplete when the budget ends it is errPrivateLayout (LC-TREEWALK-F1); an
+// absent root is a passing walk. Any other failure returns the last walk's
+// error. A lasting cause costs one budget per crossing.
+func validateRootTree(root string, validate func(string) error, transient func(error) bool, h leasePublishHooks) error {
+	retryable := func(err error) bool { return transient(err) || errors.Is(err, os.ErrNotExist) }
 	_, err := retryPublish(func() error { return validate(root) }, retryable, h)
+	if errors.Is(err, os.ErrNotExist) {
+		return errPrivateLayout
+	}
 	return err
 }
 
