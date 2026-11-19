@@ -8,6 +8,7 @@ import (
 	"go/ast"
 	"go/build"
 	"go/parser"
+	"go/scanner"
 	"go/token"
 	"go/types"
 	"io"
@@ -33,9 +34,9 @@ type referencesListed struct {
 	ImportMap       map[string]string
 }
 
-// referencesWorld is one system's dependencies: listed once per test process,
-// each type-checked from source without bodies on its first import, and used
-// by one goroutine at a time.
+// referencesWorld is one system's dependencies: listed once per test process
+// and each type-checked from source without bodies on its first import, both
+// under its lock; its checks run concurrently.
 type referencesWorld struct {
 	sync.Mutex
 	failed   bool
@@ -54,6 +55,43 @@ var referencesWorlds [len(referencesSystems)]referencesWorld
 type referencesView struct {
 	compiled, keys, resolved map[string]bool
 	counts                   map[string]int
+}
+
+// referencesViews holds a view per system, in referencesSystems' order; a
+// system set is a mask over that order.
+type referencesViews = [len(referencesSystems)]referencesView
+
+const referencesAll = 1<<len(referencesSystems) - 1
+
+// referencesParsed shares parses across checks, systems and rows, in one file
+// set: per file name and line ending, the last source parsed, reused only while
+// the source is byte-identical.
+var referencesParsed = struct {
+	sync.Mutex
+	fset  *token.FileSet
+	files map[string]referencesParse
+}{fset: token.NewFileSet(), files: map[string]referencesParse{}}
+
+type referencesParse struct {
+	source string
+	file   *ast.File
+	err    error
+}
+
+// referencesParseFile returns the parse of a source, shared while unchanged.
+func referencesParseFile(name, source string) (*ast.File, error) {
+	key := name + "\t" + strconv.FormatBool(strings.Contains(source, "\r"))
+	referencesParsed.Lock()
+	parsed, seen := referencesParsed.files[key]
+	referencesParsed.Unlock()
+	if seen && parsed.source == source {
+		return parsed.file, parsed.err
+	}
+	file, err := parser.ParseFile(referencesParsed.fset, name, source, parser.ParseComments|parser.SkipObjectResolution)
+	referencesParsed.Lock()
+	referencesParsed.files[key] = referencesParse{source, file, err}
+	referencesParsed.Unlock()
+	return file, err
 }
 
 // load lists the package's dependencies for system with the go command (its
@@ -123,6 +161,15 @@ func (w *referencesWorld) importer(importMap map[string]string, dir string) type
 	})
 }
 
+// locked returns importer holding the world's lock while it imports.
+func (w *referencesWorld) locked(importer types.Importer) types.Importer {
+	return readers4Importer(func(path string) (*types.Package, error) {
+		w.Lock()
+		defer w.Unlock()
+		return importer.Import(path)
+	})
+}
+
 // resolve returns the object a guarded name spells on this system: a member of
 // the checked package bare, any other by import path, a method as (T).m or
 // (*T).m of the type that declares it.
@@ -130,7 +177,7 @@ func (w *referencesWorld) resolve(self *types.Package, name string) types.Object
 	receiver, method, _ := strings.Cut(strings.TrimPrefix(name, "("), ").")
 	member, scope := strings.TrimPrefix(receiver, "*"), self.Scope()
 	if dot := strings.LastIndex(member, "."); dot >= 0 {
-		imported, err := w.importer(nil, "").Import(member[:dot])
+		imported, err := w.locked(w.importer(nil, "")).Import(member[:dot])
 		if err != nil {
 			return nil
 		}
@@ -153,19 +200,19 @@ func (w *referencesWorld) resolve(self *types.Package, name string) types.Object
 // context from the sources themselves, and returns its view.
 func (w *referencesWorld) check(system string, sources map[string]string, guarded []string) referencesView {
 	w.Lock()
-	defer w.Unlock()
 	if w.listed == nil {
 		w.load(system)
 	}
+	w.Unlock()
 	view := referencesView{compiled: map[string]bool{}, keys: map[string]bool{}, resolved: map[string]bool{}, counts: map[string]int{}}
 	fail := func(key string, bad bool) bool { view.keys[key] = view.keys[key] || bad; return bad }
-	context, fset, files := w.context, token.NewFileSet(), []*ast.File{}
+	context, fset, files, size := w.context, referencesParsed.fset, []*ast.File{}, 0
 	context.OpenFile = func(path string) (io.ReadCloser, error) { return io.NopCloser(strings.NewReader(sources[path])), nil }
 	for _, name := range slices.Sorted(maps.Keys(sources)) {
 		if match, err := context.MatchFile(".", name); !fail("parse:"+name, err != nil) && match {
-			file, err := parser.ParseFile(fset, name, sources[name], parser.ParseComments|parser.SkipObjectResolution)
+			file, err := referencesParseFile(name, sources[name])
 			if !fail("parse:"+name, err != nil) {
-				view.compiled[name], files = true, append(files, file)
+				view.compiled[name], files, size = true, append(files, file), size+len(sources[name])
 			}
 		}
 	}
@@ -173,9 +220,10 @@ func (w *referencesWorld) check(system string, sources map[string]string, guarde
 		return view
 	}
 	// A file is named by its source key, never by a position a line directive
-	// adjusts.
-	info := &types.Info{Uses: map[*ast.Ident]types.Object{}, Defs: map[*ast.Ident]types.Object{}, Instances: map[*ast.Ident]types.Instance{}, Types: map[ast.Expr]types.TypeAndValue{}}
-	config := types.Config{Importer: w.importer(w.listed[w.self].ImportMap, w.listed[w.self].Dir), Sizes: types.SizesFor("gc", "amd64"),
+	// adjusts. The maps are sized from the sources (about one typed expression
+	// in 13 bytes) so that they do not grow.
+	info := &types.Info{Uses: make(map[*ast.Ident]types.Object, size/16), Defs: make(map[*ast.Ident]types.Object, size/80), Instances: map[*ast.Ident]types.Instance{}, Types: make(map[ast.Expr]types.TypeAndValue, size/11)}
+	config := types.Config{Importer: w.locked(w.importer(w.listed[w.self].ImportMap, w.listed[w.self].Dir)), Sizes: types.SizesFor("gc", "amd64"),
 		Error: func(err error) {
 			fail("types:"+system+":"+fset.PositionFor(err.(types.Error).Pos, false).Filename, true)
 		}}
@@ -196,6 +244,9 @@ func (w *referencesWorld) check(system string, sources map[string]string, guarde
 	// name and identical signature as used, an instance's and not its origin's
 	// (receivers are not compared, as go/types/predicates.go:337-385 shows).
 	targets := func(object types.Object) []string {
+		if object == nil {
+			return nil
+		}
 		method, _ := object.(*types.Func)
 		if method != nil {
 			object = method.Origin()
@@ -222,6 +273,9 @@ func (w *referencesWorld) check(system string, sources map[string]string, guarde
 			if named, ok := types.Unalias(name.Type()).(*types.Named); ok {
 				generic = named.Origin().TypeParams()
 			}
+		}
+		if generic.Len() == 0 {
+			return nil
 		}
 		arguments := info.Instances[identifier].TypeArgs
 		for index := range min(generic.Len(), arguments.Len()) {
@@ -340,8 +394,10 @@ func (w *referencesWorld) check(system string, sources map[string]string, guarde
 	// value to an interface type, what the value supplies for it; at an assertion
 	// to an interface type or a range assignment to one, what can supply it.
 	referenced := func(node ast.Node) []string {
-		identifier, _ := node.(*ast.Ident)
-		names, to := append(targets(info.Uses[identifier]), supplied(identifier)...), []types.Type(nil)
+		if identifier, ok := node.(*ast.Ident); ok {
+			return append(targets(info.Uses[identifier]), supplied(identifier)...)
+		}
+		names, to := []string(nil), []types.Type(nil)
 		switch node := node.(type) {
 		case *ast.CallExpr:
 			callee := info.Types[ast.Unparen(node.Fun)]
@@ -579,30 +635,96 @@ func referencesDeclarations(declaration ast.Decl, visit func(string, ast.Node)) 
 	}
 }
 
-// packageReferencesContract checks the sources on every system in parallel
-// against the list and the guarded names, and returns its keys, sorted, and
-// for each key of a count the wanted and found counts on each system that
-// compiles its file.
-func packageReferencesContract(sources map[string]string, guarded []string, list string) ([]string, map[string]string) {
-	var views [len(referencesSystems)]referencesView
+// referencesSlots bounds the checks in flight, whichever their systems, to one
+// per system.
+var referencesSlots = make(chan struct{}, len(referencesSystems))
+
+// referencesCheck type-checks the sources in parallel on each system of checks
+// and keeps each other system's view from views.
+func referencesCheck(views referencesViews, checks uint8, sources map[string]string, guarded []string) referencesViews {
 	var group sync.WaitGroup
 	for index, system := range referencesSystems {
-		group.Go(func() { views[index] = referencesWorlds[index].check(system, sources, guarded) })
+		if checks>>index&1 == 1 {
+			group.Go(func() {
+				referencesSlots <- struct{}{}
+				defer func() { <-referencesSlots }()
+				views[index] = referencesWorlds[index].check(system, sources, guarded)
+			})
+		}
 	}
 	group.Wait()
+	return views
+}
+
+// referencesPlan returns the systems a row's edits are type-checked on, from
+// clean, the clean package's views, and those it replays CRLF on. An edit in
+// place (before, after, replace or append) of a file the clean package has is
+// checked on each system that compiles it; any other on every system: a file
+// added, copied or dropped, a guarded name, a directory entry, or a package
+// clause, //go: directive or build constraint in its anchor or text. CRLF is
+// replayed on the first of them, or on each when an edit holds a line
+// directive, a //go: directive, a build constraint or a raw string that spans
+// lines.
+func referencesPlan(clean referencesViews, edits [][4]string) (lf, crlf uint8) {
+	every, lines := false, false
+	for _, edit := range edits {
+		known := false
+		for index, view := range clean {
+			if view.compiled[edit[0]] {
+				known, lf = true, lf|1<<index
+			}
+		}
+		shape, line := referencesTokens(edit[2], edit[3])
+		every = every || !known || !slices.Contains(strings.Fields("before after replace append"), edit[1]) || shape
+		lines = lines || line
+	}
+	if every {
+		lf = referencesAll
+	}
+	if crlf = lf & -lf; lines {
+		crlf = lf
+	}
+	return lf, crlf
+}
+
+// referencesTokens reports whether texts hold a package clause, a //go:
+// directive or a build constraint (shape), and whether they hold a line
+// directive, a //go: directive, a build constraint or a raw string that spans
+// lines (lines); a text that does not scan holds both.
+func referencesTokens(texts ...string) (shape, lines bool) {
+	for _, text := range texts {
+		var scan scanner.Scanner
+		scan.Init(token.NewFileSet().AddFile("", -1, len(text)), []byte(text), func(token.Position, string) { shape, lines = true, true }, scanner.ScanComments)
+		for _, kind, literal := scan.Scan(); kind != token.EOF; _, kind, literal = scan.Scan() {
+			directive := kind == token.COMMENT && (strings.HasPrefix(literal, "//go:") || strings.Contains(literal, "+build"))
+			shape = shape || kind == token.PACKAGE || directive
+			lines = lines || directive || kind == token.COMMENT && (strings.HasPrefix(literal, "//line ") || strings.HasPrefix(literal, "/*line ")) ||
+				kind == token.STRING && strings.HasPrefix(literal, "`") && strings.Contains(literal, "\n")
+		}
+	}
+	return shape, lines
+}
+
+// packageReferencesContract merges the views of the sources against the list
+// and the guarded names, a system without a view failing closed, and returns
+// its keys, sorted, and for each key of a count the wanted and found counts on
+// each system that compiles its file.
+func packageReferencesContract(views referencesViews, sources map[string]string, guarded []string, list string) ([]string, map[string]string) {
 	listed, expected := referencesParseList(list)
 	keys, counted, compiled, resolved := map[string]bool{}, map[string]string{}, map[string]bool{}, map[string]bool{}
 	fail := func(key string, bad bool) { keys[key] = keys[key] || bad }
 	for index, view := range views {
+		fail("unchecked:"+referencesSystems[index], view.keys == nil)
 		for key, bad := range view.keys {
 			fail(key, bad)
 		}
 		maps.Copy(compiled, view.compiled)
 		maps.Copy(resolved, view.resolved)
+		counts := maps.Collect(maps.All(view.counts))
 		for key := range expected {
-			view.counts[key[:strings.LastIndex(key, "\t")]] += 0 // a listed reference counts on every system
+			counts[key[:strings.LastIndex(key, "\t")]] += 0 // a listed reference counts on every system
 		}
-		for key, count := range view.counts {
+		for key, count := range counts {
 			file, rest, _ := strings.Cut(key, "\t")
 			named, system := "ref:"+strings.ReplaceAll(key, "\t", ":"), referencesSystems[index]
 			if path, imported := strings.CutPrefix(rest, "import\t"); imported {
