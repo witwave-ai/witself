@@ -3,11 +3,12 @@
 package localcell
 
 import (
+	"context"
 	"errors"
 	"os"
 )
 
-func openLockFile(string, bool) (*os.File, error) {
+func openLockFile(context.Context, string, bool) (*os.File, error) {
 	return nil, errors.New("localcell: advisory locks are unsupported on this platform")
 }
 

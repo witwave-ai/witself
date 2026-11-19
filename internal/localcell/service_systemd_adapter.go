@@ -233,7 +233,7 @@ func (a *systemdUserAdapter) ownedUnit(d ServiceDescriptor, want []byte) (bool, 
 	if a.owned == nil || !a.owned(path, info) {
 		return false, serviceSystemdError(ErrServiceOwnershipConflict, "unit_file:owner", "not_current_uid")
 	}
-	file, err := openPlainReader(path)
+	file, err := openPlainReader(context.Background(), path)
 	if err != nil {
 		return false, a.commandError(ErrServiceOwnershipConflict, "unit_file:read", err, d.Root)
 	}

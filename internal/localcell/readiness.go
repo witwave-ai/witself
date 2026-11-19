@@ -135,7 +135,7 @@ const maxReadinessDiagnostic = 256
 // log opens without waiting and a link at its name is refused, so a FIFO or a
 // link swapped in during the readiness wait yields no diagnostic.
 func (c *Cell) lastValueFreeDiagnostic(component string, offset int64) string {
-	f, err := openPrivateReader(c.path("logs", component+".log"))
+	f, err := openPrivateReader(context.Background(), c.path("logs", component+".log"))
 	if err != nil {
 		return ""
 	}

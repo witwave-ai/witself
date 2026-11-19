@@ -16,7 +16,7 @@ const (
 	referencesAtProgress = "// journalProgress contains only"
 	referencesAtPending  = "func (c *Cell) sweepPostgresPending() {"
 	referencesAtImports  = "import (\n"
-	referencesAtVersion  = "\tif version, err := readRegular(openPostgresReader, func(info os.FileInfo) bool { return info.Size() <= 64 }, c.path(\"pg\", \"PG_VERSION\"), errCheckpointSource"
+	referencesAtVersion  = "\tif version, err := readRegular(context.Background(), openPostgresReader, func(info os.FileInfo) bool { return info.Size() <= 64 }, c.path(\"pg\", \"PG_VERSION\"), errCheckpointSource"
 	referencesAtJournal  = "\tf, err := openRegularWriter(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600, irregular, errors.New(\"cannot open local cell journal\"))\n\tif err != nil {\n\t\treturn err\n\t}\n"
 	referencesAtTail     = "\tf, err := openRegularWriter(c.path(\"journal\", \"operations.jsonl\"), os.O_WRONLY, 0, torn, torn)\n"
 	referencesAtVars     = "var (\n"
@@ -69,7 +69,7 @@ var packageReferencesRows = []struct {
 	{"platform_twin", [][4]string{{"files_linux_twin.go", "=", "files_other.go", ""},
 		{"files_linux_twin.go", "replace", "//go:build !windows\n", "//go:build linux\n"},
 		{"files_linux_twin.go", "replace", "\t\treturn os.OpenFile(path, flags|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, mode)\n", "\t\treturn os.OpenFile(path, flags, mode)\n"},
-		{"files_other.go", "replace", "//go:build !windows\n", "//go:build !windows && !linux\n"}}, []string{"file:files_linux_twin.go", "import:files_linux_twin.go:errors", "import:files_linux_twin.go:os", "import:files_linux_twin.go:runtime", "import:files_linux_twin.go:syscall", "import:files_linux_twin.go:time",
+		{"files_other.go", "replace", "//go:build !windows\n", "//go:build !windows && !linux\n"}}, []string{"file:files_linux_twin.go", "import:files_linux_twin.go:context", "import:files_linux_twin.go:errors", "import:files_linux_twin.go:os", "import:files_linux_twin.go:runtime", "import:files_linux_twin.go:syscall", "import:files_linux_twin.go:time",
 		"ref:files_linux_twin.go:createPrivateTemp:os.CreateTemp", "ref:files_linux_twin.go:openPlainReader:openPrivateReader", "ref:files_linux_twin.go:openPostgresReader:openPrivateReader", "ref:files_linux_twin.go:openPrivateFile:os.OpenFile",
 		"ref:files_linux_twin.go:openPrivateReader:os.OpenFile", "ref:files_linux_twin.go:openPrivateWriter:os.OpenFile", "ref:files_linux_twin.go:readPostgresFile:readPrivateFile", "ref:files_linux_twin.go:readPrivateFile:os.ReadFile",
 		"ref:files_linux_twin.go:(*Cell).validatePostgresDirectory:privateDir", "ref:files_linux_twin.go:(*Cell).writePostgresConfig:writeAtomicBytes", "ref:files_linux_twin.go:makePrivateDir:os.Mkdir", "ref:files_linux_twin.go:publishPrivateFile:os.Rename", "ref:files_linux_twin.go:removePrivateFile:os.Remove"}},
@@ -111,7 +111,7 @@ var packageReferencesRows = []struct {
 	{"forged_field", [][4]string{{"checkpoint_verify.go", "after", referencesAtVerify, "\tif open, ok := reflect.NewAt(reflect.TypeFor[func(string) (*os.File, error)](), reflect.ValueOf(&ops).Elem().FieldByName(\"open\").Addr().UnsafePointer()).Elem().Interface().(func(string) (*os.File, error)); ok {\n\t\tif f, err := open(filepath.Join(dir, \"..\", \"zz\")); err == nil {\n\t\t\t_ = f.Close()\n\t\t}\n\t}\n"}},
 		[]string{"ref:checkpoint_verify.go:verifyCheckpointDocuments:(reflect.Value).UnsafePointer", "ref:checkpoint_verify.go:verifyCheckpointDocuments:reflect.NewAt"}},
 	{"freebsd_file", [][4]string{{"zz_freebsd.go", "+", "", "package localcell\n\nimport \"os\"\n\nfunc zzFreeBSD() { _, _ = os.Open(\".\") }\n"}}, []string{"file:zz_freebsd.go", "import:zz_freebsd.go:os", "ref:zz_freebsd.go:zzFreeBSD:os.Open"}},
-	{"solaris_file", [][4]string{{"lock_unsupported.go", "after", "func openLockFile(string, bool) (*os.File, error) {\n", "\tif f, err := os.Open(\".\"); err == nil {\n\t\t_ = f.Close()\n\t}\n"}}, []string{"ref:lock_unsupported.go:openLockFile:os.Open"}},
+	{"solaris_file", [][4]string{{"lock_unsupported.go", "after", "func openLockFile(context.Context, string, bool) (*os.File, error) {\n", "\tif f, err := os.Open(\".\"); err == nil {\n\t\t_ = f.Close()\n\t}\n"}}, []string{"ref:lock_unsupported.go:openLockFile:os.Open"}},
 	{"generic_field", [][4]string{{"lifecycle.go", "before", referencesAtRecover, "type zzBox[T any] struct{ zzOpen func(T) (*os.File, error) }\n\nvar zzBoxed = zzBox[string]{zzOpen: os.Open}\n\nfunc zzBoxUse() { _, _ = zzBoxed.zzOpen(\".\") }\n\n"}}, []string{"ref:lifecycle.go:zzBoxUse:os.Open", "ref:lifecycle.go:zzBoxed:os.Open"}},
 	{"interface_other_signature", [][4]string{{"lifecycle.go", "before", referencesAtRecover, "func zzOpenNoArgs(v interface{ Open() error }) { _ = v.Open() }\n\n"}}, nil},
 	{"receiver_spelling", [][4]string{{"", "guard", "", "(os.Root).Open"}}, []string{"unknown:(os.Root).Open"}},

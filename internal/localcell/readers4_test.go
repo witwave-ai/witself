@@ -162,11 +162,12 @@ func readers4Contract(sources map[string]string) []string {
 		return true
 	})
 	reread, first := calls["recoverPostgresRecord"], calls["postmaster"]
-	fail("reread_call", len(reread) != 1 || len(first) != 1 || len(reread[0].Args) != 6 || len(first[0].Args) != 6)
+	fail("reread_call", len(reread) != 1 || len(first) != 1 || len(reread[0].Args) != 7 || len(first[0].Args) != 7 ||
+		types.ExprString(reread[0].Args[0]) != "context.Background()" || types.ExprString(first[0].Args[0]) != "context.Background()")
 	if !failed["reread_call"] {
-		args, bound, body, valid := reread[0].Args, named(reread[0].Args[1]), bodies["recoverPostgresRecord"], false
+		args, bound, body, valid := reread[0].Args[1:], named(reread[0].Args[2]), bodies["recoverPostgresRecord"], false
 		fail("reread_opener", declared(named(args[0])) != "localcell.openPostgresReader")
-		fail("reread_bound", declared(bound) == "" || bound != named(first[0].Args[1]))
+		fail("reread_bound", declared(bound) == "" || bound != named(first[0].Args[2]))
 		// The cause is defined just before the read and returned just after it.
 		for index, cause := 1, named(args[3]); index+1 < len(body); index++ {
 			define, _ := body[index-1].(*ast.AssignStmt)
@@ -202,7 +203,7 @@ func TestReaders4LifecycleSourceContract(t *testing.T) {
 		t.Fatal("lifecycle source contract refused the tree")
 	}
 	const anchor, path = "\tunreadable := fixedCause(", `c.path("pg", "postmaster.pid")`
-	const call = "readRegular(openPostgresReader, postmasterBounded, " + path + ", unreadable"
+	const call = "readRegular(context.Background(), openPostgresReader, postmasterBounded, " + path + ", unreadable"
 	insert := func(code string) func(string) string {
 		return func(source string) string { return strings.Replace(source, anchor, "\t"+code+"\n"+anchor, 1) }
 	}

@@ -3,6 +3,7 @@
 package localcell
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -34,7 +35,7 @@ func TestCheckpointSourceOpenRefusesLinks(t *testing.T) {
 			os.Symlink(filepath.Join(outside, "file"), f.cell.path("pg", "escape")) != nil || os.Symlink(outside, f.cell.path("pg", "outside")) != nil {
 			t.Fatal("cannot prepare escaping links")
 		}
-		open, release, err := f.cell.openCheckpointSource()
+		open, release, err := f.cell.openCheckpointSource(context.Background())
 		if err != nil {
 			t.Fatal("cannot open the PGDATA source")
 		}

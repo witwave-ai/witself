@@ -3,17 +3,18 @@
 package localcell
 
 import (
+	"context"
 	"errors"
 	"os"
 	"syscall"
 )
 
-func openLockFile(path string, create bool) (*os.File, error) {
+func openLockFile(ctx context.Context, path string, create bool) (*os.File, error) {
 	flags := syscall.O_RDWR | syscall.O_CLOEXEC | syscall.O_NOFOLLOW | syscall.O_NONBLOCK
 	if create {
 		flags |= syscall.O_CREAT
 	}
-	fd, err := waitOutLease(path, os.Lstat, func() (int, error) { return syscall.Open(path, flags, 0o600) })
+	fd, err := waitOutLease(ctx, path, os.Lstat, func() (int, error) { return syscall.Open(path, flags, 0o600) })
 	if err != nil {
 		return nil, err
 	}

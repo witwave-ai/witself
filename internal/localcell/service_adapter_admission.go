@@ -1,6 +1,7 @@
 package localcell
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -102,7 +103,7 @@ func serviceAdapterRemovalHostLock(c *Cell) (func(), error) {
 	if err := servicePrivateRecord(c.path(".service-host.lock")); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
-	file, err := openLockFile(c.path(".service-host.lock"), true)
+	file, err := openLockFile(context.Background(), c.path(".service-host.lock"), true)
 	if err != nil {
 		return nil, err
 	}

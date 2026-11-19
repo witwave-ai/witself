@@ -83,7 +83,7 @@ func servicePrivateRecord(path string) error {
 // opened without waiting; a private file that cannot be opened returns open.
 func openServiceRecord(path string, open error) (*os.File, error) {
 	notPrivate := errors.New("service_record_not_private")
-	return openRegularBy(openPrivateReader, func(info os.FileInfo) bool { return privatePassword(path, info) }, path, notPrivate, notPrivate, open)
+	return openRegularBy(context.Background(), openPrivateReader, func(info os.FileInfo) bool { return privatePassword(path, info) }, path, notPrivate, notPrivate, open)
 }
 
 // ServiceDescriptor reads the current fence and revalidates installation identity.

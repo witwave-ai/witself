@@ -1,6 +1,7 @@
 package localcell
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
@@ -32,7 +33,9 @@ const installerMigratorRole = "witself_sync_migrator"
 
 // openPrincipalCredentialFile permits replacement tests at the inspected-file open boundary.
 // Its read open never waits on what it opens; the handle checks then decide.
-var openPrincipalCredentialFile = func(path string, _ int, _ os.FileMode) (*os.File, error) { return openPrivateReader(path) }
+var openPrincipalCredentialFile = func(path string, _ int, _ os.FileMode) (*os.File, error) {
+	return openPrivateReader(context.Background(), path)
+}
 
 var principalCredentialPurposes = [...]credentialPurpose{
 	credentialServer, credentialWorker, credentialMaintenance,

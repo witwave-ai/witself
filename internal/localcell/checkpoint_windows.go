@@ -3,6 +3,7 @@
 package localcell
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 
@@ -22,7 +23,7 @@ func checkpointFreeSpace(path string) (free, total uint64, err error) {
 
 // openCheckpointSource opens PGDATA files inside the exact pg/ boundary without
 // following a reparse point, validating each opened handle.
-func (c *Cell) openCheckpointSource() (func(string) (*os.File, error), func(), error) {
+func (c *Cell) openCheckpointSource(_ context.Context) (func(string) (*os.File, error), func(), error) {
 	return func(rel string) (*os.File, error) {
 		return runtimeconfig.WindowsPrivatePostgresOpen(c.path("pg"), filepath.Join(c.path("pg"), filepath.FromSlash(rel)))
 	}, func() {}, nil

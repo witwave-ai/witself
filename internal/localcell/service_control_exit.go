@@ -502,7 +502,7 @@ func (c *Cell) ExitServiceHost(ctx context.Context) (ServiceStatus, error) {
 
 // Probe the stable lock without creating, rewriting, or unlinking its identity.
 func (c *Cell) serviceHostLeaseHeld() (bool, error) {
-	file, err := openLockFile(c.path(".service-host.lock"), false)
+	file, err := openLockFile(context.Background(), c.path(".service-host.lock"), false)
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
 	}

@@ -179,7 +179,7 @@ func (c *Cell) checkpointOps() checkpointOperations {
 		ops.publish = publishPrivateFile
 	}
 	if ops.open == nil {
-		ops.open = openPrivateReader
+		ops.open = func(path string) (*os.File, error) { return openPrivateReader(context.Background(), path) }
 	}
 	if ops.transient == nil {
 		ops.transient = runtimeconfig.WindowsPrivateTransient
@@ -461,7 +461,7 @@ func (c *Cell) admitCheckpoint(ctx context.Context, options CheckpointOptions, o
 	}
 	// As postmaster() does, the opened handle proves a small regular file before
 	// the read; nothing waits on what stands at the name. Every failure refuses.
-	if version, err := readRegular(openPostgresReader, func(info os.FileInfo) bool { return info.Size() <= 64 }, c.path("pg", "PG_VERSION"), errCheckpointSource, errCheckpointSource, errCheckpointSource); err != nil || strings.TrimSuffix(string(version), "\n") != "16" {
+	if version, err := readRegular(context.Background(), openPostgresReader, func(info os.FileInfo) bool { return info.Size() <= 64 }, c.path("pg", "PG_VERSION"), errCheckpointSource, errCheckpointSource, errCheckpointSource); err != nil || strings.TrimSuffix(string(version), "\n") != "16" {
 		return nil, errCheckpointSource
 	}
 	if err := c.validateRecovery(); err != nil {
@@ -622,11 +622,11 @@ func (c *Cell) openCheckpointEntry(entry checkpointEntry, open func(string) (*os
 	}
 	source, err := c.credentialPath(entry.purpose)
 	if !entry.custody {
-		return openPrivateReader(c.path("manifest.json"))
+		return openPrivateReader(context.Background(), c.path("manifest.json"))
 	} else if err != nil {
 		return nil, err
 	}
-	return openPrivateReader(source)
+	return openPrivateReader(context.Background(), source)
 }
 
 // copyCheckpoint copies the plan in order into a new directory: each file of
@@ -649,7 +649,7 @@ func (c *Cell) copyCheckpoint(ctx context.Context, checkpointID string, plan *ch
 	if err := privateDir(dir, true); err != nil {
 		return fail(errCheckpointCopy)
 	}
-	open, release, err := c.openCheckpointSource()
+	open, release, err := c.openCheckpointSource(context.Background())
 	if err != nil {
 		return fail(errCheckpointCopy)
 	}
@@ -868,7 +868,7 @@ func (c *Cell) witnessCheckpoint(ctx context.Context, checkpointID string, plan 
 	if index < 0 {
 		return errCheckpointWitness
 	}
-	open, release, err := c.openCheckpointSource()
+	open, release, err := c.openCheckpointSource(context.Background())
 	if err != nil {
 		return errCheckpointWitness
 	}

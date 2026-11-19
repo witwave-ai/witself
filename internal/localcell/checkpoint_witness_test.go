@@ -2,6 +2,7 @@ package localcell
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"go/ast"
@@ -136,7 +137,7 @@ func TestCheckpointWitnessHandleStat(t *testing.T) {
 		{"checkpoint", true, errCheckpointWitnessUnread, errCheckpointWitnessIrregular, errCheckpointWitnessUnread, errCheckpointWitnessUnread},
 	} {
 		t.Run(row.name, func(t *testing.T) {
-			f, err := openRegularBy(func(path string) (*os.File, error) {
+			f, err := openRegularBy(context.Background(), func(_ context.Context, path string) (*os.File, error) {
 				handle, err := os.Open(path)
 				if err == nil && row.closed {
 					_ = handle.Close()

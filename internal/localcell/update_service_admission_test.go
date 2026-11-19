@@ -1017,7 +1017,7 @@ func serviceMaintenanceHostReleased(t *testing.T, c *Cell) {
 			t.Fatal("Run retained control endpoint after exit")
 		}
 	}
-	file, err := openLockFile(c.path(".service-host.lock"), false)
+	file, err := openLockFile(context.Background(), c.path(".service-host.lock"), false)
 	if err != nil {
 		t.Fatal("Run removed stable host lease inode")
 	}

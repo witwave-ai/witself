@@ -30,7 +30,7 @@ func addr(port int) string { return net.JoinHostPort("127.0.0.1", strconv.Itoa(p
 func (c *Cell) password() (string, error) {
 	path := c.path("run", "postgres.password")
 	unavailable, invalid := errors.New("local cell password file is unavailable or not private"), errors.New("local cell password file is invalid")
-	data, err := readRegular(openPrivateReader, func(info os.FileInfo) bool { return info.Size() <= 128 && privatePassword(path, info) },
+	data, err := readRegular(context.Background(), openPrivateReader, func(info os.FileInfo) bool { return info.Size() <= 128 && privatePassword(path, info) },
 		path, unavailable, unavailable, invalid)
 	switch {
 	case errors.Is(err, os.ErrNotExist):
