@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -230,7 +231,9 @@ func TestPackageReferencesSourceContract(t *testing.T) {
 	}
 	keys, details := packageReferencesForeign(names), map[string]string{}
 	for _, ending := range []string{"\n", "\r\n"} {
-		found, counts := packageReferencesContract(referencesEnding(sources, ending), packageReferencesGuarded, packageReferencesList)
+		ended := referencesEnding(sources, ending)
+		views := referencesCheck(referencesViews{}, referencesAll, ended, packageReferencesGuarded)
+		found, counts := packageReferencesContract(views, ended, packageReferencesGuarded, packageReferencesList)
 		keys = append(keys, found...)
 		maps.Copy(details, counts)
 	}
@@ -239,12 +242,61 @@ func TestPackageReferencesSourceContract(t *testing.T) {
 	}
 }
 
-// Each row reports exactly its keys, LF and CRLF, through the whole contract
-// on all five systems; a control row reports none.
+// referencesClean holds the clean package's LF views on every system, checked
+// once per process.
+var referencesClean struct {
+	sync.Once
+	views referencesViews
+}
+
+func referencesCleanViews(t *testing.T) referencesViews {
+	referencesClean.Do(func() {
+		referencesClean.views = referencesCheck(referencesViews{}, referencesAll, referencesEnding(admissionReadSources(t), "\n"), packageReferencesGuarded)
+	})
+	return referencesClean.views
+}
+
+// The plan: a row is type-checked on each system that compiles a file it edits
+// in place, on all five when it adds a file or edits a build constraint, and
+// replays CRLF on the first of them, or on each when it holds a line or //go:
+// directive; a merge without a system's view fails closed.
+func TestPackageReferencesSourceContractPlan(t *testing.T) {
+	clean, all, every := referencesCleanViews(t), "darwin crlf:darwin freebsd linux solaris windows", "darwin crlf:darwin freebsd crlf:freebsd linux crlf:linux solaris crlf:solaris windows crlf:windows"
+	plan := func(file, mode, text string) (named string) {
+		lf, crlf := referencesPlan(clean, [][4]string{{file, mode, "\tzz := 1\n", text}})
+		for index, system := range referencesSystems {
+			named += map[bool]string{true: " " + system}[lf>>index&1 == 1] + map[bool]string{true: " crlf:" + system}[crlf>>index&1 == 1]
+		}
+		return strings.TrimSpace(named)
+	}
+	if plan("files_windows.go", "after", "\t_ = zz\n") != "windows crlf:windows" {
+		t.Fatal("package references plan for a file only windows compiles is not windows alone")
+	}
+	if plan("files_other.go", "after", "\t_ = zz\n") != "darwin crlf:darwin freebsd linux solaris" {
+		t.Fatal("package references plan for a file all but windows compile is not those four")
+	}
+	if plan("files.go", "after", "\t_ = zz\n") != all {
+		t.Fatal("package references plan for a file every system compiles is not all five")
+	}
+	if plan("zz_plan.go", "+", "package localcell\n") != all || plan("zz_plan.go", "append", "func zzPlan() {}\n") != all {
+		t.Fatal("package references plan for an added file is not all five")
+	}
+	if plan("files.go", "after", "//line zz_plan.go:1\n") != every || plan("files_other.go", "replace", "//go:build linux\n") != every {
+		t.Fatal("package references plan for a line or build directive does not replay CRLF on all five")
+	}
+	if keys, _ := packageReferencesContract(referencesViews{}, nil, nil, ""); len(keys) != len(referencesSystems) || keys[0] != "unchecked:"+referencesSystems[0] {
+		t.Fatal("package references contract merges a system it has no view of")
+	}
+}
+
+// Each row reports exactly its keys, LF on each system its plan checks and
+// CRLF on each it replays, every other system's view the clean package's (the
+// clean test asserts it); a control row reports none.
 func TestPackageReferencesSourceContractMutations(t *testing.T) {
-	sources := referencesEnding(admissionReadSources(t), "\n")
+	sources, clean := referencesEnding(admissionReadSources(t), "\n"), referencesCleanViews(t)
 	for _, row := range packageReferencesRows {
 		t.Run(row.name, func(t *testing.T) {
+			t.Parallel()
 			edited, guarded, listing := maps.Clone(sources), slices.Clone(packageReferencesGuarded), []string{}
 			for _, edit := range row.edits {
 				file, mode, anchor, text := edit[0], edit[1], edit[2], edit[3]
@@ -269,8 +321,18 @@ func TestPackageReferencesSourceContractMutations(t *testing.T) {
 					edited[file] = strings.Replace(edited[file], anchor, text, 1)
 				}
 			}
-			for _, ending := range []string{"\n", "\r\n"} {
-				keys, _ := packageReferencesContract(referencesEnding(edited, ending), guarded, packageReferencesList)
+			lf, crlf := referencesPlan(clean, row.edits)
+			if crlf == 0 || crlf&^lf != 0 {
+				t.Fatal("package references row replays CRLF on no system it checks")
+			}
+			views := clean
+			for _, pass := range []struct {
+				ending string
+				checks uint8
+			}{{"\n", lf}, {"\r\n", crlf}} {
+				ended := referencesEnding(edited, pass.ending)
+				views = referencesCheck(views, pass.checks, ended, guarded)
+				keys, _ := packageReferencesContract(views, ended, guarded, packageReferencesList)
 				keys = slices.Sorted(slices.Values(append(keys, packageReferencesForeign(listing)...)))
 				if want := slices.Sorted(slices.Values(row.keys)); !slices.Equal(keys, want) {
 					for _, key := range keys {
@@ -292,7 +354,8 @@ func TestPackageReferencesSourceContractMutations(t *testing.T) {
 // The world rows. A listing the go command failed, one cut short, one without
 // runtime and an empty one each fail their system with world:, as a missing go
 // command does; a dependency that does not type-check is refused, so the file
-// importing it fails types:; and a load writes nothing to the build cache.
+// importing it fails types:; two checks of one world at once report nothing;
+// and a load writes nothing to the build cache.
 func TestPackageReferencesSourceContractWorld(t *testing.T) {
 	dir, listing, sources := t.TempDir(), `{"ImportPath":"runtime"}{"ImportPath":"zz"}`, map[string]string{"zz.go": "package zz\n\nimport \"zz/broken\"\n\nvar _ = broken.Broken\n"}
 	if os.WriteFile(filepath.Join(dir, "broken.go"), []byte("package broken\n\nvar Broken int = \"zz\"\n"), 0o600) != nil {
@@ -321,6 +384,19 @@ func TestPackageReferencesSourceContractWorld(t *testing.T) {
 	if loaded.load("linux"); loaded.failed {
 		t.Error("package references world cannot list the package")
 	}
+	// Two checks of one world at once take its listing and its imports under its
+	// lock (a race build sees one taken without).
+	var shared referencesWorld
+	var group sync.WaitGroup
+	for range 2 {
+		group.Go(func() {
+			view := shared.check("linux", map[string]string{"zz.go": "package zz\n\nimport \"errors\"\n\nvar _ = errors.New\n"}, []string{"strings.Cut"})
+			if maps.DeleteFunc(view.keys, func(_ string, bad bool) bool { return !bad }); len(view.keys) != 0 || !view.resolved["strings.Cut"] {
+				t.Error("package references world checked twice at once reports keys")
+			}
+		})
+	}
+	group.Wait()
 	if entries, err := os.ReadDir(cache); err != nil || len(entries) != 0 {
 		t.Error("package references world load writes to the build cache")
 	}
