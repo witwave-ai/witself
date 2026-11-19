@@ -307,7 +307,7 @@ func TestWindowsShutdownFixtureDescriptorReplaySourceContract(t *testing.T) {
 	// The replay deliberately expands the production reader's flattened error.
 	// Make changes to that production sequence require reviewing the replay too.
 	production := shutdownFixtureSourceFunction(t, "service_shutdown_windows.go", "readShutdownDescriptor")
-	if !strings.Contains(production, `if !shutdownDescriptorPath(root, path) || validatePrivateTree(root) != nil || privateDir(root, false) != nil ||
+	if !strings.Contains(production, `if !shutdownDescriptorPath(root, path) || validatePrivateTreeRetried(root) != nil || privateDir(root, false) != nil ||
 		privateDir(filepath.Join(root, "service"), false) != nil || privateDir(filepath.Join(root, "service", "children"), false) != nil || servicePrivateRecord(path) != nil {`) ||
 		!strings.Contains(production, "openPrivateFile(path, os.O_RDONLY, 0)") || !strings.Contains(production, "return decodeShutdownDescriptor(f)") {
 		t.Fatal("shutdown descriptor replay must track the production reader checks")

@@ -21,7 +21,7 @@ type operationLock struct {
 // A read-only probe never creates directories or files.
 // A lease wait that ctx ended is returned wrapped, never read as absent.
 func acquireLock(ctx context.Context, root string, create bool) (_ *operationLock, err error) {
-	if err := validatePrivateTree(root); err != nil {
+	if err := validatePrivateTreeRetried(root); err != nil {
 		return nil, err
 	}
 	if err := lockDirectory(root); err != nil {

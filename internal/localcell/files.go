@@ -61,7 +61,7 @@ func privateDir(path string, create bool) error {
 }
 
 func (c *Cell) validateRoot(create bool) error {
-	if err := validateRootTree(c.cfg.Root, validatePrivateTree, runtimeconfig.WindowsPrivateTransient, leasePublishHooks{}); err != nil {
+	if err := validatePrivateTreeRetried(c.cfg.Root); err != nil {
 		return err
 	}
 	// Resolve parent aliases once at the trust boundary; never follow a root or
@@ -101,6 +101,11 @@ func (c *Cell) validateRoot(create bool) error {
 func validateRootTree(root string, validate func(string) error, retryable func(error) bool, h leasePublishHooks) error {
 	_, err := retryPublish(func() error { return validate(root) }, retryable, h)
 	return err
+}
+
+// Every private-tree walker's one retry boundary, never retried again (FLAKE-63B).
+var validatePrivateTreeRetried = func(root string) error {
+	return validateRootTree(root, validatePrivateTree, runtimeconfig.WindowsPrivateTransient, leasePublishHooks{})
 }
 
 func (c *Cell) layout() error {
