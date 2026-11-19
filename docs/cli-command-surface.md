@@ -6299,6 +6299,8 @@ directory, or was read and is not that checkpoint's witness. A link, FIFO or
 socket at that name, or a `witness.json` whose mode refuses the open, is an
 object below `recovery/` that is not private or not a plain file: all three
 verbs refuse with `local_checkpoint_state_unsupported` and `descendant_refused`.
+On Windows that check opens `witness.json` itself, so one that another process
+holds open without read sharing is refused there the same way.
 A `witness.json` that passes that check (a private regular file) but cannot be
 opened, examined or read is never listed as
 `"complete": false`: the observation that meets it is `unavailable`, with

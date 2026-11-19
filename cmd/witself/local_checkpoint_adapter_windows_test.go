@@ -27,8 +27,9 @@ func lcaPrivateFile(path string, data []byte) error {
 	return err
 }
 
-// lcaUnreadable holds name without read sharing, so the cell cannot read it,
-// and returns the release; a cleanup closes it too.
+// lcaUnreadable holds name without read sharing, so the cell cannot open it:
+// its layout check opens it too and refuses it first (descendant_refused). It
+// returns the release; a cleanup closes it too.
 func lcaUnreadable(t *testing.T, name string) func() {
 	t.Helper()
 	pointer, err := windows.UTF16PtrFromString(name)

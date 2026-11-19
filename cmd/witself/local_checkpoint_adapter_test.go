@@ -126,6 +126,44 @@ func lcaRun(t *testing.T, args []string, open func(localCheckpointMode, localChe
 	return lcaReceipt(t, raw)
 }
 
+// lcaUnreadableRefused runs one command beside an unreadable witness. A class
+// and reason other than want is named by one fixed text per known pair; then
+// the exit code, standard error and golden receipt each have their own text.
+func lcaUnreadableRefused(t *testing.T, args []string, want [2]string, golden string) {
+	t.Helper()
+	var out, errOut bytes.Buffer
+	code, got := localCheckpointRun(context.Background(), args, localCheckpointOpen, &out, &errOut), [2]string{}
+	if receipt := lcaReceipt(t, out.String()); receipt.Failure != nil {
+		got = [2]string{receipt.Failure.Class, receipt.Failure.Reason}
+	}
+	switch got {
+	case want:
+	case [2]string{}:
+		t.Fatal("beside an unreadable witness the command carried no failure")
+	case [2]string{"local_checkpoint_operation_failed", ""}:
+		t.Fatal("beside an unreadable witness the command failed with operation failed and no reason")
+	case [2]string{"local_checkpoint_state_unsupported", "descendant_refused"}:
+		t.Fatal("beside an unreadable witness the command was refused as descendant refused")
+	case [2]string{"local_checkpoint_state_unsupported", "tree_unreadable"}:
+		t.Fatal("beside an unreadable witness the command was refused as tree unreadable")
+	case [2]string{"local_checkpoint_state_unsupported", ""}:
+		t.Fatal("beside an unreadable witness the command was refused as state unsupported with no reason")
+	case [2]string{"local_cell_layout_refused", ""}:
+		t.Fatal("beside an unreadable witness the command was refused by the cell layout check")
+	default:
+		t.Fatal("beside an unreadable witness the command carried a class outside the known list")
+	}
+	if code != 1 {
+		t.Fatal("beside an unreadable witness the command did not exit 1")
+	}
+	if errOut.Len() != 0 {
+		t.Fatal("beside an unreadable witness the command wrote to stderr")
+	}
+	if out.String() != strings.ReplaceAll(golden, "NOTICE", lcNotice)+"\n" {
+		t.Fatal("beside an unreadable witness the receipt differs from its golden")
+	}
+}
+
 // lcaReceipt checks a raw receipt: no sentinel, one LF-terminated line, no key
 // repeated at any depth, the closed projection and its disclosures.
 func lcaReceipt(t *testing.T, raw string) (receipt lcWireReceipt) {
@@ -730,10 +768,12 @@ func TestLocalCheckpointAdapter(t *testing.T) {
 		}
 	})
 	// Incomplete only on proof: an empty witness and a directory at its name
-	// list "complete": false, a valid one complete. One that cannot be read
-	// (Windows: held without read sharing; macOS: a deny-read ACL entry) is
+	// list "complete": false, a valid one complete. One that cannot be read is
 	// never listed: inspect and a delete of it or of another are refused,
-	// nothing changed; released, it lists complete again.
+	// nothing changed; released, it lists complete again. macOS (a deny-read ACL
+	// entry): the listing refuses it, operation failed. Windows (held without
+	// read sharing): the layout check, which opens it itself, refuses it first,
+	// descendant_refused. One subtest per command.
 	t.Run("witness", func(t *testing.T) {
 		parent, root := lcaRoot(t)
 		witness, args := filepath.Join(root, "recovery", lcID, "witness.json"), []string{"inspect", "--checkpoint-mode=cold-v1", "--root=" + root}
@@ -742,31 +782,38 @@ func TestLocalCheckpointAdapter(t *testing.T) {
 			t.Fatal("cannot plant the checkpoint witness")
 		}
 		incomplete := `{"operation":"inspect","outcome":"succeeded","after":{"status":"listed","count":1,"unknown_count":0,"entries":[{"id":"ckpt_abcdefghijklmnop","complete":false,"verification":"not_performed"}]},"verification":"not_performed","notice":"NOTICE"}`
-		lcaRun(t, args, localCheckpointOpen, 0, incomplete)
+		t.Run("empty", func(t *testing.T) { lcaRun(t, args, localCheckpointOpen, 0, incomplete) })
 		if os.Remove(witness) != nil || lcaPrivateDir(witness) != nil {
 			t.Fatal("cannot plant a directory at the witness name")
 		}
-		lcaRun(t, args, localCheckpointOpen, 0, incomplete)
+		t.Run("directory", func(t *testing.T) { lcaRun(t, args, localCheckpointOpen, 0, incomplete) })
 		if os.Remove(witness) != nil || lcaPrivateFile(witness, []byte(`{"format":1,"checkpoint_id":"ckpt_abcdefghijklmnop","installation_id":"installation_A","created_at":"2026-01-01T00:00:00Z","bytes":5}`)) != nil {
 			t.Fatal("cannot plant a valid witness")
 		}
 		complete := strings.Replace(incomplete, `"complete":false`, `"installation_id":"installation_A","complete":true`, 1)
-		lcaRun(t, args, localCheckpointOpen, 0, complete)
+		t.Run("valid", func(t *testing.T) { lcaRun(t, args, localCheckpointOpen, 0, complete) })
 		before := lcaTree(t, parent)
 		release := lcaUnreadable(t, witness)
 		if release == nil {
 			return
 		}
-		failure := `{"class":"local_checkpoint_operation_failed","cleanup_incomplete":false}`
-		lcaRun(t, args, localCheckpointOpen, 1, `{"operation":"inspect","outcome":"refused","failure":`+failure+`,"after":{"status":"unavailable","failure":`+failure+`},"verification":"not_performed","notice":"NOTICE"}`)
-		for _, id := range []string{lcID, lcOtherID} {
-			lcaRun(t, []string{"delete", "--checkpoint-mode=cold-v1", "--root=" + root, "--checkpoint-id=" + id}, localCheckpointOpen, 1, `{"operation":"delete","outcome":"refused","failure":`+failure+`,"before":{"status":"unavailable","failure":`+failure+`},"target":"`+id+`","presence":"unknown","verification":"not_performed","notice":"NOTICE"}`)
+		want, failure := [2]string{"local_checkpoint_operation_failed", ""}, `{"class":"local_checkpoint_operation_failed","cleanup_incomplete":false}`
+		if runtime.GOOS == "windows" {
+			want, failure = [2]string{"local_checkpoint_state_unsupported", "descendant_refused"}, `{"class":"local_checkpoint_state_unsupported","reason":"descendant_refused","cleanup_incomplete":false}`
+		}
+		t.Run("inspect", func(t *testing.T) {
+			lcaUnreadableRefused(t, args, want, `{"operation":"inspect","outcome":"refused","failure":`+failure+`,"after":{"status":"unavailable","failure":`+failure+`},"verification":"not_performed","notice":"NOTICE"}`)
+		})
+		for _, row := range [][2]string{{"delete", lcID}, {"delete-other", lcOtherID}} {
+			t.Run(row[0], func(t *testing.T) {
+				lcaUnreadableRefused(t, []string{"delete", "--checkpoint-mode=cold-v1", "--root=" + root, "--checkpoint-id=" + row[1]}, want, `{"operation":"delete","outcome":"refused","failure":`+failure+`,"before":{"status":"unavailable","failure":`+failure+`},"target":"`+row[1]+`","presence":"unknown","verification":"not_performed","notice":"NOTICE"}`)
+			})
 		}
 		release()
 		if !maps.Equal(before, lcaTree(t, parent)) {
 			t.Fatal("a refusal beside an unreadable witness changed the root")
 		}
-		lcaRun(t, args, localCheckpointOpen, 0, complete)
+		t.Run("released", func(t *testing.T) { lcaRun(t, args, localCheckpointOpen, 0, complete) })
 	})
 }
 
