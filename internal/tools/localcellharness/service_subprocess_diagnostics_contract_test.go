@@ -31,7 +31,6 @@ var foregroundSubprocessDiagnosticSites = []struct {
 	{"host_spawn", "cannot start synthetic foreground host", ""},
 	{"cleanup_budget", "foreground cleanup exceeded synthetic budget", ""},
 	{"readiness_budget", "foreground readiness exceeded synthetic budget on first start", "foreground readiness exceeded synthetic budget after restart"},
-	{"readiness_budget_cap", "foreground synthetic budget exhausted before the derived readiness allowance on first start", "foreground synthetic budget exhausted before the derived readiness allowance after restart"},
 	{"readiness_allowance", "foreground host did not expose authenticated status within allowance on first start", "foreground host did not expose authenticated status within allowance after restart"},
 	{"endpoint_binding", "foreground endpoint lost fresh process binding", ""},
 	{"boot_binding_check", "foreground restart lost independent boot binding", ""},
@@ -123,6 +122,11 @@ func TestWindowsForegroundSubprocessClassEnrollment(t *testing.T) {
 	var rows []foregroundClassEnrollment
 	for _, site := range foregroundSubprocessDiagnosticSites {
 		rows = append(rows, foregroundClassEnrollment{site.class, site.class, site.class, site.assertion, site.assertion})
+	}
+	// A readiness wait at its deadline names its last probe before its own class.
+	for _, outcome := range foregroundProbeOutcomes {
+		const allowance = "foreground host did not expose authenticated status within allowance on first start"
+		rows = append(rows, foregroundClassEnrollment{outcome, outcome, outcome, allowance, allowance})
 	}
 	// The cold install classifier already has a portable truth table. Exercise
 	// its vocabulary through the foreground prefix as well as service_install.

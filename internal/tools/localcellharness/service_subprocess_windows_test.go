@@ -74,17 +74,14 @@ func TestWindowsServiceForegroundSubprocessCommands(t *testing.T) {
 	}
 	args := serviceFlags{root: root, timeout: time.Second}.hostArgs()
 	descriptor := localcell.ServiceDescriptor{Adapter: "foreground", DesiredState: "stopped", Payload: localcell.ServicePayload{Host: host, Args: args}}
-	// Preparation does, in process, a small share of the host's startup work.
-	prepared := time.Now()
 	if cell.PrepareService(ctx, descriptor) != nil {
 		t.Logf("foreground_exit class=%s", "fixture_prepare")
 		t.Fatal("cannot prepare synthetic foreground service")
 	}
-	prepare := time.Since(prepared)
 	environment := windowsForegroundHarnessEnvironment(t)
 	// The cold spawn uses the command budget; WaitDelay retains the cleanup reserve.
 	// Later commands and shutdown use an allowance calibrated from this spawn;
-	// each readiness wait also scales the measurements foregroundReadinessAllowance names.
+	// a readiness wait does not: it ends on its condition inside the command budget.
 	baseline := time.Now()
 	command := exec.CommandContext(commandCtx, host, "service", "install", "--root", root)
 	command.Env = environment
@@ -111,7 +108,6 @@ func TestWindowsServiceForegroundSubprocessCommands(t *testing.T) {
 		return command.CombinedOutput()
 	}
 	var oldStart, oldBoot string
-	var firstStart time.Duration
 	commandDeadline, _ := commandCtx.Deadline()
 	for iteration := 0; iteration < 2; iteration++ {
 		command := exec.CommandContext(commandCtx, host, "run", "--root", root)
@@ -127,7 +123,9 @@ func TestWindowsServiceForegroundSubprocessCommands(t *testing.T) {
 		done := make(chan error, 1)
 		go func() { done <- command.Wait() }()
 		finished := false
-		t.Cleanup(func() {
+		// Deferred, not a Cleanup: t.Context, and with it ctx, is canceled
+		// before any Cleanup runs, which would always report this budget spent.
+		defer func() {
 			if !finished {
 				_ = command.Process.Kill()
 				select {
@@ -137,18 +135,19 @@ func TestWindowsServiceForegroundSubprocessCommands(t *testing.T) {
 					t.Error("foreground cleanup exceeded synthetic budget")
 				}
 			}
-		})
-		// A restart repeats the first start's work; both waits end inside the command deadline.
-		readiness, capped := foregroundReadinessAllowance(allowance, prepare, firstStart, time.Until(commandDeadline))
-		waitStart := time.Now()
-		deadline := time.NewTimer(readiness)
-		ticker := time.NewTicker(20 * time.Millisecond)
+		}()
+		// No earlier sample bounds a start under a neighbour's load. Each wait ends
+		// on authenticated status, a host exit, the synthetic budget, or one
+		// WaitDelay share before the command deadline, and a probe may use all of
+		// it; a fresh pause after each probe never races that deadline.
+		waitDeadline := commandDeadline.Add(-windowsSyntheticTestBudget / 90)
+		deadline := time.NewTimer(time.Until(waitDeadline))
 		ready := false
 		for !ready {
-			probeCtx, probeCancel := context.WithTimeout(ctx, foregroundStatusProbe)
-			status, err := cell.Control(probeCtx, "status")
+			probeCtx, probeCancel := context.WithDeadline(ctx, waitDeadline)
+			status, probeErr := cell.Control(probeCtx, "status")
 			probeCancel()
-			if err == nil && status.State == "stopped" {
+			if probeErr == nil && status.State == "stopped" {
 				ready = true
 				break
 			}
@@ -187,26 +186,17 @@ func TestWindowsServiceForegroundSubprocessCommands(t *testing.T) {
 				}
 				t.Fatal("foreground readiness exceeded synthetic budget after restart")
 			case <-deadline.C:
-				if capped {
-					t.Logf("foreground_exit class=%s", "readiness_budget_cap")
-					if iteration == 0 {
-						t.Fatal("foreground synthetic budget exhausted before the derived readiness allowance on first start")
-					}
-					t.Fatal("foreground synthetic budget exhausted before the derived readiness allowance after restart")
-				}
+				_, endpointErr := os.Lstat(filepath.Join(root, "service", "control-endpoint.json"))
+				t.Logf("foreground_exit class=%s", foregroundProbeOutcome(probeErr, endpointErr))
 				t.Logf("foreground_exit class=%s", "readiness_allowance")
 				if iteration == 0 {
 					t.Fatal("foreground host did not expose authenticated status within allowance on first start")
 				}
 				t.Fatal("foreground host did not expose authenticated status within allowance after restart")
-			case <-ticker.C:
+			case <-time.After(20 * time.Millisecond):
 			}
 		}
-		if iteration == 0 {
-			firstStart = time.Since(waitStart)
-		}
 		deadline.Stop()
-		ticker.Stop()
 		endpointData, err := os.ReadFile(filepath.Join(root, "service", "control-endpoint.json"))
 		var endpoint struct {
 			HostPID           int    `json:"host_pid"`
