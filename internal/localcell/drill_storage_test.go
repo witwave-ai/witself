@@ -239,9 +239,10 @@ var drillStorageCallees = []string{"(context.Context).Err", "(*regexp.Regexp).Ma
 	"(*localcell.Cell).recoveryDir", "(*localcell.Cell).checkpointDir", "(*localcell.Cell).checkpointOps"}
 
 // drillReserveCallees are drillStorageCallees' counterpart for the reservation files (G4B1: the Linux
-// platform layer); x/sys members do not resolve here, and the checkpoint contract pins them.
+// platform layer); x/sys and runtimeconfig members do not resolve here, and the checkpoint contract pins them.
 var drillReserveCallees = []string{"errors.As", "errors.Is", "(*os.Root).Open", "(*os.File).Close", "(*os.File).Fd", "(*os.File).Stat",
-	"(io/fs.FileInfo).Size", "os.NewFile", "strings.Contains", "strings.Split", "localcell.drillStorageAdd"}
+	"(io/fs.FileInfo).Size", "os.NewFile", "strings.Contains", "strings.Split", "localcell.drillStorageAdd", "path/filepath.FromSlash", "path/filepath.Join",
+	"strings.Repeat", "localcell.checkpointPathFits", "os.SameFile", "(*os.Root).OpenRoot", "(*os.Root).Stat", "(*os.Root).Close"}
 
 // drillStorageReferences returns drill_storage_callee:<file>:<name> per name outside drillStorageCallees.
 func drillStorageReferences(sources map[string]string) []string {

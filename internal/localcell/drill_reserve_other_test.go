@@ -1,4 +1,4 @@
-//go:build !linux
+//go:build !linux && !windows
 
 package localcell
 
@@ -11,8 +11,8 @@ import (
 	"testing"
 )
 
-// Outside Linux the reservation layer refuses unsupported_fs and writes nothing (macOS and every other system;
-// Windows until its own platform layer).
+// Outside Linux and Windows the reservation layer refuses unsupported_fs and writes nothing (macOS and every
+// other system).
 func TestDrillReservePlatformOther(t *testing.T) {
 	t.Run("refused", func(t *testing.T) {
 		c, _ := unitCell(t)
@@ -24,13 +24,15 @@ func TestDrillReservePlatformOther(t *testing.T) {
 		defer func() { _ = held.Close() }()
 		before := checkpointTreeState(t, c)
 		created, createErr := drillPlatformCreate(c, boundary, boundary, "drill_aaaaaaaaaaaaaaaa", "clone")
+		opened, openErr := drillPlatformOpen(boundary, "drill_aaaaaaaaaaaaaaaa", true)
+		anchored, anchorErr := drillReserveRoot(boundary, "drill_aaaaaaaaaaaaaaaa")
 		for _, err := range []error{drillPlatformMkdir(c, boundary, nil, "drill_aaaaaaaaaaaaaaaa", ""), drillPlatformMkdir(c, boundary, boundary, "drill_aaaaaaaaaaaaaaaa", "sub"),
-			createErr, drillPlatformAllocate(held, 0, 4096), drillPlatformVerify(held, 0)} {
+			createErr, openErr, anchorErr, drillPlatformAllocate(held, 0, 4096), drillPlatformVerify(held, 0)} {
 			drillStorageReason(t, err, "unsupported_fs", "the reservation layer did not refuse outside its platforms")
 		}
 		for _, err := range []error{nil, errors.New("other"), fs.ErrExist, syscall.ENOSPC, syscall.Errno(112), drillStorageError{reason: "storage_exhausted"}} {
 			drillAssert(t, drillPlatformRefusal(err) == "", "the platform refusal named a reason outside its platforms")
 		}
-		drillAssert(t, created == nil && reflect.DeepEqual(before, checkpointTreeState(t, c)), "the reservation layer wrote outside its platforms")
+		drillAssert(t, created == nil && opened == nil && anchored == nil && reflect.DeepEqual(before, checkpointTreeState(t, c)), "the reservation layer wrote outside its platforms")
 	})
 }

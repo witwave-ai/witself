@@ -102,6 +102,49 @@ func drillReserveWatched(t *testing.T, drill *os.Root, fifo, dir, file string) (
 	}
 }
 
+// drillReserveOpened opens name through root, never waiting: an open still running after five seconds fails
+// the row, and the FIFO at fifo is opened read-write until it returns, so nothing is left blocked.
+func drillReserveOpened(t *testing.T, root *os.Root, fifo, name string, directory bool) (*os.File, error) {
+	t.Helper()
+	var f *os.File
+	var err error
+	done, waited := make(chan struct{}), false
+	go func() {
+		f, err = drillPlatformOpen(root, name, directory)
+		close(done)
+	}()
+	for {
+		select {
+		case <-done:
+			if f != nil {
+				t.Cleanup(func() { _ = f.Close() })
+			}
+			drillAssert(t, !waited, "a drill reserve open waited at a FIFO")
+			return f, err
+		case <-time.After(5 * time.Second):
+			if held, heldErr := os.OpenFile(fifo, os.O_RDWR|unix.O_NONBLOCK, 0); heldErr == nil {
+				_ = held.Close()
+			}
+			waited = true
+		}
+	}
+}
+
+// drillReservePlant makes, at planted, a link to target when one is given, else the object kind names.
+func drillReservePlant(planted, kind, target string) error {
+	switch {
+	case target != "":
+		return os.Symlink(target, planted)
+	case kind == "file":
+		return os.WriteFile(planted, []byte("x"), 0o600)
+	case kind == "fifo":
+		return unix.Mkfifo(planted, 0o600)
+	case kind == "dir":
+		return os.Mkdir(planted, 0o700)
+	}
+	return nil // absent
+}
+
 // TestDrillReservePlatformChild is efbig_child's child and does nothing unless its variable names the
 // row's file: it lowers its own file size limit, allocates past it, restores the limit and prints the reason.
 func TestDrillReservePlatformChild(_ *testing.T) {
@@ -352,6 +395,94 @@ func TestDrillReservePlatformLinux(t *testing.T) {
 		}
 		before := rounds(0, 0) // the two held roots at least
 		drillAssert(t, before >= 2 && before == rounds(0, 50), "the creators leaked a descriptor over the refused and the made rounds")
+	})
+	// The no-follow open: before the last component an absent name, a link inside or outside, a regular file or a
+	// FIFO is refused without waiting, as a file and as a directory; nothing changes.
+	for _, row := range []struct {
+		plant, target string
+		want          unix.Errno
+	}{{"absent", "", unix.ENOENT}, {"inside", "b", unix.ENOTDIR}, {"outside", "../outside", unix.ENOTDIR}, {"system_root", "/", unix.ENOTDIR},
+		{"file", "", unix.ENOTDIR}, {"fifo", "", unix.ENOTDIR}} {
+		t.Run("open_component/"+row.plant, func(t *testing.T) {
+			top := t.TempDir()
+			planted := filepath.Join(top, "drill", "a")
+			err := errors.Join(os.MkdirAll(filepath.Join(top, "drill", "b", "x"), 0o700), os.MkdirAll(filepath.Join(top, "outside", "x"), 0o700))
+			drillAssert(t, errors.Join(err, drillReservePlant(planted, row.plant, row.target)) == nil, "cannot plant the drill reserve fixture component")
+			drill, before := drillReserveHeld(t, filepath.Join(top, "drill")), drillReserveTree(t, top)
+			for _, directory := range []bool{false, true} {
+				f, err := drillReserveOpened(t, drill, planted, "a/x", directory)
+				drillAssert(t, f == nil && err == row.want, "an open through a planted component was not refused with its errno")
+			}
+			drillAssert(t, reflect.DeepEqual(before, drillReserveTree(t, top)), "an open through a planted component changed the fixture tree")
+		})
+	}
+	// At the last component: a regular file opens read-only as a file, a directory as a directory; a link is never
+	// followed, a FIFO is never waited on, and a kind other than the one asked for is refused.
+	for _, row := range []struct {
+		plant, target string
+		file, dir     unix.Errno // 0: opened
+	}{{"file", "", 0, unix.ENOTDIR}, {"file_link", "f", unix.ELOOP, unix.ENOTDIR}, {"fifo", "", unix.EINVAL, unix.ENOTDIR}, {"dir", "", unix.EINVAL, 0},
+		{"dir_link", "d", unix.ELOOP, unix.ENOTDIR}} {
+		t.Run("open_last/"+row.plant, func(t *testing.T) {
+			top := t.TempDir()
+			planted := filepath.Join(top, "a")
+			err := errors.Join(os.Mkdir(filepath.Join(top, "d"), 0o700), os.WriteFile(filepath.Join(top, "f"), []byte("x"), 0o600))
+			drillAssert(t, errors.Join(err, drillReservePlant(planted, row.plant, row.target)) == nil, "cannot plant the drill reserve fixture's last name")
+			root, before := drillReserveHeld(t, top), drillReserveTree(t, top)
+			for directory, want := range map[bool]unix.Errno{false: row.file, true: row.dir} {
+				f, err := drillReserveOpened(t, root, planted, "a", directory)
+				if want != 0 {
+					drillAssert(t, f == nil && err == want, "a planted last name was not refused with its errno")
+					continue
+				}
+				info, statErr := f.Stat()
+				_, writeErr := f.Write([]byte("y"))
+				drillAssert(t, err == nil && statErr == nil && info.IsDir() == directory && (directory || info.Mode().IsRegular()) && writeErr != nil,
+					"a plain last name was not opened read-only as its own kind")
+			}
+			drillAssert(t, reflect.DeepEqual(before, drillReserveTree(t, top)), "an open of a planted last name changed the fixture tree")
+		})
+	}
+	t.Run("open_device", func(t *testing.T) {
+		slash := drillReserveHeld(t, "/")
+		dir, dirErr := drillPlatformOpen(slash, "proc", true)
+		file, fileErr := drillPlatformOpen(slash, "proc/self/status", false)
+		drillAssert(t, dir == nil && dirErr == unix.EXDEV, "an open crossed onto another device at its last component")
+		drillAssert(t, file == nil && fileErr == unix.EXDEV, "an open crossed onto another device in its walk")
+	})
+	t.Run("open_malformed", func(t *testing.T) {
+		top := t.TempDir()
+		drillAssert(t, os.MkdirAll(filepath.Join(top, "b", "a"), 0o700) == nil, "cannot prepare the drill reserve fixture tree")
+		live, closed, before := drillReserveHeld(t, top), drillReserveHeld(t, top), drillReserveTree(t, top)
+		drillAssert(t, closed.Close() == nil, "cannot close the drill reserve fixture root")
+		for _, root := range []*os.Root{live, closed} {
+			for _, name := range []string{"", "/x", "x/", "a//x", "./x", "b/./x", ".", "b/../x", "b/a/..", "..", "../x"} {
+				for _, directory := range []bool{false, true} {
+					f, err := drillPlatformOpen(root, name, directory)
+					drillAssert(t, f == nil && err == unix.EINVAL, "a malformed name was not refused before any system call")
+				}
+			}
+		}
+		f, err := drillPlatformOpen(closed, "b", true)
+		drillAssert(t, f == nil && err == unix.EBADF, "a closed root's refusal was not a bare errno")
+		drillAssert(t, reflect.DeepEqual(before, drillReserveTree(t, top)), "a malformed open changed the fixture tree")
+	})
+	t.Run("anchor", func(t *testing.T) {
+		top := t.TempDir()
+		err := errors.Join(os.Mkdir(filepath.Join(top, "d"), 0o700), os.Mkdir(filepath.Join(top, "e"), 0o700), os.Symlink("e", filepath.Join(top, "link")),
+			os.WriteFile(filepath.Join(top, "file"), nil, 0o600))
+		drillAssert(t, err == nil, "cannot prepare the drill reserve anchor fixture")
+		parent, before := drillReserveHeld(t, top), drillReserveTree(t, top)
+		root, err := drillReserveRoot(parent, "d")
+		drillAssert(t, err == nil, "a plain directory was not held as a root")
+		info, statErr := root.Stat(".")
+		named, namedErr := os.Lstat(filepath.Join(top, "d"))
+		drillAssert(t, errors.Join(statErr, namedErr, root.Close()) == nil && os.SameFile(info, named), "the held root is not the directory at its name")
+		for name, want := range map[string]unix.Errno{"link": unix.ENOTDIR, "absent": unix.ENOENT, "file": unix.ENOTDIR} {
+			root, err := drillReserveRoot(parent, name)
+			drillAssert(t, root == nil && err == want, "an anchor was not refused with its errno")
+		}
+		drillAssert(t, reflect.DeepEqual(before, drillReserveTree(t, top)), "the anchor changed the fixture tree")
 	})
 	t.Run("layout", func(t *testing.T) {
 		var m drillFiemap

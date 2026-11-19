@@ -1,4 +1,4 @@
-//go:build !linux
+//go:build !linux && !windows
 
 package localcell
 
@@ -10,6 +10,9 @@ func drillPlatformMkdir(*Cell, *os.Root, *os.Root, string, string) error {
 	return drillStorageError{reason: "unsupported_fs"}
 }
 func drillPlatformCreate(*Cell, *os.Root, *os.Root, string, string) (*os.File, error) {
+	return nil, drillStorageError{reason: "unsupported_fs"}
+}
+func drillPlatformOpen(*os.Root, string, bool) (*os.File, error) {
 	return nil, drillStorageError{reason: "unsupported_fs"}
 }
 func drillPlatformAllocate(*os.File, uint64, uint64) error {
