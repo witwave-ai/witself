@@ -240,14 +240,22 @@ var drillStorageCallees = []string{"(context.Context).Err", "(*regexp.Regexp).Ma
 
 // drillReserveCallees are drillStorageCallees' counterpart for the reservation files (G4B1: the Linux
 // platform layer); x/sys and runtimeconfig members do not resolve here, and the checkpoint contract pins them.
+// The sequence (G4B2) adds the rest; the volume seam resolves to drillPlatformVolume.
 var drillReserveCallees = []string{"errors.As", "errors.Is", "(*os.Root).Open", "(*os.File).Close", "(*os.File).Fd", "(*os.File).Stat",
 	"(io/fs.FileInfo).Size", "os.NewFile", "strings.Contains", "strings.Split", "localcell.drillStorageAdd", "path/filepath.FromSlash", "path/filepath.Join",
-	"strings.Repeat", "localcell.checkpointPathFits", "os.SameFile", "(*os.Root).OpenRoot", "(*os.Root).Stat", "(*os.Root).Close"}
+	"strings.Repeat", "localcell.checkpointPathFits", "os.SameFile", "(*os.Root).OpenRoot", "(*os.Root).Stat", "(*os.Root).Close",
+	"(context.Context).Err", "encoding/json.Marshal", "errors.Join", "os.OpenRoot", "os.Lstat", "path.Join", "(*os.File).Sync", "(*os.File).Write",
+	"(*os.Root).Lstat", "(*os.Root).Remove", "(*os.Root).Rename", "localcell.drillPlatformVolume", "(*localcell.Cell).admitDrillStorageLocked",
+	"(*localcell.Cell).checkpointDir", "(*localcell.Cell).checkpointOps", "(*localcell.Cell).recoveryDir", "localcell.readManifest",
+	"localcell.verifyCheckpointDocuments", "localcell.checkpointVerifyShape", "localcell.drillCloneBytes", "localcell.drillStorageAdmits",
+	"localcell.drillValidOperationID", "localcell.drillValidID", "localcell.drillParseRecord", "(*localcell.Cell).drillRootStage", "localcell.drillRootSync",
+	"(*localcell.Cell).deleteDrillLocked"}
 
 // drillReservePlatformCallees hold the platform files (drill_reserve_<system>.go) to G4B1's list and the two decisions of
 // drill_reserve.go they call: a name only drill_reserve.go needs stays refused in them (drill_reserve__callee:<file>:<name>).
 var drillReservePlatformCallees = []string{"errors.As", "errors.Is", "(*os.Root).Open", "(*os.File).Close", "(*os.File).Fd", "(*os.File).Stat",
-	"(io/fs.FileInfo).Size", "os.NewFile", "strings.Contains", "strings.Split", "localcell.drillStorageAdd", "localcell.drillExtentsCover", "localcell.drillWindowsProved"}
+	"(io/fs.FileInfo).Size", "os.NewFile", "strings.Contains", "strings.Split", "localcell.drillStorageAdd", "localcell.drillExtentsCover", "localcell.drillWindowsProved",
+	"localcell.drillWindowsInherits"}
 
 // drillStorageReferences returns drill_storage_callee:<file>:<name> per name outside drillStorageCallees.
 func drillStorageReferences(sources map[string]string) []string {
@@ -373,6 +381,8 @@ func TestDrillReserveSourceContract(t *testing.T) {
 		{"remover", "localcell.removePrivateFile", "func drillReserveProbe() { _ = removePrivateFile(\"x\") }\n\n"},
 		{"writer", "localcell.writeAtomicBytes", "func drillReserveProbe() { _ = writeAtomicBytes(\"x\", nil, nil) }\n\n"},
 		{"lock", "localcell.acquireLock", "func (c *Cell) drillReserveProbe() { _, _ = acquireLock(c.cfg.Root, true) }\n\n"},
+		{"remove_all", "(*os.Root).RemoveAll", "func drillReserveProbe(r *os.Root) { _ = r.RemoveAll(\"x\") }\n\n"},
+		{"truncate", "(*os.File).Truncate", "func drillReserveProbe(f *os.File) { _ = f.Truncate(0) }\n\n"},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			var want []string

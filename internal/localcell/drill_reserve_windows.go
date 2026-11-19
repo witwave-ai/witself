@@ -76,6 +76,14 @@ func drillPlatformRefusal(err error) string {
 	return ""
 }
 
+// drillPlatformInherits reads the held directory's attributes by its handle:
+// whether a new file below it would inherit compression or encryption, which
+// the proof refuses, or the attributes cannot be read.
+func drillPlatformInherits(held *os.File) bool {
+	var info windows.ByHandleFileInformation
+	return windows.GetFileInformationByHandle(windows.Handle(held.Fd()), &info) != nil || drillWindowsInherits(info.FileAttributes)
+}
+
 // drillWindowsStandard is FILE_STANDARD_INFO (winbase.h), 24 bytes: AllocationSize
 // at 0, EndOfFile at 8, NumberOfLinks at 16, DeletePending at 20, Directory at 21.
 type drillWindowsStandard struct {

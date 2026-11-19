@@ -142,7 +142,9 @@ doc.go
 drill_record.go
 	import bytes encoding/json errors io strings
 drill_reserve.go
-	import errors io/fs os path/filepath strings
+	import context encoding/json errors github.com/witwave-ai/witself/internal/id io/fs os path path/filepath runtime strings
+	(*Cell).drillReserveRecord (*os.File).Write (*os.Root).Remove (*os.Root).Rename
+	(*Cell).reserveDrillLocked (*Cell).deleteDrillLocked (*os.Root).Open x5 os.OpenRoot
 	drillReserveRoot (*os.Root).OpenRoot
 drill_reserve_linux.go
 	import errors golang.org/x/sys/unix math os strings unsafe

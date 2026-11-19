@@ -539,3 +539,42 @@ func TestDrillReservePlatformLinux(t *testing.T) {
 		}
 	})
 }
+
+// drillReserveFull is the platform's raw lack of space; drillReserveSparse sets a file's end without allocating it.
+const drillReserveFull = unix.ENOSPC
+
+func drillReserveSparse(f *os.File, offset, length uint64) error {
+	return f.Truncate(int64(offset + length))
+}
+
+// The sequence's Linux-only rows on the runner's ext4.
+func TestDrillReservationLinux(t *testing.T) {
+	// R4: a file of exactly the same size, fully allocated, put at the name while the writer is open is refused.
+	t.Run("verify_replaced", func(t *testing.T) {
+		r := drillReserveStart(t)
+		entry := r.file()
+		name := filepath.Join(r.fixed(), drillReserveClone, filepath.FromSlash(entry.Path))
+		r.on["reserve_verify"] = func() {
+			other, err := os.OpenFile(name+".other", os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+			drillAssert(t, err == nil && unix.Fallocate(int(other.Fd()), 0, 0, *entry.Size) == nil && other.Close() == nil && os.Rename(name+".other", name) == nil,
+				"cannot replace the file under proof by an allocated file of its size")
+		}
+		drillID, err := r.reserve()
+		r.refused(drillID, err, "allocation_unproved", true)
+	})
+	// A real EOPNOTSUPP: the created file's extents flag cleared before its first chunk.
+	t.Run("no_extents", func(t *testing.T) {
+		r := drillReserveStart(t)
+		name := filepath.Join(r.fixed(), drillReserveClone, filepath.FromSlash(r.file().Path))
+		r.on["reserve_file"] = func() {
+			f, err := os.OpenFile(name, os.O_RDWR, 0)
+			drillAssert(t, err == nil, "cannot open the created file")
+			defer func() { _ = f.Close() }()
+			flags, err := unix.IoctlGetUint32(int(f.Fd()), unix.FS_IOC_GETFLAGS)
+			drillAssert(t, err == nil && unix.IoctlSetPointerInt(int(f.Fd()), unix.FS_IOC_SETFLAGS, int(flags&^drillReservePlatformExtents)) == nil,
+				"cannot clear the created file's extents flag")
+		}
+		drillID, err := r.reserve()
+		r.refused(drillID, err, "unsupported_fs", true)
+	})
+}

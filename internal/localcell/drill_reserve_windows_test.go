@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -396,4 +397,70 @@ func drillReserveWindowsNone(t *testing.T, f *os.File, message string) {
 		_ = f.Close()
 		t.Fatal(message)
 	}
+}
+
+// drillReserveFull is the platform's raw lack of space; drillReserveSparse marks a file sparse through its own
+// writer at its first chunk (FILE_SET_SPARSE_BUFFER{TRUE}, sparse_attribute's control) and sets its end.
+const drillReserveFull = windows.ERROR_DISK_FULL
+
+func drillReserveSparse(f *os.File, offset, length uint64) error {
+	sparse, returned := byte(1), uint32(0)
+	if offset == 0 {
+		if err := windows.DeviceIoControl(windows.Handle(f.Fd()), windows.FSCTL_SET_SPARSE, &sparse, 1, nil, 0, &returned, nil); err != nil {
+			return err
+		}
+	}
+	return f.Truncate(int64(offset + length))
+}
+
+// The sequence's Windows-only rows (CI's localcell-windows job, the owner's Windows host); one check, one fixed text per
+// expectation.
+func TestDrillReservationWindows(t *testing.T) {
+	// N8: a name the walk refuses by content passes admission and is refused at its own creation, after the drill
+	// directory and the record exist (the first entry, a directory; a later one, a file); everything is discarded.
+	for _, row := range []struct{ name, path, kind string }{{"refused_first", "aa-refused-first.", "dir"}, {"refused_later", "pg/zz-refused-later.", "file"}} {
+		t.Run(row.name, func(t *testing.T) {
+			r, entry := drillReserveStart(t), checkpointInventoryEntry{Path: row.path, Type: row.kind}
+			if row.kind == "dir" {
+				r.witness.Directories++
+			} else {
+				entry.Size, entry.SHA256 = new(int64), strings.Repeat("0", 64)
+				r.witness.Files++
+			}
+			r.inventory.Entries = append(r.inventory.Entries, entry)
+			slices.SortFunc(r.inventory.Entries, func(a, b checkpointInventoryEntry) int { return strings.Compare(a.Path, b.Path) })
+			r.inventorySeal()
+			drillAssert(t, (r.inventory.Entries[0].Path == row.path) == (row.name == "refused_first"), "the refused name is not at the row's position")
+			drillID, err := r.reserve()
+			listing, listErr := r.c.drillRootList()
+			drillReserveWindowsCheck(t, err == error(drillStorageError{reason: "boundary_refused"}), err, "a name the walk refuses was not refused with the fallback reason")
+			drillReserveWindowsCheck(t, !strings.Contains(err.Error(), row.path), nil, "the refusal carried the refused name")
+			drillReserveWindowsCheck(t, drillID == "", nil, "a discarded reservation returned an identifier")
+			drillReserveWindowsCheck(t, r.stages["reserve_publish"] == 1, nil, "the name was refused before the record was published")
+			drillReserveWindowsCheck(t, r.stages["directory"] > 0, nil, "the drill directory was not discarded")
+			drillReserveWindowsCheck(t, listErr == nil && reflect.DeepEqual(listing, drillRootListing{}), listErr, "the discard left a drill listed")
+			drillReserveWindowsCheck(t, reflect.DeepEqual(r.before, checkpointTreeState(t, r.c)), nil, "the discard left the tree changed")
+		})
+	}
+	// N9: a compressed recovery/ (FSCTL_SET_COMPRESSION, COMPRESSION_FORMAT_DEFAULT, as compressed_refused) is refused by
+	// the reservation's admission with the proof's reason before any write; the volume is faked so that G4A's
+	// identification, which refuses a compressed directory as unsupported_fs, does not answer first.
+	t.Run("compressed_boundary", func(t *testing.T) {
+		r := drillReserveStart(t)
+		name, err := windows.UTF16PtrFromString(r.c.recoveryDir())
+		drillAssert(t, err == nil, "cannot name the drill reserve fixture's recovery directory")
+		handle, err := windows.CreateFile(name, windows.GENERIC_READ|windows.GENERIC_WRITE, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, nil,
+			windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
+		drillReserveWindowsCheck(t, err == nil, err, "cannot open the drill reserve fixture's recovery directory")
+		format, returned := uint16(1), uint32(0)
+		err = windows.DeviceIoControl(handle, windows.FSCTL_SET_COMPRESSION, (*byte)(unsafe.Pointer(&format)), 2, nil, 0, &returned, nil)
+		_ = windows.CloseHandle(handle)
+		drillReserveWindowsCheck(t, err == nil, err, "cannot compress the recovery fixture (NTFS compression needs clusters of at most 4 KiB and must be enabled)")
+		r.volume(func(int) drillVolume { return drillVolume{unit: 4096, free: math.MaxUint64} })
+		drillID, err := r.reserve()
+		drillReserveWindowsCheck(t, err == error(drillStorageError{reason: "allocation_unproved"}), err, "a compressed recovery directory was not refused with the proof's reason")
+		drillReserveWindowsCheck(t, drillID == "", nil, "a refused reservation returned an identifier")
+		drillReserveWindowsCheck(t, r.stages["reserve_mkdir"] == 0, nil, "a compressed recovery directory was refused only after a write")
+		drillReserveWindowsCheck(t, reflect.DeepEqual(r.before, checkpointTreeState(t, r.c)), nil, "the refused reservation changed the tree")
+	})
 }

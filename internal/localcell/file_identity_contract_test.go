@@ -22,7 +22,7 @@ type fileIdentityCount struct {
 
 var fileIdentityExpected = map[string]fileIdentityCount{
 	"checkpoint_root.go":                 {2, 0},
-	"drill_reserve.go":                   {1, 0}, // drillReserveSame: the open handle's stat against the caller's (drillReserveRoot: Root.Stat, by handle)
+	"drill_reserve.go":                   {1, 0}, // drillReserveSame: the open handle's stat against the caller's (drillReserveRoot: Root.Stat, by handle; the boundary bind: recovery/ read at the comparison itself, as drill_root.go's)
 	"drill_root.go":                      {2, 0},
 	"files.go":                           {1, 0}, // the torn-tail truncate: both sides are handle stats
 	"installer_principal_credentials.go": {3, 1},
