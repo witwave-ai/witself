@@ -252,9 +252,9 @@ func publishAtomic(attempt func() error, h leasePublishHooks) (int, error) {
 	// passes its single-attempt hook to the shared retry) and that hook's
 	// production default. checkpointVerifyRead re-reads kept bytes from offset
 	// zero under the caller's lock and publishes nothing. A package-level value
-	// counts under "".
+	// counts under "". validateRootTree repeats a tree walk (FLAKE-63).
 	want := map[string]map[string]int{
-		"retryPublish":         {"publishAtomic": 1, "retryCheckpointStep": 1},
+		"retryPublish":         {"publishAtomic": 1, "retryCheckpointStep": 1, "validateRootTree": 1},
 		"retryCheckpointStep":  {"copyCheckpoint": 1, "inventoryCheckpoint": 1, "checkpointVerifyRead": 1},
 		"publishAtomic":        {"writeAtomic": 1, "writeAtomicBytes": 1, "publishServiceLease": 1},
 		"writeAtomicOnce":      {"writeAtomic": 1, "defaults": 1},
