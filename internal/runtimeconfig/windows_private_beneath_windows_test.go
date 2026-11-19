@@ -22,6 +22,12 @@ var beneathCalls = []struct{ create, directory bool }{{true, true}, {true, false
 func TestWindowsPrivateBeneath(t *testing.T) {
 	t.Run("created", func(t *testing.T) {
 		dir, root := beneathRoot(t)
+		// The wrapper passes a nil seam, which the walk must never call.
+		defer func() {
+			if recover() != nil {
+				t.Fatal("the walk called the nil seam of the wrapper")
+			}
+		}()
 		for _, step := range []struct {
 			name              string
 			create, directory bool
@@ -73,11 +79,17 @@ func TestWindowsPrivateBeneath(t *testing.T) {
 					makeSpoolJunction(t, last, filepath.Join(outside, "absent"))
 				}
 				before, beforeOutside := beneathTree(t, dir), beneathTree(t, outside)
-				for _, directory := range []bool{true, false} {
-					file, err := WindowsPrivateBeneath(root, "x", true, directory)
+				// A create collides; an open reaches validation, which refuses
+				// the reparse point and the inherited descriptor.
+				for _, call := range beneathCalls {
+					file, err := WindowsPrivateBeneath(root, "x", call.create, call.directory)
 					beneathRefused(t, file, err)
-					if !errors.Is(err, fs.ErrExist) {
-						t.Fatal("an existing last name was not refused as existing")
+					if errors.Is(err, fs.ErrExist) != call.create {
+						t.Fatal("an existing last name was refused for the wrong reason")
+					}
+					inherited := (kind == "directory" && call.directory) || (kind == "file" && !call.directory)
+					if !call.create && inherited && !beneathPolicy(err) {
+						t.Fatal("an inherited descriptor was not refused by policy")
 					}
 				}
 				beneathUnchanged(t, before, dir)
@@ -135,16 +147,16 @@ func TestWindowsPrivateBeneath(t *testing.T) {
 		}
 	})
 	t.Run("link_kinds", func(t *testing.T) {
-		for _, kind := range []string{"directory", "file"} {
+		for _, kind := range []string{"directory", "file", "junction"} {
 			for _, last := range []bool{false, true} {
-				link, name, position, calls := "a", "a/x", "intermediate", beneathCalls
+				link, name, position := "a", "a/x", "intermediate"
 				if last {
-					link, name, position, calls = "x", "x", "last", beneathCalls[:2]
+					link, name, position = "x", "x", "last"
 				}
 				t.Run(kind+"_"+position, func(t *testing.T) {
 					dir, root := beneathRoot(t)
 					outside := t.TempDir()
-					target := filepath.Join(outside, "target")
+					target, path := filepath.Join(outside, "target"), filepath.Join(dir, link)
 					var err error
 					if kind == "file" {
 						err = os.WriteFile(target, []byte("t"), 0o600)
@@ -154,15 +166,25 @@ func TestWindowsPrivateBeneath(t *testing.T) {
 					if err != nil {
 						t.Fatal("cannot create the link target")
 					}
-					if os.Symlink(target, filepath.Join(dir, link)) != nil {
+					if kind == "junction" {
+						if os.Mkdir(path, 0o700) != nil {
+							t.Fatal("cannot create the junction directory")
+						}
+						makeSpoolJunction(t, path, target)
+					} else if os.Symlink(target, path) != nil {
 						t.Fatal("the link rows need the symbolic-link privilege")
 					}
+					// A last link dangles: a walk that followed it would create
+					// the target, which the outside tree would show.
+					if last && os.Remove(target) != nil {
+						t.Fatal("cannot remove the link target")
+					}
 					before, beforeOutside := beneathTree(t, dir), beneathTree(t, outside)
-					for _, call := range calls {
+					for _, call := range beneathCalls {
 						file, err := WindowsPrivateBeneath(root, name, call.create, call.directory)
 						beneathRefused(t, file, err)
-						if errors.Is(err, fs.ErrExist) != last {
-							t.Fatal("a symbolic link was refused for the wrong reason")
+						if errors.Is(err, fs.ErrExist) != (last && call.create) {
+							t.Fatal("a link was refused for the wrong reason")
 						}
 					}
 					beneathUnchanged(t, before, dir)
@@ -179,7 +201,8 @@ func TestWindowsPrivateBeneath(t *testing.T) {
 		}
 		before := beneathTree(t, dir)
 		for _, root := range []*os.Root{live, closed, nil} {
-			for _, name := range []string{"", "/x", "x/", "a//x", "./x", "b/./x", ".", "b/../x", "b/a/..", "..", "../x", `a\b`, "a:b", "con", "a.", "a "} {
+			for _, name := range []string{"", "/x", "x/", "a//x", "./x", "b/./x", ".", "b/../x", "b/a/..", "..", "../x", `a\b`, "a:b", "con", "a.", "a ",
+				"a*b", "a?b", "a<b", "a>b", `a"b`, "a|b", "a\x01b", "nul.txt", "com1", strings.Repeat("a", 257)} {
 				for _, call := range beneathCalls {
 					file, err := WindowsPrivateBeneath(root, name, call.create, call.directory)
 					beneathRefused(t, file, err)
@@ -197,6 +220,27 @@ func TestWindowsPrivateBeneath(t *testing.T) {
 				t.Fatal("an unusable root was refused with the wrong cause")
 			}
 		}
+		// 256 units pass the clean-path check (3 + 256 < 260) and the file
+		// system refuses them; 255 units are created, opened and removed.
+		for _, call := range beneathCalls {
+			file, err := WindowsPrivateBeneath(live, strings.Repeat("a", 256), call.create, call.directory)
+			beneathRefused(t, file, err)
+			if errors.Unwrap(err) == nil || errors.Is(err, fs.ErrExist) {
+				t.Fatal("an overlong component was not refused by the system")
+			}
+		}
+		for _, longest := range []string{strings.Repeat("d", 255), strings.Repeat("f", 255)} {
+			for _, create := range []bool{true, false} {
+				file, err := WindowsPrivateBeneath(live, longest, create, longest[0] == 'd')
+				if err != nil || file == nil || file.Close() != nil {
+					beneathClose(file)
+					t.Fatal("a component of the longest length was refused")
+				}
+			}
+			if os.Remove(filepath.Join(dir, longest)) != nil {
+				t.Fatal("cannot remove the component of the longest length")
+			}
+		}
 		beneathUnchanged(t, before, dir)
 	})
 	t.Run("fence", func(t *testing.T) {
@@ -207,14 +251,16 @@ func TestWindowsPrivateBeneath(t *testing.T) {
 				t.Fatal("cannot create the held directory")
 			}
 			var indexes []int
-			var renamed error
+			fenced := true
+			// Called once a is held and again once x is created below it.
 			file, err := windowsPrivateBeneath(root, "a/x", true, directory, func(index int) error {
 				indexes = append(indexes, index)
-				renamed = os.Rename(held, filepath.Join(dir, "aside"))
+				renamed := os.Rename(held, filepath.Join(dir, "aside"))
+				fenced = fenced && (errors.Is(renamed, windows.ERROR_SHARING_VIOLATION) || errors.Is(renamed, windows.ERROR_ACCESS_DENIED))
 				return nil
 			})
 			beneathClose(file)
-			if !slices.Equal(indexes, []int{0}) || (!errors.Is(renamed, windows.ERROR_SHARING_VIOLATION) && !errors.Is(renamed, windows.ERROR_ACCESS_DENIED)) {
+			if !slices.Equal(indexes, []int{0, 1}) || !fenced {
 				t.Fatal("a held directory was not fenced against rename")
 			}
 			created := beneathEntry(filepath.Join(held, "x"))
@@ -239,7 +285,10 @@ func TestWindowsPrivateBeneath(t *testing.T) {
 				converted := false
 				// The attribute-only writer of TestWindowsPrivateGuardRefusesInPlaceReparse:
 				// no sharing mode of the held handle can deny it.
-				file, err := windowsPrivateBeneath(root, "a/x", true, directory, func(int) error {
+				file, err := windowsPrivateBeneath(root, "a/x", true, directory, func(index int) error {
+					if index != 0 {
+						return nil
+					}
 					pointer, err := windows.UTF16PtrFromString(held)
 					if err != nil {
 						return err
@@ -260,10 +309,13 @@ func TestWindowsPrivateBeneath(t *testing.T) {
 					beneathClose(file)
 					t.Fatal("the held directory could not be converted in place")
 				}
+				// Either outcome is accepted; the log says which one NTFS chose.
 				if file == nil {
+					t.Log("NTFS refused the creation below the converted held directory")
 					beneathRefused(t, file, err)
 					return
 				}
+				t.Log("NTFS created the object inside the converted held directory")
 				var created, origin windows.ByHandleFileInformation
 				anchor, openErr := root.Open(".")
 				if openErr == nil {
@@ -278,6 +330,87 @@ func TestWindowsPrivateBeneath(t *testing.T) {
 				}
 				if removeErr != nil {
 					t.Fatal("cannot remove the object created in the converted directory")
+				}
+			})
+		}
+	})
+	t.Run("held_elsewhere", func(t *testing.T) {
+		dir, root := beneathRoot(t)
+		held := filepath.Join(dir, "a")
+		pointer, err := windows.UTF16PtrFromString(held)
+		if err != nil || os.Mkdir(held, 0o700) != nil {
+			t.Fatal("cannot create the directory held elsewhere")
+		}
+		before := beneathTree(t, dir)
+		// A holder of DELETE could rename it, so the walk's open, which denies
+		// delete sharing, fails rather than walk below it.
+		holder, err := windows.CreateFile(pointer, windows.DELETE, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+			nil, windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+		if err != nil {
+			t.Fatal("cannot hold the directory with delete access")
+		}
+		defer func() {
+			if holder != windows.InvalidHandle {
+				_ = windows.CloseHandle(holder)
+			}
+		}()
+		for _, call := range beneathCalls {
+			file, err := WindowsPrivateBeneath(root, "a/x", call.create, call.directory)
+			beneathRefused(t, file, err)
+			if !errors.Is(err, windows.ERROR_SHARING_VIOLATION) {
+				t.Fatal("a directory held with delete access was not refused as shared")
+			}
+		}
+		closeErr := windows.CloseHandle(holder)
+		holder = windows.InvalidHandle
+		if closeErr != nil {
+			t.Fatal("cannot release the directory held elsewhere")
+		}
+		beneathUnchanged(t, before, dir)
+	})
+	t.Run("rollback", func(t *testing.T) {
+		// One more ACE, set by name through SetNamedSecurityInfo's own handle
+		// while the walk holds the created object, as windowsPrivateTestBroaden
+		// does in TestWindowsPrivateCreationVerifiedBeforeData.
+		wide, _, err := windowsPrivateTestDescriptor(t, "D:P(A;;FA;;;"+windowsPrivateTestUser(t)+")(A;;FA;;;SY)(A;;FR;;;WD)").DACL()
+		if err != nil {
+			t.Fatal("cannot read the widened fixture DACL")
+		}
+		for _, row := range []struct {
+			name                     string
+			directory, child, refuse bool
+			want                     error
+		}{{"directory", true, false, false, errWindowsPrivateACECount}, {"file", false, false, false, errWindowsPrivateACECount},
+			{"nonempty", true, true, false, errWindowsPrivateRollback}, {"refused_directory", true, false, true, errWindowsPrivateObject},
+			{"refused_file", false, false, true, errWindowsPrivateObject}} {
+			t.Run(row.name, func(t *testing.T) {
+				dir, root := beneathRoot(t)
+				path := filepath.Join(dir, "x")
+				var indexes []int
+				var fixture error
+				file, err := windowsPrivateBeneath(root, "x", true, row.directory, func(index int) error {
+					indexes = append(indexes, index)
+					if row.refuse {
+						return fs.ErrInvalid
+					}
+					if row.child {
+						fixture = os.Mkdir(filepath.Join(path, "child"), 0o700)
+					}
+					fixture = errors.Join(fixture, windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+						windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, wide, nil))
+					return nil
+				})
+				if !slices.Equal(indexes, []int{0}) || fixture != nil {
+					beneathClose(file)
+					t.Fatal("the seam did not change the object after its creation")
+				}
+				beneathRefused(t, file, err)
+				if err.Error() != row.want.Error() {
+					t.Fatal("the rollback row was refused for the wrong reason")
+				}
+				// Deleted through the walk's own handle, unless no longer empty.
+				if _, err := os.Lstat(path); errors.Is(err, fs.ErrNotExist) == row.child {
+					t.Fatal("the created object was not rolled back as expected")
 				}
 			})
 		}
@@ -345,6 +478,13 @@ func beneathRefused(t *testing.T, file *os.File, err error) {
 	if _, bare := cause.(syscall.Errno); cause != nil && !bare && cause.Error() != err.Error() {
 		t.Fatal("a refusal carries a cause that is not a bare system error")
 	}
+}
+
+// beneathPolicy reports a refusal by the private policy: its cause is its
+// reason (windowsPrivatePolicyFailure).
+func beneathPolicy(err error) bool {
+	cause := errors.Unwrap(err)
+	return cause != nil && cause.Error() == err.Error()
 }
 
 // beneathTree records every object at or below dir, never following a link,
