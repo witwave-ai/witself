@@ -1,6 +1,7 @@
 package localcell
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -1034,14 +1035,47 @@ func (c *Cell) deleteCheckpointLocked(_ context.Context, options DeleteCheckpoin
 	return c.journal("checkpoint_delete", "operation", "done")
 }
 
+// errCheckpointWitnessUnread: a witness that may exist was not read; it is never reported incomplete.
+var errCheckpointWitnessUnread = errors.New("cannot read local cell checkpoint witness")
+
+// errCheckpointWitnessIrregular: what stands at the witness name was examined and is not a regular file.
+var errCheckpointWitnessIrregular = errors.New("local cell checkpoint witness is not a regular file")
+
 // checkpointComplete reads a format-1 witness naming this identifier;
 // verifyCheckpointDocuments also reads the witness for integrity verification.
-func checkpointComplete(dir, checkpointID string) (checkpointWitness, bool) {
-	var witness checkpointWitness
-	if err := readJSON(filepath.Join(dir, checkpointWitnessName), &witness); err != nil {
-		return checkpointWitness{}, false
+// Incomplete is said only on proof: the name absent below a directory (the
+// os.ErrNotExist of openRegular, which absentBelowDirectory backs: on Windows
+// a file where the checkpoint directory was is a not-exist error too), what
+// stands there examined and not a regular file (its Lstat after a failed open,
+// or the opened handle's stat), or its whole bounded content read and not that
+// witness. Every other open, inspect or read failure is returned, a failed
+// stat of the opened handle too.
+func checkpointComplete(dir, checkpointID string) (checkpointWitness, bool, error) {
+	f, err := openRegular(filepath.Join(dir, checkpointWitnessName), errCheckpointWitnessUnread, errCheckpointWitnessIrregular, errCheckpointWitnessUnread)
+	if errors.Is(err, os.ErrNotExist) || errors.Is(err, errCheckpointWitnessIrregular) {
+		return checkpointWitness{}, false, nil
+	} else if err != nil {
+		return checkpointWitness{}, false, err
 	}
-	return witness, witness.Format == 1 && witness.CheckpointID == checkpointID
+	defer func() { _ = f.Close() }()
+	return checkpointWitnessRead(f, checkpointID)
+}
+
+// checkpointWitnessRead reads r to readJSON's bound, then decodes the bytes as
+// readJSON does: a failed read is errCheckpointWitnessUnread, never
+// incomplete; content that is not this format-1 witness is incomplete.
+func checkpointWitnessRead(r io.Reader, checkpointID string) (checkpointWitness, bool, error) {
+	data, err := io.ReadAll(io.LimitReader(r, 1<<20))
+	if err != nil {
+		return checkpointWitness{}, false, errCheckpointWitnessUnread
+	}
+	var witness checkpointWitness
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&witness) != nil || decoder.Decode(new(any)) != io.EOF {
+		return checkpointWitness{}, false, nil
+	}
+	return witness, witness.Format == 1 && witness.CheckpointID == checkpointID, nil
 }
 
 // listCheckpoints classifies recovery/ after validateRecovery; entries that
@@ -1063,7 +1097,12 @@ func (c *Cell) listCheckpoints() ([]CheckpointSummary, int, error) {
 			continue
 		}
 		summary := CheckpointSummary{ID: entry.Name()}
-		if witness, complete := checkpointComplete(dir, entry.Name()); complete {
+		witness, complete, err := checkpointComplete(dir, entry.Name())
+		if err != nil {
+			// A witness that may exist and was not read is never listed.
+			return nil, 0, err
+		}
+		if complete {
 			summary.InstallationID, summary.CreatedAt, summary.Bytes, summary.Complete = witness.InstallationID, witness.CreatedAt, witness.Bytes, true
 		}
 		summaries = append(summaries, summary)

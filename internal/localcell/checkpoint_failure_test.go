@@ -137,15 +137,15 @@ func TestCheckpointSafeMetadata(t *testing.T) {
 			f, _ := checkpointFixture(t, "legacy", false)
 			c := f.cell
 			dir := checkpointPlant(t, c, valid.ID, valid.ID)
-			witness, complete := checkpointComplete(dir, valid.ID)
-			if !complete {
+			witness, complete, err := checkpointComplete(dir, valid.ID)
+			if err != nil || !complete {
 				t.Fatal("initial witness incomplete")
 			}
 			row.edit(&witness)
 			if writeAtomic(filepath.Join(dir, checkpointWitnessName), witness, nil) != nil {
 				t.Fatal("cannot write unsafe witness")
 			}
-			if got, complete := checkpointComplete(dir, valid.ID); !complete || got != witness {
+			if got, complete, err := checkpointComplete(dir, valid.ID); err != nil || !complete || got != witness {
 				t.Fatal("safe metadata changed completeness")
 			}
 			summary := checkpointSummaryOf(t, c, valid.ID)

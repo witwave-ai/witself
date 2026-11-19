@@ -44,7 +44,7 @@ reflect.NewAt reflect.SliceAt (reflect.Value).UnsafePointer (reflect.Value).Unsa
 // guarded object, with the count.
 var packageReferencesList = `
 checkpoint.go
-	import context crypto/sha256 encoding/hex encoding/json errors github.com/witwave-ai/witself/internal/id github.com/witwave-ai/witself/internal/runtimeconfig io io/fs math os os/exec path path/filepath regexp runtime slices sort strings sync time unicode/utf16 unicode/utf8
+	import bytes context crypto/sha256 encoding/hex encoding/json errors github.com/witwave-ai/witself/internal/id github.com/witwave-ai/witself/internal/runtimeconfig io io/fs math os os/exec path path/filepath regexp runtime slices sort strings sync time unicode/utf16 unicode/utf8
 	(*Cell).admitCheckpoint openPostgresReader readRegular
 	(*Cell).admitDeleteCheckpoint os.ReadDir
 	(*Cell).checkpointOps openPrivateReader x3
@@ -56,7 +56,7 @@ checkpoint.go
 	(*Cell).planCheckpoint path/filepath.WalkDir
 	(*Cell).validateRecovery os.ReadDir path/filepath.WalkDir
 	(*Cell).witnessCheckpoint (*Cell).openCheckpointSource
-	checkpointComplete readJSON
+	checkpointComplete openRegular
 	syncCheckpointDirectory syncDirectory
 checkpoint_other.go
 	import os

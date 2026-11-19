@@ -6294,7 +6294,25 @@ lists it by exact identifier with `"complete": false`, `create` refuses with
 `local_checkpoint_incomplete` while it exists, and `delete --checkpoint-id=`
 that identifier removes it and nothing else. Until then it holds a private
 partial copy of the data and passwords, and its disk space. A damaged
-checkpoint lists the same way. A `delete` killed before it removes the witness
+checkpoint lists the same way: one whose `witness.json` is missing, is a
+directory, or was read and is not that checkpoint's witness. A link, FIFO or
+socket at that name, or a `witness.json` whose mode refuses the open, is an
+object below `recovery/` that is not private or not a plain file: all three
+verbs refuse with `local_checkpoint_state_unsupported` and `descendant_refused`.
+On Windows that check opens `witness.json` itself, so one that another process
+holds open without read sharing is refused there the same way.
+A `witness.json` that passes that check (a private regular file) but cannot be
+opened, examined or read is never listed as
+`"complete": false`: the observation that meets it is `unavailable`, with
+`local_checkpoint_operation_failed` and no reason. `inspect` is then `refused`,
+exit 1, and a `create`, or a `delete` of any checkpoint of that root, is
+refused, exit 1, before it changes anything; a `create` whose own checks meet it
+fails with the same class. Run the command again once the file can be read; if
+it stays unreadable, move that checkpoint's directory out of the cell root by
+hand, then retry. The receipt does not name it: it is the directory below
+`recovery/` whose `witness.json` the cell's user cannot read. The moved
+directory is still a private copy of the data and passwords: keep it private,
+or delete it by hand. A `delete` killed before it removes the witness
 leaves its target listed complete, one killed after leaves it incomplete;
 either way the same `delete` run again closes any operation it left and
 finishes. Run again after its target is gone, it reports
@@ -6343,8 +6361,9 @@ file, the manifest, a password file, the cell's lock files, a checkpoint's
 go and the command waits until the lease ends, holding the cell lock (a lease
 on `.owner.lock` is waited out before any lock is taken), for at most 60
 seconds each time it opens the file; it then goes on as if no lease had been
-held. `inspect` reads one `witness.json` per checkpoint, so the bound applies
-per leased witness. A FUSE file system or a storage manager that answers
+held. `inspect` reads one `witness.json` per checkpoint and stops at the first
+it cannot read, so the bound applies per leased witness up to the first that
+outlasts it. A FUSE file system or a storage manager that answers
 would-block for a regular file is waited out the same way. Other systems
 refuse such an open at once. A holder that lets go when asked delays the
 command by a moment; one that never answers loses the lease when the system
@@ -6376,9 +6395,11 @@ no checkpoint directory made and the checkpoint named by `delete` kept (a read
 lease stops the verb at its first journal write, outcome `failed`; a write
 lease stops it at its first observation, outcome `refused` with
 `before.status: unavailable`, or `after.status: unavailable` for `inspect`).
-Such a lease on a checkpoint's `witness.json` makes that checkpoint list as
-`"complete": false`, and `create` beside it refuses with
-`local_checkpoint_incomplete`. Run again after the holder has let go, each
+Such a lease on a checkpoint's `witness.json` never makes that checkpoint list
+as `"complete": false`: the observation that reads it is `unavailable` with
+`local_checkpoint_operation_failed`, so `inspect` is `refused`, exit 1, and
+`create` and `delete` of that root, a `delete` of another checkpoint too, are
+refused before they change anything. Run again after the holder has let go, each
 command succeeds.
 
 On Windows, `delete` also removes a checkpoint whose witness file is read-only,

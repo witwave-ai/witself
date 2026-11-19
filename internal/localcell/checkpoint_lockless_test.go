@@ -213,7 +213,7 @@ func TestCheckpointLocklessRefusal(t *testing.T) {
 			if checkpointUnchanged(t, c, before); !checkpointSameError(err, row.want) {
 				t.Fatal("lockless refusal returned another class")
 			}
-			if _, complete := checkpointComplete(c.path("recovery", locklessTarget), locklessTarget); strings.HasPrefix(row.name, "mid_purge") && !complete {
+			if _, complete, err := checkpointComplete(c.path("recovery", locklessTarget), locklessTarget); strings.HasPrefix(row.name, "mid_purge") && (err != nil || !complete) {
 				t.Fatal("refused call left the target checkpoint incomplete")
 			}
 		})
