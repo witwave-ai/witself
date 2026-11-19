@@ -2,6 +2,7 @@ package localcell
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -257,7 +258,7 @@ func (c *Cell) readDerivedUpdateRecord(id string) (*updateRecord, bool, error) {
 	if !validUpdateOperationID(id) || c.validateRoot(false) != nil {
 		return nil, false, errUpdatePartialState
 	}
-	f, err := openServiceRecord(c.updateRecordPath(id), errUpdatePartialState)
+	f, err := openServiceRecord(context.Background(), c.updateRecordPath(id), errUpdatePartialState)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, true, nil
 	} else if err != nil {

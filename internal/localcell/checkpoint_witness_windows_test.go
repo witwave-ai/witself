@@ -3,6 +3,7 @@
 package localcell
 
 import (
+	"context"
 	"errors"
 	"path/filepath"
 	"testing"
@@ -44,7 +45,7 @@ func TestCheckpointWitnessSharing(t *testing.T) {
 	}
 	t.Cleanup(release)
 	t.Run("unread", func(t *testing.T) {
-		_, complete, err := checkpointComplete(dir, id)
+		_, complete, err := checkpointComplete(context.Background(), dir, id)
 		if complete {
 			t.Fatal("a witness held without read sharing was read as complete")
 		}

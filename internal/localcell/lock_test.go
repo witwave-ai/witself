@@ -20,7 +20,7 @@ func TestOperationLockHelperProcess(t *testing.T) {
 		return
 	}
 	mode, root := os.Args[len(os.Args)-2], os.Args[len(os.Args)-1]
-	lock, err := acquireLock(root, true)
+	lock, err := acquireLock(context.Background(), root, true)
 	if mode == "contend" {
 		if !errors.Is(err, ErrLocked) || err.Error() != "localcell: another operation owns this cell" {
 			if lock != nil {
@@ -75,7 +75,7 @@ func TestOperationLockAcrossProcessesAndCrashRelease(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = holder.Wait()
-	lock, err := acquireLock(root, true)
+	lock, err := acquireLock(context.Background(), root, true)
 	if err != nil {
 		t.Fatalf("OS did not release crashed holder's lock: %v", err)
 	}
@@ -86,7 +86,7 @@ func TestOperationLockAcrossProcessesAndCrashRelease(t *testing.T) {
 
 func TestOperationLockProtectsRunRemoval(t *testing.T) {
 	root := testPrivateRoot(t)
-	lock, err := acquireLock(root, true)
+	lock, err := acquireLock(context.Background(), root, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +94,7 @@ func TestOperationLockProtectsRunRemoval(t *testing.T) {
 	if err := os.RemoveAll(filepath.Join(root, "run")); err != nil {
 		t.Fatal(err)
 	}
-	other, err := acquireLock(root, true)
+	other, err := acquireLock(context.Background(), root, true)
 	if other != nil {
 		_ = other.Close()
 	}
@@ -107,7 +107,7 @@ func TestOperationLockProtectsRunRemoval(t *testing.T) {
 	if err := lock.Close(); err != nil {
 		t.Fatal(err)
 	}
-	other, err = acquireLock(root, true)
+	other, err = acquireLock(context.Background(), root, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,7 +118,7 @@ func TestOperationLockProtectsRunRemoval(t *testing.T) {
 
 func TestOperationLockReadOnlyAndModes(t *testing.T) {
 	root := testPrivateRoot(t)
-	lock, err := acquireLock(root, false)
+	lock, err := acquireLock(context.Background(), root, false)
 	if err != nil || lock != nil {
 		t.Fatalf("empty read-only probe: lock=%t err=%v", lock != nil, err)
 	}
@@ -126,7 +126,7 @@ func TestOperationLockReadOnlyAndModes(t *testing.T) {
 	if err != nil || len(entries) != 0 {
 		t.Fatal("read-only lock probe created filesystem state")
 	}
-	lock, err = acquireLock(root, true)
+	lock, err = acquireLock(context.Background(), root, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,7 +146,7 @@ func TestOperationLockReadOnlyAndModes(t *testing.T) {
 			t.Fatalf("%s permissions = %o, want %o", name, info.Mode().Perm(), want)
 		}
 	}
-	lock, err = acquireLock(root, false)
+	lock, err = acquireLock(context.Background(), root, false)
 	if err != nil || lock == nil {
 		t.Fatalf("existing read-only lock probe: %v", err)
 	}
@@ -180,7 +180,7 @@ func TestOperationLockRefusesSymlinks(t *testing.T) {
 				}
 				t.Fatal(err)
 			}
-			lock, err := acquireLock(root, true)
+			lock, err := acquireLock(context.Background(), root, true)
 			if lock != nil {
 				_ = lock.Close()
 			}

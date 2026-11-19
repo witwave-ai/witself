@@ -81,9 +81,9 @@ func servicePrivateRecord(path string) error {
 
 // openServiceRecord is servicePrivateRecord decided on the handle openRegularBy
 // opened without waiting; a private file that cannot be opened returns open.
-func openServiceRecord(path string, open error) (*os.File, error) {
+func openServiceRecord(ctx context.Context, path string, open error) (*os.File, error) {
 	notPrivate := errors.New("service_record_not_private")
-	return openRegularBy(context.Background(), openPrivateReader, func(info os.FileInfo) bool { return privatePassword(path, info) }, path, notPrivate, notPrivate, open)
+	return openRegularBy(ctx, openPrivateReader, func(info os.FileInfo) bool { return privatePassword(path, info) }, path, notPrivate, notPrivate, open)
 }
 
 // ServiceDescriptor reads the current fence and revalidates installation identity.
@@ -219,7 +219,7 @@ func (c *Cell) serviceControlSecret() (string, error) {
 		return "", err
 	}
 	invalid := errors.New("service_control_secret_invalid")
-	f, err := openServiceRecord(c.path("service", "control.secret"), invalid)
+	f, err := openServiceRecord(context.Background(), c.path("service", "control.secret"), invalid)
 	if err != nil {
 		return "", err
 	}

@@ -3,6 +3,7 @@
 package localcell
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -18,7 +19,7 @@ func TestWindowsOwnershipFailureBusyClassification(t *testing.T) {
 	if err := privateDir(c.path("pg"), true); err != nil {
 		t.Fatal("cannot complete Windows ownership fixture layout")
 	}
-	owner, err := acquireLock(root, true)
+	owner, err := acquireLock(context.Background(), root, true)
 	if err != nil {
 		t.Fatal("cannot acquire Windows ownership fixture lock")
 	}

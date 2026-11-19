@@ -23,7 +23,7 @@ var readers7Waiting = strings.Fields(`os.Open os.OpenFile os.Create os.ReadFile 
 	localcell.openPrivateFile localcell.readPrivateFile localcell.readPostgresFile localcell.openPlainReader localcell.openPrivateWriter`)
 
 // readers7Pinned are logFile's checked open's arguments, a local as defined.
-var readers7Pinned = []string{`c.path("logs", component + ".log")`, "os.O_WRONLY | os.O_CREATE | os.O_APPEND", "0o600",
+var readers7Pinned = []string{"context.Background()", `c.path("logs", component + ".log")`, "os.O_WRONLY | os.O_CREATE | os.O_APPEND", "0o600",
 	`errors.New("local cell log must be a regular file")`, `errors.New("cannot open local cell log")`}
 
 // readers7Contract type-checks the package sources as built here (sharing
@@ -143,7 +143,7 @@ func TestLogOpenSourceContract(t *testing.T) {
 	if err != nil || !slices.Equal(check(sources), []string{"", ""}) {
 		t.Fatal("log open source contract refused the tree")
 	}
-	const open, second = `return openRegularWriter(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600, irregular, errors.New("cannot open local cell log"))`, `log, err := c.logFile("postgres")`
+	const open, second = `return openRegularWriter(context.Background(), path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600, irregular, errors.New("cannot open local cell log"))`, `log, err := c.logFile("postgres")`
 	reopen := func(before, call string) func(string) string {
 		return func(source string) string {
 			return strings.Replace(source, open, before+"f, err := "+open[len("return "):]+"\n\tif err != nil {\n\t\treturn nil, err\n\t}\n\t_ = f.Close()\n\treturn "+call, 1)
@@ -166,7 +166,7 @@ func TestLogOpenSourceContract(t *testing.T) {
 			return replace("import (\n", "import (\n\tstdos \"os\"\n")(reopen("", "stdos.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0)")(source))
 		}},
 		{"root_method", "(*os.Root).OpenFile log_open_returned os.OpenRoot", reopen("root, _ := os.OpenRoot(c.path(\"logs\"))\n\t", "root.OpenFile(component+\".log\", os.O_WRONLY|os.O_APPEND, 0)")},
-		{"second_checked_open", "log_open_count", replace(second, `log, err := openRegularWriter(c.path("logs", "postgres.log"), os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600, nil, nil)`)},
+		{"second_checked_open", "log_open_count", replace(second, `log, err := openRegularWriter(context.Background(), c.path("logs", "postgres.log"), os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600, nil, nil)`)},
 		{"second_waiting_open", "localcell.openPrivateFile", replace(second, `log, err := openPrivateFile(c.path("logs", "postgres.log"), os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)`)},
 		{"mode_changed", "log_open_args", replace("APPEND, 0o600, irregular", "APPEND, 0o644, irregular")},
 		{"unresolved_reference", "types", replace(open, "_ = readers7Unresolved\n\t"+open)},

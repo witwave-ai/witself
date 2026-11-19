@@ -1,6 +1,7 @@
 package localcell
 
 import (
+	"context"
 	"encoding/base64"
 	"errors"
 	"os"
@@ -61,7 +62,10 @@ var reader2Rows = []reader2Row{
 		c, _ := unitCell(t)
 		want := updateTestFence(t, c)
 		return c.path("journal", "maintenance.json"), func() error {
-			fence, err := c.readMaintenanceFenceWith(func(name string, dst any) error { plant(name); return readMaintenanceFenceJSON(name, dst) })
+			fence, err := c.readMaintenanceFenceWith(func(name string, dst any) error {
+				plant(name)
+				return readMaintenanceFenceJSON(context.Background(), name, dst)
+			})
 			if err == nil && (fence == nil || fence.Generation != want.Generation || fence.OperationID != want.OperationID) {
 				return errors.New("fence content lost")
 			}

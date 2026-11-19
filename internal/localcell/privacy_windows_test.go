@@ -3,6 +3,7 @@
 package localcell
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
 	"io"
@@ -269,7 +270,7 @@ func TestWindowsFreshCellObjectsHaveExactPrivateDACL(t *testing.T) {
 	if err := log.Close(); err != nil {
 		t.Fatal(err)
 	}
-	lock, err := acquireLock(root, true)
+	lock, err := acquireLock(context.Background(), root, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -329,7 +330,7 @@ func TestWindowsRootPrivacyRefusedBeforeMutation(t *testing.T) {
 			}
 			before := windowsTreeSnapshot(t, root)
 			assertPrivateRefusal(t, c.validateRoot(true), root)
-			lock, err := acquireLock(root, true)
+			lock, err := acquireLock(context.Background(), root, true)
 			if lock != nil {
 				_ = lock.Close()
 			}
@@ -345,7 +346,7 @@ func TestWindowsExistingObjectsRefusedBeforeMutation(t *testing.T) {
 	for _, name := range []string{"run", "spool", "logs", "tmp", "journal", "home", "manifest.json", "run/postgres.password", "run/server.json", "journal/operations.jsonl", "logs/server.log", ".owner.lock", "run/operation.lock"} {
 		t.Run(strings.ReplaceAll(name, "/", "_"), func(t *testing.T) {
 			c, _ := unitCell(t)
-			lock, err := acquireLock(c.cfg.Root, true)
+			lock, err := acquireLock(context.Background(), c.cfg.Root, true)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -361,7 +362,7 @@ func TestWindowsExistingObjectsRefusedBeforeMutation(t *testing.T) {
 			setTestDACL(t, path, "(A;;FR;;;WD)", false, false)
 			before := windowsTreeSnapshot(t, c.cfg.Root)
 			assertPrivateRefusal(t, c.validateRoot(true), path)
-			lock, err = acquireLock(c.cfg.Root, true)
+			lock, err = acquireLock(context.Background(), c.cfg.Root, true)
 			if lock != nil {
 				_ = lock.Close()
 			}
@@ -488,7 +489,7 @@ func TestWindowsJunctionRunRefusedBeforeMutation(t *testing.T) {
 	root, outside := testPrivateRoot(t), testPrivateRoot(t)
 	createTestJunction(t, filepath.Join(root, "run"), outside)
 	before := windowsTreeSnapshot(t, outside)
-	lock, err := acquireLock(root, true)
+	lock, err := acquireLock(context.Background(), root, true)
 	if lock != nil {
 		_ = lock.Close()
 	}

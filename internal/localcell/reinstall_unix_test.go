@@ -121,7 +121,7 @@ func TestReinstallPGVersionSpecialFiles(t *testing.T) {
 				t.Fatal("special PG_VERSION was followed, read or admitted")
 			}
 			// The refusal released the operation lock: a non-blocking probe takes it.
-			lock, err := acquireLock(c.cfg.Root, false)
+			lock, err := acquireLock(context.Background(), c.cfg.Root, false)
 			if err != nil || lock == nil {
 				t.Fatal("refused reinstall kept the operation lock")
 			}

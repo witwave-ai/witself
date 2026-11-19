@@ -17,8 +17,8 @@ const (
 	referencesAtPending  = "func (c *Cell) sweepPostgresPending() {"
 	referencesAtImports  = "import (\n"
 	referencesAtVersion  = "\tif version, err := readRegular(context.Background(), openPostgresReader, func(info os.FileInfo) bool { return info.Size() <= 64 }, c.path(\"pg\", \"PG_VERSION\"), errCheckpointSource"
-	referencesAtJournal  = "\tf, err := openRegularWriter(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600, irregular, errors.New(\"cannot open local cell journal\"))\n\tif err != nil {\n\t\treturn err\n\t}\n"
-	referencesAtTail     = "\tf, err := openRegularWriter(c.path(\"journal\", \"operations.jsonl\"), os.O_WRONLY, 0, torn, torn)\n"
+	referencesAtJournal  = "\tf, err := openRegularWriter(context.Background(), path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600, irregular, errors.New(\"cannot open local cell journal\"))\n\tif err != nil {\n\t\treturn err\n\t}\n"
+	referencesAtTail     = "\tf, err := openRegularWriter(context.Background(), c.path(\"journal\", \"operations.jsonl\"), os.O_WRONLY, 0, torn, torn)\n"
 	referencesAtVars     = "var (\n"
 	referencesAtIdentity = "func processIdentity("
 	referencesAtVerify   = "\tvar data []byte\n\tvar oversized bool\n"
@@ -50,7 +50,7 @@ var packageReferencesRows = []struct {
 	{"other_file_site", [][4]string{{"reinstall.go", "after", "\tif err := c.reinstallBoundary(\"operation_manifest\"); err != nil {\n\t\treturn err\n\t}\n",
 		"\tif f, err := openPrivateFile(c.path(\"journal\", \"operations.jsonl\"), os.O_WRONLY|os.O_APPEND, 0); err == nil {\n\t\t_ = f.Close()\n\t}\n"}}, []string{"ref:reinstall.go:(*Cell).finishReinstall:openPrivateFile"}},
 	{"helper_existing_file", [][4]string{{"postgres_pending.go", "before", referencesAtPending, "func zzHelperOpen(path string) (*os.File, error) { return os.OpenFile(path, os.O_RDWR|os.O_APPEND, 0) }\n\n"},
-		{"commands.go", "before", "\treturn openRegularWriter(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600, irregular, errors.New(\"cannot open local cell log\"))\n", "\tif probe, err := zzHelperOpen(path); err == nil {\n\t\t_ = probe.Close()\n\t}\n"}}, []string{"ref:postgres_pending.go:zzHelperOpen:os.OpenFile"}},
+		{"commands.go", "before", "\treturn openRegularWriter(context.Background(), path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600, irregular, errors.New(\"cannot open local cell log\"))\n", "\tif probe, err := zzHelperOpen(path); err == nil {\n\t\t_ = probe.Close()\n\t}\n"}}, []string{"ref:postgres_pending.go:zzHelperOpen:os.OpenFile"}},
 	{"alias_existing_file", [][4]string{{"postgres_pending.go", "before", referencesAtPending, "var zzAliasOpen = openPrivateFile\n\n"},
 		{"checkpoint.go", "before", referencesAtVersion, "\tif probe, err := zzAliasOpen(filepath.Join(c.cfg.Root, \"pg\", \"PG_VERSION\"), os.O_RDWR|os.O_APPEND, 0); err == nil {\n\t\t_ = probe.Close()\n\t}\n"}}, []string{"ref:postgres_pending.go:zzAliasOpen:openPrivateFile", "ref:checkpoint.go:(*Cell).admitCheckpoint:openPrivateFile"}},
 	{"existing_seam_elsewhere", [][4]string{{"checkpoint.go", "before", referencesAtVersion, "\tif probe, err := openUpdateJournalFile(filepath.Join(c.cfg.Root, \"pg\", \"PG_VERSION\"), os.O_RDONLY, 0); err == nil {\n\t\t_ = probe.Close()\n\t}\n"}}, []string{"ref:checkpoint.go:(*Cell).admitCheckpoint:openPrivateFile"}},

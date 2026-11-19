@@ -14,7 +14,7 @@ func (c *Cell) own(create bool) (*operationLock, error) {
 	if err := c.validateRoot(create); err != nil {
 		return nil, classifyOwnershipFailure(c.cfg.Root, err)
 	}
-	lock, err := acquireLock(c.cfg.Root, true)
+	lock, err := acquireLock(context.Background(), c.cfg.Root, true)
 	if err != nil {
 		return nil, classifyOwnershipFailure(c.cfg.Root, err)
 	}
@@ -30,7 +30,7 @@ func (c *Cell) ownExisting() (*operationLock, error) {
 	if err := c.validateRoot(false); err != nil {
 		return nil, classifyOwnershipFailure(c.cfg.Root, err)
 	}
-	lock, err := acquireLock(c.cfg.Root, false)
+	lock, err := acquireLock(context.Background(), c.cfg.Root, false)
 	if err != nil {
 		return nil, classifyOwnershipFailure(c.cfg.Root, err)
 	}
@@ -626,7 +626,7 @@ func (c *Cell) Inspect(_ context.Context) (Inspection, error) {
 	if err := c.validateRoot(false); err != nil {
 		return result, err
 	}
-	lock, err := acquireLock(c.cfg.Root, false)
+	lock, err := acquireLock(context.Background(), c.cfg.Root, false)
 	if errors.Is(err, ErrLocked) {
 		result.Locked = true
 	} else if err != nil {

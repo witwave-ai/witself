@@ -3,6 +3,7 @@
 package localcell
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -26,7 +27,7 @@ func TestCheckpointWitnessUnopenable(t *testing.T) {
 		t.Fatal("cannot remove the witness permissions")
 	}
 	t.Cleanup(func() { _ = os.Chmod(name, 0o600) })
-	_, complete, err := checkpointComplete(dir, id)
+	_, complete, err := checkpointComplete(context.Background(), dir, id)
 	if root := os.Geteuid() == 0; root && (!complete || err != nil) || !root && (complete || !errors.Is(err, errCheckpointWitnessUnread)) {
 		t.Fatal("an unopenable witness was read as incomplete, or an effective root user's open as unread")
 	}

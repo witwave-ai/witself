@@ -1,6 +1,7 @@
 package localcell
 
 import (
+	"context"
 	"errors"
 	"os"
 	"time"
@@ -80,7 +81,7 @@ func (c *Cell) finishRetainedRemoval(m *Manifest) error {
 		// the remaining checkpoint; an absent legacy journal is never created,
 		// and a file put at its name since the read is refused, never synced.
 		unavailable := errors.New("cannot open local cell journal")
-		f, err := openRegularWriter(c.path("journal", "operations.jsonl"), os.O_WRONLY, 0, unavailable, unavailable)
+		f, err := openRegularWriter(context.Background(), c.path("journal", "operations.jsonl"), os.O_WRONLY, 0, unavailable, unavailable)
 		if err != nil {
 			return err
 		}

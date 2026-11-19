@@ -109,8 +109,8 @@ func (c *Cell) layout() error {
 // A failed open is classified by Lstat as the check before the open used to be:
 // os.ErrNotExist when absent below a directory, else inspect, irregular (a
 // refused link too) or open. Nothing is read on that path.
-func openRegular(path string, inspect, irregular, open error) (*os.File, error) {
-	return openRegularBy(context.Background(), openPrivateReader, nil, path, inspect, irregular, open)
+func openRegular(ctx context.Context, path string, inspect, irregular, open error) (*os.File, error) {
+	return openRegularBy(ctx, openPrivateReader, nil, path, inspect, irregular, open)
 }
 
 // leaseWaitCut is a lease wait ended by its context: it unwraps to the
@@ -187,8 +187,12 @@ func nearestAncestorIsDirectory(path string) bool {
 // file checked on its handle before any byte is written, in blocking mode. A
 // failed open is irregular when Lstat shows what is not a regular file at the
 // name, else failed: an absent name too is a refusal, never success.
-func openRegularWriter(path string, flags int, mode os.FileMode, irregular, failed error) (*os.File, error) {
-	f, err := openPrivateWriter(context.Background(), path, flags, mode)
+// A wait that ctx ended returns its cut as it is, before any Lstat.
+func openRegularWriter(ctx context.Context, path string, flags int, mode os.FileMode, irregular, failed error) (*os.File, error) {
+	f, err := openPrivateWriter(ctx, path, flags, mode)
+	if cut := (*leaseWaitCut)(nil); errors.As(err, &cut) {
+		return nil, cut
+	}
 	if err != nil {
 		if info, err := os.Lstat(path); err == nil && !info.Mode().IsRegular() {
 			return nil, irregular
@@ -221,7 +225,7 @@ func readRegular(ctx context.Context, openReader func(context.Context, string) (
 }
 
 func readJSON(path string, dst any) error {
-	f, err := openRegular(path, errors.New("cannot inspect local cell record"),
+	f, err := openRegular(context.Background(), path, errors.New("cannot inspect local cell record"),
 		errors.New("local cell record must be a regular file"), errors.New("cannot open local cell record"))
 	if err != nil {
 		return err
@@ -402,7 +406,7 @@ func (c *Cell) journalCause(operation, step, state, cause string) error {
 	// never reports not-exist. Journal writers hold the root operation lock, so
 	// nothing else creates or unlinks the file between this Lstat and the open.
 	created := errors.Is(err, os.ErrNotExist)
-	f, err := openRegularWriter(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600, irregular, errors.New("cannot open local cell journal"))
+	f, err := openRegularWriter(context.Background(), path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600, irregular, errors.New("cannot open local cell journal"))
 	if err != nil {
 		return err
 	}
@@ -460,7 +464,7 @@ func (p journalProgress) installComplete(manifests ...*Manifest) bool {
 func (c *Cell) readJournal() (journalProgress, error) {
 	var progress journalProgress
 	invalid := errors.New("invalid local cell journal")
-	f, err := openRegular(c.path("journal", "operations.jsonl"), invalid, invalid, errors.New("cannot read local cell journal"))
+	f, err := openRegular(context.Background(), c.path("journal", "operations.jsonl"), invalid, invalid, errors.New("cannot read local cell journal"))
 	if errors.Is(err, os.ErrNotExist) {
 		progress.pending, err = c.cleanupInterruption()
 		progress.cleanupOnly = progress.pending != nil
@@ -548,7 +552,7 @@ func (c *Cell) discardJournalTail(progress journalProgress) error {
 		return nil
 	}
 	torn := errors.New("cannot open torn local cell journal")
-	f, err := openRegularWriter(c.path("journal", "operations.jsonl"), os.O_WRONLY, 0, torn, torn)
+	f, err := openRegularWriter(context.Background(), c.path("journal", "operations.jsonl"), os.O_WRONLY, 0, torn, torn)
 	if err != nil {
 		return err
 	}
@@ -646,7 +650,7 @@ type updateJournalEntry struct {
 func (c *Cell) readUpdateJournal() (journalProgress, error) {
 	var progress journalProgress
 	invalid := errors.New("invalid local cell journal")
-	f, err := openRegular(c.path("journal", "operations.jsonl"), invalid, invalid, errors.New("cannot read local cell journal"))
+	f, err := openRegular(context.Background(), c.path("journal", "operations.jsonl"), invalid, invalid, errors.New("cannot read local cell journal"))
 	if errors.Is(err, os.ErrNotExist) {
 		progress.pending, err = c.cleanupInterruption()
 		return progress, err
