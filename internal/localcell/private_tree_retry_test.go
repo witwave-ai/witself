@@ -83,10 +83,11 @@ func TestValidateRootTreeRetry(t *testing.T) {
 	}
 }
 
-// The boundary: validateRoot's first statement (production walk, predicate, clock) and validateRootTree.
+// The boundary: validateRoot's first statement, validateRootTree and the walkers' boundary (FLAKE-63B).
 const validateRootTreeSource = "package localcell\nfunc (c *Cell) validateRoot() {\n" +
-	"if err := validateRootTree(c.cfg.Root, validatePrivateTree, runtimeconfig.WindowsPrivateTransient, leasePublishHooks{}); err != nil { return err } }\n" +
-	"func validateRootTree() { _, err := retryPublish(func() error { return validate(root) }, retryable, h); return err }\n"
+	"if err := validatePrivateTreeRetried(c.cfg.Root); err != nil { return err } }\n" +
+	"func validateRootTree() { _, err := retryPublish(func() error { return validate(root) }, retryable, h); return err }\n" +
+	"var validatePrivateTreeRetried = func(root string) error { return validateRootTree(root, validatePrivateTree, runtimeconfig.WindowsPrivateTransient, leasePublishHooks{}) }\n"
 
 func TestValidateRootTreeSourceContract(t *testing.T) {
 	source := leasePublishReadSource(t, "files.go")
@@ -98,9 +99,9 @@ func TestValidateRootTreeSourceContract(t *testing.T) {
 		t.Fatal("tree walk retry contract refused a CRLF checkout")
 	}
 	for _, mutation := range []struct{ name, before, after string }{
-		{"old_form", "if err := validateRootTree(c.cfg.Root, validatePrivateTree, runtimeconfig.WindowsPrivateTransient, leasePublishHooks{}); err != nil {", "if err := validatePrivateTree(c.cfg.Root); err != nil {"},
+		{"old_form", "if err := validatePrivateTreeRetried(c.cfg.Root); err != nil {", "if err := validatePrivateTree(c.cfg.Root); err != nil {"},
 		{"any_error", "validatePrivateTree, runtimeconfig.WindowsPrivateTransient, leasePublishHooks{})", "validatePrivateTree, func(err error) bool { return err != nil }, leasePublishHooks{})"},
-		{"not_there", "leasePublishHooks{}); err != nil {\n\t\treturn err\n\t}", "leasePublishHooks{}); runtimeconfig.WindowsPrivateTransient(err) {\n\t\treturn os.ErrNotExist\n\t} else if err != nil {\n\t\treturn err\n\t}"},
+		{"not_there", "validatePrivateTreeRetried(c.cfg.Root); err != nil {\n\t\treturn err\n\t}", "validatePrivateTreeRetried(c.cfg.Root); runtimeconfig.WindowsPrivateTransient(err) {\n\t\treturn os.ErrNotExist\n\t} else if err != nil {\n\t\treturn err\n\t}"},
 		{"forever", "_, err := retryPublish(func() error { return validate(root) }, retryable, h)", "err := validate(root)\n\tfor err != nil && retryable(err) {\n\t\terr = validate(root)\n\t}"},
 	} {
 		t.Run(mutation.name, func(t *testing.T) {
@@ -131,6 +132,8 @@ func validateRootTreeParts(source string) string {
 			case function.Name.Name == "validateRootTree" && function.Recv == nil:
 				body = serviceBootPublicationText(function.Body)
 			}
+		} else if variables, ok := declaration.(*ast.GenDecl); ok && variables.Tok == token.VAR && variables.Specs[0].(*ast.ValueSpec).Names[0].Name == "validatePrivateTreeRetried" {
+			body += "\n" + serviceBootPublicationText(variables.Specs[0].(*ast.ValueSpec).Values[0])
 		}
 	}
 	if statement == "" || body == "" {

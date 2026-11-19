@@ -94,7 +94,7 @@ func InstallLocalShutdown(_ context.Context, cancel context.CancelFunc, cfg runt
 }
 
 func readShutdownDescriptor(root, path string) (serviceShutdownDescriptor, error) {
-	if !shutdownDescriptorPath(root, path) || validatePrivateTree(root) != nil || privateDir(root, false) != nil ||
+	if !shutdownDescriptorPath(root, path) || validatePrivateTreeRetried(root) != nil || privateDir(root, false) != nil ||
 		privateDir(filepath.Join(root, "service"), false) != nil || privateDir(filepath.Join(root, "service", "children"), false) != nil || servicePrivateRecord(path) != nil {
 		return serviceShutdownDescriptor{}, shutdownRefused("shutdown:descriptor")
 	}
