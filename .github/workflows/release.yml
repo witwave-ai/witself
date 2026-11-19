@@ -716,7 +716,7 @@ jobs:
       # do), so install it for the formula render/audit step below. Runs
       # before the long snapshot build so an install flake fails fast.
       - name: Set up Homebrew
-        uses: Homebrew/actions/setup-homebrew@63a2d4d8d4193eab3e62b1b782ff3ab8408f5b29 # 2026.11.09.1
+        uses: Homebrew/actions/setup-homebrew@ceec4e8419bb3c97ce96e9dda7738499ed5f869d # 2026.11.14.1
 
       # This no-publish pass deliberately uses the real GoReleaser archive
       # pipeline. It catches archive-name or target drift before the release job
