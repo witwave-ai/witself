@@ -60,7 +60,7 @@ func privateDir(path string, create bool) error {
 }
 
 func (c *Cell) validateRoot(create bool) error {
-	if err := validatePrivateTree(c.cfg.Root); err != nil {
+	if err := validateRootTree(c.cfg.Root, validatePrivateTree, runtimeconfig.WindowsPrivateTransient, leasePublishHooks{}); err != nil {
 		return err
 	}
 	// Resolve parent aliases once at the trust boundary; never follow a root or
@@ -90,6 +90,16 @@ func (c *Cell) validateRoot(create bool) error {
 		}
 	}
 	return nil
+}
+
+// validateRootTree runs validate(root), one complete read-only private-tree
+// walk, as an attempt of the shared bounded retry: on Windows a concurrent
+// private creation, publication or removal holds what it changes with delete
+// access, which the walk's guard does not share (slice FLAKE-63). A holder kept
+// past the budget, like any other failure, returns the last walk's error.
+func validateRootTree(root string, validate func(string) error, retryable func(error) bool, h leasePublishHooks) error {
+	_, err := retryPublish(func() error { return validate(root) }, retryable, h)
+	return err
 }
 
 func (c *Cell) layout() error {
