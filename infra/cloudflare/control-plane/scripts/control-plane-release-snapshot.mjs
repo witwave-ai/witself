@@ -42,7 +42,9 @@ const FROZEN_DIRECTORY_MODE = 0o555;
 const FROZEN_FILE_MODE = 0o444;
 const FROZEN_EXECUTABLE_MODE = 0o555;
 export const MAX_SOURCE_FILES = 8192;
-export const MAX_SOURCE_BYTES = 64 * 1024 * 1024;
+// Raised from 64 MiB on 2026-11-19: the tracked tree had reached 75 percent of that cap (about 48 MiB,
+// growing by about 11 MiB a month), which the headroom test reports before a release can meet the cap.
+export const MAX_SOURCE_BYTES = 128 * 1024 * 1024;
 const MAX_SOURCE_FILE_BYTES = 16 * 1024 * 1024;
 const MAX_DEPENDENCY_FILES = 64;
 const MAX_DEPENDENCY_BYTES = 2 * 1024 * 1024;
