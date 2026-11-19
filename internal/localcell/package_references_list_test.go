@@ -320,6 +320,18 @@ postgres_windows.go
 	(*Cell).startPostgres (*Cell).launchWindows (*Cell).logFile
 	(*Cell).windowsPostgresReady readPostgresFile
 	(*Cell).windowsStalePostmaster readPostgresFile
+private_beneath_unix.go
+	import errors golang.org/x/sys/unix io/fs math/rand/v2 os strconv strings time
+	privateBeneathAt (*os.Root).Open golang.org/x/sys/unix.Openat
+	privateBeneathCreateTemp golang.org/x/sys/unix.Openat os.NewFile
+	privateBeneathDup golang.org/x/sys/unix.FcntlInt os.NewFile
+	privateBeneathMkdir golang.org/x/sys/unix.Mkdirat
+	privateBeneathOpen golang.org/x/sys/unix.Openat os.NewFile
+	privateBeneathOpened golang.org/x/sys/unix.Openat
+	privateBeneathPublish golang.org/x/sys/unix.Renameat
+	privateBeneathRemove golang.org/x/sys/unix.Unlinkat x2
+	privateBeneathRemoveBelow golang.org/x/sys/unix.Unlinkat x2
+	privateBeneathReplace golang.org/x/sys/unix.Renameat
 private_tree_boundary.go
 	import io/fs path/filepath strings
 private_tree_snapshot.go
