@@ -51,7 +51,7 @@ var leaseWait = struct{ ceiling, first, longest time.Duration }{60 * time.Second
 // from leaseWait.first to at most leaseWait.longest, while the next interval
 // ends by leaseWait.ceiling; the last refusal is returned unchanged. It never
 // opens otherwise and never blocks: anything at the name but a regular file is
-// refused at once, on every attempt. Each sleep ends early when ctx is done,
+// refused at once, on every attempt. Each sleep ends early at leaseWaitDone,
 // and the wait then returns a leaseWaitCut of ctx's error with no further
 // attempt; the first attempt is always made, so a done ctx never refuses an
 // unleased file. A FUSE file system or a storage manager that answers
@@ -70,7 +70,7 @@ func waitOutLease[T any](ctx context.Context, path string, lstat func(string) (o
 		}
 		pause := time.NewTimer(delay)
 		select {
-		case <-ctx.Done():
+		case <-leaseWaitDone(ctx):
 			pause.Stop()
 			return result, &leaseWaitCut{cause: ctx.Err()}
 		case <-pause.C:
@@ -79,6 +79,15 @@ func waitOutLease[T any](ctx context.Context, path string, lstat func(string) (o
 			delay = leaseWait.longest
 		}
 	}
+}
+
+// leaseWaitDone is what a lease wait races: ctx.Done(), or nil for a context
+// leaseWaitDetached marked, so that no lease wait below it ends early.
+func leaseWaitDone(ctx context.Context) <-chan struct{} {
+	if ctx.Value(leaseWaitDetachedKey{}) != nil {
+		return nil
+	}
+	return ctx.Done()
 }
 
 // blockingWriter clears openPrivateWriter's non-blocking flag: today's open

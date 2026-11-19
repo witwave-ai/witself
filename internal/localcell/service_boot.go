@@ -37,7 +37,7 @@ func (c *Cell) reconcileServiceBoot() error {
 	if err == nil && (previous.InstallationID != d.InstallationID || previous.BootID == "") {
 		return ErrServiceOwnershipConflict
 	}
-	if err := c.maintenanceFenceAllows(0); err != nil {
+	if err := c.maintenanceFenceAllows(context.Background(), 0); err != nil {
 		return err
 	}
 	if previous.BootID != "" && previous.BootID != boot {
@@ -87,7 +87,7 @@ func (c *Cell) reconcileOldBoot(oldBoot, currentBoot string) error {
 			pg = record
 		}
 	}
-	pid, err := c.postmaster()
+	pid, err := c.postmaster(context.Background())
 	if err != nil {
 		return err
 	}

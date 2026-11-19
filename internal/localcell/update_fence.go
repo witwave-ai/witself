@@ -157,9 +157,9 @@ func (c *Cell) readMaintenanceFenceWith(read func(string, any) error) (*maintena
 // It is not a service-wide maintenance policy or
 // an independent boundary for lower-level launch helpers.
 // Zero denotes an ordinary caller; a positive generation requires an exact
-// durable fence match, including when no fence exists anymore.
-func (c *Cell) maintenanceFenceAllows(generation int) error {
-	fence, err := c.readMaintenanceFence(context.Background())
+// durable fence match, including when no fence exists anymore; a cut returns.
+func (c *Cell) maintenanceFenceAllows(ctx context.Context, generation int) error {
+	fence, err := c.readMaintenanceFence(ctx)
 	if err != nil {
 		return err
 	}

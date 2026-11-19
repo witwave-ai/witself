@@ -244,7 +244,8 @@ func (c *Cell) checkpointDir(checkpointID string) (string, error) {
 // is started: pg_controldata runs at admission and again at the witness step.
 // A failed call removes only the witness-less directory it created.
 func (c *Cell) Checkpoint(ctx context.Context, options CheckpointOptions) error {
-	if err := c.refuseBeforeLockNames(func() error { return c.admitCheckpointDry(ctx, options) }); err != nil {
+	ctx = leaseWaitDetached(ctx)
+	if err := c.refuseBeforeLockNames(ctx, func() error { return c.admitCheckpointDry(ctx, options) }); err != nil {
 		return err
 	}
 	lock, err := c.own(false)
@@ -252,7 +253,7 @@ func (c *Cell) Checkpoint(ctx context.Context, options CheckpointOptions) error 
 		return err
 	}
 	defer func() { _ = lock.Close() }()
-	if err := c.maintenanceFenceAllows(0); err != nil {
+	if err := c.maintenanceFenceAllows(ctx, 0); err != nil {
 		return err
 	}
 	return c.checkpointLocked(ctx, options)
@@ -261,7 +262,8 @@ func (c *Cell) Checkpoint(ctx context.Context, options CheckpointOptions) error 
 // DeleteCheckpoint deletes exactly the checkpoint its identifier names: the
 // witness first, so an interruption leaves it incomplete, then the directory.
 func (c *Cell) DeleteCheckpoint(ctx context.Context, options DeleteCheckpointOptions) error {
-	if err := c.refuseBeforeLockNames(func() error { return c.admitDeleteCheckpoint(options) }); err != nil {
+	ctx = leaseWaitDetached(ctx)
+	if err := c.refuseBeforeLockNames(ctx, func() error { return c.admitDeleteCheckpoint(options) }); err != nil {
 		return err
 	}
 	lock, err := c.own(false)
@@ -269,7 +271,7 @@ func (c *Cell) DeleteCheckpoint(ctx context.Context, options DeleteCheckpointOpt
 		return err
 	}
 	defer func() { _ = lock.Close() }()
-	if err := c.maintenanceFenceAllows(0); err != nil {
+	if err := c.maintenanceFenceAllows(ctx, 0); err != nil {
 		return err
 	}
 	return c.deleteCheckpointLocked(ctx, options)
@@ -285,7 +287,7 @@ var errCheckpointDryAdmitted = errors.New("local cell checkpoint dry admission p
 // the root creates none of them. It never admits: nil leads to own(false), the
 // fence and the admission, unchanged under the full lock. It never reads the
 // maintenance fence and never runs pg_controldata (admitCheckpointDry).
-func (c *Cell) refuseBeforeLockNames(admit func() error) error {
+func (c *Cell) refuseBeforeLockNames(ctx context.Context, admit func() error) error {
 	// The gate: with both names present own(false) creates nothing, so today's
 	// path alone runs. A not-exist here only selects the checks below.
 	_, owner := os.Lstat(c.path(".owner.lock"))
@@ -297,9 +299,11 @@ func (c *Cell) refuseBeforeLockNames(admit func() error) error {
 	}
 	// No create. Its not-exists (no owner lock, no run/, no run lock) stand on
 	// validateRoot just above: the root and any run are real private
-	// directories, so a file at run was refused there, on Windows too.
-	held, err := acquireLock(context.Background(), c.cfg.Root, false)
-	if err != nil {
+	// directories, so a file at run was refused there, on Windows too; a cut returns.
+	held, err := acquireLock(ctx, c.cfg.Root, false)
+	if cut := (*leaseWaitCut)(nil); errors.As(err, &cut) {
+		return err
+	} else if err != nil {
 		return nil
 	}
 	defer func() { _ = held.Close() }()
@@ -373,7 +377,7 @@ func (c *Cell) checkpointLocked(ctx context.Context, options CheckpointOptions) 
 	if err := c.closeCheckpointLeftover(); err != nil {
 		return err
 	}
-	if err := c.begin(context.Background(), "checkpoint"); err != nil {
+	if err := c.begin(ctx, "checkpoint"); err != nil {
 		return err
 	}
 	if c.cfg.Failpoint != nil && c.cfg.Failpoint("checkpoint", "operation_started") != nil {
@@ -398,14 +402,14 @@ func (c *Cell) checkpointLocked(ctx context.Context, options CheckpointOptions) 
 	} {
 		// A crash leaves the operation open and discards nothing; Repair or the next
 		// admitted Checkpoint or DeleteCheckpoint closes it.
-		if err := c.step(context.Background(), "checkpoint", step.name, step.run); errors.Is(err, errInterrupted) {
+		if err := c.step(ctx, "checkpoint", step.name, step.run); errors.Is(err, errInterrupted) {
 			return err
 		} else if err != nil {
 			discarded := !created || discard() == nil
 			return c.closeCheckpointFailure("checkpoint", err, discarded, ops.beforeClose)
 		}
 	}
-	return c.journal(context.Background(), "checkpoint", "operation", "done")
+	return c.journal(ctx, "checkpoint", "operation", "done")
 }
 
 // admitCheckpoint runs under the lock and writes nothing; the control and free
@@ -427,7 +431,7 @@ func (c *Cell) admitCheckpoint(ctx context.Context, options CheckpointOptions, o
 	if !m.Installed || m.Cleanup != nil || !accountPattern.MatchString(m.AccountID) || m.LastVerifiedSchemaVersion < 1 {
 		return nil, errCheckpointState
 	}
-	if progress, err := c.readJournal(context.Background()); err != nil {
+	if progress, err := c.readJournal(ctx); err != nil {
 		return nil, err
 	} else if (progress.pending != nil || progress.tornTail) && !checkpointLeftover(progress) {
 		return nil, errCheckpointState
@@ -461,7 +465,7 @@ func (c *Cell) admitCheckpoint(ctx context.Context, options CheckpointOptions, o
 	}
 	// As postmaster() does, the opened handle proves a small regular file before
 	// the read; nothing waits on what stands at the name. Every failure refuses.
-	if version, err := readRegular(context.Background(), openPostgresReader, func(info os.FileInfo) bool { return info.Size() <= 64 }, c.path("pg", "PG_VERSION"), errCheckpointSource, errCheckpointSource, errCheckpointSource); err != nil || strings.TrimSuffix(string(version), "\n") != "16" {
+	if version, err := readRegular(ctx, openPostgresReader, func(info os.FileInfo) bool { return info.Size() <= 64 }, c.path("pg", "PG_VERSION"), errCheckpointSource, errCheckpointSource, errCheckpointSource); err != nil || strings.TrimSuffix(string(version), "\n") != "16" {
 		return nil, errCheckpointSource
 	}
 	if err := c.validateRecovery(); err != nil {
@@ -649,7 +653,7 @@ func (c *Cell) copyCheckpoint(ctx context.Context, checkpointID string, plan *ch
 	if err := privateDir(dir, true); err != nil {
 		return fail(errCheckpointCopy)
 	}
-	open, release, err := c.openCheckpointSource(context.Background())
+	open, release, err := c.openCheckpointSource(ctx)
 	if err != nil {
 		return fail(errCheckpointCopy)
 	}
@@ -868,7 +872,7 @@ func (c *Cell) witnessCheckpoint(ctx context.Context, checkpointID string, plan 
 	if index < 0 {
 		return errCheckpointWitness
 	}
-	open, release, err := c.openCheckpointSource(context.Background())
+	open, release, err := c.openCheckpointSource(ctx)
 	if err != nil {
 		return errCheckpointWitness
 	}
@@ -998,7 +1002,7 @@ func (c *Cell) admitDeleteCheckpoint(options DeleteCheckpointOptions) error {
 	return nil
 }
 
-func (c *Cell) deleteCheckpointLocked(_ context.Context, options DeleteCheckpointOptions) error {
+func (c *Cell) deleteCheckpointLocked(ctx context.Context, options DeleteCheckpointOptions) error {
 	if err := c.admitDeleteCheckpoint(options); err != nil {
 		return err
 	}
@@ -1016,7 +1020,7 @@ func (c *Cell) deleteCheckpointLocked(_ context.Context, options DeleteCheckpoin
 	if err := c.closeCheckpointLeftover(); err != nil {
 		return err
 	}
-	if err := c.begin(context.Background(), "checkpoint_delete"); err != nil {
+	if err := c.begin(ctx, "checkpoint_delete"); err != nil {
 		return err
 	}
 	for _, step := range []struct {
@@ -1026,13 +1030,13 @@ func (c *Cell) deleteCheckpointLocked(_ context.Context, options DeleteCheckpoin
 		{"unseal", func() error { return c.unsealCheckpointHeld(recovery, checkpoint, options.CheckpointID) }},
 		{"remove", func() error { return c.removeCheckpointHeld(recovery, checkpoint, options.CheckpointID) }},
 	} {
-		if err := c.step(context.Background(), "checkpoint_delete", step.name, step.run); errors.Is(err, errInterrupted) {
+		if err := c.step(ctx, "checkpoint_delete", step.name, step.run); errors.Is(err, errInterrupted) {
 			return err
 		} else if err != nil {
 			return c.closeCheckpointFailure("checkpoint_delete", err, true, nil)
 		}
 	}
-	return c.journal(context.Background(), "checkpoint_delete", "operation", "done")
+	return c.journal(ctx, "checkpoint_delete", "operation", "done")
 }
 
 // errCheckpointWitnessUnread: a witness that may exist was not read; it is never reported incomplete.

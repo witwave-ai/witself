@@ -78,7 +78,7 @@ func TestWinerr5ReadersParentFile(t *testing.T) {
 			return err == nil && state == (ProcessState{}), err
 		}},
 		{"postmaster", "pg", "invalid PostgreSQL process record", func(c *Cell) (bool, error) {
-			pid, err := c.postmaster()
+			pid, err := c.postmaster(context.Background())
 			return err == nil && pid == 0, err
 		}},
 		{"service_record", "service", "service_record_not_private", func(c *Cell) (bool, error) {

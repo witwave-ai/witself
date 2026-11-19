@@ -570,7 +570,7 @@ func (c *Cell) exitServiceHostForRemoval(ctx context.Context) error {
 		}
 		// PostgreSQL can publish its pidfile before the host records the
 		// process. Preserve that independent recovery authority as well.
-		pid, err := c.postmaster()
+		pid, err := c.postmaster(context.Background())
 		if err != nil {
 			return hostExitRefused("child_tree_unknown")
 		}

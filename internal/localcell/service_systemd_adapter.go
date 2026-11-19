@@ -470,7 +470,7 @@ func (a *systemdUserAdapter) Apply(ctx context.Context, plan ServicePlan) error 
 		return err
 	}
 	defer unlock()
-	if err := cell.maintenanceFenceAllows(0); err != nil {
+	if err := cell.maintenanceFenceAllows(context.Background(), 0); err != nil {
 		return err
 	}
 	if !reflect.DeepEqual(fresh, d) {
@@ -625,7 +625,7 @@ func (a *systemdUserAdapter) Remove(ctx context.Context, d ServiceIdentity) erro
 		return serviceSystemdError(ErrServiceRemovalFailed, "remove:host_lease", "unavailable")
 	}
 	defer releaseHost()
-	if err := cell.maintenanceFenceAllows(0); err != nil {
+	if err := cell.maintenanceFenceAllows(context.Background(), 0); err != nil {
 		return err
 	}
 	observation, err = a.Inspect(ctx, d)

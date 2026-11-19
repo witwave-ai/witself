@@ -6,8 +6,10 @@ import (
 	"maps"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 const leaseLayerID = "ckpt_abcdefghijklmnop"
@@ -28,6 +30,24 @@ func leaseJournalPlant(c *Cell, m *Manifest, prepare string) (journalProgress, e
 	}
 	progress, readErr := c.readJournal(bg)
 	return progress, errors.Join(err, readErr)
+}
+
+// leaseRecordPlant prepares c for an LC-LEASE-2C2 R5 row: postmaster.pid of
+// an unallocated PID, a fence, or the owner lock without the run lock.
+func leaseRecordPlant(t *testing.T, c *Cell, prepare string) error {
+	switch prepare {
+	case "record":
+		record := strconv.Itoa(checkpointUnallocatedPID) + "\n" + c.path("pg") + "\n1\n"
+		return errors.Join(testMkdir(c.path("pg"), 0o700), testWriteFile(c.path("pg", "postmaster.pid"), []byte(record), 0o600))
+	case "fence":
+		updateTestFence(t, c)
+		return nil
+	}
+	lock, err := acquireLock(context.Background(), c.cfg.Root, true)
+	if err != nil {
+		return err
+	}
+	return errors.Join(lock.Close(), os.Remove(c.path("run", "operation.lock")))
 }
 
 // LC-LEASE-2B R5: with its context already done, each threaded declaration
@@ -137,6 +157,71 @@ func TestLeaseWaitLayerUnleased(t *testing.T) {
 				t.Fatal("a journal declaration gave another result for an unleased journal under a done context")
 			}
 		})
+	}
+	// LC-LEASE-2C2 R5: the process record, the fence, the lockless lock probe.
+	admitted := errors.New("unleased lockless row admitted")
+	for _, row := range []struct {
+		name, prepare string
+		call          func(c *Cell) (bool, error)
+	}{
+		{"postmaster", "record", func(c *Cell) (bool, error) {
+			pid, err := c.postmaster(done)
+			return pid == checkpointUnallocatedPID, err
+		}},
+		{"maintenanceFenceAllows", "fence", func(c *Cell) (bool, error) { return true, c.maintenanceFenceAllows(done, 1) }},
+		{"refuseBeforeLockNames", "lockless", func(c *Cell) (bool, error) {
+			return c.refuseBeforeLockNames(done, func() error { return admitted }) == admitted, nil
+		}},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			c, _ := unitCell(t)
+			if leaseRecordPlant(t, c, row.prepare) != nil {
+				t.Fatal("cannot prepare the unleased record or fence row")
+			}
+			normal, err := row.call(c)
+			if err != nil {
+				t.Fatal("a record or fence declaration refused an unleased file under a done context")
+			}
+			if !normal {
+				t.Fatal("a record or fence declaration gave another result for an unleased file under a done context")
+			}
+		})
+	}
+}
+
+// leaseWaitDetachedRows are TestLeaseWaitDetached's rows that only Linux runs
+// (leasewait_detached_linux_test.go adds them), by name.
+var leaseWaitDetachedRows = map[string]func(*testing.T){}
+
+// LC-LEASE-2C2 R3: the detached value keeps its parent's Done, Err and Deadline
+// before and after the cancel and carries the wait's mark, on every system
+// (Windows and macOS in CI only); Linux rows wait out a lease under it.
+func TestLeaseWaitDetached(t *testing.T) {
+	t.Run("value", func(t *testing.T) {
+		parent, cancel := context.WithTimeout(context.Background(), time.Hour)
+		defer cancel()
+		detached := leaseWaitDetached(parent)
+		for _, phase := range []string{"before", "after"} {
+			if phase == "after" {
+				cancel()
+			}
+			if detached.Done() != parent.Done() {
+				t.Fatalf("the detached value does not share its parent's Done channel %s the cancel", phase)
+			}
+			if detached.Err() != parent.Err() {
+				t.Fatalf("the detached value does not give its parent's error %s the cancel", phase)
+			}
+			at, ok := detached.Deadline()
+			if want, wantOK := parent.Deadline(); !at.Equal(want) || ok != wantOK {
+				t.Fatalf("the detached value does not keep its parent's deadline %s the cancel", phase)
+			}
+		}
+		if detached.Value(leaseWaitDetachedKey{}) == nil {
+			t.Fatal("the detached value does not carry the lease wait mark")
+		}
+	})
+	for _, name := range slices.Sorted(maps.Keys(leaseWaitDetachedRows)) {
+		t.Run(name, leaseWaitDetachedRows[name])
 	}
 }
 

@@ -187,7 +187,7 @@ func (c *Cell) stopPostgres(ctx context.Context, state ProcessState) error {
 	// Keeping this object open reserves its PID across pg_ctl's own PID-file
 	// lookup, so a postmaster exit cannot redirect the request to a reused PID.
 	defer func() { _ = windows.CloseHandle(handle) }()
-	pid, err := c.postmaster()
+	pid, err := c.postmaster(context.Background())
 	if err != nil || pid != record.PID {
 		return errors.New("localcell: PostgreSQL process identity mismatch; refusing to stop")
 	}

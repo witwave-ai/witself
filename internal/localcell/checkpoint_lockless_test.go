@@ -390,14 +390,15 @@ func TestCheckpointLocklessHealthy(t *testing.T) {
 	}
 }
 
+// locklessFirst is each verb's statement after its detach (LC-LEASE-2C2).
 var locklessFirst = map[string]string{
-	"Checkpoint":       `if err := c.refuseBeforeLockNames(func() error { return c.admitCheckpointDry(ctx, options) }); err != nil { return err }`,
-	"DeleteCheckpoint": `if err := c.refuseBeforeLockNames(func() error { return c.admitDeleteCheckpoint(options) }); err != nil { return err }`,
+	"Checkpoint":       `if err := c.refuseBeforeLockNames(ctx, func() error { return c.admitCheckpointDry(ctx, options) }); err != nil { return err }`,
+	"DeleteCheckpoint": `if err := c.refuseBeforeLockNames(ctx, func() error { return c.admitDeleteCheckpoint(options) }); err != nil { return err }`,
 }
 
-// refuseBeforeLockNames's calls in source order, errors.Is aside.
+// refuseBeforeLockNames's calls in source order, errors.Is aside (2C2: R6's cut).
 var locklessOrder = []string{`os.Lstat(c.path(".owner.lock"))`, `os.Lstat(c.path("run", "operation.lock"))`, `c.validateRoot(false)`,
-	`acquireLock(context.Background(), c.cfg.Root, false)`, `defer held.Close()`, `c.validateRoot(false)`, `os.Lstat(c.path("journal", "maintenance.json"))`,
+	`acquireLock(ctx, c.cfg.Root, false)`, `(*leaseWaitCut)(nil)`, `errors.As(err, &cut)`, `defer held.Close()`, `c.validateRoot(false)`, `os.Lstat(c.path("journal", "maintenance.json"))`,
 	`os.Lstat(c.recoveryDir())`, `admit()`}
 
 // locklessCallees closes what each dry function may call, resolved by type: a
@@ -405,7 +406,7 @@ var locklessOrder = []string{`os.Lstat(c.path(".owner.lock"))`, `os.Lstat(c.path
 // package variable, field or other local is called, nothing unresolved is, and
 // no function or package variable holding one is named as a value.
 var locklessCallees = map[string][]string{
-	"refuseBeforeLockNames": {"os.Lstat", "errors.Is", "context.Background", "localcell.acquireLock", "(*localcell.operationLock).Close", "(*localcell.Cell).path",
+	"refuseBeforeLockNames": {"os.Lstat", "errors.Is", "errors.As", "convert leaseWaitCut", "localcell.acquireLock", "(*localcell.operationLock).Close", "(*localcell.Cell).path",
 		"(*localcell.Cell).validateRoot", "(*localcell.Cell).recoveryDir", "param admit"},
 	"admitCheckpointDry": {"errors.Is", "(*localcell.Cell).checkpointOps", "(*localcell.Cell).admitCheckpoint"},
 	"admitDeleteCheckpoint": {"os.Lstat", "os.ReadDir", "errors.Is", "context.Background", "localcell.privateDir", "localcell.checkpointLeftover",
@@ -460,6 +461,8 @@ func locklessClosed(info *types.Info, fn *ast.FuncDecl, allowed []string) bool {
 			continue
 		} else if selector, ok := fun.(*ast.SelectorExpr); ok {
 			fun = selector.Sel
+		} else if pointer, ok := fun.(*ast.StarExpr); ok {
+			fun = pointer.X // a conversion to a pointer type
 		}
 		identifier, _ := fun.(*ast.Ident)
 		switch object := info.Uses[identifier].(type) {
@@ -467,6 +470,8 @@ func locklessClosed(info *types.Info, fn *ast.FuncDecl, allowed []string) bool {
 			name = object.FullName()
 		case *types.Builtin:
 			name = object.Name()
+		case *types.TypeName:
+			name = "convert " + object.Name()
 		case *types.Var:
 			if object.Pos() > fn.Type.Pos() && object.Pos() < fn.Type.End() {
 				name = "param " + object.Name()
@@ -529,7 +534,7 @@ func locklessContract(sources map[string]string) []string {
 		return ""
 	}
 	for name, want := range locklessFirst {
-		if statement(name, 0) != admissionStatements(want)[0] {
+		if statement(name, 0) != "ctx = leaseWaitDetached(ctx)" || statement(name, 1) != admissionStatements(want)[0] {
 			failures = append(failures, "lockless_first:"+name)
 		}
 	}
@@ -566,9 +571,13 @@ func locklessContract(sources map[string]string) []string {
 	if !slices.Equal(calls, locklessOrder) {
 		return append(failures, "lockless_order")
 	}
-	// Every early return defers: it is nil.
+	// Every early return defers: it is nil, but R6's cut is returned.
+	cut, returned := admissionStatements(`if cut := (*leaseWaitCut)(nil); errors.As(err, &cut) { return err } else if err != nil { return nil }`)[0], map[ast.Node]bool{}
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
-		if result, ok := n.(*ast.ReturnStmt); ok && n != fn.Body.List[len(fn.Body.List)-1] && admissionNodeText(result) != "return nil" {
+		if branch, ok := n.(*ast.IfStmt); ok && admissionNodeText(branch) == cut {
+			returned[branch.Body.List[0]] = true
+		}
+		if result, ok := n.(*ast.ReturnStmt); ok && n != fn.Body.List[len(fn.Body.List)-1] && admissionNodeText(result) != "return nil" && !returned[result] {
 			failures = append(failures, "lockless_defer")
 		}
 		return true
@@ -587,16 +596,16 @@ func TestCheckpointLocklessSourceContract(t *testing.T) {
 	for _, row := range []struct{ name, before, after, key string }{
 		{"control", "", "", ""},
 		{"gate_removed", "\tif (owner == nil && run == nil) || c.validateRoot(false) != nil {\n\t\treturn nil\n\t}\n", "", "lockless_order"},
-		{"acquire_creates", "held, err := acquireLock(context.Background(), c.cfg.Root, false)", "held, err := acquireLock(context.Background(), c.cfg.Root, true)", "lockless_order"},
+		{"acquire_creates", "held, err := acquireLock(ctx, c.cfg.Root, false)", "held, err := acquireLock(ctx, c.cfg.Root, true)", "lockless_order"},
 		{"fence_helper", "if _, err := os.Lstat(c.path(\"journal\", \"maintenance.json\")); !errors.Is(err, fs.ErrNotExist) {\n\t\treturn nil", "if err := c.maintenanceFenceAllows(0); err != nil {\n\t\treturn err", "lockless_writer:refuseBeforeLockNames"},
-		{"classified", "acquireLock(context.Background(), c.cfg.Root, false)\n\tif err != nil {\n\t\treturn nil", "acquireLock(context.Background(), c.cfg.Root, false)\n\tif err != nil {\n\t\treturn classifyOwnershipFailure(c.cfg.Root, err)", "lockless_writer:refuseBeforeLockNames"},
+		{"classified", "\t} else if err != nil {\n\t\treturn nil\n\t}\n\tdefer", "\t} else if err != nil {\n\t\treturn classifyOwnershipFailure(c.cfg.Root, err)\n\t}\n\tdefer", "lockless_writer:refuseBeforeLockNames"},
 		{"fence_refuses", "\"maintenance.json\")); !errors.Is(err, fs.ErrNotExist) {\n\t\treturn nil", "\"maintenance.json\")); !errors.Is(err, fs.ErrNotExist) {\n\t\treturn errMaintenanceFenceActive", "lockless_defer"},
 		{"control_kept", "\tops.control = func(context.Context) (pgControlData, error) { return pgControlData{}, errCheckpointDryAdmitted }\n", "", "lockless_control"},
 		{"hold_in_admission", "\treturn nil\n}\n\nfunc (c *Cell) deleteCheckpointLocked(", "\t_, _, _ = c.holdCheckpoint(options.CheckpointID)\n\treturn nil\n}\n\nfunc (c *Cell) deleteCheckpointLocked(", "lockless_writer:admitDeleteCheckpoint"},
 		{"delete_unsplit", "DeleteCheckpointOptions) error {\n\tif err := c.admitDeleteCheckpoint(options); err != nil {\n\t\treturn err\n\t}\n", "DeleteCheckpointOptions) error {\n", "lockless_split"},
 		{"admission_refuses", "\treturn nil\n}\n\nfunc (c *Cell) deleteCheckpointLocked(", "\treturn errCheckpointIdentity\n}\n\nfunc (c *Cell) deleteCheckpointLocked(", "lockless_split"},
-		{"create_unguarded", "\tif err := c.refuseBeforeLockNames(func() error { return c.admitCheckpointDry(ctx, options) }); err != nil {\n\t\treturn err\n\t}\n", "", "lockless_first:Checkpoint"},
-		{"delete_unguarded", "\tif err := c.refuseBeforeLockNames(func() error { return c.admitDeleteCheckpoint(options) }); err != nil {\n\t\treturn err\n\t}\n", "", "lockless_first:DeleteCheckpoint"},
+		{"create_unguarded", "\tif err := c.refuseBeforeLockNames(ctx, func() error { return c.admitCheckpointDry(ctx, options) }); err != nil {\n\t\treturn err\n\t}\n", "", "lockless_first:Checkpoint"},
+		{"delete_unguarded", "\tif err := c.refuseBeforeLockNames(ctx, func() error { return c.admitDeleteCheckpoint(options) }); err != nil {\n\t\treturn err\n\t}\n", "", "lockless_first:DeleteCheckpoint"},
 		{"unparsable", "package localcell\n", "package localcell {\n", "parse:checkpoint.go"},
 		{"second_validate_returns", "if err := c.validateRoot(false); err != nil {\n\t\treturn nil", "if err := c.validateRoot(false); err != nil {\n\t\treturn err", "lockless_defer"},
 		{"dry_lock_names", dry, "\tif l, err := acquireLock(c.cfg.Root, true); err == nil {\n\t\t_ = l.Close()\n\t}\n" + dry, "lockless_writer:admitCheckpointDry"},

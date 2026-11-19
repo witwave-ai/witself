@@ -20,7 +20,7 @@ func (c *Cell) startPostgres(ctx context.Context, _ *Manifest) error {
 	if err := c.pgCommand(ctx, "pg_ctl", "start", "-D", c.path("pg"), "-l", c.path("logs", "postgres.log"), "-w", "-t", strconv.Itoa(max(1, int(c.cfg.Timeout.Seconds())))); err != nil {
 		return err
 	}
-	pid, err := c.postmaster()
+	pid, err := c.postmaster(context.Background())
 	if err != nil || pid == 0 {
 		return fixedCause("PostgreSQL did not publish process ownership")
 	}

@@ -10,7 +10,7 @@ import (
 	"testing"
 )
 
-const maintenanceAdapterAdmissionStatement = `if err := cell.maintenanceFenceAllows(0); err != nil { return err }`
+const maintenanceAdapterAdmissionStatement = `if err := cell.maintenanceFenceAllows(context.Background(), 0); err != nil { return err }`
 
 // The adapter has its own owner proof. Cell owners retain their c receiver and
 // their existing statement, so this exception cannot admit a renamed Cell owner.
@@ -226,7 +226,7 @@ func (a *windowsLogonTaskAdapter) Apply(ctx context.Context, plan ServicePlan) e
  if err != nil { return err }
  current, err := a.current(d)
  if err != nil || !reflect.DeepEqual(windowsTaskImmutable(current), windowsTaskImmutable(d)) { return windowsTaskError(ErrServiceOwnershipConflict, "create", 0, "stale_plan") }
- if err := cell.maintenanceFenceAllows(0); err != nil { return err }
+ if err := cell.maintenanceFenceAllows(context.Background(), 0); err != nil { return err }
  if !reflect.DeepEqual(current, d) || d.DesiredState != "running" || d.Faulted { return windowsTaskError(ErrServiceOwnershipConflict, "create", 0, "stale_plan") }
  if observation.Owned { return nil }
  records, err := a.records(d)
@@ -242,7 +242,7 @@ func (a *windowsLogonTaskAdapter) Start(ctx context.Context, d ServiceIdentity) 
  current, err := a.current(d)
  if err != nil || current.DesiredState != "running" || current.Faulted { return windowsTaskError(ErrServiceDesiredState, "inspect:host_owner", 0, "stopped") }
  if !observation.Owned { return windowsTaskError(ErrServiceOwnershipConflict, "inspect:host_owner", 0, "not_owned") }
- if err := cell.maintenanceFenceAllows(0); err != nil { return err }
+ if err := cell.maintenanceFenceAllows(context.Background(), 0); err != nil { return err }
  name, _ := WindowsLogonTaskName(d)
  result, err := a.command(ctx, "/Run", "/TN", name)
  return nil
@@ -263,7 +263,7 @@ func (a *windowsLogonTaskAdapter) Remove(ctx context.Context, d ServiceIdentity)
  releaseHost, err := serviceAdapterRemovalHostLock(cell)
  if err != nil { return err }
  defer releaseHost()
- if err := cell.maintenanceFenceAllows(0); err != nil { return err }
+ if err := cell.maintenanceFenceAllows(context.Background(), 0); err != nil { return err }
  return nil
 }
 `
@@ -300,8 +300,8 @@ func TestWindowsTaskMaintenanceAdmissionSourceContract(t *testing.T) {
 		change      func(string) string
 	}{
 		{"statement_missing", "Apply", func(s string) string { return strings.Replace(s, gate, "", 1) }},
-		{"literal_one", "Apply", func(s string) string { return strings.Replace(s, "Allows(0)", "Allows(1)", 1) }},
-		{"nonliteral_generation", "Apply", func(s string) string { return strings.Replace(s, "Allows(0)", "Allows(generation)", 1) }},
+		{"literal_one", "Apply", func(s string) string { return strings.Replace(s, "(), 0)", "(), 1)", 1) }},
+		{"nonliteral_generation", "Apply", func(s string) string { return strings.Replace(s, "(), 0)", "(), generation)", 1) }},
 		{"cell_owner_receiver", "Apply", func(s string) string { return strings.Replace(s, "cell.maintenance", "c.maintenance", 1) }},
 		{"error_discarded", "Apply", func(s string) string { return strings.Replace(s, gate, "_ = cell.maintenanceFenceAllows(0)", 1) }},
 		{"before_immutable", "Apply", moveGate("if err != nil || !reflect.DeepEqual(windowsTaskImmutable(current), windowsTaskImmutable(d))", false)},

@@ -98,7 +98,7 @@ func (c *Cell) Install(ctx context.Context, options InstallOptions) error {
 	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return errors.New("cannot inspect PostgreSQL data")
 	}
-	if err := c.maintenanceFenceAllows(0); err != nil {
+	if err := c.maintenanceFenceAllows(context.Background(), 0); err != nil {
 		return err
 	}
 	if err := c.layout(); err != nil {
@@ -250,7 +250,7 @@ func (c *Cell) Start(ctx context.Context) error {
 	if err := c.serviceStartFence(); err != nil {
 		return err
 	}
-	if err := c.maintenanceFenceAllows(0); err != nil {
+	if err := c.maintenanceFenceAllows(context.Background(), 0); err != nil {
 		return err
 	}
 	m.MigrationWait, m.JobRestartPolicy = c.runtimeSettings(m)
@@ -437,7 +437,7 @@ func (c *Cell) Repair(ctx context.Context) error {
 		defer selectedCancel()
 		ctx = selected
 	}
-	if err := c.maintenanceFenceAllows(0); err != nil {
+	if err := c.maintenanceFenceAllows(context.Background(), 0); err != nil {
 		return err
 	}
 	progress, err := c.readJournal(context.Background())
@@ -534,7 +534,7 @@ func (c *Cell) Remove(ctx context.Context, options RemoveOptions) error {
 		return err
 	}
 	defer func() { _ = lock.Close() }()
-	if err := c.maintenanceFenceAllows(0); err != nil {
+	if err := c.maintenanceFenceAllows(context.Background(), 0); err != nil {
 		return err
 	}
 	if err := c.setServiceDesiredStateLocked("stopped"); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -621,12 +621,13 @@ func (c *Cell) finishRemoval(ctx context.Context, m *Manifest, purge bool) error
 }
 
 // Inspect reads state and probes the advisory lock without creating records.
-func (c *Cell) Inspect(_ context.Context) (Inspection, error) {
+func (c *Cell) Inspect(ctx context.Context) (Inspection, error) {
+	ctx = leaseWaitDetached(ctx)
 	result := Inspection{Processes: map[string]ProcessState{}}
 	if err := c.validateRoot(false); err != nil {
 		return result, err
 	}
-	lock, err := acquireLock(context.Background(), c.cfg.Root, false)
+	lock, err := acquireLock(ctx, c.cfg.Root, false)
 	if errors.Is(err, ErrLocked) {
 		result.Locked = true
 	} else if err != nil {
@@ -643,7 +644,7 @@ func (c *Cell) Inspect(_ context.Context) (Inspection, error) {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return result, errors.New("cannot inspect PostgreSQL data")
 	}
-	progress, err := c.readJournal(context.Background())
+	progress, err := c.readJournal(ctx)
 	if err != nil {
 		return result, err
 	}
@@ -683,7 +684,7 @@ func (c *Cell) Inspect(_ context.Context) (Inspection, error) {
 			return result, err
 		}
 		if component == "postgres" {
-			pid, err := c.postmaster()
+			pid, err := c.postmaster(ctx)
 			if err != nil {
 				state.Matches = false
 			} else if pid == 0 {
@@ -765,9 +766,9 @@ func (c *Cell) processStateWithRecord(component string) (ProcessState, ProcessRe
 	return ProcessState{PID: record.PID, Alive: alive, Matches: alive && identity == record.StartTime && record.Root == c.cfg.Root && record.Component == component}, record, nil
 }
 
-func (c *Cell) postmaster() (int, error) {
+func (c *Cell) postmaster(ctx context.Context) (int, error) {
 	invalid := errors.New("invalid PostgreSQL process record")
-	data, err := readRegular(context.Background(), openPostgresReader, postmasterBounded, c.path("pg", "postmaster.pid"),
+	data, err := readRegular(ctx, openPostgresReader, postmasterBounded, c.path("pg", "postmaster.pid"),
 		invalid, invalid, errors.New("cannot read PostgreSQL process record"))
 	if errors.Is(err, os.ErrNotExist) {
 		return 0, nil
@@ -793,7 +794,7 @@ func (c *Cell) postmaster() (int, error) {
 func postmasterBounded(info os.FileInfo) bool { return info.Size() <= 8192 }
 
 func (c *Cell) verifyAll() error {
-	pgPID, err := c.postmaster()
+	pgPID, err := c.postmaster(context.Background())
 	if err != nil {
 		return err
 	}
@@ -824,7 +825,7 @@ func (c *Cell) verifyAll() error {
 // launch step. postmaster.pid supplies the data directory and start epoch;
 // native process creation time must independently agree before recording a fence.
 func (c *Cell) recoverPostgresRecord() error {
-	pid, err := c.postmaster()
+	pid, err := c.postmaster(context.Background())
 	if err != nil || pid == 0 {
 		return err
 	}

@@ -33,7 +33,7 @@ func (c *Cell) serviceMaintenanceObservation(ctx context.Context, observed *Serv
 	if observed != nil {
 		*observed = d
 	}
-	if err := c.maintenanceFenceAllows(0); err != nil {
+	if err := c.maintenanceFenceAllows(context.Background(), 0); err != nil {
 		return err
 	}
 	return nil

@@ -227,7 +227,7 @@ func TestCheckpointRetryCancellation(t *testing.T) {
 					return errCheckpointRetryRefusal
 				})
 				c.checkpointTest.sleep = func(got context.Context, _ time.Duration) {
-					if got != ctx {
+					if got.Done() != ctx.Done() {
 						t.Fatal("backoff lost caller context")
 					}
 					sleeps++

@@ -171,8 +171,8 @@ func TestLeaseWaitContextRegularBy(t *testing.T) {
 	}
 }
 
-// The released verbs keep their documented wait (OQ2): their call sites pass the
-// placeholder, so a command context cancelled 100 ms into a lease wait never
+// The released verbs keep their documented wait (OQ2): their context is detached
+// (LC-LEASE-2C2), so a command context cancelled 100 ms into a lease wait never
 // let go (ceiling 500 ms here) ends no wait, and each verb ends as HEAD does:
 // the journal rows with the open text, nothing journaled and the checkpoint
 // kept; the copy row as a failed copy, its partial copy removed and its
@@ -237,4 +237,5 @@ func TestLeaseWaitContextReleased(t *testing.T) {
 			}
 		})
 	}
+	leaseReleasedDetached(t) // LC-LEASE-2C2's rows (leasewait_detached_linux_test.go)
 }

@@ -171,13 +171,13 @@ func TestUpdateFenceStrictDecoding(t *testing.T) {
 				if err != nil || got == nil || *got != fixture.want {
 					t.Error("Reader level did not return the exact expected fields")
 				}
-				if c.maintenanceFenceAllows(0) != errMaintenanceFenceActive {
+				if c.maintenanceFenceAllows(context.Background(), 0) != errMaintenanceFenceActive {
 					t.Error("Reader level admitted the ordinary generation")
 				}
-				if c.maintenanceFenceAllows(fixture.want.Generation) != nil {
+				if c.maintenanceFenceAllows(context.Background(), fixture.want.Generation) != nil {
 					t.Error("Reader level refused the matching generation")
 				}
-				if c.maintenanceFenceAllows(fixture.want.Generation+1) != errMaintenanceFenceActive {
+				if c.maintenanceFenceAllows(context.Background(), fixture.want.Generation+1) != errMaintenanceFenceActive {
 					t.Error("Reader level admitted a different generation")
 				}
 			} else {
@@ -186,7 +186,7 @@ func TestUpdateFenceStrictDecoding(t *testing.T) {
 				}
 				generations := append([]int{0, 1, 2}, fixture.generations...)
 				for _, generation := range generations {
-					if c.maintenanceFenceAllows(generation) != errMaintenanceFenceActive {
+					if c.maintenanceFenceAllows(context.Background(), generation) != errMaintenanceFenceActive {
 						t.Error("Reader level admitted a refused fixture generation")
 					}
 				}
@@ -214,10 +214,10 @@ func TestUpdateFenceStrictAbsentParity(t *testing.T) {
 			if got != nil || err != nil || called {
 				t.Error("Absent fence reached the reader or changed its result")
 			}
-			if c.maintenanceFenceAllows(0) != nil {
+			if c.maintenanceFenceAllows(context.Background(), 0) != nil {
 				t.Error("Absent fence refused the ordinary generation")
 			}
-			if c.maintenanceFenceAllows(1) != errMaintenanceFenceActive {
+			if c.maintenanceFenceAllows(context.Background(), 1) != errMaintenanceFenceActive {
 				t.Error("Absent fence admitted a positive generation")
 			}
 			serviceMaintenanceUnchanged(t, c, before)

@@ -144,6 +144,17 @@ type leaseWaitCut struct{ cause error }
 func (e *leaseWaitCut) Error() string { return "local cell lease wait ended: " + e.cause.Error() }
 func (e *leaseWaitCut) Unwrap() error { return e.cause }
 
+// leaseWaitDetachedKey marks a context whose lease waits never end early.
+type leaseWaitDetachedKey struct{}
+
+// leaseWaitDetached keeps the released commands' documented wait (Checkpoint,
+// DeleteCheckpoint, Inspect): neither --timeout nor a first signal ends a lease
+// wait below it. Every other use of ctx (its deadline, its cancellation) is
+// unchanged.
+func leaseWaitDetached(ctx context.Context) context.Context {
+	return context.WithValue(ctx, leaseWaitDetachedKey{}, true)
+}
+
 // openRegularBy is openRegular through openReader, a per-OS open that never
 // waits either (openPostgresReader below pg/). A reader whose check before the
 // open also bounded the size or required privacy passes it as accept, which

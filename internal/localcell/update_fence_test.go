@@ -25,10 +25,10 @@ func TestUpdateFenceReadResults(t *testing.T) {
 	t.Run("absent_leaf", func(t *testing.T) {
 		c, _ := unitCell(t)
 		fence, err := c.readMaintenanceFence(context.Background())
-		if err != nil || fence != nil || c.maintenanceFenceAllows(0) != nil {
+		if err != nil || fence != nil || c.maintenanceFenceAllows(context.Background(), 0) != nil {
 			t.Fatal("absent fence refused ordinary predicate")
 		}
-		if !errors.Is(c.maintenanceFenceAllows(1), errMaintenanceFenceActive) {
+		if !errors.Is(c.maintenanceFenceAllows(context.Background(), 1), errMaintenanceFenceActive) {
 			t.Fatal("absent fence authorized a transition")
 		}
 	})
@@ -54,11 +54,11 @@ func TestUpdateFenceReadResults(t *testing.T) {
 			t.Fatal("valid fence was not returned")
 		}
 		for _, generation := range []int{-1, 0, want.Generation + 1} {
-			if !errors.Is(c.maintenanceFenceAllows(generation), errMaintenanceFenceActive) {
+			if !errors.Is(c.maintenanceFenceAllows(context.Background(), generation), errMaintenanceFenceActive) {
 				t.Fatal("unmatched maintenance generation was allowed")
 			}
 		}
-		if err := c.maintenanceFenceAllows(want.Generation); err != nil {
+		if err := c.maintenanceFenceAllows(context.Background(), want.Generation); err != nil {
 			t.Fatal("matching maintenance generation was refused")
 		}
 		after, err := os.ReadFile(c.path("journal", "maintenance.json"))
@@ -79,7 +79,7 @@ func TestUpdateFenceInvalidParent(t *testing.T) {
 		if fence != nil || err == nil || errors.Is(err, errMaintenanceFenceActive) || err.Error() != want.Error() {
 			t.Fatal("absent leaf lost its distinct parent validation error")
 		}
-		if err = c.maintenanceFenceAllows(0); err == nil || errors.Is(err, errMaintenanceFenceActive) || err.Error() != want.Error() {
+		if err = c.maintenanceFenceAllows(context.Background(), 0); err == nil || errors.Is(err, errMaintenanceFenceActive) || err.Error() != want.Error() {
 			t.Fatal("predicate converted parent validation error to fence refusal or absence")
 		}
 	}
@@ -127,8 +127,8 @@ func TestUpdateFenceCorruptionFailsClosed(t *testing.T) {
 			}
 			fence, err := c.readMaintenanceFence(context.Background())
 			if fence != nil || !errors.Is(err, errMaintenanceFenceActive) ||
-				!errors.Is(c.maintenanceFenceAllows(0), errMaintenanceFenceActive) ||
-				!errors.Is(c.maintenanceFenceAllows(1), errMaintenanceFenceActive) {
+				!errors.Is(c.maintenanceFenceAllows(context.Background(), 0), errMaintenanceFenceActive) ||
+				!errors.Is(c.maintenanceFenceAllows(context.Background(), 1), errMaintenanceFenceActive) {
 				t.Fatal("invalid present fence was not refused")
 			}
 			after, err := os.ReadFile(c.path("journal", "maintenance.json"))
@@ -227,7 +227,7 @@ func TestUpdateFenceSymlinkEvidence(t *testing.T) {
 			}
 			got, err := c.readMaintenanceFence(context.Background())
 			if got != nil || !errors.Is(err, errMaintenanceFenceActive) ||
-				!errors.Is(c.maintenanceFenceAllows(fence.Generation), errMaintenanceFenceActive) {
+				!errors.Is(c.maintenanceFenceAllows(context.Background(), fence.Generation), errMaintenanceFenceActive) {
 				t.Fatal("symlink leaf granted target fence authority")
 			}
 			after, err := os.ReadFile(target)
