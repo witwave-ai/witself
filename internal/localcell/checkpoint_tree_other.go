@@ -3,6 +3,7 @@
 package localcell
 
 import (
+	"context"
 	"io/fs"
 	"os"
 )
@@ -22,3 +23,8 @@ func (t *checkpointTree) createTemp(string) (*os.File, string, error) {
 func (t *checkpointTree) publish(string, string) error { return errCheckpointState }
 func (t *checkpointTree) sync(string) error            { return errCheckpointState }
 func (t *checkpointTree) discard() error               { return errCheckpointState }
+func (t *checkpointTree) open(context.Context, string) (*os.File, error) {
+	return nil, errCheckpointState
+}
+func (t *checkpointTree) check(map[string]bool) (int, error) { return 0, errCheckpointState }
+func (t *checkpointTree) record(string, []byte) error        { return errCheckpointState }

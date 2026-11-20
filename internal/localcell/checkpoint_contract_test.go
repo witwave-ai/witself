@@ -352,12 +352,13 @@ var checkpointRootMembers = map[string][]string{"errors": {"Is", "New"}, "fs": {
 	"os": {"Lstat", "OpenRoot", "Root", "SameFile"}, "runtime": {"GOOS"}}
 var checkpointRootFiles = []string{"checkpoint_root.go", "checkpoint_root_windows.go"}
 
-// checkpointTreeBypassed are the pathname creators, publishers, syncs, stats and removers the copy's tree replaces:
-// checkpoint_tree_unix.go names none, and checkpoint.go calls none (privateDir creating) on a path rooted in a
-// checkpointDir value, or joining recovery/ with a name that is not a literal (checkpointTreeBypassRooted), but
-// checkpointTreeBypassKept, by exact count: the allocation refusal before recovery/ is held, and delete's admission. A
-// key is checkpoint_tree_bypass:<file>:<function>.
-var checkpointTreeBypassed = []string{"privateDir", "createPrivateTemp", "publishPrivateFile", "syncDirectory", "os.Lstat", "os.Stat", "os.Mkdir", "os.Rename", "os.Remove"}
+// checkpointTreeBypassed are the pathname creators, publishers, syncs, stats, removers, walks, readers and record
+// writers the checkpoint tree replaces: checkpoint_tree_unix.go names none, and checkpoint.go calls none (privateDir
+// creating) on a path rooted in a checkpointDir value, or joining recovery/ with a name that is not a literal
+// (checkpointTreeBypassRooted), but checkpointTreeBypassKept, by exact count: the allocation refusal before recovery/ is
+// held, and delete's admission. A key is checkpoint_tree_bypass:<file>:<function>.
+var checkpointTreeBypassed = []string{"privateDir", "createPrivateTemp", "publishPrivateFile", "syncDirectory", "os.Lstat", "os.Stat", "os.Mkdir", "os.Rename", "os.Remove",
+	"filepath.WalkDir", "openPrivateReader", "writeAtomic", "writeAtomicBytes"}
 var checkpointTreeBypassKept = map[string]int{"checkpointLocked:os.Lstat": 1, "admitDeleteCheckpoint:os.Lstat": 1}
 var checkpointRootCallees = map[string]string{"c.checkpointStage": "receiver", "c.checkpointTest.beforeStep": "receiver", "c.recoveryDir": "receiver", "c.holdRecovery": "receiver",
 	"c.checkpointDir": "receiver", "c.holdCheckpoint": "receiver", "c.checkpointRootsBound": "receiver", "c.removeCheckpointHeld": "receiver",
@@ -556,6 +557,34 @@ func checkpointNamesRemoval(node ast.Node) (found bool) {
 	return found
 }
 
+// checkpointTreeRecordWrite is the one write rule (h) admits: in checkpoint_tree_unix.go, (*checkpointTree).record's
+// temporary.Write, temporary defined once there as the file t.createTemp made and never assigned again; nil otherwise.
+func checkpointTreeRecordWrite(name string, file *ast.File) (written *ast.SelectorExpr) {
+	for _, declaration := range file.Decls {
+		function, ok := declaration.(*ast.FuncDecl)
+		if name != "checkpoint_tree_unix.go" || !ok || function.Name.Name != "record" || updateReceiverName(function) != "checkpointTree" || function.Body == nil {
+			continue
+		}
+		writes, assigned, made := []*ast.SelectorExpr(nil), 0, (*ast.AssignStmt)(nil)
+		ast.Inspect(function.Body, func(node ast.Node) bool {
+			if selector, ok := node.(*ast.SelectorExpr); ok && types.ExprString(selector) == "temporary.Write" {
+				writes = append(writes, selector)
+			} else if assign, ok := node.(*ast.AssignStmt); ok && slices.ContainsFunc(assign.Lhs, func(target ast.Expr) bool { return types.ExprString(target) == "temporary" }) {
+				assigned, made = assigned+1, assign
+			}
+			return true
+		})
+		if len(writes) != 1 || assigned != 1 || made.Tok != token.DEFINE || len(made.Rhs) != 1 || types.ExprString(made.Lhs[0]) != "temporary" {
+			return nil
+		}
+		identifier, ok := writes[0].X.(*ast.Ident)
+		if call, isCall := made.Rhs[0].(*ast.CallExpr); ok && isCall && types.ExprString(call.Fun) == "t.createTemp" && identifier.Obj != nil && identifier.Obj.Decl == made {
+			written = writes[0]
+		}
+	}
+	return written
+}
+
 // checkpointHeldContract applies the held-root rules (b)-(h) to every
 // checkpoint file but drill_root.go, whose own rules stand.
 func checkpointHeldContract(parsed map[string]*ast.File, failures map[string]bool) {
@@ -588,7 +617,7 @@ func checkpointHeldContract(parsed map[string]*ast.File, failures map[string]boo
 				failures["system_import:"+name+":"+path] = true // (d)
 			}
 		}
-		rootFile, uses := slices.Contains(checkpointRootFiles, name), map[string]int{}
+		rootFile, uses, written := slices.Contains(checkpointRootFiles, name), map[string]int{}, checkpointTreeRecordWrite(name, file)
 		selected, inventoried, opens, reserved := map[*ast.Ident]bool{}, map[ast.Node]bool{}, map[ast.Node]bool{}, map[ast.Node]bool{}
 		ast.Inspect(file, func(node ast.Node) bool {
 			switch node := node.(type) {
@@ -619,7 +648,7 @@ func checkpointHeldContract(parsed map[string]*ast.File, failures map[string]boo
 					failures["checkpoint_root_selector:"+text] = true // (f)
 				}
 				if !rootFile && receiver != "os" && slices.Contains([]string{"Remove", "RemoveAll", "Rename", "Link", "Symlink", "Mkdir", "MkdirAll", "Create",
-					"WriteFile", "Chmod", "Chown", "Lchown", "Chtimes", "Truncate", "Write", "WriteAt", "WriteString"}, node.Sel.Name) && !reserved[node] {
+					"WriteFile", "Chmod", "Chown", "Lchown", "Chtimes", "Truncate", "Write", "WriteAt", "WriteString"}, node.Sel.Name) && !reserved[node] && node != written {
 					failures["checkpoint_mutating_method:"+name+":"+text] = true // (h)
 				}
 			case *ast.Ident:
@@ -634,7 +663,7 @@ func checkpointHeldContract(parsed map[string]*ast.File, failures map[string]boo
 		})
 		for _, identifier := range []string{"recovery", "checkpoint"} {
 			failures["checkpoint_root_uses:"+name+":"+identifier] = !rootFile && uses[identifier] != map[string]int{"checkpoint.go:recovery": 4, "checkpoint.go:checkpoint": 4,
-				"checkpoint_tree_unix.go:recovery": 18}[name+":"+identifier] // (g)
+				"checkpoint_tree_unix.go:recovery": 25}[name+":"+identifier] // (g)
 		}
 	}
 	for _, text := range slices.Concat(slices.Collect(maps.Keys(counted)), slices.Collect(maps.Keys(checkpointRootCalls))) {
@@ -1368,11 +1397,11 @@ func TestCheckpointSourceContract(t *testing.T) {
 		{"third_removeall", "checkpoint.go", tail, "func checkpointSweep(c *Cell) error { dir, _ := c.checkpointDir(\"x\"); return os.RemoveAll(dir) }\n\n" + tail, "removeall_count:checkpoint.go"},
 		{"lifecycle_removeall_dropped", "lifecycle.go", "if err := os.RemoveAll(c.path(name)); err != nil {", "if err := removePrivateFile(c.path(name)); err != nil {", "removeall_count:lifecycle.go"},
 		{"publish_into_pgdata", "checkpoint.go", "filepath.Join(dir, filepath.FromSlash(entry.path)), false", "filepath.Join(c.path(\"pg\"), filepath.FromSlash(entry.path)), false", "writer_root:checkpoint.go:ops.publish"},
-		{"escape_by_literal", "checkpoint.go", "writeAtomic(filepath.Join(dir, checkpointWitnessName), witness, nil)", "writeAtomic(filepath.Join(dir, \"..\", \"..\", \"manifest.json\"), witness, nil)", "writer_root:checkpoint.go:writeAtomic"},
+		{"escape_by_literal", "checkpoint.go", tail, "func checkpointProbe(c *Cell, witness checkpointWitness) error { dir, _ := c.checkpointDir(\"\"); return writeAtomic(filepath.Join(dir, \"..\", \"..\", \"manifest.json\"), witness, nil) }\n\n" + tail, "writer_root:checkpoint.go:writeAtomic"},
 		{"temporary_in_run", "checkpoint.go", "tree.createTemp(path.Dir(entry.path))", "tree.createTemp(path.Dir(entry.path)); _, _ = createPrivateTemp(c.path(\"run\"))", "live_path_not_read:checkpoint.go:run"},
 		// The copy reaches every name below recovery/ through its tree (LC-CKPT-WALK-1B).
 		{"copy_pathname_mkdir", "checkpoint.go", "} else if tree.mkdir(entry.path) != nil {", "} else if privateDir(filepath.Join(dir, filepath.FromSlash(entry.path)), true) != nil {", "checkpoint_tree_bypass:checkpoint.go:privateDir"},
-		{"tree_pathname_lstat", "checkpoint_tree_unix.go", "return privateBeneathLstat(t.recovery, t.name(name), t.want)", "return os.Lstat(filepath.Join(t.c.recoveryDir(), filepath.FromSlash(t.name(name))))", "checkpoint_tree_bypass:checkpoint_tree_unix.go:os.Lstat"},
+		{"tree_pathname_lstat", "checkpoint_tree_unix.go", "\n\treturn privateBeneathLstat(t.recovery, t.name(name), t.want)\n", "\n\treturn os.Lstat(filepath.Join(t.c.recoveryDir(), filepath.FromSlash(t.name(name))))\n", "checkpoint_tree_bypass:checkpoint_tree_unix.go:os.Lstat"},
 		{"recovery_joined_sync", "checkpoint.go", tail, "func checkpointProbe(c *Cell, checkpointID string) error { return syncCheckpointTreeDirectory(filepath.Join(c.recoveryDir(), checkpointID), nil) }\n\n" + tail, "writer_root:checkpoint.go:syncCheckpointTreeDirectory"},
 		// LC-CKPT-WALK-1B-F1: the bypass rule's missed spellings (P_C5, B23, P_C18), each walk call's identity (B6, B8) and
 		// no walk function as a value, each operation's bind (B4), the parent sync in the tree's mkdir (B10), the Windows
