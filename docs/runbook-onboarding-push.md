@@ -175,7 +175,7 @@ These render only on a cell whose values turn them on. Production has monitoring
 | `WitselfIdentityCapacityAtLimit` | An account at its plan identity limit for 30 min | info; no `witself_alert` label, never pages | [Founder open-plane](../.gitops/charts/platform/files/founder-open-plane.rules.yaml) |
 | `NodeMemoryHighUtilization` (upstream) | Host memory above 90% for 15 min (host memory, not working set) | upstream default | [Alerts And Dashboards](observability-and-operations.md#alerts-and-dashboards) |
 | `WitselfPostgreSQLOOMKilled`, `WitselfPostgreSQLRestarted` | Any PostgreSQL OOM kill or restart within 30 min | critical | [PostgreSQL](../.gitops/charts/platform/files/postgresql.rules.yaml) |
-| `WitselfPostgreSQLMemoryNearLimit` | Working set above 90% of the limit for 10 min | warning | [Platform](../.gitops/charts/platform/files/platform.rules.yaml) |
+| `WitselfPostgreSQLMemoryNearLimit` | Non-file memory (usage minus active and inactive file cache) above 80% of the limit for 15 min; keeps firing 30 min after recovery | warning | [Platform](../.gitops/charts/platform/files/platform.rules.yaml) |
 | `WitselfNodeMemoryWorkingSetHigh` | Node working set above 90% of allocatable for 15 min | warning | [Platform](../.gitops/charts/platform/files/platform.rules.yaml) |
 | `WitselfPostgreSQLVolumeFillingUp` | The 24 h trend fills the volume within 7 days, for 1 h | warning | [PostgreSQL](../.gitops/charts/platform/files/postgresql.rules.yaml) |
 | `WitselfSignupGlobalQuotaDenied` | Any global-quota denial in 15 min; fires at once | warning | [Uptime probes](../.gitops/charts/platform/files/uptime-probes.rules.yaml) |
@@ -247,7 +247,10 @@ enc() { jq -rn --arg q "$1" '$q|@uri'; }
 qprod() { kubectl --kubeconfig "$PROD_KUBECONFIG" get --raw "$P?query=$(enc "$1")" | jq -r '.data.result[] | "\(.metric) \(.value[1])"'; }
 qsand() { kubectl --context witself-civo-sandbox-use1-serving get --raw "$P?query=$(enc "$1")" | jq -r '.data.result[] | "\(.metric) \(.value[1])"'; }
 
-# PostgreSQL working set fraction (adapted from WitselfPostgreSQLMemoryNearLimit, without the threshold)
+# PostgreSQL non-file memory fraction (adapted from WitselfPostgreSQLMemoryNearLimit, without the threshold)
+qprod '(max by (pod) (container_memory_usage_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",container="postgresql"}) - on (pod) max by (pod) (container_memory_total_active_file_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",container="postgresql"}) - on (pod) max by (pod) (container_memory_total_inactive_file_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",container="postgresql"})) / on (pod) max by (pod) (kube_pod_container_resource_limits{job="kube-state-metrics",namespace="witself",container="postgresql",resource="memory"})'
+
+# PostgreSQL working set fraction (the section 6 signal; it still counts active file cache, so it reads high on a cache-full container)
 qprod 'max by (pod) (container_memory_working_set_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",container="postgresql"}) / on (pod) max by (pod) (kube_pod_container_resource_limits{job="kube-state-metrics",namespace="witself",container="postgresql",resource="memory"})'
 
 # PostgreSQL volume used fraction (selector from WitselfPostgresPVCApproachingCapacity)
@@ -281,7 +284,7 @@ The production PostgreSQL uses the `medium` resources preset of PostgreSQL chart
 
 | Signal | Pause | Brake | Source |
 |---|---|---|---|
-| PostgreSQL working set vs its limit | The documented capacity threshold **[PROPOSED]** | The documented threshold: B2. `WitselfPostgreSQLMemoryNearLimit` (warning) or any PostgreSQL OOM kill or restart (critical): B1 and B2 | Founder-confirmed thresholds; [platform rules](../.gitops/charts/platform/files/platform.rules.yaml), [PostgreSQL rules](../.gitops/charts/platform/files/postgresql.rules.yaml) |
+| PostgreSQL working set vs its limit | The documented capacity threshold **[PROPOSED]** | The documented threshold: B2. `WitselfPostgreSQLMemoryNearLimit` (warning; the rule has changed since this row was written and now measures non-file memory above 80% of the limit for 15 min, not working set above 90% for 10 min) or any PostgreSQL OOM kill or restart (critical): B1 and B2 | Founder-confirmed thresholds; [platform rules](../.gitops/charts/platform/files/platform.rules.yaml), [PostgreSQL rules](../.gitops/charts/platform/files/postgresql.rules.yaml) |
 | Node working set vs allocatable | The documented capacity threshold **[PROPOSED]** | The documented threshold: B2 | Baseline below 60% at first sync **[PROPOSED]**; `WitselfNodeMemoryWorkingSetHigh` (warning) sits above the brake |
 | PostgreSQL volume used | The documented capacity threshold **[PROPOSED]**, or `WitselfPostgreSQLVolumeFillingUp` fires | The documented threshold: B2, then section 7.5 | `WitselfPostgresPVCApproachingCapacity` (80% for 15 min, critical) sits above the brake |
 | PostgreSQL CPU vs its limit | Above the documented CPU threshold in `kubectl top` **[PROPOSED]** **[GAP] G4** | Judgment, with the 5xx and transaction-age signals | No rule watches PostgreSQL CPU (**[GAP] G4**); read it with `kubectl top` (5.4) |

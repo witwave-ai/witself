@@ -1147,7 +1147,7 @@ PrometheusRules carry `release: witself-monitoring` for discovery.
 | `WitselfPostgreSQLDown` | [`pg_up`](https://github.com/prometheus-community/postgres_exporter/blob/v0.20.1/exporter/postgres_exporter.go#L474-L479) is zero for 5 minutes. | critical |
 | `WitselfPostgreSQLOOMKilled` | The PostgreSQL container's last termination reason is `OOMKilled` and its restart counter increased within 30 minutes, per pod. | critical |
 | `WitselfPostgreSQLRestarted` | The PostgreSQL container's restart counter increased within 30 minutes, per pod. A last-known `OOMKilled` reason within that window suppresses it unless a non-OOM termination reason is current. | critical |
-| `WitselfPostgreSQLMemoryNearLimit` | PostgreSQL container working set exceeds 90% of its memory limit for 10 minutes. | warning |
+| `WitselfPostgreSQLMemoryNearLimit` | PostgreSQL container non-file memory, usage minus active and inactive file cache, exceeds 80% of its memory limit for 15 minutes, with a 30-minute firing hold after recovery. | warning |
 | `WitselfPostgreSQLVolumeFillingUp` | A 24-hour available-space trend predicts the PostgreSQL PVC will fill within 7 days, for 1 hour. | warning |
 
 Connection counts and limits are matched per scrape target before comparison.
@@ -1192,8 +1192,22 @@ non-OOM termination reason lifts that suppression, so a genuine newer Error
 restart fires without waiting for the OOM lookback to expire. A backend-only
 OOM kill that leaves the postmaster running is not a container restart; among
 these new alerts, only the memory-near-limit alert can warn of that pressure.
-The memory alert uses the last five minutes of samples to bridge brief scrape
-gaps, requires `for: 10m`, and retains `keep_firing_for: 5m` after recovery.
+The memory alert divides cAdvisor `container_memory_usage_bytes` minus
+`container_memory_total_active_file_bytes` and
+`container_memory_total_inactive_file_bytes` by the kube-state-metrics memory
+limit. File cache is left out because the kernel drops it under pressure; process
+memory, shared buffers and kernel memory remain. Each input uses its last sample
+within five minutes to bridge brief scrape gaps; the alert requires `for: 15m`
+above 80% and retains `keep_firing_for: 30m` after recovery, so a dip below the
+threshold for under 30 minutes does not resolve and re-page it.
+
+Earlier versions of this alert divided working set by the limit, above 90% for
+10 minutes with a 5-minute hold. Working set still counts active file cache, and a
+database larger than its limit fills the container with cache. Measured on the
+serving cell on 2026-11-20, that rule had raised 125 of the 154 incidents of the
+previous 120 days without any OOM risk; before the 2026-11-10 OOM kill at the old
+384Mi limit, non-file memory sat at 82 to 86% of that limit for days while the
+working-set rule fired only intermittently.
 
 The volume forecast has a 24-hour trend window, a 7-day horizon and a 1-hour
 pending hold. It complements the existing critical
@@ -1208,14 +1222,15 @@ a node move.
 
 The OOM, restart, memory-near-limit and node working-set alerts stay silent when
 their required kube-state-metrics, cAdvisor or node-exporter series stop
-reporting, after any retained samples or firing hold expire. No absence guard
-covers those series yet.
+reporting, after any retained samples or firing hold expire. The memory-near-limit
+alert also stays silent when either cAdvisor file-cache series is missing. No
+absence guard covers those series yet.
 
 | Alert | First diagnostic step |
 | --- | --- |
 | `WitselfPostgreSQLOOMKilled` | Read the PostgreSQL container's restart count and last termination: `kubectl -n witself get pod witself-postgresql-0 -o jsonpath='{range .status.containerStatuses[?(@.name=="postgresql")]}{.restartCount}{"\t"}{.lastState.terminated.reason}{"\t"}{.lastState.terminated.finishedAt}{"\n"}{end}'`. |
 | `WitselfPostgreSQLRestarted` | Read the previous container's termination lines: `kubectl -n witself logs witself-postgresql-0 -c postgresql --previous --tail=100`. |
-| `WitselfPostgreSQLMemoryNearLimit` | Compare container memory use: `kubectl -n witself top pod witself-postgresql-0 --containers`. |
+| `WitselfPostgreSQLMemoryNearLimit` | Read the alert's inputs for `container="postgresql"` in Prometheus: `container_memory_usage_bytes` minus `container_memory_total_active_file_bytes` and `container_memory_total_inactive_file_bytes`, against `kube_pod_container_resource_limits{resource="memory"}`; `container_memory_rss` shows how much of it is process memory rather than shared buffers. `kubectl top` reports working set, which still counts active file cache. |
 | `WitselfPostgreSQLVolumeFillingUp` | Read filesystem capacity: `kubectl -n witself exec witself-postgresql-0 -c postgresql -- df -h /bitnami/postgresql`. |
 
 Database logs may contain customer values. Do not paste them into incidents or
@@ -1275,7 +1290,7 @@ identify the node, workload, PVC, certificate, or Argo application.
 | Upstream `kubernetes-resources` | `KubeCPUOvercommit` | Pod CPU requests exceed the upstream cluster availability threshold. |
 | Local `platform-node` | `NodeFilesystemSpaceFillingUp` | Writable filesystem is over 80% used and its six-hour trend predicts exhaustion within 24 hours, for 1 hour. |
 | Local `platform-node` | `WitselfNodeMemoryWorkingSetHigh` | Node working-set estimate exceeds 90% of allocatable memory for 15 minutes, with a 5-minute firing hold after recovery. |
-| Local `platform-container-memory` | `WitselfPostgreSQLMemoryNearLimit` | PostgreSQL container working set exceeds 90% of its memory limit for 10 minutes. |
+| Local `platform-container-memory` | `WitselfPostgreSQLMemoryNearLimit` | PostgreSQL container non-file memory (usage minus active and inactive file cache) exceeds 80% of its memory limit for 15 minutes, with a 30-minute firing hold after recovery. |
 | Local `platform-storage` | `WitselfPrometheusPVCUsageHigh` | Prometheus PVC usage in `monitoring` exceeds 80% for 15 minutes. |
 | Local `platform-certificates` | `WitselfCertificateExpiringSoon` | Certificate expiration is less than 14 days away for 1 hour. |
 | Local `platform-argocd` | `WitselfArgoApplicationUnhealthy` | `argocd_app_info` reports health other than Healthy or sync other than Synced for 15 minutes. |

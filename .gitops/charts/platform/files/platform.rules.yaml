@@ -81,20 +81,31 @@ groups:
           runbook: docs/observability-and-operations.md#platform-alerts
   - name: platform-container-memory
     rules:
+      # Non-file memory: usage minus active and inactive file cache. Working set
+      # still counts active file cache, which the kernel drops under pressure, so
+      # a cache-full container read near its limit without any OOM risk. A missing
+      # file-cache or limit series leaves the division empty: no alert, no error.
       - alert: WitselfPostgreSQLMemoryNearLimit
         expr: |
-          max by (namespace, pod, container) (last_over_time(container_memory_working_set_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",container="postgresql"}[5m]))
+          (
+            max by (namespace, pod, container) (last_over_time(container_memory_usage_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",container="postgresql"}[5m]))
+            - on (namespace, pod, container)
+            max by (namespace, pod, container) (last_over_time(container_memory_total_active_file_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",container="postgresql"}[5m]))
+            - on (namespace, pod, container)
+            max by (namespace, pod, container) (last_over_time(container_memory_total_inactive_file_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",container="postgresql"}[5m]))
+          )
           / on (namespace, pod, container)
           max by (namespace, pod, container) (last_over_time(kube_pod_container_resource_limits{job="kube-state-metrics",namespace="witself",container="postgresql",resource="memory"}[5m]) > 0)
-          > 0.9
-        for: 10m
-        keep_firing_for: 5m
+          > 0.8
+        for: 15m
+        keep_firing_for: 30m
         labels:
           severity: warning
           service: witself-postgresql
           witself_alert: "true"
         annotations:
-          summary: The PostgreSQL container working set is above 90 percent of its memory limit.
+          summary: PostgreSQL non-file memory is above 80 percent of the container's memory limit.
+          description: The postgresql container's memory usage minus its active and inactive file cache has stayed above 80 percent of its memory limit for 15 minutes. File cache is left out because the kernel drops it under pressure; the rest (process memory, shared buffers, kernel memory) is what leads to an OOM kill. Check first how much of it is process memory (container_memory_rss) and whether work_mem, shared_buffers or the connection count grew; kubectl top shows working set, which still counts active file cache.
           runbook: docs/observability-and-operations.md#postgresql-alerts
   - name: platform-storage
     rules:
