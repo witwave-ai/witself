@@ -86,7 +86,8 @@ func TestValidateRootTreeRetry(t *testing.T) {
 // The boundary: validateRoot's first statement, validateRootTree and the walkers' boundary (FLAKE-63B).
 const validateRootTreeSource = "package localcell\nfunc (c *Cell) validateRoot() {\n" +
 	"if err := validatePrivateTreeRetried(c.cfg.Root); err != nil { return err } }\n" +
-	"func validateRootTree() { _, err := retryPublish(func() error { return validate(root) }, retryable, h); return err }\n" +
+	"func validateRootTree() { retryable := func(err error) bool { return transient(err) || errors.Is(err, os.ErrNotExist) }\n" +
+	"_, err := retryPublish(func() error { return validate(root) }, retryable, h); if errors.Is(err, os.ErrNotExist) { return errPrivateLayout }; return err }\n" +
 	"var validatePrivateTreeRetried = func(root string) error { return validateRootTree(root, validatePrivateTree, runtimeconfig.WindowsPrivateTransient, leasePublishHooks{}) }\n"
 
 func TestValidateRootTreeSourceContract(t *testing.T) {

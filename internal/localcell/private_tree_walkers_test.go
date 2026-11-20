@@ -8,7 +8,6 @@ import (
 	"go/parser"
 	"go/token"
 	"go/types"
-	"io/fs"
 	"maps"
 	"os"
 	"regexp"
@@ -52,8 +51,8 @@ func treeLockWalker(create bool) func(*testing.T) (string, func() error) {
 }
 
 // Each walker through the seam (the retry over a fake walk, predicate and clock): refused three times
-// then passing; refused past the budget (one budget, the last error); non-transient (the snapshot's
-// churn) or a cut, one walk.
+// then passing; refused past the budget (one budget, the last error); non-transient (a validation
+// refusal) or a cut, one walk. A vanished object is walked again (TestPrivateTreeWalkersWalkAgain).
 func TestPrivateTreeWalkersRetry(t *testing.T) {
 	transient := errors.New("synthetic transient tree refusal")
 	for _, walker := range treeWalkers {
@@ -62,7 +61,7 @@ func TestPrivateTreeWalkersRetry(t *testing.T) {
 			failures, walks int // failures: refused walks before one passes (-1: all); walks 0: one budget
 			failure         error
 		}{{"released", 3, 4, transient}, {"held", -1, 0, transient},
-			{"refusal", -1, 1, fmt.Errorf("synthetic tree churn refusal: %w", fs.ErrNotExist)}, {"cut", -1, 1, context.Canceled}} {
+			{"refusal", -1, 1, errors.New("synthetic tree validation refusal")}, {"cut", -1, 1, context.Canceled}} {
 			t.Run(walker.name+"/"+row.name, func(t *testing.T) {
 				root, run := walker.setup(t)
 				calls, walks, now, slept, sleeps, last, previous := 0, 0, time.Unix(0, 0), time.Duration(0), []time.Duration{}, error(nil), validatePrivateTreeRetried
@@ -93,9 +92,21 @@ func TestPrivateTreeWalkersRetry(t *testing.T) {
 	}
 }
 
-// privateTreeWalkerContract names every walk outside the boundary and every retry around a walker or in the walk.
+// Each walker's one crossing, the statement that returns or maps its error (LC-TREEWALK-F1).
+var privateTreeCrossings = map[string]string{
+	"files.go:(*Cell).validateRoot": "if err := validatePrivateTreeRetried(c.cfg.Root); err != nil { return err }",
+	"lock.go:acquireLock":           "if err := validatePrivateTreeRetried(root); err != nil { return nil, err }",
+	"service_shutdown_windows.go:readShutdownDescriptor": `if !shutdownDescriptorPath(root, path) || validatePrivateTreeRetried(root) != nil || privateDir(root, false) != nil || ` +
+		`privateDir(filepath.Join(root, "service"), false) != nil || privateDir(filepath.Join(root, "service", "children"), false) != nil || ` +
+		`servicePrivateRecord(path) != nil { return serviceShutdownDescriptor{}, shutdownRefused("shutdown:descriptor") }`,
+}
+
+// privateTreeWalkerContract names every walk outside the boundary, every retry around a walker or in the walk,
+// the engine reached other than through the boundary, a write of the boundary, and a crossing that is not one
+// walker's pinned statement.
 func privateTreeWalkerContract(sources map[string]string) []string {
 	walker, failures := regexp.MustCompile(`\b(validatePrivateTree|validatePrivateTreeRetried|validateRoot|acquireLock|readShutdownDescriptor)\b`), []string{}
+	boundary, crossings := regexp.MustCompile(`\bvalidatePrivateTreeRetried\b`), map[string][]string{}
 	for _, name := range slices.Sorted(maps.Keys(sources)) {
 		file, err := parser.ParseFile(token.NewFileSet(), name, strings.ReplaceAll(sources[name], "\r\n", "\n"), 0)
 		if err != nil {
@@ -103,8 +114,27 @@ func privateTreeWalkerContract(sources map[string]string) []string {
 		}
 		for _, declaration := range file.Decls {
 			referencesDeclarations(declaration, func(owner string, part ast.Node) {
-				site := name + ":" + owner
+				site, parts := name+":"+owner, []ast.Node{part}
+				if function, ok := part.(*ast.FuncDecl); ok && function.Body != nil {
+					parts = parts[:0]
+					for _, statement := range function.Body.List {
+						parts = append(parts, statement)
+					}
+				}
+				for _, piece := range parts {
+					if text := serviceBootPublicationText(piece); boundary.MatchString(text) && site != "files.go:validatePrivateTreeRetried" {
+						crossings[site] = append(crossings[site], text)
+					}
+				}
 				ast.Inspect(part, func(node ast.Node) bool {
+					if word, ok := node.(*ast.Ident); ok && word.Name == "validateRootTree" && site != "files.go:validateRootTree" && site != "files.go:validatePrivateTreeRetried" {
+						failures = append(failures, "engine:"+site)
+					}
+					if assign, ok := node.(*ast.AssignStmt); ok && slices.ContainsFunc(assign.Lhs, func(target ast.Expr) bool { return boundary.MatchString(types.ExprString(target)) }) {
+						failures = append(failures, "write:"+site)
+					} else if address, ok := node.(*ast.UnaryExpr); ok && address.Op == token.AND && boundary.MatchString(types.ExprString(address.X)) {
+						failures = append(failures, "write:"+site)
+					}
 					if call, ok := node.(*ast.CallExpr); ok && site != "files.go:validatePrivateTreeRetried" && slices.Contains([]string{"retryPublish",
 						"publishAtomic", "retryCheckpointStep", "validateRootTree", "retryServiceContention", "writeAtomic", "writeAtomicBytes"}, types.ExprString(call.Fun)) &&
 						(owner == "validatePrivateTree" || slices.ContainsFunc(call.Args, func(argument ast.Expr) bool {
@@ -117,6 +147,16 @@ func privateTreeWalkerContract(sources map[string]string) []string {
 					return true
 				})
 			})
+		}
+	}
+	for site, statements := range crossings {
+		if want, ok := privateTreeCrossings[site]; !ok || len(statements) != 1 || statements[0] != want {
+			failures = append(failures, "crossing:"+site)
+		}
+	}
+	for site := range privateTreeCrossings {
+		if crossings[site] == nil {
+			failures = append(failures, "crossing:"+site)
 		}
 	}
 	slices.Sort(failures)
@@ -134,6 +174,14 @@ func TestPrivateTreeWalkerSourceContract(t *testing.T) {
 		{"shutdown_descriptor_direct", "service_shutdown_windows.go", "validatePrivateTreeRetried(root) != nil", "validatePrivateTree(root) != nil", "direct:service_shutdown_windows.go:readShutdownDescriptor"},
 		{"nested_around", "files.go", "if err := validatePrivateTreeRetried(c.cfg.Root); err != nil {", "if err := validateRootTree(c.cfg.Root, validatePrivateTreeRetried, runtimeconfig.WindowsPrivateTransient, leasePublishHooks{}); err != nil {", "nested:files.go:(*Cell).validateRoot"},
 		{"nested_inside", "files_windows.go", "if err := validateRootPath(root); err != nil {", "if _, err := retryPublish(func() error { return validateRootPath(root) }, runtimeconfig.WindowsPrivateTransient, leasePublishHooks{}); err != nil {", "nested:files_windows.go:validatePrivateTree"},
+		// LC-TREEWALK-R1's survivors (G-1, G-2, G-4, G-5), each one edit of its exact text.
+		{"probe_refusal_absent", "lock.go", "if err := validatePrivateTreeRetried(root); err != nil {\n\t\treturn nil, err\n\t}", "if err := validatePrivateTreeRetried(root); err != nil {\n\t\tif !create && err.Error() == \"private Windows sharing-violation\" {\n\t\t\treturn nil, nil\n\t\t}\n\t\treturn nil, err\n\t}", "crossing:lock.go:acquireLock"},
+		{"production_write", "files_windows.go", "func validatePrivateTree(root string) error {", "func init() { validatePrivateTreeRetried = func(string) error { return nil } }\n\nfunc validatePrivateTree(root string) error {", "write:files_windows.go:init"},
+		{"local_shadow", "lock.go", "func acquireLock(ctx context.Context, root string, create bool) (_ *operationLock, err error) {\n", "func acquireLock(ctx context.Context, root string, create bool) (_ *operationLock, err error) {\n\tvalidatePrivateTreeRetried := func(root string) error { return retriedTreeWalk(validatePrivateTreeRetried, root) }\n", "write:lock.go:acquireLock"},
+		{"second_crossing", "lock.go", "if err := validatePrivateTreeRetried(root); err != nil {\n\t\treturn nil, err\n\t}", "if err := validatePrivateTreeRetried(root); err != nil {\n\t\tif err.Error() == \"private Windows sharing-violation\" {\n\t\t\terr = validatePrivateTreeRetried(root)\n\t\t}\n\t\tif err != nil {\n\t\t\treturn nil, err\n\t\t}\n\t}", "crossing:lock.go:acquireLock"},
+		{"engine_parameter", "files.go", "// Every private-tree walker's one retry boundary, never retried again (FLAKE-63B).\n", "func retriedTreeWalk(walk func(string) error, root string) error {\n\treturn validateRootTree(root, walk, runtimeconfig.WindowsPrivateTransient, leasePublishHooks{})\n}\n\n// Every private-tree walker's one retry boundary, never retried again (FLAKE-63B).\n", "engine:files.go:retriedTreeWalk"},
+		{"engine_method_value", "files.go", "// Every private-tree walker's one retry boundary, never retried again (FLAKE-63B).\n", "func (c *Cell) validateRootRetried(create bool) error {\n\tcheck := c.validateRoot\n\treturn validateRootTree(c.cfg.Root, func(string) error { return check(create) }, runtimeconfig.WindowsPrivateTransient, leasePublishHooks{})\n}\n\n// Every private-tree walker's one retry boundary, never retried again (FLAKE-63B).\n", "engine:files.go:(*Cell).validateRootRetried"},
+		{"engine_snapshot", "private_tree_snapshot.go", "err := validate(path, entry.IsDir())", "err := validateRootTree(path, func(path string) error { return validate(path, entry.IsDir()) }, privateTreeTransient, leasePublishHooks{})", "engine:private_tree_snapshot.go:validatePrivateTreeSnapshot"},
 	} {
 		t.Run(mutation.name, func(t *testing.T) {
 			if strings.Count(sources[mutation.file], mutation.before) != 1 {

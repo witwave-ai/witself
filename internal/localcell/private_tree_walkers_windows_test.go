@@ -33,8 +33,9 @@ func init() {
 	}})
 }
 
-// A real delete handle below the tree: released within the budget, the walker passes after it; kept
-// past it (a fuse at three budgets), the walker ends after the budget in today's (unretried) refusal.
+// A real delete handle below the tree, proved on the bare walk: released within the budget, the walker
+// passes after it; kept past it (a fuse at three budgets), the walker ends after the budget in today's
+// (unretried) refusal. One check per expectation (LC-TREEWALK-F1).
 func TestWindowsPrivateTreeWalkersHolder(t *testing.T) {
 	for _, walker := range treeWalkers {
 		for _, hold := range []time.Duration{serviceLeasePublishBudget / 8, 3 * serviceLeasePublishBudget} {
@@ -43,6 +44,9 @@ func TestWindowsPrivateTreeWalkersHolder(t *testing.T) {
 				root, run := walker.setup(t)
 				release, today, previous := holdTreeDelete(t, filepath.Join(root, "manifest.json")), error(nil), validatePrivateTreeRetried
 				t.Cleanup(func() { validatePrivateTreeRetried = previous })
+				if validatePrivateTree(root) == nil {
+					t.Fatalf("cannot refuse the bare tree walk with the held delete handle: %s", walker.name)
+				}
 				if held {
 					validatePrivateTreeRetried = validatePrivateTree
 					today, validatePrivateTreeRetried = run(), previous
@@ -58,8 +62,10 @@ func TestWindowsPrivateTreeWalkersHolder(t *testing.T) {
 				case !held && elapsed < hold:
 					t.Fatalf("the tree walker passed a tree walk while the delete handle was held: %s", walker.name)
 				case held && today == nil:
-					t.Fatalf("cannot refuse an unretried tree walker with the held delete handle: %s", walker.name)
-				case held && (err == nil || runtimeconfig.WindowsPrivateFailureClass(err) != runtimeconfig.WindowsPrivateFailureClass(today)):
+					t.Fatalf("the unretried tree walker passed a walk the held delete handle refused: %s", walker.name)
+				case held && err == nil:
+					t.Fatalf("a delete handle held past the budget let the tree walker pass: %s", walker.name)
+				case held && runtimeconfig.WindowsPrivateFailureClass(err) != runtimeconfig.WindowsPrivateFailureClass(today):
 					t.Fatalf("a delete handle held past the budget changed the tree walker refusal class: %s", walker.name)
 				case held && err.Error() != today.Error():
 					t.Fatalf("a delete handle held past the budget changed the tree walker refusal text: %s", walker.name)
