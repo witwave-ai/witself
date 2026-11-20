@@ -8,6 +8,8 @@ import (
 	"path"
 	"path/filepath"
 	"reflect"
+	"runtime/debug"
+	"strconv"
 	"syscall"
 	"testing"
 
@@ -48,11 +50,23 @@ func treePlant(t *testing.T, c *Cell, name, kind string, kept heldTrees) {
 	}
 }
 
-// A same-user object put at a directory the copy made (its parent synced: syncCheckpointTreeParent), at a name it is
-// about to publish (checkpointTest.beforeStep "publish", the k-th), at recovery/ (after the checkpoint directory's
-// parent sync), or at the checkpoint after the copy (checkpointRecorder.after) is refused before anything is written
-// through it: nothing it leads to changes, the journal closes, and cleanup is incomplete exactly where the plant
-// stands at the checkpoint's name or recovery/, which then holds it as planted; elsewhere the call removed its own.
+// treeSame reports whether each kept tree still stands, unchanged.
+func treeSame(t *testing.T, kept heldTrees) bool {
+	for dir, tree := range kept {
+		if _, err := os.Lstat(dir); err != nil || !reflect.DeepEqual(tree, heldTree(t, dir)) {
+			return false
+		}
+	}
+	return true
+}
+
+// A same-user object put at a directory the copy made (its parent synced: syncCheckpointTreeParent), at one it is about
+// to sync (syncCheckpointTreeDirectory), at a name it is about to publish (checkpointTest.beforeStep "publish", the
+// k-th), at recovery/ (after the checkpoint directory's parent sync), or at the checkpoint after the copy
+// (checkpointRecorder.after) is refused before anything is written through or into it: nothing it leads to changes, a
+// plant below the checkpoint is as planted when the discard begins, the journal closes, and cleanup is incomplete
+// exactly where the plant stands at the checkpoint's name or recovery/, which then holds it as planted; elsewhere the
+// call removed its own.
 func TestCheckpointTreeCopyRefuses(t *testing.T) {
 	dirs, leaves := []string{"dir", "link_cell", "link_out", "dangling", "file", "fifo"}, []string{"dir", "link_out", "dangling", "file", "fifo"}
 	for _, row := range []struct {
@@ -62,13 +76,13 @@ func TestCheckpointTreeCopyRefuses(t *testing.T) {
 	}{
 		{"mkdir", "", 0, dirs}, {"mkdir", "pg/base/1", 0, dirs}, {"publish", "", 1, dirs}, {"publish", "pg", 1, dirs},
 		{"publish", "pg/global", 3, dirs}, {"publish", "run", 6, dirs}, {"publish", "pg/global/pg_control", 3, leaves},
-		{"recovery", "", 0, leaves}, {"afterCopy", "", 0, []string{"dir", "link_out", "dangling", "file"}},
+		{"recovery", "", 0, leaves}, {"afterCopy", "", 0, []string{"dir", "link_out", "dangling", "file"}}, {"sync", "pg/base/1", 0, dirs},
 	} {
 		for _, kind := range row.kinds {
 			t.Run(row.stage+"#"+row.name+"/"+kind, func(t *testing.T) {
 				f, r := checkpointFixture(t, "legacy", false)
 				c, kept, calls, reached, want := f.cell, heldTrees{}, 0, false, any(nil)
-				at, left := c.path("recovery", heldTarget, filepath.FromSlash(row.name)), row.name == ""
+				at, left, inspected, through := c.path("recovery", heldTarget, filepath.FromSlash(row.name)), row.name == "", false, false
 				if r.nextID = func() (string, error) { return heldTarget, nil }; row.stage == "recovery" {
 					at = c.recoveryDir()
 				}
@@ -79,17 +93,23 @@ func TestCheckpointTreeCopyRefuses(t *testing.T) {
 						want = treeAt(t, at)
 					}
 				}
-				original := syncCheckpointTreeParent
-				t.Cleanup(func() { syncCheckpointTreeParent = original })
+				original, directory := syncCheckpointTreeParent, syncCheckpointTreeDirectory
+				t.Cleanup(func() { syncCheckpointTreeParent, syncCheckpointTreeDirectory = original, directory })
 				syncCheckpointTreeParent = func(made string, sync func() error) error {
 					err := original(made, sync)
 					plant(row.stage == "recovery" && made == heldTarget || row.stage == "mkdir" && made == path.Join(heldTarget, row.name))
 					return err
 				}
+				syncCheckpointTreeDirectory = func(name string, sync func() error) error {
+					plant(row.stage == "sync" && name == path.Join(heldTarget, row.name))
+					return directory(name, sync)
+				}
 				c.checkpointTest.beforeStep = func(step, _ string) {
 					if step == "publish" {
 						calls++
 						plant(row.stage == "publish" && calls == row.at)
+					} else if step == "hold" && reached && !left {
+						inspected, through = true, !reflect.DeepEqual(treeAt(t, at), want)
 					}
 				}
 				r.after = func(string) { plant(row.stage == "afterCopy") }
@@ -103,7 +123,15 @@ func TestCheckpointTreeCopyRefuses(t *testing.T) {
 				if failure.CleanupIncomplete != left {
 					t.Fatalf("the tree row reported cleanup incomplete %t", failure.CleanupIncomplete)
 				}
-				heldSame(t, kept)
+				if !treeSame(t, kept) {
+					t.Fatal("the tree row changed a tree its plant leads to")
+				}
+				if !left && !inspected {
+					t.Fatal("the tree row's discard never began after its plant")
+				}
+				if through {
+					t.Fatal("the tree row wrote through or into its plant before the discard")
+				}
 				if !readers5JournalClosed(c) {
 					t.Fatal("the tree row left its journal open or torn")
 				}
@@ -136,6 +164,99 @@ func TestCheckpointTreeMkdirRefused(t *testing.T) {
 	}
 	if treeAt(t, f.cell.path("recovery", heldTarget)) != nil {
 		t.Fatal("the refused mkdir left something at the checkpoint name")
+	}
+}
+
+// A made directory whose parent sync fails (pg/base/1's, through the seam) fails the create, and the discard removes it.
+func TestCheckpointTreeParentSyncFails(t *testing.T) {
+	f, r := checkpointFixture(t, "legacy", false)
+	r.nextID = func() (string, error) { return heldTarget, nil }
+	original := syncCheckpointTreeParent
+	t.Cleanup(func() { syncCheckpointTreeParent = original })
+	syncCheckpointTreeParent = func(made string, sync func() error) error {
+		if made == path.Join(heldTarget, "pg", "base", "1") {
+			return errors.New("synthetic parent sync failure")
+		}
+		return original(made, sync)
+	}
+	if failure := ClassifyCheckpointFailure(f.cell.Checkpoint(t.Context(), checkpointOptions(f))); failure.Class != "local_checkpoint_copy_failed" {
+		t.Fatalf("the failed parent sync ended in class %q", failure.Class)
+	} else if failure.CleanupIncomplete {
+		t.Fatal("the failed parent sync left its directory to an incomplete cleanup")
+	}
+	if treeAt(t, f.cell.path("recovery", heldTarget)) != nil {
+		t.Fatal("the failed parent sync left something at the checkpoint name")
+	}
+}
+
+// recovery/ moved out of the cell and linked back just before a tree operation that binds on its own (the temporary
+// after pg is made, the first publication, the first directory sync, the failed create's sweep and directory steps) is
+// refused at that operation: the moved tree never changes and cleanup is incomplete (MINOR-1 of LC-CKPT-WALK-1BR).
+func TestCheckpointTreeBound(t *testing.T) {
+	for _, row := range []string{"create_temp", "publish", "sync", "sweep", "directory"} {
+		t.Run(row, func(t *testing.T) {
+			kept, reached := heldTrees{}, false
+			plant := func(c *Cell, now bool) {
+				if now && !reached {
+					reached = true
+					treePlant(t, c, c.recoveryDir(), "link_out", kept)
+				}
+			}
+			parent, directory := syncCheckpointTreeParent, syncCheckpointTreeDirectory
+			t.Cleanup(func() { syncCheckpointTreeParent, syncCheckpointTreeDirectory = parent, directory })
+			discarding, failure := row == "sweep" || row == "directory", CheckpointFailure{}
+			if discarding {
+				_, failure = heldDiscard(t, func(c *Cell) { heldAt(c, row, func() { plant(c, true) }) })
+			} else {
+				f, r := checkpointFixture(t, "legacy", false)
+				r.nextID = func() (string, error) { return heldTarget, nil }
+				syncCheckpointTreeParent = func(made string, sync func() error) error {
+					err := parent(made, sync)
+					plant(f.cell, row == "create_temp" && made == path.Join(heldTarget, "pg"))
+					return err
+				}
+				syncCheckpointTreeDirectory = func(name string, sync func() error) error {
+					plant(f.cell, row == "sync")
+					return directory(name, sync)
+				}
+				f.cell.checkpointTest.beforeStep = func(step, _ string) { plant(f.cell, row == "publish" && step == "publish") }
+				failure = ClassifyCheckpointFailure(f.cell.Checkpoint(t.Context(), checkpointOptions(f)))
+			}
+			if !reached {
+				t.Fatal("the bound row never reached its planting stage")
+			}
+			if !discarding && failure.Class != "local_checkpoint_copy_failed" {
+				t.Fatalf("the bound row ended in class %q", failure.Class)
+			}
+			if !failure.CleanupIncomplete {
+				t.Fatal("the bound row reported a cleanup through a moved recovery directory")
+			}
+			if !treeSame(t, kept) {
+				t.Fatal("a tree operation changed the moved recovery directory")
+			}
+		})
+	}
+}
+
+// A create leaves no descriptor open on recovery/: its tree is closed (N7 of LC-CKPT-WALK-1BR). No collection runs
+// while the row looks, so no finalizer can close a leaked root behind it.
+func TestCheckpointTreeClosed(t *testing.T) {
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	f, r := checkpointFixture(t, "legacy", false)
+	r.nextID = func() (string, error) { return heldTarget, nil }
+	var recovery unix.Stat_t
+	if f.cell.Checkpoint(t.Context(), checkpointOptions(f)) != nil || unix.Lstat(f.cell.recoveryDir(), &recovery) != nil {
+		t.Fatal("cannot create the closed tree checkpoint")
+	}
+	descriptors, err := os.ReadDir("/dev/fd")
+	if err != nil {
+		t.Fatal("cannot list this process's descriptors")
+	}
+	for _, descriptor := range descriptors {
+		var stat unix.Stat_t
+		if fd, err := strconv.Atoi(descriptor.Name()); err == nil && unix.Fstat(fd, &stat) == nil && stat.Dev == recovery.Dev && stat.Ino == recovery.Ino {
+			t.Fatal("a create left a descriptor open on the recovery directory")
+		}
 	}
 }
 

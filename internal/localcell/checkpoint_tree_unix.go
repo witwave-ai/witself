@@ -70,8 +70,10 @@ func (t *checkpointTree) lstat(name string) (fs.FileInfo, error) {
 	return privateBeneathLstat(t.recovery, t.name(name), t.want)
 }
 
-// mkdir makes name and records its identity, a refused one's too (its
-// re-open, privacy check or parent sync failed), so the discard can remove it.
+// mkdir makes name and records its identity, a refused one's too once its
+// re-open succeeded (its privacy check or parent sync failed), so the discard
+// can remove it. A directory whose re-open failed has no identity and is not
+// recorded: at the checkpoint's own name the discard leaves it, incomplete.
 func (t *checkpointTree) mkdir(name string) error {
 	if err := t.bound(); err != nil {
 		return err
