@@ -186,25 +186,37 @@ var leaseWaitReleased = []string{"checkpoint.go:(*Cell).Checkpoint", "checkpoint
 	"checkpoint.go:(*Cell).admitCheckpoint", "checkpoint.go:(*Cell).admitCheckpointDry", "checkpoint.go:(*Cell).checkpointLocked", "checkpoint.go:(*Cell).copyCheckpoint",
 	"checkpoint.go:(*Cell).deleteCheckpointLocked", "checkpoint.go:(*Cell).inventoryCheckpoint", "checkpoint.go:(*Cell).witnessCheckpoint"}
 
-// leaseWaitCall is one call into leaseWaitOpeners: its site and file offset.
+// leaseWaitValueUses are the non-test uses of an opener other than as a callee
+// (G5), each an opener handed to openRegularBy or readRegular as its open, by
+// file and declaration with their counts; leaseWaitReleasedCallers are the
+// non-test calls into leaseWaitReleased from outside it (G2, G5).
+var leaseWaitValueUses = map[string]int{"checkpoint.go:(*Cell).admitCheckpoint": 1, "commands.go:(*Cell).password": 1, "files.go:openRegular": 1,
+	"lifecycle.go:(*Cell).postmaster": 1, "lifecycle.go:(*Cell).recoverPostgresRecord": 1, "reinstall.go:(*Cell).reinstallAvailable": 1, "service_descriptor.go:openServiceRecord": 1}
+var leaseWaitReleasedCallers = map[string]int{"lifecycle.go:(*Cell).Status": 1}
+
+// leaseWaitCall is one use of an opener or a released declaration: its site
+// and file offset.
 type leaseWaitCall struct {
 	site   string
 	offset int
 }
 
 // leaseWaitTyped type-checks the sources system builds through the package
-// reference contract's world and returns each call into leaseWaitOpeners, a
-// callee resolved by type (a method by its receiver type), whose first
-// argument is not its declaration's own context parameter, with whether it
-// passes anything but context.Background(); the openers it resolves; and
-// whether the world or the check failed.
-func leaseWaitTyped(world *referencesWorld, system string, sources map[string]string) (calls map[leaseWaitCall]bool, resolved map[string]bool, failed bool) {
+// reference contract's world and returns by kind each call into
+// leaseWaitOpeners, a callee resolved by type (a method by its receiver type,
+// or an interface method of a listed method's name and signature): "live" with
+// its declaration's own context parameter first, "placeholder" with a call of
+// package context's Background (by object), else "other"; each other use of an
+// opener ("value"); each call into leaseWaitReleased ("released" with its own
+// context, else "released_other"); the openers it resolves; and whether the
+// world or the check failed.
+func leaseWaitTyped(world *referencesWorld, system string, sources map[string]string) (calls map[leaseWaitCall]string, resolved map[string]bool, failed bool) {
 	world.Lock()
 	defer world.Unlock()
 	if world.listed == nil {
 		world.load(system)
 	}
-	if calls, resolved = map[leaseWaitCall]bool{}, map[string]bool{}; world.failed {
+	if calls, resolved = map[leaseWaitCall]string{}, map[string]bool{}; world.failed {
 		return calls, resolved, true
 	}
 	matcher, fset, files := world.context, token.NewFileSet(), []*ast.File(nil)
@@ -221,10 +233,15 @@ func leaseWaitTyped(world *referencesWorld, system string, sources map[string]st
 	config := types.Config{Importer: world.importer(world.listed[world.self].ImportMap, world.listed[world.self].Dir), Sizes: types.SizesFor("gc", "amd64"),
 		Error: func(error) { failed = true }}
 	self, _ := config.Check(world.self, fset, files, info)
-	targets := map[types.Object]bool{}
+	targets, released, methods := map[types.Object]bool{}, map[types.Object]bool{}, map[string]types.Type{}
 	for _, name := range leaseWaitOpeners {
 		if object := world.resolve(self, name); object != nil {
-			targets[object], resolved[name] = true, true
+			targets[object], resolved[name], methods[object.Name()] = true, true, object.Type()
+		}
+	}
+	for _, site := range leaseWaitReleased {
+		if _, name, _ := strings.Cut(site, ":"); world.resolve(self, name) != nil {
+			released[world.resolve(self, name)] = true
 		}
 	}
 	for _, file := range files {
@@ -232,13 +249,34 @@ func leaseWaitTyped(world *referencesWorld, system string, sources map[string]st
 		for _, declaration := range file.Decls {
 			function, _ := declaration.(*ast.FuncDecl)
 			referencesDeclarations(declaration, func(owner string, node ast.Node) {
+				called := map[*ast.Ident]bool{}
 				ast.Inspect(node, func(node ast.Node) bool {
-					call, ok := node.(*ast.CallExpr)
-					if !ok {
+					if identifier, ok := node.(*ast.Ident); ok && !called[identifier] {
+						if object, _ := info.Uses[identifier].(*types.Func); object != nil && targets[object.Origin()] {
+							calls[leaseWaitCall{name + ":" + owner, fset.PositionFor(identifier.Pos(), false).Offset}] = "value"
+						}
+					}
+					call, _ := node.(*ast.CallExpr)
+					callee := (*types.Func)(nil)
+					if call != nil {
+						called[referencesIdentifier(call.Fun)] = true
+						callee, _ = referencesNamed(info, call.Fun).(*types.Func)
+					}
+					if callee == nil {
 						return true
 					}
-					if callee, _ := referencesNamed(info, call.Fun).(*types.Func); callee != nil && targets[callee.Origin()] && !leaseWaitOwnTyped(info, function, call.Args) {
-						calls[leaseWaitCall{name + ":" + owner, fset.PositionFor(call.Pos(), false).Offset}] = len(call.Args) == 0 || types.ExprString(call.Args[0]) != "context.Background()"
+					use, own, receiver := leaseWaitCall{name + ":" + owner, fset.PositionFor(call.Pos(), false).Offset}, leaseWaitOwnTyped(info, function, call.Args), callee.Signature().Recv()
+					switch background := (*types.Func)(nil); {
+					case released[callee.Origin()]:
+						calls[use] = map[bool]string{true: "released", false: "released_other"}[own]
+					case !targets[callee.Origin()] && (receiver == nil || !types.IsInterface(receiver.Type()) || !types.Identical(callee.Type(), methods[callee.Name()])):
+					case own:
+						calls[use] = "live"
+					default: // a placeholder by its text and by its object (G2)
+						if argument, ok := slices.Concat(call.Args, []ast.Expr{nil})[0].(*ast.CallExpr); ok && types.ExprString(argument) == "context.Background()" {
+							background, _ = referencesNamed(info, argument.Fun).(*types.Func)
+						}
+						calls[use] = map[bool]string{true: "placeholder", false: "other"}[background != nil && background.FullName() == "context.Background"]
 					}
 					return true
 				})
@@ -272,9 +310,10 @@ func leaseWaitOwnTyped(info *types.Info, function *ast.FuncDecl, arguments []ast
 // second per file too.
 func leaseWaitContract(sources map[string]string) (result []string) {
 	failures, fset, counts, found := map[string]bool{}, token.NewFileSet(), map[string]int{}, map[string]bool{}
-	placeholders, lf, typed, group := map[string]int{}, map[string]string{}, [len(referencesSystems)]map[leaseWaitCall]bool{}, sync.WaitGroup{}
+	placeholders, lf, typed, group := map[string]int{}, map[string]string{}, [len(referencesSystems)]map[leaseWaitCall]string{}, sync.WaitGroup{}
 	resolved, failed := [len(referencesSystems)]map[string]bool{}, [len(referencesSystems)]bool{}
 	detached, entries := map[string]int{}, map[string]bool{} // LC-LEASE-2C2's lease_wait_detached
+	values, released, reassigned := map[string]int{}, map[string]int{}, map[string]int{}
 	for name, source := range sources {
 		lf[name] = strings.ReplaceAll(source, "\r\n", "\n")
 	}
@@ -284,16 +323,35 @@ func leaseWaitContract(sources map[string]string) (result []string) {
 		})
 	}
 	group.Wait()
-	calls := map[leaseWaitCall]bool{}
+	calls := map[leaseWaitCall]string{}
 	for index, system := range referencesSystems {
 		failures["lease_wait_types:"+system] = failed[index]
-		for call, bad := range typed[index] {
-			calls[call] = calls[call] || bad
+		for call, kind := range typed[index] {
+			if seen, ok := calls[call]; ok && seen != kind {
+				kind = "other" // systems that disagree on a use
+			}
+			calls[call] = kind
 		}
 	}
-	for call, bad := range calls {
-		placeholders[call.site]++
-		failures["lease_wait_placeholder:"+call.site] = failures["lease_wait_placeholder:"+call.site] || bad
+	for call, kind := range calls {
+		switch _, owner, _ := strings.Cut(call.site, ":"); kind {
+		case "live": // an own context enters the layer only from the layer or a released declaration
+			failures["lease_wait_live:"+call.site] = failures["lease_wait_live:"+call.site] || !slices.Contains(leaseWaitOpeners, owner) && !slices.Contains(leaseWaitReleased, call.site)
+		case "value":
+			values[call.site]++
+		case "released", "released_other":
+			released[call.site]++
+			failures["lease_wait_released:"+call.site] = failures["lease_wait_released:"+call.site] || kind != "released"
+		default:
+			placeholders[call.site]++
+			failures["lease_wait_placeholder:"+call.site] = failures["lease_wait_placeholder:"+call.site] || kind != "placeholder"
+		}
+	}
+	for _, site := range slices.Concat(slices.Collect(maps.Keys(values)), slices.Collect(maps.Keys(leaseWaitValueUses))) {
+		failures["lease_wait_value:"+site] = values[site] != leaseWaitValueUses[site]
+	}
+	for _, site := range slices.Concat(slices.Collect(maps.Keys(released)), slices.Collect(maps.Keys(leaseWaitReleasedCallers))) {
+		failures["lease_wait_released:"+site] = failures["lease_wait_released:"+site] || !slices.Contains(leaseWaitReleased, site) && released[site] != leaseWaitReleasedCallers[site]
 	}
 	for _, name := range leaseWaitOpeners {
 		failures["lease_wait_unknown:"+name] = !slices.ContainsFunc(resolved[:], func(names map[string]bool) bool { return names[name] })
@@ -343,13 +401,28 @@ func leaseWaitContract(sources map[string]string) (result []string) {
 		})
 		for _, declaration := range file.Decls {
 			referencesDeclarations(declaration, func(owner string, node ast.Node) {
+				function, _ := node.(*ast.FuncDecl) // G1: a layer declaration that assigns or exposes its own context
+				layer := function != nil && (slices.Contains(leaseWaitOpeners, owner) || slices.Contains(leaseWaitReleased, name+":"+owner))
 				ast.Inspect(node, func(node ast.Node) bool {
-					if identifier, ok := node.(*ast.Ident); ok && (identifier.Name == "leaseWaitDetached" || identifier.Name == "leaseWaitDetachedKey") {
-						detached[name+":"+owner]++
+					var targets []ast.Expr
+					switch node := node.(type) {
+					case *ast.Ident:
+						if node.Name == "leaseWaitDetached" || node.Name == "leaseWaitDetachedKey" {
+							detached[name+":"+owner]++
+						}
+					case *ast.AssignStmt:
+						targets = node.Lhs
+					case *ast.UnaryExpr:
+						targets = []ast.Expr{map[bool]ast.Expr{true: node.X}[node.Op == token.AND]}
+					case *ast.RangeStmt:
+						targets = []ast.Expr{node.Key, node.Value}
+					}
+					for _, target := range targets {
+						reassigned[name+":"+owner] += map[bool]int{true: 1}[layer && leaseWaitOwnContext(function, target)]
 					}
 					return true
 				})
-				if function, ok := node.(*ast.FuncDecl); ok && function.Body != nil && len(function.Body.List) > 0 && strings.HasPrefix(owner, "(*Cell).") {
+				if function != nil && function.Body != nil && len(function.Body.List) > 0 && strings.HasPrefix(owner, "(*Cell).") {
 					first, _ := function.Body.List[0].(*ast.AssignStmt) // ctx = leaseWaitDetached(ctx), ctx its own
 					entries[name+":"+owner] = first != nil && leaseWaitPrint(fset, first) == "ctx = leaseWaitDetached(ctx)" && leaseWaitOwnContext(function, first.Rhs[0].(*ast.CallExpr).Args[0])
 				}
@@ -413,6 +486,9 @@ func leaseWaitContract(sources map[string]string) (result []string) {
 	}
 	for _, site := range leaseWaitReleased {
 		failures["lease_wait_detached"] = failures["lease_wait_detached"] || placeholders[site] != 0
+	}
+	for _, site := range slices.Concat(slices.Collect(maps.Keys(reassigned)), leaseWaitReleased[:3]) { // only the three entries' detach
+		failures["lease_wait_reassigned:"+site] = reassigned[site] != map[bool]int{true: 1}[slices.Contains(leaseWaitReleased[:3], site)]
 	}
 	for file, texts := range leaseWaitCutText {
 		for _, text := range texts {
@@ -511,6 +587,8 @@ func TestLeaseWaitSourceContract(t *testing.T) {
 	}
 	const checkpoint, start = "func (c *Cell) Checkpoint(ctx context.Context, options CheckpointOptions) error {\n", "func (c *Cell) Start(ctx context.Context) error {\n"
 	const source = "\topen, release, err := c.openCheckpointSource("
+	const begin, inspect, witness = "\tif err := c.begin(context.Background(), \"start\"); err != nil {\n", "\tinspection, err := c.Inspect(ctx)\n", source + "ctx)\n\tif err != nil {\n\t\treturn errCheckpointWitness\n"
+	const journal, removal = "\tprogress, err := c.readJournal(ctx)\n\tif err != nil {\n\t\treturn result, err\n\t}\n", "func (c *Cell) finishRemoval(ctx context.Context, m *Manifest, purge bool) error {\n"
 	for _, row := range []struct{ name, file, before, after, want string }{
 		{"wait_any_error", "files_other.go", "!errors.Is(err, syscall.EWOULDBLOCK)", "false", "lease_wait_body"},
 		{"wait_no_lstat", "files_other.go", "info, statErr := lstat(path); statErr != nil || !info.Mode().IsRegular() || ", "", "lease_wait_body"},
@@ -544,6 +622,26 @@ func TestLeaseWaitSourceContract(t *testing.T) {
 			"lease_wait_placeholder:checkpoint.go:(*Cell).copyCheckpoint"},
 		{"wait_ignores_detach", "files_other.go", "\t\tcase <-leaseWaitDone(ctx):\n", "\t\tcase <-ctx.Done():\n", "lease_wait_body"},
 		{"refuse_cut_deferred", "checkpoint.go", "\tif cut := (*leaseWaitCut)(nil); errors.As(err, &cut) {\n\t\treturn err\n\t} else if err != nil {\n", "\tif err != nil {\n", "lease_wait_cut:checkpoint.go"},
+		// LC-LEASE-2C2-F1: the independent review's survivors behind G1, G2 and G5, each by its own text.
+		{"inspect_context_reassigned", "lifecycle.go", journal, "\tctx, cancel := context.WithTimeout(context.Background(), c.cfg.Timeout)\n\tdefer cancel()\n" + journal, "lease_wait_reassigned:lifecycle.go:(*Cell).Inspect"},
+		{"witness_context_reassigned", "checkpoint.go", witness, "\tctx, sourceCancel := context.WithTimeout(context.Background(), c.cfg.Timeout)\n\tdefer sourceCancel()\n" + witness,
+			"lease_wait_reassigned:checkpoint.go:(*Cell).witnessCheckpoint"},
+		{"removal_context_reassigned", "lifecycle.go", removal, removal + "\tctx = context.WithoutCancel(ctx)\n", "lease_wait_reassigned:lifecycle.go:(*Cell).finishRemoval"},
+		{"live_call_added", "lifecycle.go", begin, "\tif _, err := c.readJournal(ctx); err != nil {\n\t\treturn err\n\t}\n" + begin, "lease_wait_live:lifecycle.go:(*Cell).Start"},
+		{"live_closure_added", "lifecycle.go", begin, "\tprobe := func() error { _, err := c.readJournal(ctx); return err }\n\tif err := probe(); err != nil {\n\t\treturn err\n\t}\n" + begin,
+			"lease_wait_live:lifecycle.go:(*Cell).Start"},
+		{"live_status_added", "lifecycle.go", inspect, inspect + "\t_, _ = c.postmaster(ctx)\n", "lease_wait_live:lifecycle.go:(*Cell).Status"},
+		{"placeholder_spoofed", "lifecycle.go", begin + "\t\treturn err\n\t}\n", "\tif err := func() error {\n\t\tcontext := struct{ Background func() context.Context }{func() context.Context { return ctx }}\n" +
+			"\t\treturn c.begin(context.Background(), \"start\")\n\t}(); err != nil {\n\t\treturn err\n\t}\n", "lease_wait_placeholder:lifecycle.go:(*Cell).Start"},
+		{"released_live_added", "lifecycle.go", "\treturn c.finish(context.Background(), m, \"start\")\n}\n", "\t_, _ = c.Inspect(ctx)\n\treturn c.finish(context.Background(), m, \"start\")\n}\n",
+			"lease_wait_released:lifecycle.go:(*Cell).Start"},
+		{"value_in_field", "lifecycle.go", begin, "\treader := struct{ read func(context.Context) (journalProgress, error) }{c.readJournal}\n\tif _, err := reader.read(context.Background()); err != nil {\n\t\treturn err\n\t}\n" + begin,
+			"lease_wait_value:lifecycle.go:(*Cell).Start"},
+		{"interface_method_call", "lifecycle.go", begin, "\tif _, err := (interface {\n\t\treadJournal(context.Context) (journalProgress, error)\n\t})(c).readJournal(context.Background()); err != nil {\n\t\treturn err\n\t}\n" + begin,
+			"lease_wait_placeholder:lifecycle.go:(*Cell).Start"},
+		{"function_value", "lifecycle.go", begin, "\tread := c.readJournal\n\tif _, err := read(context.Background()); err != nil {\n\t\treturn err\n\t}\n" + begin, "lease_wait_value:lifecycle.go:(*Cell).Start"},
+		{"released_placeholder_caller", "lifecycle.go", inspect, "\tinspection, err := c.Inspect(context.Background())\n", "lease_wait_released:lifecycle.go:(*Cell).Status"},
+		{"released_callee_added", "lifecycle.go", begin, "\tif _, err := c.Inspect(context.Background()); err != nil {\n\t\treturn err\n\t}\n" + begin, "lease_wait_released:lifecycle.go:(*Cell).Start"},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			if strings.Count(sources[row.file], row.before) != 1 {

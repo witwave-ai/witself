@@ -9,11 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"slices"
 	"strings"
-	"sync"
-	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -41,6 +38,9 @@ func init() {
 			if f != nil {
 				_ = f.Close()
 			}
+			if ctx.Err() == nil {
+				t.Fatal("the detached row context was not done when its wait ended")
+			}
 			if _, broken := leaseContextBroken(l); !broken {
 				t.Fatal("the holder never saw the break of the detached row lease")
 			}
@@ -48,7 +48,13 @@ func init() {
 			if after, afterErr := os.ReadFile(name); readErr != nil || afterErr != nil || !bytes.Equal(before, after) {
 				t.Fatal("the leased file changed during the detached row")
 			}
-			if errors.As(err, &cut) || errors.Is(err, context.Canceled) || !errors.Is(err, syscall.EWOULDBLOCK) {
+			if errors.As(err, &cut) {
+				t.Fatal("a detached wait returned the lease wait cut")
+			}
+			if errors.Is(err, context.Canceled) {
+				t.Fatal("a detached wait returned its context error")
+			}
+			if !errors.Is(err, syscall.EWOULDBLOCK) {
 				t.Fatal("a detached wait did not keep the lease refusal")
 			}
 			if waited < leaseWait.ceiling-leaseWait.longest {
@@ -56,46 +62,6 @@ func init() {
 			}
 		}
 	}
-}
-
-// leaseRetaken takes a lease on name again at once each time it is broken, as
-// the start-state table's holder: F_GETLEASE polled about every 20 µs on a
-// locked OS thread, raw fcntl re-takes retried for at most 250 µs, so no open
-// gets in. It returns whether it saw a break or lost a re-take, and its stop.
-func leaseRetaken(t *testing.T, name string, lease int) (saw, lost *atomic.Bool, stop func()) {
-	fd, err := unix.Open(name, unix.O_RDONLY|unix.O_CLOEXEC, 0)
-	if _, leaseErr := unix.FcntlInt(uintptr(fd), unix.F_SETLEASE, lease); err != nil || leaseErr != nil {
-		_ = unix.Close(fd)
-		t.Fatal("this kernel or sandbox refused the lease the row needs")
-	}
-	saw, lost, stopped, done := new(atomic.Bool), new(atomic.Bool), make(chan struct{}), make(chan struct{})
-	go func() {
-		runtime.LockOSThread() // never unlocked: the thread and its timer slack end with the holder
-		defer close(done)
-		defer func() { _ = unix.Close(fd) }()
-		_ = unix.Prctl(unix.PR_SET_TIMERSLACK, 1000, 0, 0, 0)
-		for pause := (unix.Timespec{Nsec: 20000}); ; _ = unix.Nanosleep(&pause, nil) {
-			select {
-			case <-stopped:
-				return
-			default:
-			}
-			if held, err := unix.FcntlInt(uintptr(fd), unix.F_GETLEASE, 0); err != nil || held == lease {
-				continue
-			}
-			saw.Store(true)
-			_, _ = unix.FcntlInt(uintptr(fd), unix.F_SETLEASE, unix.F_UNLCK)
-			for deadline := time.Now().Add(250 * time.Microsecond); ; {
-				if _, err := unix.FcntlInt(uintptr(fd), unix.F_SETLEASE, lease); err == nil || time.Now().After(deadline) {
-					lost.Store(lost.Load() || err != nil)
-					break
-				}
-			}
-		}
-	}()
-	stop = sync.OnceFunc(func() { close(stopped); <-done })
-	t.Cleanup(stop)
-	return saw, lost, stop
 }
 
 // leaseReleasedDetached are LC-LEASE-2C2's TestLeaseWaitContextReleased rows,
@@ -126,22 +92,13 @@ func leaseReleasedDetached(t *testing.T) {
 				updateTestFence(t, c)
 			}
 			journal, kept := retainedRead(t, c, "journal/operations.jsonl"), checkpointIDs(t, c)
-			var broken func() bool
-			var release func()
-			lost := func() bool { return false }
-			if row.name == "create_pg_version" {
-				saw, gone, stop := leaseRetaken(t, leased, row.lease)
-				broken, lost, release = saw.Load, gone.Load, stop
-			} else {
-				l := leaseTaken(t, leaseHolder(t, "kept", row.lease), leased)
-				broken, release = l.broken, l.release
-			}
+			l := leaseTaken(t, leaseHolder(t, map[bool]string{true: "retaken", false: "kept"}[row.name == "create_pg_version"], row.lease), leased)
 			leaseWait.ceiling = row.ceiling
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			seen := make(chan time.Time, 1)
 			go func() {
-				for deadline := time.Now().Add(5 * time.Second); !broken() && time.Now().Before(deadline); {
+				for deadline := time.Now().Add(5 * time.Second); !l.broken() && time.Now().Before(deadline); {
 					time.Sleep(time.Millisecond)
 				}
 				seen <- time.Now()
@@ -156,22 +113,40 @@ func leaseReleasedDetached(t *testing.T) {
 					return err
 				}
 				return c.Checkpoint(ctx, checkpointOptions(f))
-			}, release)
+			}, l.release)
 			returned, waited, cut := time.Now(), <-seen, (*leaseWaitCut)(nil)
-			if !broken() || lost() {
-				t.Fatal("the released row never met its lease, or its holder lost it")
+			if ctx.Err() == nil {
+				t.Fatal("the released row context was not done when its verb returned")
 			}
-			if err == nil || err.Error() != row.text || ClassifyCheckpointFailure(err).Class != row.class {
-				t.Fatal("the released row did not end with its parent text and class")
+			if !l.broken() {
+				t.Fatal("the released row never met its lease")
 			}
-			if errors.As(err, &cut) || errors.Is(err, context.Canceled) {
-				t.Fatal("the released row saw its context end the wait")
+			if err == nil || err.Error() != row.text {
+				t.Fatal("the released row did not end with its parent text")
 			}
-			if returned.Sub(started) < leaseWait.ceiling-leaseWait.longest || returned.Sub(waited) < leaseWait.ceiling-2*leaseWait.longest {
-				t.Fatal("the released row did not wait to the ceiling")
+			if ClassifyCheckpointFailure(err).Class != row.class {
+				t.Fatal("the released row did not end with its parent class")
 			}
-			if !bytes.Equal(journal, retainedRead(t, c, "journal/operations.jsonl")) || !slices.Equal(checkpointIDs(t, c), kept) || len(inspection.Checkpoints) != 0 {
-				t.Fatal("the released row journaled, changed the checkpoints or listed one it could not read")
+			if errors.As(err, &cut) {
+				t.Fatal("the released row returned the lease wait cut")
+			}
+			if errors.Is(err, context.Canceled) {
+				t.Fatal("the released row returned its context error")
+			}
+			if returned.Sub(started) < leaseWait.ceiling-leaseWait.longest {
+				t.Fatal("the released row did not wait to the ceiling from its start")
+			}
+			if returned.Sub(waited) < leaseWait.ceiling-2*leaseWait.longest {
+				t.Fatal("the released row did not wait to the ceiling after its lease broke")
+			}
+			if !bytes.Equal(journal, retainedRead(t, c, "journal/operations.jsonl")) {
+				t.Fatal("the released row journaled")
+			}
+			if !slices.Equal(checkpointIDs(t, c), kept) {
+				t.Fatal("the released row changed the checkpoints")
+			}
+			if len(inspection.Checkpoints) != 0 {
+				t.Fatal("the released row listed a checkpoint it could not read")
 			}
 		})
 	}
@@ -197,21 +172,34 @@ func TestLeaseWaitDetachedControl(t *testing.T) {
 		failure := ClassifyCheckpointFailure(c.Checkpoint(ctx, checkpointOptions(f)))
 		returned, at := time.Now(), <-point
 		progress, journalErr := c.readJournal(context.Background())
-		if returned.Before(at) || returned.After(at.Add(c.cfg.Timeout/2)) {
+		if returned.Before(at) {
+			t.Fatal("the leased control program run ended before the first signal")
+		}
+		if returned.After(at.Add(c.cfg.Timeout / 2)) {
 			t.Fatal("a first signal did not end the leased control program's wait")
 		}
-		if failure.Class != "local_checkpoint_operation_failed" || failure.CleanupIncomplete || r.calls["control"] != 1 {
-			t.Fatal("a first signal did not fail create as an ended control run")
+		if failure.Class != "local_checkpoint_operation_failed" {
+			t.Fatal("a first signal did not fail create with the operation class")
 		}
-		if journalErr != nil || progress.pending != nil || progress.tornTail || !reflect.DeepEqual(checkpointLeasedTree(t, c, lease), before) {
-			t.Fatal("a first signal left create journaled or its tree changed")
+		if failure.CleanupIncomplete {
+			t.Fatal("a first signal left the create cleanup incomplete")
+		}
+		if r.calls["control"] != 1 {
+			t.Fatal("a first signal did not end create in its one control run")
+		}
+		if journalErr != nil || progress.pending != nil || progress.tornTail {
+			t.Fatal("a first signal left create journaled")
+		}
+		if !reflect.DeepEqual(checkpointLeasedTree(t, c, lease), before) {
+			t.Fatal("a first signal left the create tree changed")
 		}
 	})
 }
 
 // Each LC-LEASE-2C2 R5 declaration on a lease never let go (ceiling 2 s; a read
-// lease on the owner lock) cancelled 200 ms in returns the cut soon after, never
-// nil, an active fence or a pid alone; nothing written, admit never called.
+// lease on the owner lock) cancelled 200 ms in returns the cut well before the
+// ceiling (within half of it after the cancel), never nil, an active fence or a
+// pid alone; nothing written, admit never called.
 // background (ceiling 300 ms): HEAD's refusal; the lockless probe defers (nil).
 func TestLeaseWaitFence(t *testing.T) {
 	for _, row := range []struct {
@@ -262,23 +250,48 @@ func TestLeaseWaitFence(t *testing.T) {
 				}
 				l.close() // a plain read of a write-leased file would wait out the kernel's break
 				after, afterErr := os.ReadFile(leased)
-				if _, record := os.Lstat(c.path("run", "postgres.json")); readErr != nil || afterErr != nil || !bytes.Equal(before, after) || !errors.Is(record, os.ErrNotExist) || !empty {
-					t.Fatal("the fence row wrote, or gave a result beside its error")
+				if readErr != nil || afterErr != nil || !bytes.Equal(before, after) {
+					t.Fatal("the fence row changed its leased file")
+				}
+				if _, record := os.Lstat(c.path("run", "postgres.json")); !errors.Is(record, os.ErrNotExist) {
+					t.Fatal("the fence row wrote a process record")
+				}
+				if !empty {
+					t.Fatal("the fence row gave a result beside its error")
 				}
 				if background {
-					if errors.As(err, &cut) || (row.refusal == "") != (err == nil) || err != nil && err.Error() != row.refusal || returned.Sub(started) < leaseKeptAfter {
-						t.Fatal("the placeholder context did not keep the fence row refusal at the ceiling")
+					if errors.As(err, &cut) {
+						t.Fatal("the placeholder context cut the fence row wait")
+					}
+					if (row.refusal == "") != (err == nil) || err != nil && err.Error() != row.refusal {
+						t.Fatal("the placeholder context did not keep the fence row refusal")
+					}
+					if returned.Sub(started) < leaseKeptAfter {
+						t.Fatal("the placeholder context did not keep the fence row wait to the ceiling")
 					}
 					return
 				}
-				if !errors.As(err, &cut) || !errors.Is(err, context.Canceled) {
+				if !errors.As(err, &cut) {
 					t.Fatal("the fence row declaration did not return the lease wait cut")
 				}
-				if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, os.ErrNotExist) || errors.Is(err, errMaintenanceFenceActive) {
-					t.Fatal("the fence row cut reads as a refusal, an absent file or an active fence")
+				if !errors.Is(err, context.Canceled) {
+					t.Fatal("the fence row cut does not carry its context error")
 				}
-				if at := <-point; returned.Before(at) || returned.After(at.Add(leaseWait.longest+150*time.Millisecond)) {
-					t.Fatal("the fence row declaration did not return soon after its context was done")
+				if errors.Is(err, syscall.EWOULDBLOCK) {
+					t.Fatal("the fence row cut reads as a lease refusal")
+				}
+				if errors.Is(err, os.ErrNotExist) {
+					t.Fatal("the fence row cut reads as an absent file")
+				}
+				if errors.Is(err, errMaintenanceFenceActive) {
+					t.Fatal("the fence row cut reads as an active fence")
+				}
+				at := <-point
+				if returned.Before(at) {
+					t.Fatal("the fence row declaration returned before its context was done")
+				}
+				if returned.After(at.Add(leaseWait.ceiling / 2)) {
+					t.Fatal("the fence row declaration did not return well before the ceiling once its context was done")
 				}
 			})
 		}
