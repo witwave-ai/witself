@@ -135,7 +135,7 @@ func (c *Cell) healthPrincipal(m *Manifest) (string, string, error) {
 	if m.PrincipalLayoutVersion != 0 {
 		purpose = credentialMaintenance
 	}
-	password, err := c.credentialPassword(m, purpose)
+	password, err := c.credentialPassword(context.Background(), m, purpose)
 	if err != nil {
 		return "", "", err
 	}

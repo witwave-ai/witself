@@ -73,7 +73,7 @@ func TestRuntimeSettingsValidationAndChildEnvironment(t *testing.T) {
 	}
 	m.MigrationWait, m.JobRestartPolicy = 7*time.Second, runtimeconfig.JobRestartOnFailure
 	for _, component := range []string{"server", "worker"} {
-		environment, err := c.childEnvironment(m, component)
+		environment, err := c.childEnvironment(context.Background(), m, component)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -145,7 +145,7 @@ func TestReadinessDiagnosticOnlyAcceptsValueFreeLines(t *testing.T) {
 			if err := writeAtomicBytes(c.path("logs", component+".log"), []byte(diagnostic+"\n"), nil); err != nil {
 				t.Fatal(err)
 			}
-			if c.lastValueFreeDiagnostic(component, 0) != diagnostic {
+			if c.lastValueFreeDiagnostic(context.Background(), component, 0) != diagnostic {
 				t.Fatal("readiness log lost the exact listener bind diagnostic")
 			}
 		}
@@ -156,13 +156,13 @@ func TestReadinessDiagnosticOnlyAcceptsValueFreeLines(t *testing.T) {
 	if err := writeAtomicBytes(log, []byte(stale+"untrusted-current-output\n"), nil); err != nil {
 		t.Fatal(err)
 	}
-	if c.lastValueFreeDiagnostic("server", int64(len(stale))) != "" {
+	if c.lastValueFreeDiagnostic(context.Background(), "server", int64(len(stale))) != "" {
 		t.Fatal("readiness cause included a previous launch's diagnostic")
 	}
 	if err := writeAtomicBytes(log, []byte(strings.Repeat("private-output", 4096)+"\n"+safe+"\n"), nil); err != nil {
 		t.Fatal(err)
 	}
-	if got := c.lastValueFreeDiagnostic("server", 0); got != safe || len(got) > maxReadinessDiagnostic {
+	if got := c.lastValueFreeDiagnostic(context.Background(), "server", 0); got != safe || len(got) > maxReadinessDiagnostic {
 		t.Fatal("bounded tail did not retain exactly the safe diagnostic")
 	}
 }

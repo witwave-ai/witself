@@ -1,6 +1,7 @@
 package localcell
 
 import (
+	"context"
 	"errors"
 	"go/ast"
 	"go/build"
@@ -40,7 +41,7 @@ func TestReaders4ReadinessLog(t *testing.T) {
 			if !prepared {
 				t.Fatal("cannot prepare the readiness log")
 			}
-			_ = readerWatchdog(t, func() error { got = c.lastValueFreeDiagnostic("server", 0); return nil }, func() {
+			_ = readerWatchdog(t, func() error { got = c.lastValueFreeDiagnostic(context.Background(), "server", 0); return nil }, func() {
 				if writer, err := os.OpenFile(log, os.O_WRONLY|syscall.O_NONBLOCK, 0); err == nil {
 					_ = writer.Close()
 				}

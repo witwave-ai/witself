@@ -81,12 +81,12 @@ func (c *Cell) allocateAvailablePorts(previous Ports, component string) (Ports, 
 	return Ports{}, fixedCause("cannot allocate local cell loopback ports")
 }
 
-func (c *Cell) prepareComponentPorts(m *Manifest, component string, running, force bool) error {
-	return c.prepareComponentPortsFor("start", m, component, running, force)
+func (c *Cell) prepareComponentPorts(ctx context.Context, m *Manifest, component string, running, force bool) error {
+	return c.prepareComponentPortsFor(ctx, "start", m, component, running, force)
 }
 
 // prepareComponentPortsFor journals a reallocation under the calling operation.
-func (c *Cell) prepareComponentPortsFor(operation string, m *Manifest, component string, running, force bool) error {
+func (c *Cell) prepareComponentPortsFor(ctx context.Context, operation string, m *Manifest, component string, running, force bool) error {
 	if running {
 		return nil
 	}
@@ -116,5 +116,5 @@ func (c *Cell) prepareComponentPortsFor(operation string, m *Manifest, component
 			return err
 		}
 	}
-	return c.journalCause(context.Background(), operation, component, "started", "port_reallocated="+component)
+	return c.journalCause(ctx, operation, component, "started", "port_reallocated="+component)
 }

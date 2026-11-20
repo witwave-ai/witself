@@ -585,7 +585,7 @@ func checkpointVerifyOpenCases(t *testing.T, target string, fixture func(*testin
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			v := fixture(t, false)
-			original := v.c.checkpointOps().open
+			original := v.c.checkpointOps(context.Background()).open
 			calls := 0
 			v.c.checkpointTest.open = func(name string) (*os.File, error) {
 				if name == filepath.Join(v.dir, filepath.FromSlash(row.document)) {
@@ -617,7 +617,7 @@ func checkpointVerifyOpenCases(t *testing.T, target string, fixture func(*testin
 		}
 		t.Run(name, func(t *testing.T) {
 			v := fixture(t, false)
-			original := v.c.checkpointOps().open
+			original := v.c.checkpointOps(context.Background()).open
 			calls, sleeps := 0, 0
 			now := time.Now()
 			var slept time.Duration
@@ -698,7 +698,7 @@ func checkpointVerifyOpenCases(t *testing.T, target string, fixture func(*testin
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			v := fixture(t, false)
-			original := v.c.checkpointOps().open
+			original := v.c.checkpointOps(context.Background()).open
 			data := v.read(checkpointInventoryName)
 			calls, seeks, sleeps := 0, 0, 0
 			done := make(chan struct{})
@@ -752,7 +752,7 @@ func checkpointVerifyOpenCases(t *testing.T, target string, fixture func(*testin
 	}
 	t.Run("transient_inventory_second_read", func(t *testing.T) {
 		v := fixture(t, false)
-		ops := v.c.checkpointOps()
+		ops := v.c.checkpointOps(context.Background())
 		original := ops.open
 		calls, sleeps := 0, 0
 		failure := errors.New("injected transient")
@@ -784,7 +784,7 @@ func checkpointVerifyOpenCases(t *testing.T, target string, fixture func(*testin
 		v := fixture(t, false)
 		ctx, cancel := context.WithCancel(t.Context())
 		defer cancel()
-		original := v.c.checkpointOps().open
+		original := v.c.checkpointOps(context.Background()).open
 		late := false
 		v.c.checkpointTest.open = func(name string) (*os.File, error) {
 			if ctx.Err() != nil {

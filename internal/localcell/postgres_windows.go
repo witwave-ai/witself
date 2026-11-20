@@ -37,7 +37,7 @@ func (c *Cell) startPostgres(ctx context.Context, _ *Manifest) error {
 		return err
 	}
 	environment = appendEnvironment(environment, "LC_ALL=C", "LANG=C")
-	log, err := c.logFile("postgres")
+	log, err := c.logFile(context.Background(), "postgres")
 	if err != nil {
 		return err
 	}

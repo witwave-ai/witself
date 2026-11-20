@@ -37,7 +37,7 @@ func (c *Cell) waitReadyWithPortRecovery(ctx context.Context, m *Manifest, compo
 	if stopErr := c.stopSelected(ctx, keep); stopErr != nil {
 		return stopErr
 	}
-	if reallocateErr := c.prepareComponentPorts(m, component, false, true); reallocateErr != nil {
+	if reallocateErr := c.prepareComponentPorts(context.Background(), m, component, false, true); reallocateErr != nil {
 		return reallocateErr
 	}
 	// Reallocation and cleanup also spend the original readiness budget.

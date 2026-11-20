@@ -3,6 +3,7 @@
 package localcell
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -21,7 +22,7 @@ func TestUnixChildrenReceiveExactPrivateEnvironmentValues(t *testing.T) {
 			if err := c.makePassword(); err != nil {
 				t.Fatal(err)
 			}
-			environment, err := c.childEnvironment(m, component)
+			environment, err := c.childEnvironment(context.Background(), m, component)
 			if err != nil {
 				t.Fatal(err)
 			}

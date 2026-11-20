@@ -139,7 +139,7 @@ func TestDrillRoot(t *testing.T) {
 		drillRootWant(t, c, 1, 0, 0, 0, "drill root listing was not exact")
 		listing, err := c.drillRootList()
 		drillAssert(t, err == nil && reflect.DeepEqual(listing.declared, []string{v.DrillID}), "drill root listing was not exact")
-		summaries, unknown, err := c.listCheckpoints()
+		summaries, unknown, err := c.listCheckpoints(context.Background())
 		drillAssert(t, err == nil && len(summaries) == 0 && unknown == 1, "drill root changed the checkpoint listing")
 		visits, err := recordPrivateTreeWalk(t, c.cfg.Root, nil)
 		drillAssert(t, err == nil, "drill root listing was not exact")

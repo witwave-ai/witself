@@ -68,7 +68,7 @@ func seedRetainedFixture(t *testing.T, c *Cell, m *Manifest) *retainedFixture {
 			t.Fatal("cannot publish private retention sentinel")
 		}
 	}
-	if c.makePassword() != nil || (m.PrincipalLayoutVersion != 0 && c.makePrincipalPasswords(m) != nil) || writeAtomic(c.path("manifest.json"), m, nil) != nil {
+	if c.makePassword() != nil || (m.PrincipalLayoutVersion != 0 && c.makePrincipalPasswords(context.Background(), m) != nil) || writeAtomic(c.path("manifest.json"), m, nil) != nil {
 		t.Fatal("cannot prepare generated custody fixture")
 	}
 	if c.begin(context.Background(), "stop") != nil || c.journal(context.Background(), "stop", "stop", "started") != nil || c.journal(context.Background(), "stop", "stop", "done") != nil || c.journal(context.Background(), "stop", "operation", "done") != nil {

@@ -261,10 +261,10 @@ func (c *Cell) Start(ctx context.Context) error {
 		return err
 	}
 	if m.PrincipalLayoutVersion == 0 {
-		if _, err := c.password(); err != nil {
+		if _, err := c.password(context.Background()); err != nil {
 			return err
 		}
-	} else if err := c.validatePrincipalPasswords(m); err != nil {
+	} else if err := c.validatePrincipalPasswords(context.Background(), m); err != nil {
 		return err
 	}
 	if err := c.verifyAll(); err != nil {
@@ -288,7 +288,7 @@ func (c *Cell) Start(ctx context.Context) error {
 			// A replacement belongs to this Start even if the entry snapshot
 			// contained its now-exited predecessor. Roll back the replacement.
 			before[component] = false
-			if err := c.prepareComponentPorts(m, component, false, false); err != nil {
+			if err := c.prepareComponentPorts(context.Background(), m, component, false, false); err != nil {
 				return err
 			}
 			launched[component] = true
@@ -314,7 +314,7 @@ func (c *Cell) Start(ctx context.Context) error {
 				return c.bindServiceProcessBoot("postgres")
 			}
 			before["postgres"] = false
-			if err := c.prepareComponentPorts(m, "postgres", false, false); err != nil {
+			if err := c.prepareComponentPorts(context.Background(), m, "postgres", false, false); err != nil {
 				return err
 			}
 			return ops.postgres(ctx, m)
@@ -669,13 +669,13 @@ func (c *Cell) Inspect(ctx context.Context) (Inspection, error) {
 		switch {
 		case !result.PGDataPresent:
 			result.InstallState = "removed; data purged or missing; reinstall unsupported"
-		case c.reinstallAvailable(result.Manifest, progress) == nil:
+		case c.reinstallAvailable(ctx, result.Manifest, progress) == nil:
 			result.InstallState = "removed; data retained; explicit reinstall available"
 		default:
 			result.InstallState = "removed; data retained; reinstall unsupported"
 		}
 	}
-	if err := c.checkpointSummaries(lock, &result); err != nil {
+	if err := c.checkpointSummaries(ctx, lock, &result); err != nil {
 		return result, err
 	}
 	for _, component := range []string{"postgres", "server", "worker"} {

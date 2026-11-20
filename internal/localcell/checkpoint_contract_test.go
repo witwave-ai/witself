@@ -808,7 +808,7 @@ func checkpointWaitingReader(file *ast.File, parts map[*ast.Ident]bool, node ast
 
 // checkpointDefaultOpen is the inventory's default open as leaseWaitLiteral
 // prints it: openPrivateReader given the placeholder context (LC-LEASE-2A).
-const checkpointDefaultOpen = "func(path string) (*os.File, error) { return openPrivateReader(context.Background(), path) }"
+const checkpointDefaultOpen = "func(path string) (*os.File, error) { return openPrivateReader(ctx, path) }"
 
 // checkpointWaitingContract is rule (j): checkpointWaitingFiles name no waiting
 // reader, called or not, checkpoint.go gives the inventory's default open, by
@@ -1457,8 +1457,8 @@ func TestCheckpointSourceContract(t *testing.T) {
 		{"drill_checkpoint_sync_reference", "drill_root.go", "if drillRootSync(recovery) != nil {", "if syncCheckpointTreeDirectory(c.recoveryDir(), nil) != nil {", "drill_checkpoint_reference:drill_root.go:syncCheckpointTreeDirectory"},
 		{"checkpoint_root_open_blocking", "checkpoint_unix.go", "root.OpenFile(name, os.O_RDONLY|syscall.O_NONBLOCK, 0)", "root.OpenFile(name, os.O_RDONLY, 0)", "root_open_not_read_only:checkpoint_unix.go"},
 		// (j) no waiting reader on the create path; the PGDATA flag stays in checkpoint_unix.go (d).
-		{"waiting_reader_manifest", "checkpoint.go", "openPrivateReader(context.Background(), c.path(\"manifest.json\"))", "openPrivateFile(c.path(\"manifest.json\"), os.O_RDONLY, 0)", "waiting_reader:checkpoint.go:openPrivateFile"},
-		{"waiting_reader_custody", "checkpoint.go", "openPrivateReader(context.Background(), source)", "openPrivateFile(source, os.O_RDONLY, 0)", "waiting_reader:checkpoint.go:openPrivateFile"},
+		{"waiting_reader_manifest", "checkpoint.go", "openPrivateReader(ctx, c.path(\"manifest.json\"))", "openPrivateFile(c.path(\"manifest.json\"), os.O_RDONLY, 0)", "waiting_reader:checkpoint.go:openPrivateFile"},
+		{"waiting_reader_custody", "checkpoint.go", "openPrivateReader(ctx, source)", "openPrivateFile(source, os.O_RDONLY, 0)", "waiting_reader:checkpoint.go:openPrivateFile"},
 		{"waiting_reader_inventory_default", "checkpoint.go", "ops.open = " + checkpointDefaultOpen, "ops.open = func(name string) (*os.File, error) { return openPrivateFile(name, os.O_RDONLY, 0) }", "waiting_reader:checkpoint.go:ops.open"},
 		{"waiting_reader_inventory_literal", "checkpoint.go", "ops := checkpointOperations{control: c.checkpointControl, free: checkpointFreeSpace}", "ops := checkpointOperations{control: c.checkpointControl, free: checkpointFreeSpace, open: openPlainReader}", "waiting_reader:checkpoint.go:ops.open"},
 		{"waiting_reader_pg_version", "checkpoint.go", "readRegular(ctx, openPostgresReader, func(info os.FileInfo) bool { return info.Size() <= 64 }, c.path(\"pg\", \"PG_VERSION\"), errCheckpointSource, errCheckpointSource, errCheckpointSource)", "readPostgresFile(c.path(\"pg\", \"PG_VERSION\"))", "waiting_reader:checkpoint.go:readPostgresFile"},
@@ -1536,16 +1536,16 @@ func TestCheckpointSourceContract(t *testing.T) {
 		{"inventory_arms_swapped", "checkpoint.go", "\t\t\t\tif opened {\n", "\t\t\t\tif !opened {\n", "checkpoint_inventory_reader"},
 		{"verifier_tree_record", "checkpoint_verify.go", verifyTail, "func checkpointProbe(t *checkpointTree) error { return t.record(\"probe\", nil) }\n\n" + verifyTail, "verifier_write"},
 		{"second_journal_create", "checkpoint.go", "\tif err := c.begin(ctx, \"checkpoint\"); err != nil {", "\t_ = privateDir(c.path(\"journal\"), true)\n\tif err := c.begin(ctx, \"checkpoint\"); err != nil {", "writer_root:checkpoint.go:privateDir"},
-		{"manifest_opened_for_write", "checkpoint.go", "openPrivateReader(context.Background(), c.path(\"manifest.json\"))", "openPrivateFile(c.path(\"manifest.json\"), os.O_RDWR, 0)", "live_path_not_read:checkpoint.go:manifest.json"},
+		{"manifest_opened_for_write", "checkpoint.go", "openPrivateReader(ctx, c.path(\"manifest.json\"))", "openPrivateFile(c.path(\"manifest.json\"), os.O_RDWR, 0)", "live_path_not_read:checkpoint.go:manifest.json"},
 		{"root_open_for_write", "checkpoint_unix.go", "root.OpenFile(name, os.O_RDONLY|syscall.O_NONBLOCK, 0)", "root.OpenFile(name, os.O_RDWR|syscall.O_NONBLOCK, 0)", "root_open_not_read_only:checkpoint_unix.go"},
 		{"checkpoint_root_name_made", "checkpoint_unix.go", "name := filepath.FromSlash(rel)", "name := rel", "pgdata_root_name:checkpoint_unix.go"},
 		{"checkpoint_root_name_changed", "checkpoint_unix.go", "name := filepath.FromSlash(rel)\n", "name := filepath.FromSlash(rel)\n\t\tname = filepath.Base(name)\n", "pgdata_root_name:checkpoint_unix.go"},
 		{"witness_read_elsewhere", "checkpoint.go", tail, "func checkpointPeek(dir string) error { var w checkpointWitness; return readJSON(filepath.Join(dir, checkpointWitnessName), &w) }\n\n" + tail, "witness_read:checkpoint.go:checkpointPeek"},
 		{"witness_open_elsewhere", "checkpoint.go", tail, "func checkpointPeek(dir string) { _, _ = openRegular(context.Background(), filepath.Join(dir, checkpointWitnessName), nil, nil, nil) }\n\n" + tail, "witness_read:checkpoint.go:checkpointPeek"},
 		{"witness_second_spelling", "checkpoint.go", tail, "var checkpointSeal = \"witness.json\"\n\n" + tail, "witness_name_spelling"},
-		{"recovery_dir_elsewhere", "lifecycle.go", "\tif err := c.checkpointSummaries(lock, &result); err != nil {", "\t_ = c.recoveryDir()\n\tif err := c.checkpointSummaries(lock, &result); err != nil {", "reference:lifecycle.go:recoveryDir"},
-		{"second_inspect_reference", "lifecycle.go", "\tif err := c.checkpointSummaries(lock, &result); err != nil {", "\t_ = c.checkpointSummaries(lock, &result)\n\tif err := c.checkpointSummaries(lock, &result); err != nil {", "inspect_summaries"},
-		{"inspect_closes_leftover", "lifecycle.go", "\tif err := c.checkpointSummaries(lock, &result); err != nil {", "\t_ = c.closeCheckpointLeftover()\n\tif err := c.checkpointSummaries(lock, &result); err != nil {", "reference:lifecycle.go:closeCheckpointLeftover"},
+		{"recovery_dir_elsewhere", "lifecycle.go", "\tif err := c.checkpointSummaries(ctx, lock, &result); err != nil {", "\t_ = c.recoveryDir()\n\tif err := c.checkpointSummaries(ctx, lock, &result); err != nil {", "reference:lifecycle.go:recoveryDir"},
+		{"second_inspect_reference", "lifecycle.go", "\tif err := c.checkpointSummaries(ctx, lock, &result); err != nil {", "\t_ = c.checkpointSummaries(ctx, lock, &result)\n\tif err := c.checkpointSummaries(ctx, lock, &result); err != nil {", "inspect_summaries"},
+		{"inspect_closes_leftover", "lifecycle.go", "\tif err := c.checkpointSummaries(ctx, lock, &result); err != nil {", "\t_ = c.closeCheckpointLeftover(ctx)\n\tif err := c.checkpointSummaries(ctx, lock, &result); err != nil {", "reference:lifecycle.go:closeCheckpointLeftover"},
 		{"summaries_outside_inspect", "lifecycle.go", "func (c *Cell) finishRemoval(", "func (c *Cell) listRecovery() { _ = c.checkpointSummaries(nil, &Inspection{}) }\n\nfunc (c *Cell) finishRemoval(", "reference:lifecycle.go:checkpointSummaries"},
 		{"checkpoint_called_elsewhere", "reinstall.go", "func (c *Cell) reinstallBoundary(", "func (c *Cell) reinstallCheckpoint() { _ = c.Checkpoint(nil, CheckpointOptions{}) }\n\nfunc (c *Cell) reinstallBoundary(", "reference:reinstall.go:Checkpoint"},
 		{"call_os.OpenRoot_off_unix", "checkpoint_other.go", "func validateRecoveryObject(", "func checkpointCall() { os.OpenRoot(\"\") }\n\nfunc validateRecoveryObject(", "forbidden_call:checkpoint_other.go:os.OpenRoot"},

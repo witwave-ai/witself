@@ -393,7 +393,7 @@ func TestCheckpointLocklessHealthy(t *testing.T) {
 // locklessFirst is each verb's statement after its detach (LC-LEASE-2C2).
 var locklessFirst = map[string]string{
 	"Checkpoint":       `if err := c.refuseBeforeLockNames(ctx, func() error { return c.admitCheckpointDry(ctx, options) }); err != nil { return err }`,
-	"DeleteCheckpoint": `if err := c.refuseBeforeLockNames(ctx, func() error { return c.admitDeleteCheckpoint(options) }); err != nil { return err }`,
+	"DeleteCheckpoint": `if err := c.refuseBeforeLockNames(ctx, func() error { return c.admitDeleteCheckpoint(ctx, options) }); err != nil { return err }`,
 }
 
 // refuseBeforeLockNames's calls in source order, errors.Is aside (2C2: R6's cut).
@@ -409,7 +409,7 @@ var locklessCallees = map[string][]string{
 	"refuseBeforeLockNames": {"os.Lstat", "errors.Is", "errors.As", "convert leaseWaitCut", "localcell.acquireLock", "(*localcell.operationLock).Close", "(*localcell.Cell).path",
 		"(*localcell.Cell).validateRoot", "(*localcell.Cell).recoveryDir", "param admit"},
 	"admitCheckpointDry": {"errors.Is", "(*localcell.Cell).checkpointOps", "(*localcell.Cell).admitCheckpoint"},
-	"admitDeleteCheckpoint": {"os.Lstat", "os.ReadDir", "errors.Is", "context.Background", "localcell.privateDir", "localcell.checkpointLeftover",
+	"admitDeleteCheckpoint": {"os.Lstat", "os.ReadDir", "errors.Is", "localcell.privateDir", "localcell.checkpointLeftover",
 		"localcell.recoveryEntryCanonical", "(*localcell.Cell).readJournal", "(*localcell.Cell).checkpointCold", "(*localcell.Cell).validateRecovery",
 		"(*localcell.Cell).checkpointDir", "(*localcell.Cell).recoveryDir", "(*regexp.Regexp).MatchString", "(io/fs.DirEntry).Name", "append", "len", "make"},
 }
@@ -538,7 +538,7 @@ func locklessContract(sources map[string]string) []string {
 			failures = append(failures, "lockless_first:"+name)
 		}
 	}
-	if statement("deleteCheckpointLocked", 0) != admissionStatements(`if err := c.admitDeleteCheckpoint(options); err != nil { return err }`)[0] || statement("admitDeleteCheckpoint", -1) != "return nil" {
+	if statement("deleteCheckpointLocked", 0) != admissionStatements(`if err := c.admitDeleteCheckpoint(ctx, options); err != nil { return err }`)[0] || statement("admitDeleteCheckpoint", -1) != "return nil" {
 		failures = append(failures, "lockless_split")
 	}
 	for name, allowed := range locklessCallees {
@@ -592,7 +592,7 @@ func TestCheckpointLocklessSourceContract(t *testing.T) {
 		return err != nil || !built
 	})
 	source := strings.ReplaceAll(sources["checkpoint.go"], "\r\n", "\n")
-	dry, shape := "\tops := c.checkpointOps()\n\tops.control", "MatchString(options.CheckpointID) {\n\t\treturn errCheckpointIdentity\n\t}\n"
+	dry, shape := "\tops := c.checkpointOps(ctx)\n\tops.control", "MatchString(options.CheckpointID) {\n\t\treturn errCheckpointIdentity\n\t}\n"
 	for _, row := range []struct{ name, before, after, key string }{
 		{"control", "", "", ""},
 		{"gate_removed", "\tif (owner == nil && run == nil) || c.validateRoot(false) != nil {\n\t\treturn nil\n\t}\n", "", "lockless_order"},
@@ -602,10 +602,10 @@ func TestCheckpointLocklessSourceContract(t *testing.T) {
 		{"fence_refuses", "\"maintenance.json\")); !errors.Is(err, fs.ErrNotExist) {\n\t\treturn nil", "\"maintenance.json\")); !errors.Is(err, fs.ErrNotExist) {\n\t\treturn errMaintenanceFenceActive", "lockless_defer"},
 		{"control_kept", "\tops.control = func(context.Context) (pgControlData, error) { return pgControlData{}, errCheckpointDryAdmitted }\n", "", "lockless_control"},
 		{"hold_in_admission", "\treturn nil\n}\n\nfunc (c *Cell) deleteCheckpointLocked(", "\t_, _, _ = c.holdCheckpoint(options.CheckpointID)\n\treturn nil\n}\n\nfunc (c *Cell) deleteCheckpointLocked(", "lockless_writer:admitDeleteCheckpoint"},
-		{"delete_unsplit", "DeleteCheckpointOptions) error {\n\tif err := c.admitDeleteCheckpoint(options); err != nil {\n\t\treturn err\n\t}\n", "DeleteCheckpointOptions) error {\n", "lockless_split"},
+		{"delete_unsplit", "DeleteCheckpointOptions) error {\n\tif err := c.admitDeleteCheckpoint(ctx, options); err != nil {\n\t\treturn err\n\t}\n", "DeleteCheckpointOptions) error {\n", "lockless_split"},
 		{"admission_refuses", "\treturn nil\n}\n\nfunc (c *Cell) deleteCheckpointLocked(", "\treturn errCheckpointIdentity\n}\n\nfunc (c *Cell) deleteCheckpointLocked(", "lockless_split"},
 		{"create_unguarded", "\tif err := c.refuseBeforeLockNames(ctx, func() error { return c.admitCheckpointDry(ctx, options) }); err != nil {\n\t\treturn err\n\t}\n", "", "lockless_first:Checkpoint"},
-		{"delete_unguarded", "\tif err := c.refuseBeforeLockNames(ctx, func() error { return c.admitDeleteCheckpoint(options) }); err != nil {\n\t\treturn err\n\t}\n", "", "lockless_first:DeleteCheckpoint"},
+		{"delete_unguarded", "\tif err := c.refuseBeforeLockNames(ctx, func() error { return c.admitDeleteCheckpoint(ctx, options) }); err != nil {\n\t\treturn err\n\t}\n", "", "lockless_first:DeleteCheckpoint"},
 		{"unparsable", "package localcell\n", "package localcell {\n", "parse:checkpoint.go"},
 		{"second_validate_returns", "if err := c.validateRoot(false); err != nil {\n\t\treturn nil", "if err := c.validateRoot(false); err != nil {\n\t\treturn err", "lockless_defer"},
 		{"dry_lock_names", dry, "\tif l, err := acquireLock(c.cfg.Root, true); err == nil {\n\t\t_ = l.Close()\n\t}\n" + dry, "lockless_writer:admitCheckpointDry"},

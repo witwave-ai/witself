@@ -33,8 +33,8 @@ const installerMigratorRole = "witself_sync_migrator"
 
 // openPrincipalCredentialFile permits replacement tests at the inspected-file open boundary.
 // Its read open never waits on what it opens; the handle checks then decide.
-var openPrincipalCredentialFile = func(path string, _ int, _ os.FileMode) (*os.File, error) {
-	return openPrivateReader(context.Background(), path)
+var openPrincipalCredentialFile = func(ctx context.Context, path string, _ int, _ os.FileMode) (*os.File, error) {
+	return openPrivateReader(ctx, path)
 }
 
 var principalCredentialPurposes = [...]credentialPurpose{
@@ -74,12 +74,12 @@ func (c *Cell) credentialPath(purpose credentialPurpose) (string, error) {
 	return c.path("run", "credentials", role), nil
 }
 
-func (c *Cell) credentialPassword(m *Manifest, purpose credentialPurpose) (string, error) {
+func (c *Cell) credentialPassword(ctx context.Context, m *Manifest, purpose credentialPurpose) (string, error) {
 	if err := validatePrincipalLayout(m); err != nil {
 		return "", err
 	}
 	if purpose == credentialBootstrap {
-		return c.password()
+		return c.password(ctx)
 	}
 	if m.PrincipalLayoutVersion == 0 {
 		return "", ErrLocalPrincipalCredentialsRefused
@@ -100,8 +100,10 @@ func (c *Cell) credentialPassword(m *Manifest, purpose credentialPurpose) (strin
 		// the pathname afterwards fails the identity check below.
 		return "", ErrLocalPrincipalCredentialsRefused
 	}
-	f, err := openPrincipalCredentialFile(path, os.O_RDONLY, 0)
-	if err != nil {
+	f, err := openPrincipalCredentialFile(ctx, path, os.O_RDONLY, 0)
+	if cut := (*leaseWaitCut)(nil); errors.As(err, &cut) {
+		return "", cut
+	} else if err != nil {
 		return "", ErrLocalPrincipalCredentialsRefused
 	}
 	defer func() { _ = f.Close() }()
@@ -149,7 +151,7 @@ func privatePrincipalCredential(path string, info os.FileInfo) bool {
 // makePrincipalPasswords never rotates one side of a database/file pair. A full
 // published set can be reused after authentication; a partial set needs explicit
 // recovery and cannot become launchable by generating the missing values.
-func (c *Cell) makePrincipalPasswords(m *Manifest) error {
+func (c *Cell) makePrincipalPasswords(ctx context.Context, m *Manifest) error {
 	if validatePrincipalLayout(m) != nil || m.PrincipalLayoutVersion == 0 {
 		return ErrLocalPrincipalCredentialsRefused
 	}
@@ -184,7 +186,7 @@ func (c *Cell) makePrincipalPasswords(m *Manifest) error {
 		return ErrLocalPrincipalCredentialsRefused
 	}
 	if present != 0 {
-		return c.validatePrincipalPasswords(m)
+		return c.validatePrincipalPasswords(ctx, m)
 	}
 	for _, purpose := range principalCredentialPurposes {
 		var secret [32]byte
@@ -196,10 +198,10 @@ func (c *Cell) makePrincipalPasswords(m *Manifest) error {
 			return ErrLocalPrincipalCredentialsRefused
 		}
 	}
-	return c.validatePrincipalPasswords(m)
+	return c.validatePrincipalPasswords(ctx, m)
 }
 
-func (c *Cell) validatePrincipalPasswords(m *Manifest) error {
+func (c *Cell) validatePrincipalPasswords(ctx context.Context, m *Manifest) error {
 	if validatePrincipalLayout(m) != nil || m.PrincipalLayoutVersion == 0 || privateDir(c.path("run", "credentials"), false) != nil {
 		return ErrLocalPrincipalCredentialsRefused
 	}
@@ -209,8 +211,10 @@ func (c *Cell) validatePrincipalPasswords(m *Manifest) error {
 	}
 	seen := make(map[string]bool, len(principalCredentialPurposes))
 	for _, purpose := range principalCredentialPurposes {
-		value, err := c.credentialPassword(m, purpose)
-		if err != nil || seen[value] {
+		value, err := c.credentialPassword(ctx, m, purpose)
+		if cut := (*leaseWaitCut)(nil); errors.As(err, &cut) {
+			return cut
+		} else if err != nil || seen[value] {
 			return ErrLocalPrincipalCredentialsRefused
 		}
 		seen[value] = true
@@ -218,8 +222,8 @@ func (c *Cell) validatePrincipalPasswords(m *Manifest) error {
 	return nil
 }
 
-func (c *Cell) principalDSN(m *Manifest, purpose credentialPurpose) (string, error) {
-	password, err := c.credentialPassword(m, purpose)
+func (c *Cell) principalDSN(ctx context.Context, m *Manifest, purpose credentialPurpose) (string, error) {
+	password, err := c.credentialPassword(ctx, m, purpose)
 	if err != nil {
 		return "", err
 	}

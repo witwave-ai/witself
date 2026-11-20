@@ -31,7 +31,7 @@ var reader2Rows = []reader2Row{
 			t.Fatal("cannot prepare the reader password")
 		}
 		path := c.path("run", "postgres.password")
-		return path, func() error { plant(path); return reader2Value(c.password()) }
+		return path, func() error { plant(path); return reader2Value(c.password(context.Background())) }
 	}},
 	{"serviceControlSecret", "service_record_not_private", "service_record_not_private", "service_control_secret_invalid", func(t *testing.T, plant func(string)) (string, func() error) {
 		c, _ := unitCell(t)
@@ -50,11 +50,11 @@ var reader2Rows = []reader2Row{
 		}
 		realOpen := openPrincipalCredentialFile
 		t.Cleanup(func() { openPrincipalCredentialFile = realOpen })
-		openPrincipalCredentialFile = func(name string, flags int, mode os.FileMode) (*os.File, error) {
+		openPrincipalCredentialFile = func(ctx context.Context, name string, flags int, mode os.FileMode) (*os.File, error) {
 			plant(name)
-			return realOpen(name, flags, mode)
+			return realOpen(ctx, name, flags, mode)
 		}
-		return path, func() error { return reader2Value(c.credentialPassword(m, credentialServer)) }
+		return path, func() error { return reader2Value(c.credentialPassword(context.Background(), m, credentialServer)) }
 	}},
 	// The fence keeps its observing Lstat; the existing read parameter plants.
 	// An empty fence stays active: it is never read as absent.

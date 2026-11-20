@@ -79,14 +79,16 @@ func leaseReleasedDetached(t *testing.T) {
 		{"create_fence", "journal/maintenance.json", "local_maintenance_fence_active", "local_maintenance_fence_active", unix.F_WRLCK, 2 * time.Second, 200 * time.Millisecond},
 		{"create_pg_version", "pg/PG_VERSION", "local_checkpoint_source_unsupported", "local_checkpoint_source_unsupported", unix.F_WRLCK, 2 * time.Second, 200 * time.Millisecond},
 		{"inspect_witness", "", "cannot read local cell checkpoint witness", "local_checkpoint_operation_failed", unix.F_WRLCK, 2 * time.Second, 200 * time.Millisecond},
+		// LC-LEASE-2D: the listing's own wait, through the detached checkpointSummaries and listCheckpoints.
+		{"inspect_listing", "", "cannot read local cell checkpoint witness", "local_checkpoint_operation_failed", unix.F_WRLCK, 500 * time.Millisecond, 100 * time.Millisecond},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			f, _ := checkpointFixture(t, "legacy", false)
 			c, saved, leased := f.cell, leaseWait, f.cell.path(filepath.FromSlash(row.file))
 			t.Cleanup(func() { leaseWait = saved })
-			if row.name == "inspect_witness" && (c.Checkpoint(t.Context(), checkpointOptions(f)) != nil || len(checkpointIDs(t, c)) != 1) {
+			if row.file == "" && (c.Checkpoint(t.Context(), checkpointOptions(f)) != nil || len(checkpointIDs(t, c)) != 1) {
 				t.Fatal("cannot prepare the checkpoint the witness row lists")
-			} else if row.name == "inspect_witness" {
+			} else if row.file == "" {
 				leased = filepath.Join(c.recoveryDir(), checkpointIDs(t, c)[0], checkpointWitnessName)
 			} else if row.name == "create_fence" {
 				updateTestFence(t, c)

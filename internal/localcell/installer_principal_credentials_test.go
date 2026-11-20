@@ -56,7 +56,7 @@ func TestInstallerPrincipalsChildIsolation(t *testing.T) {
 		purpose   credentialPurpose
 	}{{"server", credentialServer}, {"worker", credentialWorker}} {
 		t.Run(test.component, func(t *testing.T) {
-			environment, err := c.childEnvironment(m, test.component)
+			environment, err := c.childEnvironment(context.Background(), m, test.component)
 			if err != nil {
 				t.Fatal("child credential mapping unexpectedly refused selected fixture")
 			}
@@ -96,7 +96,7 @@ func TestInstallerPrincipalsChildIsolation(t *testing.T) {
 	if values[credentialWorker] == values[credentialServer] {
 		t.Fatal("child credential fixture requires distinguishable independent secrets")
 	}
-	if _, err := c.childEnvironment(m, "snapshot"); err == nil {
+	if _, err := c.childEnvironment(context.Background(), m, "snapshot"); err == nil {
 		t.Fatal("child credential mapping accepted an unwired component")
 	}
 	if err := c.startChildPrepared(t.Context(), m, "migration", nil); err == nil {
@@ -178,22 +178,22 @@ func TestInstallerPrincipalCredentialPublication(t *testing.T) {
 			}
 		}
 		t.Cleanup(func() { beforePasswordWrite = before })
-		if c.makePrincipalPasswords(m) != nil || opened != len(principalCredentialPurposes) {
+		if c.makePrincipalPasswords(context.Background(), m) != nil || opened != len(principalCredentialPurposes) {
 			t.Fatal("credential publisher did not observe every opened role temporary")
 		}
 		first := make(map[credentialPurpose]string)
 		for _, purpose := range principalCredentialPurposes {
-			value, err := c.credentialPassword(m, purpose)
+			value, err := c.credentialPassword(context.Background(), m, purpose)
 			if err != nil {
 				t.Fatal("credential publisher created an unreadable role value")
 			}
 			first[purpose] = value
 		}
-		if c.makePrincipalPasswords(m) != nil || opened != len(principalCredentialPurposes) {
+		if c.makePrincipalPasswords(context.Background(), m) != nil || opened != len(principalCredentialPurposes) {
 			t.Fatal("credential publisher rotated an already complete credential set")
 		}
 		for purpose, value := range first {
-			again, err := c.credentialPassword(m, purpose)
+			again, err := c.credentialPassword(context.Background(), m, purpose)
 			if err != nil || again != value {
 				t.Fatal("credential publisher changed a durable credential pair on retry")
 			}
@@ -258,11 +258,11 @@ func TestInstallerPrincipalCredentialPublication(t *testing.T) {
 			var err error
 			switch defect {
 			case "unknown-purpose":
-				_, err = c.credentialPassword(m, credentialPurpose(250))
+				_, err = c.credentialPassword(context.Background(), m, credentialPurpose(250))
 			case "duplicate-secret", "owner-file":
-				err = c.makePrincipalPasswords(m)
+				err = c.makePrincipalPasswords(context.Background(), m)
 			default:
-				_, err = c.childEnvironment(m, "server")
+				_, err = c.childEnvironment(context.Background(), m, "server")
 			}
 			if err == nil {
 				t.Fatal("credential refusal failed or fell back to bootstrap material")
@@ -288,21 +288,21 @@ func TestInstallerPrincipalCredentialPublication(t *testing.T) {
 			return f.Sync()
 		}
 		t.Cleanup(func() { syncFile = oldSync })
-		if c.makePrincipalPasswords(m) == nil {
+		if c.makePrincipalPasswords(context.Background(), m) == nil {
 			t.Fatal("credential publication ignored the interrupted atomic write")
 		}
 		syncFile = oldSync
-		before, err := c.credentialPassword(m, credentialServer)
+		before, err := c.credentialPassword(context.Background(), m, credentialServer)
 		if err != nil {
 			t.Fatal("credential publication lost the first durable credential")
 		}
-		if c.makePrincipalPasswords(m) == nil {
+		if c.makePrincipalPasswords(context.Background(), m) == nil {
 			t.Fatal("credential publication silently filled an ambiguous partial set")
 		}
-		if _, err := c.childEnvironment(m, "server"); err == nil {
+		if _, err := c.childEnvironment(context.Background(), m, "server"); err == nil {
 			t.Fatal("credential publication allowed a partial set to reach a runtime child")
 		}
-		after, err := c.credentialPassword(m, credentialServer)
+		after, err := c.credentialPassword(context.Background(), m, credentialServer)
 		if err != nil || before != after {
 			t.Fatal("credential publication rotated the surviving database/file pair")
 		}
@@ -341,7 +341,7 @@ func (i principalCredentialOwnerInfo) Sys() any {
 
 func TestInstallerPrincipalsMigrationCredential(t *testing.T) {
 	c, m, values := selectedCredentialFixture(t)
-	environment, err := c.childEnvironment(m, "migration")
+	environment, err := c.childEnvironment(context.Background(), m, "migration")
 	if err != nil {
 		t.Fatal("migration credential mapping refused valid selected fixture")
 	}

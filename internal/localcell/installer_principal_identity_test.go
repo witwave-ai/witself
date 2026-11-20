@@ -2,6 +2,7 @@ package localcell
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"os"
 	"testing"
@@ -35,7 +36,7 @@ func TestPrincipalCredentialReplacementBeforeOpen(t *testing.T) {
 	realOpen := openPrincipalCredentialFile
 	t.Cleanup(func() { openPrincipalCredentialFile = realOpen })
 	opened := false
-	openPrincipalCredentialFile = func(name string, flags int, mode os.FileMode) (*os.File, error) {
+	openPrincipalCredentialFile = func(ctx context.Context, name string, flags int, mode os.FileMode) (*os.File, error) {
 		if name != path || opened {
 			t.Fatal("unexpected principal credential open")
 		}
@@ -50,9 +51,9 @@ func TestPrincipalCredentialReplacementBeforeOpen(t *testing.T) {
 		if err != nil || !privatePrincipalCredential(path, info) {
 			t.Fatal("replacement credential was not a private regular file")
 		}
-		return realOpen(name, flags, mode)
+		return realOpen(ctx, name, flags, mode)
 	}
-	got, err := c.credentialPassword(m, purpose)
+	got, err := c.credentialPassword(context.Background(), m, purpose)
 	if !opened {
 		t.Fatal("principal credential replacement seam was not reached")
 	}

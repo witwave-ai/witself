@@ -54,7 +54,7 @@ func TestPortsReallocationPublication(t *testing.T) {
 						t.Cleanup(func() { _ = listener.Close() })
 					}
 				}
-				err = c.prepareComponentPorts(m, component, false, true)
+				err = c.prepareComponentPorts(context.Background(), m, component, false, true)
 				if outcome == "exhausted" {
 					assertUnchanged()
 					if err == nil || err.Error() != "cannot allocate local cell loopback ports" || attempts != 3 {
@@ -107,7 +107,7 @@ func TestPostgresPortConfigRecoversInterruptedReallocation(t *testing.T) {
 	if testMkdir(c.path("pg"), 0o700) != nil || testMkdir(c.path("pg", "postgresql.conf"), 0o700) != nil {
 		t.Fatal("cannot stage interrupted config write")
 	}
-	if err := c.prepareComponentPorts(m, "postgres", false, true); err == nil {
+	if err := c.prepareComponentPorts(context.Background(), m, "postgres", false, true); err == nil {
 		t.Fatal("invalid config target did not fail reallocation publication")
 	}
 	saved, err := readManifest(c.cfg.Root)
@@ -118,7 +118,7 @@ func TestPostgresPortConfigRecoversInterruptedReallocation(t *testing.T) {
 		t.Fatal("cannot release interrupted config target")
 	}
 	c.afterPortAllocation = func(Ports) { t.Fatal("config recovery unnecessarily reallocated ports") }
-	if err := c.prepareComponentPorts(saved, "postgres", false, false); err != nil {
+	if err := c.prepareComponentPorts(context.Background(), saved, "postgres", false, false); err != nil {
 		t.Fatal("stopped preflight did not reconcile the durable PostgreSQL port")
 	}
 	config, err := os.ReadFile(c.path("pg", "postgresql.conf"))
@@ -161,7 +161,7 @@ func TestComponentPortAllocationBoundedAndIsolated(t *testing.T) {
 					}
 				}
 			}
-			if err := c.prepareComponentPorts(m, component, false, true); err == nil ||
+			if err := c.prepareComponentPorts(context.Background(), m, component, false, true); err == nil ||
 				err.Error() != "cannot allocate local cell loopback ports" || attempts != 3 {
 				t.Fatal("component allocation did not stop after three occupied candidates")
 			}
@@ -169,7 +169,7 @@ func TestComponentPortAllocationBoundedAndIsolated(t *testing.T) {
 				t.Fatal("exhausted allocation changed the manifest ports")
 			}
 			attempts = 0
-			if err := c.prepareComponentPorts(m, component, true, true); err != nil || attempts != 0 || m.Ports != initial {
+			if err := c.prepareComponentPorts(context.Background(), m, component, true, true); err != nil || attempts != 0 || m.Ports != initial {
 				t.Fatal("running component was reallocated")
 			}
 		})

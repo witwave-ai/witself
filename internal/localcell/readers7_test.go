@@ -2,6 +2,7 @@ package localcell
 
 import (
 	"cmp"
+	"context"
 	"errors"
 	"go/ast"
 	"go/build"
@@ -23,7 +24,7 @@ var readers7Waiting = strings.Fields(`os.Open os.OpenFile os.Create os.ReadFile 
 	localcell.openPrivateFile localcell.readPrivateFile localcell.readPostgresFile localcell.openPlainReader localcell.openPrivateWriter`)
 
 // readers7Pinned are logFile's checked open's arguments, a local as defined.
-var readers7Pinned = []string{"context.Background()", `c.path("logs", component + ".log")`, "os.O_WRONLY | os.O_CREATE | os.O_APPEND", "0o600",
+var readers7Pinned = []string{"ctx", `c.path("logs", component + ".log")`, "os.O_WRONLY | os.O_CREATE | os.O_APPEND", "0o600",
 	`errors.New("local cell log must be a regular file")`, `errors.New("cannot open local cell log")`}
 
 // readers7Contract type-checks the package sources as built here (sharing
@@ -143,7 +144,7 @@ func TestLogOpenSourceContract(t *testing.T) {
 	if err != nil || !slices.Equal(check(sources), []string{"", ""}) {
 		t.Fatal("log open source contract refused the tree")
 	}
-	const open, second = `return openRegularWriter(context.Background(), path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600, irregular, errors.New("cannot open local cell log"))`, `log, err := c.logFile("postgres")`
+	const open, second = `return openRegularWriter(ctx, path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600, irregular, errors.New("cannot open local cell log"))`, `log, err := c.logFile(context.Background(), "postgres")`
 	reopen := func(before, call string) func(string) string {
 		return func(source string) string {
 			return strings.Replace(source, open, before+"f, err := "+open[len("return "):]+"\n\tif err != nil {\n\t\treturn nil, err\n\t}\n\t_ = f.Close()\n\treturn "+call, 1)
@@ -196,7 +197,7 @@ func TestLogFileStillOpens(t *testing.T) {
 			if row.planted != "" {
 				err = errors.Join(err, testWriteFile(name, []byte(row.planted), 0o600))
 			}
-			f, openErr := c.logFile("server")
+			f, openErr := c.logFile(context.Background(), "server")
 			if row.want != "" {
 				data, _ := os.ReadFile(name)
 				if err != nil || openErr == nil || openErr.Error() != row.want || string(data) != row.planted {

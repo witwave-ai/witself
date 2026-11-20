@@ -161,7 +161,7 @@ type checkpointOperations struct {
 	beforeStep  func(step, path string) // observes attempts without replacing operations
 }
 
-func (c *Cell) checkpointOps() checkpointOperations {
+func (c *Cell) checkpointOps(ctx context.Context) checkpointOperations {
 	ops := checkpointOperations{control: c.checkpointControl, free: checkpointFreeSpace}
 	if c.checkpointTest != nil {
 		ops = *c.checkpointTest
@@ -176,7 +176,7 @@ func (c *Cell) checkpointOps() checkpointOperations {
 		ops.newID = func() (string, error) { return id.New("ckpt") }
 	}
 	if ops.open == nil {
-		ops.open = func(path string) (*os.File, error) { return openPrivateReader(context.Background(), path) }
+		ops.open = func(path string) (*os.File, error) { return openPrivateReader(ctx, path) }
 	}
 	if ops.transient == nil {
 		ops.transient = runtimeconfig.WindowsPrivateTransient
@@ -260,7 +260,7 @@ func (c *Cell) Checkpoint(ctx context.Context, options CheckpointOptions) error 
 // witness first, so an interruption leaves it incomplete, then the directory.
 func (c *Cell) DeleteCheckpoint(ctx context.Context, options DeleteCheckpointOptions) error {
 	ctx = leaseWaitDetached(ctx)
-	if err := c.refuseBeforeLockNames(ctx, func() error { return c.admitDeleteCheckpoint(options) }); err != nil {
+	if err := c.refuseBeforeLockNames(ctx, func() error { return c.admitDeleteCheckpoint(ctx, options) }); err != nil {
 		return err
 	}
 	lock, err := c.own(false)
@@ -329,7 +329,7 @@ func (c *Cell) refuseBeforeLockNames(ctx context.Context, admit func() error) er
 // admitCheckpointDry is the unchanged admitCheckpoint with its control
 // boundary replaced, so it returns before pg_controldata or free space.
 func (c *Cell) admitCheckpointDry(ctx context.Context, options CheckpointOptions) error {
-	ops := c.checkpointOps()
+	ops := c.checkpointOps(ctx)
 	ops.control = func(context.Context) (pgControlData, error) { return pgControlData{}, errCheckpointDryAdmitted }
 	if _, err := c.admitCheckpoint(ctx, options, ops); !errors.Is(err, errCheckpointDryAdmitted) {
 		return err
@@ -357,7 +357,7 @@ type checkpointPlan struct {
 }
 
 func (c *Cell) checkpointLocked(ctx context.Context, options CheckpointOptions) error {
-	ops := c.checkpointOps()
+	ops := c.checkpointOps(ctx)
 	plan, err := c.admitCheckpoint(ctx, options, ops)
 	if err != nil {
 		return err
@@ -371,7 +371,7 @@ func (c *Cell) checkpointLocked(ctx context.Context, options CheckpointOptions) 
 	if _, statErr := os.Lstat(dir); err != nil || dirErr != nil || !errors.Is(statErr, fs.ErrNotExist) {
 		return errCheckpointAllocation
 	}
-	if err := c.closeCheckpointLeftover(); err != nil {
+	if err := c.closeCheckpointLeftover(ctx); err != nil {
 		return err
 	}
 	if err := c.begin(ctx, "checkpoint"); err != nil {
@@ -404,7 +404,7 @@ func (c *Cell) checkpointLocked(ctx context.Context, options CheckpointOptions) 
 			return err
 		} else if err != nil {
 			discarded := !created || discard() == nil
-			return c.closeCheckpointFailure("checkpoint", err, discarded, ops.beforeClose)
+			return c.closeCheckpointFailure(ctx, "checkpoint", err, discarded, ops.beforeClose)
 		}
 	}
 	return c.journal(ctx, "checkpoint", "operation", "done")
@@ -444,11 +444,11 @@ func (c *Cell) admitCheckpoint(ctx context.Context, options CheckpointOptions, o
 			return nil, errCheckpointState
 		}
 	}
-	if _, err := c.password(); err != nil {
+	if _, err := c.password(ctx); err != nil {
 		return nil, err
 	}
 	if m.PrincipalLayoutVersion != 0 {
-		if err := c.validatePrincipalPasswords(m); err != nil {
+		if err := c.validatePrincipalPasswords(ctx, m); err != nil {
 			return nil, err
 		}
 	}
@@ -469,7 +469,7 @@ func (c *Cell) admitCheckpoint(ctx context.Context, options CheckpointOptions, o
 	if err := c.validateRecovery(); err != nil {
 		return nil, err
 	}
-	switch summaries, unknown, err := c.listCheckpoints(); {
+	switch summaries, unknown, err := c.listCheckpoints(ctx); {
 	case err != nil:
 		return nil, err
 	case slices.ContainsFunc(summaries, func(summary CheckpointSummary) bool { return !summary.Complete }):
@@ -618,17 +618,17 @@ var syncCheckpointTreeDirectory = func(_ string, sync func() error) error { retu
 // openCheckpointEntry opens one planned file read-only: PGDATA through the
 // confined source opener, the manifest and custody as private readers. None
 // waits on what stands at the name; copyFile decides the handle before a read.
-func (c *Cell) openCheckpointEntry(entry checkpointEntry, open func(string) (*os.File, error)) (*os.File, error) {
+func (c *Cell) openCheckpointEntry(ctx context.Context, entry checkpointEntry, open func(string) (*os.File, error)) (*os.File, error) {
 	if !entry.custody && entry.path != "manifest.json" {
 		return open(strings.TrimPrefix(entry.path, "pg/"))
 	}
 	source, err := c.credentialPath(entry.purpose)
 	if !entry.custody {
-		return openPrivateReader(context.Background(), c.path("manifest.json"))
+		return openPrivateReader(ctx, c.path("manifest.json"))
 	} else if err != nil {
 		return nil, err
 	}
-	return openPrivateReader(context.Background(), source)
+	return openPrivateReader(ctx, source)
 }
 
 // copyCheckpoint copies the plan in order into a new directory through the
@@ -659,7 +659,7 @@ func (c *Cell) copyCheckpoint(ctx context.Context, checkpointID string, plan *ch
 	}
 	defer release()
 	copyFile := func(entry *checkpointEntry) error {
-		source, err := c.openCheckpointEntry(*entry, open)
+		source, err := c.openCheckpointEntry(ctx, *entry, open)
 		if err != nil {
 			return errCheckpointCopy
 		}
@@ -907,15 +907,15 @@ func (c *Cell) witnessCheckpoint(ctx context.Context, checkpointID string, plan 
 
 // closeCheckpointFailure closes a failed operation unless the journal ends in
 // a torn record, which only Repair may truncate.
-func (c *Cell) closeCheckpointFailure(operation string, stepErr error, discarded bool, beforeClose func()) error {
+func (c *Cell) closeCheckpointFailure(ctx context.Context, operation string, stepErr error, discarded bool, beforeClose func()) error {
 	if beforeClose != nil {
 		beforeClose()
 	}
-	progress, err := c.readJournal(context.Background())
+	progress, err := c.readJournal(ctx)
 	if err != nil || progress.tornTail || progress.pending == nil || progress.pending.Operation != operation {
 		return stepErr
 	}
-	if err := c.journal(context.Background(), operation, "operation", "done"); err != nil {
+	if err := c.journal(ctx, operation, "operation", "done"); err != nil {
 		return err
 	}
 	var cause fixedCause
@@ -945,8 +945,8 @@ func checkpointLeftover(progress journalProgress) bool {
 
 // closeCheckpointLeftover, under the verb's lock after its admission, appends
 // only operation/done to such a leftover; a recorded cleanup refuses unwritten.
-func (c *Cell) closeCheckpointLeftover() error {
-	progress, err := c.readJournal(context.Background())
+func (c *Cell) closeCheckpointLeftover(ctx context.Context) error {
+	progress, err := c.readJournal(ctx)
 	if err != nil || !checkpointLeftover(progress) {
 		return err
 	}
@@ -955,17 +955,17 @@ func (c *Cell) closeCheckpointLeftover() error {
 	} else if cleanup != nil {
 		return errCheckpointState
 	}
-	return c.journal(context.Background(), progress.pending.Operation, "operation", "done")
+	return c.journal(ctx, progress.pending.Operation, "operation", "done")
 }
 
 // admitDeleteCheckpoint is DeleteCheckpoint's admission: it writes nothing and
 // ends before the hold.
-func (c *Cell) admitDeleteCheckpoint(options DeleteCheckpointOptions) error {
+func (c *Cell) admitDeleteCheckpoint(ctx context.Context, options DeleteCheckpointOptions) error {
 	// The identifier's shape is checked before any filesystem access.
 	if !checkpointIDPattern.MatchString(options.CheckpointID) {
 		return errCheckpointIdentity
 	}
-	if progress, err := c.readJournal(context.Background()); err != nil {
+	if progress, err := c.readJournal(ctx); err != nil {
 		return err
 	} else if (progress.pending != nil || progress.tornTail) && !checkpointLeftover(progress) {
 		return errCheckpointState
@@ -999,7 +999,7 @@ func (c *Cell) admitDeleteCheckpoint(options DeleteCheckpointOptions) error {
 }
 
 func (c *Cell) deleteCheckpointLocked(ctx context.Context, options DeleteCheckpointOptions) error {
-	if err := c.admitDeleteCheckpoint(options); err != nil {
+	if err := c.admitDeleteCheckpoint(ctx, options); err != nil {
 		return err
 	}
 	// recovery/ and the checkpoint are held as directories; every removal goes
@@ -1013,7 +1013,7 @@ func (c *Cell) deleteCheckpointLocked(ctx context.Context, options DeleteCheckpo
 	if err := privateDir(c.path("journal"), true); err != nil {
 		return err
 	}
-	if err := c.closeCheckpointLeftover(); err != nil {
+	if err := c.closeCheckpointLeftover(ctx); err != nil {
 		return err
 	}
 	if err := c.begin(ctx, "checkpoint_delete"); err != nil {
@@ -1029,7 +1029,7 @@ func (c *Cell) deleteCheckpointLocked(ctx context.Context, options DeleteCheckpo
 		if err := c.step(ctx, "checkpoint_delete", step.name, step.run); errors.Is(err, errInterrupted) {
 			return err
 		} else if err != nil {
-			return c.closeCheckpointFailure("checkpoint_delete", err, true, nil)
+			return c.closeCheckpointFailure(ctx, "checkpoint_delete", err, true, nil)
 		}
 	}
 	return c.journal(ctx, "checkpoint_delete", "operation", "done")
@@ -1080,7 +1080,7 @@ func checkpointWitnessRead(r io.Reader, checkpointID string) (checkpointWitness,
 
 // listCheckpoints classifies recovery/ after validateRecovery; entries that
 // are not id-shaped directories are counted unknown.
-func (c *Cell) listCheckpoints() ([]CheckpointSummary, int, error) {
+func (c *Cell) listCheckpoints(ctx context.Context) ([]CheckpointSummary, int, error) {
 	entries, err := os.ReadDir(c.recoveryDir())
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, 0, nil
@@ -1097,7 +1097,7 @@ func (c *Cell) listCheckpoints() ([]CheckpointSummary, int, error) {
 			continue
 		}
 		summary := CheckpointSummary{ID: entry.Name()}
-		witness, complete, err := checkpointComplete(context.Background(), dir, entry.Name())
+		witness, complete, err := checkpointComplete(ctx, dir, entry.Name())
 		if err != nil {
 			// A witness that may exist and was not read is never listed.
 			return nil, 0, err
@@ -1112,7 +1112,7 @@ func (c *Cell) listCheckpoints() ([]CheckpointSummary, int, error) {
 
 // checkpointSummaries is Inspect's read-only listing. Inspect retains its own
 // acquired lock until this returns; without it we never descend into recovery.
-func (c *Cell) checkpointSummaries(lock *operationLock, inspection *Inspection) error {
+func (c *Cell) checkpointSummaries(ctx context.Context, lock *operationLock, inspection *Inspection) error {
 	switch {
 	case inspection.Locked:
 		inspection.CheckpointListing = "busy"
@@ -1137,7 +1137,7 @@ func (c *Cell) checkpointSummaries(lock *operationLock, inspection *Inspection) 
 		return err
 	}
 	var err error
-	inspection.Checkpoints, inspection.CheckpointUnknown, err = c.listCheckpoints()
+	inspection.Checkpoints, inspection.CheckpointUnknown, err = c.listCheckpoints(ctx)
 	return err
 }
 
