@@ -31,7 +31,7 @@ var (
 
 // privateBeneathContract returns the keys sources break, sorted: the walk file's build line, imports, calls, constants,
 // pathname calls and os uses (root.Open("."), a called os.NewFile, no other root method or os name), and any other
-// non-test file naming privateBeneath... or errPrivateBeneath... (R7).
+// non-test file but the copy's tree naming privateBeneath... or errPrivateBeneath... (R7).
 func privateBeneathContract(sources map[string]string) []string {
 	const walk = "private_beneath_unix.go"
 	keys, calls, texts, roots, called, imports := map[string]bool{}, map[string]int{}, map[string]int{}, map[string]bool{}, map[ast.Expr]string{}, []string{}
@@ -74,8 +74,8 @@ func privateBeneathContract(sources map[string]string) []string {
 		keys["private_beneath_call:"+text] = keys["private_beneath_call:"+text] || texts[text] != privateBeneathCalls[text]
 	}
 	for name, source := range sources {
-		if name == walk || !strings.Contains(source, "rivateBeneath") {
-			continue // a file that cannot name the walk's declarations is not parsed
+		if name == walk || name == "checkpoint_tree_unix.go" || !strings.Contains(source, "rivateBeneath") {
+			continue // the copy's tree, and a file that cannot name the walk's declarations, are not parsed
 		}
 		other, err := parser.ParseFile(token.NewFileSet(), name, source, parser.SkipObjectResolution)
 		for node := range ast.Preorder(other) {
@@ -106,6 +106,8 @@ func TestPrivateBeneathSourceContract(t *testing.T) {
 			[]string{"private_beneath_call:dir.Sync()", "private_beneath_pathname:unix.Fsync"}},
 		{"reference_elsewhere", "checkpoint.go", [][2]string{{"\nfunc ClassifyCheckpointFailure(", "\nfunc zz() { _ = privateBeneathAt }\n\nfunc ClassifyCheckpointFailure("}},
 			[]string{"private_beneath_reference:checkpoint.go:privateBeneathAt"}},
+		{"reference_windows_tree", "checkpoint_tree_windows.go", [][2]string{{"\nfunc (t *checkpointTree) close() {}\n", "\nfunc (t *checkpointTree) close() { _ = privateBeneathAt }\n"}},
+			[]string{"private_beneath_reference:checkpoint_tree_windows.go:privateBeneathAt"}},
 		{"import_added", walk, [][2]string{{"\t\"errors\"\n", "\t\"errors\"\n\t\"path/filepath\"\n"}, {"\nfunc privateBeneathPart(", "\nvar _ = filepath.Base\n\nfunc privateBeneathPart("}},
 			[]string{"private_beneath_import:path/filepath", "private_beneath_pathname:filepath.Base"}},
 		{"unix_constant", walk, [][2]string{{"\tdir := int(held.Fd())\n", "\tdir := unix.AT_FDCWD\n"}}, []string{"private_beneath_call:unix.AT_FDCWD"}},

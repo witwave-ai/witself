@@ -175,9 +175,6 @@ func (c *Cell) checkpointOps() checkpointOperations {
 	if ops.newID == nil {
 		ops.newID = func() (string, error) { return id.New("ckpt") }
 	}
-	if ops.publish == nil {
-		ops.publish = publishPrivateFile
-	}
 	if ops.open == nil {
 		ops.open = func(path string) (*os.File, error) { return openPrivateReader(context.Background(), path) }
 	}
@@ -383,9 +380,10 @@ func (c *Cell) checkpointLocked(ctx context.Context, options CheckpointOptions) 
 	if c.cfg.Failpoint != nil && c.cfg.Failpoint("checkpoint", "operation_started") != nil {
 		return errInterrupted
 	}
-	created := false
+	created, tree := false, c.checkpointTree(checkpointID)
+	defer tree.close()
 	// The failed create's one cleanup; later calls reuse the first call's result.
-	discard := sync.OnceValue(func() error { return c.discardOwnCheckpoint(checkpointID) })
+	discard := sync.OnceValue(tree.discard)
 	budget := checkpointRetryBudget{limit: checkpointRetryFloor}
 	for _, entry := range plan.entries {
 		if !entry.directory {
@@ -396,7 +394,7 @@ func (c *Cell) checkpointLocked(ctx context.Context, options CheckpointOptions) 
 		name string
 		run  func() error
 	}{
-		{"copy", func() error { return c.copyCheckpoint(ctx, checkpointID, plan, &created, discard, ops, &budget) }},
+		{"copy", func() error { return c.copyCheckpoint(ctx, checkpointID, plan, tree, &created, discard, ops, &budget) }},
 		{"inventory", func() error { return c.inventoryCheckpoint(ctx, checkpointID, plan, discard, ops, &budget) }},
 		{"witness", func() error { return c.witnessCheckpoint(ctx, checkpointID, plan, ops) }},
 	} {
@@ -613,9 +611,9 @@ func (p *checkpointPlan) need() uint64 {
 	return 2*size + checkpointReserve
 }
 
-// syncCheckpointDirectory syncs a checkpoint directory or recovery/. Tests
-// replace it; production always uses syncDirectory.
-var syncCheckpointDirectory = syncDirectory
+// syncCheckpointTreeDirectory syncs a directory of the copy, name its slash
+// path below recovery/. Tests replace it; production runs sync.
+var syncCheckpointTreeDirectory = func(_ string, sync func() error) error { return sync() }
 
 // openCheckpointEntry opens one planned file read-only: PGDATA through the
 // confined source opener, the manifest and custody as private readers. None
@@ -633,24 +631,26 @@ func (c *Cell) openCheckpointEntry(entry checkpointEntry, open func(string) (*os
 	return openPrivateReader(context.Background(), source)
 }
 
-// copyCheckpoint copies the plan in order into a new directory: each file of
-// exactly its planned size through a SHA-256 tee into a private temporary
-// published once. A failure removes the directory before the failed line.
-func (c *Cell) copyCheckpoint(ctx context.Context, checkpointID string, plan *checkpointPlan, created *bool, discard func() error, ops checkpointOperations, budget *checkpointRetryBudget) error {
+// copyCheckpoint copies the plan in order into a new directory through the
+// tree: each file of exactly its planned size through a SHA-256 tee into a
+// private temporary published once. A failure removes the directory before the
+// failed line.
+func (c *Cell) copyCheckpoint(ctx context.Context, checkpointID string, plan *checkpointPlan, tree *checkpointTree, created *bool, discard func() error, ops checkpointOperations, budget *checkpointRetryBudget) error {
 	dir, err := c.checkpointDir(checkpointID)
 	if err != nil {
 		return err
 	}
-	if err := privateDir(c.recoveryDir(), true); err != nil {
+	if err := privateDir(c.recoveryDir(), true); err != nil || tree.hold() != nil {
 		return errCheckpointCopy
 	}
 	// The second refusal of an existing identifier: nothing is written into it.
-	if _, err := os.Lstat(dir); !errors.Is(err, fs.ErrNotExist) {
+	// Not-exist is the no-follow fstatat of the one name in the held, bound recovery/.
+	if _, err := tree.lstat("."); !errors.Is(err, fs.ErrNotExist) {
 		return errCheckpointCopy
 	}
 	*created = true
 	fail := func(cause error) error { _ = discard(); return cause }
-	if err := privateDir(dir, true); err != nil {
+	if err := tree.mkdir("."); err != nil {
 		return fail(errCheckpointCopy)
 	}
 	open, release, err := c.openCheckpointSource(ctx)
@@ -667,7 +667,7 @@ func (c *Cell) copyCheckpoint(ctx context.Context, checkpointID string, plan *ch
 		if info, err := source.Stat(); err != nil || !info.Mode().IsRegular() || info.Size() != entry.size {
 			return errCheckpointWitness
 		}
-		temporary, err := createPrivateTemp(filepath.Join(dir, filepath.FromSlash(path.Dir(entry.path))))
+		temporary, pending, err := tree.createTemp(path.Dir(entry.path))
 		if err != nil {
 			return errCheckpointCopy
 		}
@@ -684,22 +684,25 @@ func (c *Cell) copyCheckpoint(ctx context.Context, checkpointID string, plan *ch
 		if syncFile(temporary) != nil || temporary.Close() != nil {
 			return errCheckpointCopy
 		}
-		target, attempted := filepath.Join(dir, filepath.FromSlash(entry.path)), false
+		from, target, attempted := filepath.Join(dir, filepath.FromSlash(pending)), filepath.Join(dir, filepath.FromSlash(entry.path)), false
 		if retryCheckpointStep(ctx, budget, ops, func() error {
 			// A post-move validation refusal can leave the complete target.
 			// Only this call owns the directory; inventory re-hashes the file.
 			if attempted {
-				_, sourceErr := os.Lstat(temporary.Name())
-				info, targetErr := os.Lstat(target)
+				_, sourceErr := tree.lstat(pending)
+				info, targetErr := tree.lstat(entry.path)
 				if errors.Is(sourceErr, fs.ErrNotExist) && targetErr == nil && info.Mode().IsRegular() {
 					return nil
 				}
 			}
 			attempted = true
 			if ops.beforeStep != nil {
-				ops.beforeStep("publish", temporary.Name())
+				ops.beforeStep("publish", from)
 			}
-			return ops.publish(temporary.Name(), target)
+			if ops.publish != nil {
+				return ops.publish(from, target)
+			}
+			return tree.publish(pending, entry.path)
 		}) != nil {
 			return errCheckpointCopy
 		}
@@ -713,7 +716,7 @@ func (c *Cell) copyCheckpoint(ctx context.Context, checkpointID string, plan *ch
 		}
 		if !entry.directory {
 			err = copyFile(entry)
-		} else if privateDir(filepath.Join(dir, filepath.FromSlash(entry.path)), true) != nil {
+		} else if tree.mkdir(entry.path) != nil {
 			err = errCheckpointCopy
 		}
 		if err != nil {
@@ -722,11 +725,11 @@ func (c *Cell) copyCheckpoint(ctx context.Context, checkpointID string, plan *ch
 	}
 	// Plan order creates parents first; the reverse syncs deepest first.
 	for index := len(plan.entries) - 1; index >= 0; index-- {
-		if plan.entries[index].directory && syncCheckpointDirectory(filepath.Join(dir, filepath.FromSlash(plan.entries[index].path))) != nil {
+		if plan.entries[index].directory && tree.sync(plan.entries[index].path) != nil {
 			return fail(errCheckpointCopy)
 		}
 	}
-	if err := syncCheckpointDirectory(dir); err != nil {
+	if err := tree.sync("."); err != nil {
 		return fail(errCheckpointCopy)
 	}
 	if ops.afterCopy != nil {

@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -95,6 +96,24 @@ func readers5Seam(t *testing.T, seam *func(string) error, accept func(string) bo
 	}
 }
 
+// readers5TreeSeam replaces a tree sync seam, which must still run its sync,
+// with one that first offers the planter the directory offer returns for the
+// seam's slash name below recovery/ ("" offers nothing).
+func readers5TreeSeam(t *testing.T, c *Cell, seam *func(string, func() error) error, offer func(string) string, p *readers5Planter) {
+	t.Helper()
+	saved, calls := *seam, 0
+	if saved("", func() error { calls++; return nil }) != nil || calls != 1 {
+		t.Fatal("the tree sync seam no longer runs its sync")
+	}
+	t.Cleanup(func() { *seam = saved })
+	*seam = func(name string, sync func() error) error {
+		if dir := offer(name); dir != "" {
+			p.put(filepath.Join(c.recoveryDir(), filepath.FromSlash(dir)))
+		}
+		return saved(name, sync)
+	}
+}
+
 // readers5NothingLeft checks recovery/ itself (R8): it exists as a directory
 // and lists no checkpoint; a recovery/ that cannot be read is not empty.
 func readers5NothingLeft(c *Cell) bool {
@@ -143,11 +162,11 @@ func TestReaders5NeverWait(t *testing.T) {
 					}
 				case "checkpoint":
 					// The first sync is the last planned directory (deepest first).
-					readers5Seam(t, &syncCheckpointDirectory, func(string) bool { return true }, p)
+					readers5TreeSeam(t, c, &syncCheckpointTreeDirectory, func(name string) string { return name }, p)
 				case "parent":
-					readers5Seam(t, &syncPrivateDirParent, func(name string) bool {
-						rel, err := filepath.Rel(c.recoveryDir(), name)
-						return err == nil && strings.HasPrefix(rel, "ckpt_") && strings.Contains(rel, string(filepath.Separator))
+					// The made directory's parent, when it is below the checkpoint directory.
+					readers5TreeSeam(t, c, &syncCheckpointTreeParent, func(made string) string {
+						return map[bool]string{true: path.Dir(made)}[strings.Contains(path.Dir(made), "/")]
 					}, p)
 				}
 				err := readerWatchdog(t, func() error { return c.Checkpoint(t.Context(), checkpointOptions(f)) }, p.unblock)
