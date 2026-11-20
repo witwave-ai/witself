@@ -250,19 +250,27 @@ tests:
   - expr: count(ALERTS{alertname="WitselfArgoApplicationUnhealthy",alertstate="firing"})
     eval_time: 30m
     exp_samples: []
-- name: B1 PostgreSQL memory fires after ten minutes and excludes the metrics sidecar
+- name: B1 PostgreSQL non-file memory just above eighty percent is pending at fourteen minutes and fires at fifteen, excluding the metrics sidecar
   interval: 1m
   input_series:
-  - series: container_memory_working_set_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",pod="witself-postgresql-0",container="postgresql",id="/kubepods/postgresql/old",image="postgresql:18",instance="n1:10250",node="n1"}
+  - series: container_memory_usage_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",pod="witself-postgresql-0",container="postgresql",id="/kubepods/postgresql/old",image="postgresql:18",instance="n1:10250",node="n1"}
     values: 382730240+0x40
+  - series: container_memory_total_active_file_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",pod="witself-postgresql-0",container="postgresql",id="/kubepods/postgresql/old",image="postgresql:18",instance="n1:10250",node="n1"}
+    values: 41943040+0x40
+  - series: container_memory_total_inactive_file_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",pod="witself-postgresql-0",container="postgresql",id="/kubepods/postgresql/old",image="postgresql:18",instance="n1:10250",node="n1"}
+    values: 18350080+0x40
   - series: kube_pod_container_resource_limits{job="kube-state-metrics",namespace="witself",pod="witself-postgresql-0",container="postgresql",instance="ksm:8080",uid="postgresql-0-uid",resource="memory",unit="byte"}
     values: 402653184+0x40
   - series: kube_pod_container_resource_limits{job="kube-state-metrics",namespace="witself",pod="witself-postgresql-0",container="postgresql",instance="ksm:8080",uid="postgresql-0-uid",resource="cpu",unit="core"}
     values: 0.38+0x40
   - series: kube_pod_container_resource_limits{job="kube-state-metrics",namespace="witself",pod="witself-postgresql-0",container="postgresql",instance="ksm:8080",uid="postgresql-0-uid",resource="ephemeral_storage",unit="byte"}
     values: 2147483648+0x40
-  - series: container_memory_working_set_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",pod="witself-postgresql-0",container="metrics",id="/kubepods/postgresql/metrics",image="postgres-exporter:latest",instance="n1:10250",node="n1"}
+  - series: container_memory_usage_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",pod="witself-postgresql-0",container="metrics",id="/kubepods/postgresql/metrics",image="postgres-exporter:latest",instance="n1:10250",node="n1"}
     values: 990+0x40
+  - series: container_memory_total_active_file_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",pod="witself-postgresql-0",container="metrics",id="/kubepods/postgresql/metrics",image="postgres-exporter:latest",instance="n1:10250",node="n1"}
+    values: 0+0x40
+  - series: container_memory_total_inactive_file_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",pod="witself-postgresql-0",container="metrics",id="/kubepods/postgresql/metrics",image="postgres-exporter:latest",instance="n1:10250",node="n1"}
+    values: 0+0x40
   - series: kube_pod_container_resource_limits{job="kube-state-metrics",namespace="witself",pod="witself-postgresql-0",container="metrics",instance="ksm:8080",uid="postgresql-0-uid",resource="memory",unit="byte"}
     values: 1000+0x40
   - series: kube_pod_container_resource_limits{job="kube-state-metrics",namespace="witself",pod="witself-postgresql-0",container="metrics",instance="ksm:8080",uid="postgresql-0-uid",resource="cpu",unit="core"}
@@ -270,11 +278,16 @@ tests:
   - series: kube_pod_container_resource_limits{job="kube-state-metrics",namespace="witself",pod="witself-postgresql-0",container="metrics",instance="ksm:8080",uid="postgresql-0-uid",resource="ephemeral_storage",unit="byte"}
     values: 2147483648+0x40
   promql_expr_test:
+  - expr: count(ALERTS{alertname="WitselfPostgreSQLMemoryNearLimit",alertstate="pending"})
+    eval_time: 14m
+    exp_samples:
+    - labels: "{}"
+      value: 1
   - expr: count(ALERTS{alertname="WitselfPostgreSQLMemoryNearLimit",alertstate="firing"})
-    eval_time: 9m
+    eval_time: 14m
     exp_samples: []
   - expr: count(ALERTS{alertname="WitselfPostgreSQLMemoryNearLimit",alertstate="firing"})
-    eval_time: 11m
+    eval_time: 15m
     exp_samples:
     - labels: "{}"
       value: 1
@@ -284,10 +297,10 @@ tests:
     - labels: "{}"
       value: 1
   alert_rule_test:
-  - eval_time: 9m
+  - eval_time: 14m
     alertname: WitselfPostgreSQLMemoryNearLimit
     exp_alerts: []
-  - eval_time: 11m
+  - eval_time: 15m
     alertname: WitselfPostgreSQLMemoryNearLimit
     exp_alerts:
     - exp_labels:
@@ -298,8 +311,8 @@ tests:
         service: witself-postgresql
         witself_alert: 'true'
       exp_annotations:
-        summary: The PostgreSQL container working set is above 90 percent of its memory
-          limit.
+        summary: PostgreSQL non-file memory is above 80 percent of the container's memory limit.
+        description: The postgresql container's memory usage minus its active and inactive file cache has stayed above 80 percent of its memory limit for 15 minutes. File cache is left out because the kernel drops it under pressure; the rest (process memory, shared buffers, kernel memory) is what leads to an OOM kill. Check first how much of it is process memory (container_memory_rss) and whether work_mem, shared_buffers or the connection count grew; kubectl top shows working set, which still counts active file cache.
         runbook: docs/observability-and-operations.md#postgresql-alerts
   - eval_time: 30m
     alertname: WitselfPostgreSQLMemoryNearLimit
@@ -312,39 +325,49 @@ tests:
         service: witself-postgresql
         witself_alert: 'true'
       exp_annotations:
-        summary: The PostgreSQL container working set is above 90 percent of its memory
-          limit.
+        summary: PostgreSQL non-file memory is above 80 percent of the container's memory limit.
+        description: The postgresql container's memory usage minus its active and inactive file cache has stayed above 80 percent of its memory limit for 15 minutes. File cache is left out because the kernel drops it under pressure; the rest (process memory, shared buffers, kernel memory) is what leads to an OOM kill. Check first how much of it is process memory (container_memory_rss) and whether work_mem, shared_buffers or the connection count grew; kubectl top shows working set, which still counts active file cache.
         runbook: docs/observability-and-operations.md#postgresql-alerts
-- name: B2 PostgreSQL memory below ninety percent stays silent
+- name: B2 PostgreSQL cache-full container with working set at 98 percent and non-file memory at 42 percent stays silent for two hours
   interval: 1m
   input_series:
   - series: container_memory_working_set_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",pod="witself-postgresql-0",container="postgresql",id="/kubepods/postgresql/old",image="postgresql:18",instance="n1:10250",node="n1"}
-    values: 361758720+0x40
+    values: 789577728+0x120
+  - series: container_memory_usage_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",pod="witself-postgresql-0",container="postgresql",id="/kubepods/postgresql/old",image="postgresql:18",instance="n1:10250",node="n1"}
+    values: 797966336+0x120
+  - series: container_memory_total_active_file_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",pod="witself-postgresql-0",container="postgresql",id="/kubepods/postgresql/old",image="postgresql:18",instance="n1:10250",node="n1"}
+    values: 451936256+0x120
+  - series: container_memory_total_inactive_file_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",pod="witself-postgresql-0",container="postgresql",id="/kubepods/postgresql/old",image="postgresql:18",instance="n1:10250",node="n1"}
+    values: 8388608+0x120
   - series: kube_pod_container_resource_limits{job="kube-state-metrics",namespace="witself",pod="witself-postgresql-0",container="postgresql",instance="ksm:8080",uid="postgresql-0-uid",resource="memory",unit="byte"}
-    values: 402653184+0x40
+    values: 805306368+0x120
   - series: kube_pod_container_resource_limits{job="kube-state-metrics",namespace="witself",pod="witself-postgresql-0",container="postgresql",instance="ksm:8080",uid="postgresql-0-uid",resource="cpu",unit="core"}
     values: 0.38+0x40
   - series: kube_pod_container_resource_limits{job="kube-state-metrics",namespace="witself",pod="witself-postgresql-0",container="postgresql",instance="ksm:8080",uid="postgresql-0-uid",resource="ephemeral_storage",unit="byte"}
     values: 2147483648+0x40
   promql_expr_test:
   - expr: count(ALERTS{alertname="WitselfPostgreSQLMemoryNearLimit",alertstate="firing"})
-    eval_time: 11m
-    exp_samples: []
-  - expr: count(ALERTS{alertname="WitselfPostgreSQLMemoryNearLimit",alertstate="firing"})
     eval_time: 30m
     exp_samples: []
+  - expr: count(ALERTS{alertname="WitselfPostgreSQLMemoryNearLimit"})
+    eval_time: 120m
+    exp_samples: []
   alert_rule_test:
-  - eval_time: 11m
-    alertname: WitselfPostgreSQLMemoryNearLimit
-    exp_alerts: []
   - eval_time: 30m
     alertname: WitselfPostgreSQLMemoryNearLimit
     exp_alerts: []
-- name: B3 PostgreSQL memory exactly ninety percent stays silent
+  - eval_time: 120m
+    alertname: WitselfPostgreSQLMemoryNearLimit
+    exp_alerts: []
+- name: B3 PostgreSQL non-file memory at exactly eighty percent stays silent
   interval: 1m
   input_series:
-  - series: container_memory_working_set_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",pod="witself-postgresql-0",container="postgresql",id="/kubepods/postgresql/old",image="postgresql:18",instance="n1:10250",node="n1"}
-    values: 900+0x40
+  - series: container_memory_usage_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",pod="witself-postgresql-0",container="postgresql",id="/kubepods/postgresql/old",image="postgresql:18",instance="n1:10250",node="n1"}
+    values: 950+0x40
+  - series: container_memory_total_active_file_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",pod="witself-postgresql-0",container="postgresql",id="/kubepods/postgresql/old",image="postgresql:18",instance="n1:10250",node="n1"}
+    values: 100+0x40
+  - series: container_memory_total_inactive_file_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",pod="witself-postgresql-0",container="postgresql",id="/kubepods/postgresql/old",image="postgresql:18",instance="n1:10250",node="n1"}
+    values: 50+0x40
   - series: kube_pod_container_resource_limits{job="kube-state-metrics",namespace="witself",pod="witself-postgresql-0",container="postgresql",instance="ksm:8080",uid="postgresql-0-uid",resource="memory",unit="byte"}
     values: 1000+0x40
   - series: kube_pod_container_resource_limits{job="kube-state-metrics",namespace="witself",pod="witself-postgresql-0",container="postgresql",instance="ksm:8080",uid="postgresql-0-uid",resource="cpu",unit="core"}
@@ -352,6 +375,9 @@ tests:
   - series: kube_pod_container_resource_limits{job="kube-state-metrics",namespace="witself",pod="witself-postgresql-0",container="postgresql",instance="ksm:8080",uid="postgresql-0-uid",resource="ephemeral_storage",unit="byte"}
     values: 2147483648+0x40
   promql_expr_test:
+  - expr: count(ALERTS{alertname="WitselfPostgreSQLMemoryNearLimit"})
+    eval_time: 30m
+    exp_samples: []
   - expr: count(ALERTS{alertname="WitselfPostgreSQLMemoryNearLimit",alertstate="firing"})
     eval_time: 30m
     exp_samples: []
@@ -359,33 +385,42 @@ tests:
   - eval_time: 30m
     alertname: WitselfPostgreSQLMemoryNearLimit
     exp_alerts: []
-- name: B4 PostgreSQL memory retains its five minute firing hold after recovery
+- name: B4 PostgreSQL memory keeps firing without a gap through a ten-minute dip and resolves thirty minutes after recovery
   interval: 1m
   input_series:
-  - series: container_memory_working_set_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",pod="witself-postgresql-0",container="postgresql",id="/kubepods/postgresql/old",image="postgresql:18",instance="n1:10250",node="n1"}
-    values: 382730240+0x19 314572800+0x20
+  - series: container_memory_usage_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",pod="witself-postgresql-0",container="postgresql",id="/kubepods/postgresql/old",image="postgresql:18",instance="n1:10250",node="n1"}
+    values: 382730240+0x19 314572800+0x9 382730240+0x9 314572800+0x35
+  - series: container_memory_total_active_file_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",pod="witself-postgresql-0",container="postgresql",id="/kubepods/postgresql/old",image="postgresql:18",instance="n1:10250",node="n1"}
+    values: 20971520+0x75
+  - series: container_memory_total_inactive_file_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",pod="witself-postgresql-0",container="postgresql",id="/kubepods/postgresql/old",image="postgresql:18",instance="n1:10250",node="n1"}
+    values: 10485760+0x75
   - series: kube_pod_container_resource_limits{job="kube-state-metrics",namespace="witself",pod="witself-postgresql-0",container="postgresql",instance="ksm:8080",uid="postgresql-0-uid",resource="memory",unit="byte"}
-    values: 402653184+0x40
+    values: 402653184+0x75
   - series: kube_pod_container_resource_limits{job="kube-state-metrics",namespace="witself",pod="witself-postgresql-0",container="postgresql",instance="ksm:8080",uid="postgresql-0-uid",resource="cpu",unit="core"}
     values: 0.38+0x40
   - series: kube_pod_container_resource_limits{job="kube-state-metrics",namespace="witself",pod="witself-postgresql-0",container="postgresql",instance="ksm:8080",uid="postgresql-0-uid",resource="ephemeral_storage",unit="byte"}
     values: 2147483648+0x40
   promql_expr_test:
   - expr: count(ALERTS{alertname="WitselfPostgreSQLMemoryNearLimit",alertstate="firing"})
-    eval_time: 19m
+    eval_time: 25m
     exp_samples:
     - labels: "{}"
       value: 1
   - expr: count(ALERTS{alertname="WitselfPostgreSQLMemoryNearLimit",alertstate="firing"})
-    eval_time: 24m
+    eval_time: 29m30s
     exp_samples:
     - labels: "{}"
       value: 1
+  - expr: max(ALERTS_FOR_STATE{alertname="WitselfPostgreSQLMemoryNearLimit"})
+    eval_time: 35m
+    exp_samples:
+    - labels: "{}"
+      value: 0
   - expr: count(ALERTS{alertname="WitselfPostgreSQLMemoryNearLimit",alertstate="firing"})
-    eval_time: 26m
+    eval_time: 70m
     exp_samples: []
   alert_rule_test:
-  - eval_time: 19m
+  - eval_time: 35m
     alertname: WitselfPostgreSQLMemoryNearLimit
     exp_alerts:
     - exp_labels:
@@ -396,10 +431,10 @@ tests:
         service: witself-postgresql
         witself_alert: 'true'
       exp_annotations:
-        summary: The PostgreSQL container working set is above 90 percent of its memory
-          limit.
+        summary: PostgreSQL non-file memory is above 80 percent of the container's memory limit.
+        description: The postgresql container's memory usage minus its active and inactive file cache has stayed above 80 percent of its memory limit for 15 minutes. File cache is left out because the kernel drops it under pressure; the rest (process memory, shared buffers, kernel memory) is what leads to an OOM kill. Check first how much of it is process memory (container_memory_rss) and whether work_mem, shared_buffers or the connection count grew; kubectl top shows working set, which still counts active file cache.
         runbook: docs/observability-and-operations.md#postgresql-alerts
-  - eval_time: 24m
+  - eval_time: 69m30s
     alertname: WitselfPostgreSQLMemoryNearLimit
     exp_alerts:
     - exp_labels:
@@ -410,26 +445,45 @@ tests:
         service: witself-postgresql
         witself_alert: 'true'
       exp_annotations:
-        summary: The PostgreSQL container working set is above 90 percent of its memory
-          limit.
+        summary: PostgreSQL non-file memory is above 80 percent of the container's memory limit.
+        description: The postgresql container's memory usage minus its active and inactive file cache has stayed above 80 percent of its memory limit for 15 minutes. File cache is left out because the kernel drops it under pressure; the rest (process memory, shared buffers, kernel memory) is what leads to an OOM kill. Check first how much of it is process memory (container_memory_rss) and whether work_mem, shared_buffers or the connection count grew; kubectl top shows working set, which still counts active file cache.
         runbook: docs/observability-and-operations.md#postgresql-alerts
-  - eval_time: 26m
+  - eval_time: 71m
     alertname: WitselfPostgreSQLMemoryNearLimit
     exp_alerts: []
-- name: B5 PostgreSQL memory excludes pod cgroups other namespaces jobs paths and
-    containers
+- name: B5 PostgreSQL memory excludes pod cgroups other namespaces jobs paths and containers
   interval: 1m
   input_series:
-  - series: container_memory_working_set_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",pod="witself-postgresql-0",container="",id="/kubepods/postgresql",image="",instance="n1:10250",node="n1"}
+  - series: container_memory_usage_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",pod="witself-postgresql-0",container="",id="/kubepods/postgresql",image="",instance="n1:10250",node="n1"}
     values: 990+0x40
-  - series: container_memory_working_set_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="other",pod="witself-postgresql-0",container="postgresql",id="/kubepods/postgresql/old",image="postgresql:18",instance="n1:10250",node="n1"}
+  - series: container_memory_total_active_file_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",pod="witself-postgresql-0",container="",id="/kubepods/postgresql",image="",instance="n1:10250",node="n1"}
+    values: 0+0x40
+  - series: container_memory_total_inactive_file_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",pod="witself-postgresql-0",container="",id="/kubepods/postgresql",image="",instance="n1:10250",node="n1"}
+    values: 0+0x40
+  - series: container_memory_usage_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="other",pod="witself-postgresql-0",container="postgresql",id="/kubepods/postgresql/old",image="postgresql:18",instance="n1:10250",node="n1"}
     values: 990+0x40
-  - series: container_memory_working_set_bytes{job="other-kubelet",metrics_path="/metrics/cadvisor",namespace="witself",pod="witself-postgresql-0",container="postgresql",id="/kubepods/postgresql/other-job",image="postgresql:18",instance="n1:10250",node="n1"}
+  - series: container_memory_total_active_file_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="other",pod="witself-postgresql-0",container="postgresql",id="/kubepods/postgresql/old",image="postgresql:18",instance="n1:10250",node="n1"}
+    values: 0+0x40
+  - series: container_memory_total_inactive_file_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="other",pod="witself-postgresql-0",container="postgresql",id="/kubepods/postgresql/old",image="postgresql:18",instance="n1:10250",node="n1"}
+    values: 0+0x40
+  - series: container_memory_usage_bytes{job="other-kubelet",metrics_path="/metrics/cadvisor",namespace="witself",pod="witself-postgresql-0",container="postgresql",id="/kubepods/postgresql/other-job",image="postgresql:18",instance="n1:10250",node="n1"}
     values: 990+0x40
-  - series: container_memory_working_set_bytes{job="kubelet",metrics_path="/metrics/resource",namespace="witself",pod="witself-postgresql-0",container="postgresql",id="/kubepods/postgresql/resource",image="postgresql:18",instance="n1:10250",node="n1"}
+  - series: container_memory_total_active_file_bytes{job="other-kubelet",metrics_path="/metrics/cadvisor",namespace="witself",pod="witself-postgresql-0",container="postgresql",id="/kubepods/postgresql/other-job",image="postgresql:18",instance="n1:10250",node="n1"}
+    values: 0+0x40
+  - series: container_memory_total_inactive_file_bytes{job="other-kubelet",metrics_path="/metrics/cadvisor",namespace="witself",pod="witself-postgresql-0",container="postgresql",id="/kubepods/postgresql/other-job",image="postgresql:18",instance="n1:10250",node="n1"}
+    values: 0+0x40
+  - series: container_memory_usage_bytes{job="kubelet",metrics_path="/metrics/resource",namespace="witself",pod="witself-postgresql-0",container="postgresql",id="/kubepods/postgresql/resource",image="postgresql:18",instance="n1:10250",node="n1"}
     values: 990+0x40
-  - series: container_memory_working_set_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",pod="witself-postgresql-0",container="witself-server",id="/kubepods/server",image="witself:latest",instance="n1:10250",node="n1"}
+  - series: container_memory_total_active_file_bytes{job="kubelet",metrics_path="/metrics/resource",namespace="witself",pod="witself-postgresql-0",container="postgresql",id="/kubepods/postgresql/resource",image="postgresql:18",instance="n1:10250",node="n1"}
+    values: 0+0x40
+  - series: container_memory_total_inactive_file_bytes{job="kubelet",metrics_path="/metrics/resource",namespace="witself",pod="witself-postgresql-0",container="postgresql",id="/kubepods/postgresql/resource",image="postgresql:18",instance="n1:10250",node="n1"}
+    values: 0+0x40
+  - series: container_memory_usage_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",pod="witself-postgresql-0",container="witself-server",id="/kubepods/server",image="witself:latest",instance="n1:10250",node="n1"}
     values: 990+0x40
+  - series: container_memory_total_active_file_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",pod="witself-postgresql-0",container="witself-server",id="/kubepods/server",image="witself:latest",instance="n1:10250",node="n1"}
+    values: 0+0x40
+  - series: container_memory_total_inactive_file_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",pod="witself-postgresql-0",container="witself-server",id="/kubepods/server",image="witself:latest",instance="n1:10250",node="n1"}
+    values: 0+0x40
   - series: kube_pod_container_resource_limits{job="kube-state-metrics",namespace="witself",pod="witself-postgresql-0",container="",instance="ksm:8080",uid="postgresql-0-uid",resource="memory",unit="byte"}
     values: 1000+0x40
   - series: kube_pod_container_resource_limits{job="kube-state-metrics",namespace="witself",pod="witself-postgresql-0",container="",instance="ksm:8080",uid="postgresql-0-uid",resource="cpu",unit="core"}
@@ -462,11 +516,15 @@ tests:
   - eval_time: 15m
     alertname: WitselfPostgreSQLMemoryNearLimit
     exp_alerts: []
-- name: B6i PostgreSQL memory hold survives two stale working-set scrapes
+- name: B6i PostgreSQL memory hold survives two stale scrapes of every container-memory series
   interval: 1m
   input_series:
-  - series: container_memory_working_set_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",pod="witself-postgresql-0",container="postgresql",id="/kubepods/postgresql/old",image="postgresql:18",instance="n1:10250",node="n1"}
+  - series: container_memory_usage_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",pod="witself-postgresql-0",container="postgresql",id="/kubepods/postgresql/old",image="postgresql:18",instance="n1:10250",node="n1"}
     values: 382730240+0x4 stale stale 382730240+0x33
+  - series: container_memory_total_active_file_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",pod="witself-postgresql-0",container="postgresql",id="/kubepods/postgresql/old",image="postgresql:18",instance="n1:10250",node="n1"}
+    values: 20971520+0x4 stale stale 20971520+0x33
+  - series: container_memory_total_inactive_file_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",pod="witself-postgresql-0",container="postgresql",id="/kubepods/postgresql/old",image="postgresql:18",instance="n1:10250",node="n1"}
+    values: 10485760+0x4 stale stale 10485760+0x33
   - series: kube_pod_container_resource_limits{job="kube-state-metrics",namespace="witself",pod="witself-postgresql-0",container="postgresql",instance="ksm:8080",uid="postgresql-0-uid",resource="memory",unit="byte"}
     values: 402653184+0x40
   - series: kube_pod_container_resource_limits{job="kube-state-metrics",namespace="witself",pod="witself-postgresql-0",container="postgresql",instance="ksm:8080",uid="postgresql-0-uid",resource="cpu",unit="core"}
@@ -475,18 +533,18 @@ tests:
     values: 2147483648+0x40
   promql_expr_test:
   - expr: count(ALERTS{alertname="WitselfPostgreSQLMemoryNearLimit",alertstate="firing"})
-    eval_time: 9m
+    eval_time: 14m
     exp_samples: []
   - expr: count(ALERTS{alertname="WitselfPostgreSQLMemoryNearLimit",alertstate="firing"})
-    eval_time: 11m
+    eval_time: 15m
     exp_samples:
     - labels: "{}"
       value: 1
   alert_rule_test:
-  - eval_time: 9m
+  - eval_time: 14m
     alertname: WitselfPostgreSQLMemoryNearLimit
     exp_alerts: []
-  - eval_time: 11m
+  - eval_time: 15m
     alertname: WitselfPostgreSQLMemoryNearLimit
     exp_alerts:
     - exp_labels:
@@ -497,14 +555,18 @@ tests:
         service: witself-postgresql
         witself_alert: 'true'
       exp_annotations:
-        summary: The PostgreSQL container working set is above 90 percent of its memory
-          limit.
+        summary: PostgreSQL non-file memory is above 80 percent of the container's memory limit.
+        description: The postgresql container's memory usage minus its active and inactive file cache has stayed above 80 percent of its memory limit for 15 minutes. File cache is left out because the kernel drops it under pressure; the rest (process memory, shared buffers, kernel memory) is what leads to an OOM kill. Check first how much of it is process memory (container_memory_rss) and whether work_mem, shared_buffers or the connection count grew; kubectl top shows working set, which still counts active file cache.
         runbook: docs/observability-and-operations.md#postgresql-alerts
 - name: B6ii PostgreSQL memory hold survives two stale limit scrapes
   interval: 1m
   input_series:
-  - series: container_memory_working_set_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",pod="witself-postgresql-0",container="postgresql",id="/kubepods/postgresql/old",image="postgresql:18",instance="n1:10250",node="n1"}
+  - series: container_memory_usage_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",pod="witself-postgresql-0",container="postgresql",id="/kubepods/postgresql/old",image="postgresql:18",instance="n1:10250",node="n1"}
     values: 382730240+0x40
+  - series: container_memory_total_active_file_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",pod="witself-postgresql-0",container="postgresql",id="/kubepods/postgresql/old",image="postgresql:18",instance="n1:10250",node="n1"}
+    values: 20971520+0x40
+  - series: container_memory_total_inactive_file_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",pod="witself-postgresql-0",container="postgresql",id="/kubepods/postgresql/old",image="postgresql:18",instance="n1:10250",node="n1"}
+    values: 10485760+0x40
   - series: kube_pod_container_resource_limits{job="kube-state-metrics",namespace="witself",pod="witself-postgresql-0",container="postgresql",instance="ksm:8080",uid="postgresql-0-uid",resource="memory",unit="byte"}
     values: 402653184+0x4 stale stale 402653184+0x33
   - series: kube_pod_container_resource_limits{job="kube-state-metrics",namespace="witself",pod="witself-postgresql-0",container="postgresql",instance="ksm:8080",uid="postgresql-0-uid",resource="cpu",unit="core"}
@@ -513,18 +575,18 @@ tests:
     values: 2147483648+0x40
   promql_expr_test:
   - expr: count(ALERTS{alertname="WitselfPostgreSQLMemoryNearLimit",alertstate="firing"})
-    eval_time: 9m
+    eval_time: 14m
     exp_samples: []
   - expr: count(ALERTS{alertname="WitselfPostgreSQLMemoryNearLimit",alertstate="firing"})
-    eval_time: 11m
+    eval_time: 15m
     exp_samples:
     - labels: "{}"
       value: 1
   alert_rule_test:
-  - eval_time: 9m
+  - eval_time: 14m
     alertname: WitselfPostgreSQLMemoryNearLimit
     exp_alerts: []
-  - eval_time: 11m
+  - eval_time: 15m
     alertname: WitselfPostgreSQLMemoryNearLimit
     exp_alerts:
     - exp_labels:
@@ -535,37 +597,33 @@ tests:
         service: witself-postgresql
         witself_alert: 'true'
       exp_annotations:
-        summary: The PostgreSQL container working set is above 90 percent of its memory
-          limit.
+        summary: PostgreSQL non-file memory is above 80 percent of the container's memory limit.
+        description: The postgresql container's memory usage minus its active and inactive file cache has stayed above 80 percent of its memory limit for 15 minutes. File cache is left out because the kernel drops it under pressure; the rest (process memory, shared buffers, kernel memory) is what leads to an OOM kill. Check first how much of it is process memory (container_memory_rss) and whether work_mem, shared_buffers or the connection count grew; kubectl top shows working set, which still counts active file cache.
         runbook: docs/observability-and-operations.md#postgresql-alerts
 - name: B7 PostgreSQL cgroup replacement retains the firing hold after the old high series expires
   interval: 1m
   input_series:
-  - series: container_memory_working_set_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",pod="witself-postgresql-0",container="postgresql",id="/kubepods/postgresql/old",image="postgresql:18",instance="n1:10250",node="n1"}
-    values: 382730240+0x12 stale stale stale stale stale stale stale stale stale stale
-      stale stale stale stale stale stale stale stale stale stale stale stale stale
-      stale stale stale stale stale
-  - series: container_memory_working_set_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",pod="witself-postgresql-0",container="postgresql",id="/kubepods/postgresql/new",image="postgresql:18",instance="n1:10250",node="n1"}
-    values: _x13 80530636.8+0x27
+  - series: container_memory_usage_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",pod="witself-postgresql-0",container="postgresql",id="/kubepods/postgresql/old",image="postgresql:18",instance="n1:10250",node="n1"}
+    values: 382730240+0x17 stale
+  - series: container_memory_total_active_file_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",pod="witself-postgresql-0",container="postgresql",id="/kubepods/postgresql/old",image="postgresql:18",instance="n1:10250",node="n1"}
+    values: 20971520+0x17 stale
+  - series: container_memory_total_inactive_file_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",pod="witself-postgresql-0",container="postgresql",id="/kubepods/postgresql/old",image="postgresql:18",instance="n1:10250",node="n1"}
+    values: 10485760+0x17 stale
+  - series: container_memory_usage_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",pod="witself-postgresql-0",container="postgresql",id="/kubepods/postgresql/new",image="postgresql:18",instance="n1:10250",node="n1"}
+    values: _x18 80530636.8+0x39
+  - series: container_memory_total_active_file_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",pod="witself-postgresql-0",container="postgresql",id="/kubepods/postgresql/new",image="postgresql:18",instance="n1:10250",node="n1"}
+    values: _x18 4194304+0x39
+  - series: container_memory_total_inactive_file_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",pod="witself-postgresql-0",container="postgresql",id="/kubepods/postgresql/new",image="postgresql:18",instance="n1:10250",node="n1"}
+    values: _x18 2097152+0x39
   - series: kube_pod_container_resource_limits{job="kube-state-metrics",namespace="witself",pod="witself-postgresql-0",container="postgresql",instance="ksm:8080",uid="postgresql-0-uid",resource="memory",unit="byte"}
-    values: 402653184+0x40
+    values: 402653184+0x60
   - series: kube_pod_container_resource_limits{job="kube-state-metrics",namespace="witself",pod="witself-postgresql-0",container="postgresql",instance="ksm:8080",uid="postgresql-0-uid",resource="cpu",unit="core"}
     values: 0.38+0x40
   - series: kube_pod_container_resource_limits{job="kube-state-metrics",namespace="witself",pod="witself-postgresql-0",container="postgresql",instance="ksm:8080",uid="postgresql-0-uid",resource="ephemeral_storage",unit="byte"}
     values: 2147483648+0x40
   promql_expr_test:
   - expr: count(ALERTS{alertname="WitselfPostgreSQLMemoryNearLimit",alertstate="firing"})
-    eval_time: 11m
-    exp_samples:
-    - labels: "{}"
-      value: 1
-  - expr: count(ALERTS{alertname="WitselfPostgreSQLMemoryNearLimit",alertstate="firing"})
-    eval_time: 16m
-    exp_samples:
-    - labels: "{}"
-      value: 1
-  - expr: count(ALERTS{alertname="WitselfPostgreSQLMemoryNearLimit",alertstate="firing"})
-    eval_time: 18m
+    eval_time: 15m
     exp_samples:
     - labels: "{}"
       value: 1
@@ -576,12 +634,22 @@ tests:
       value: 1
   - expr: count(ALERTS{alertname="WitselfPostgreSQLMemoryNearLimit",alertstate="firing"})
     eval_time: 22m
+    exp_samples:
+    - labels: "{}"
+      value: 1
+  - expr: count(ALERTS{alertname="WitselfPostgreSQLMemoryNearLimit",alertstate="firing"})
+    eval_time: 51m30s
+    exp_samples:
+    - labels: "{}"
+      value: 1
+  - expr: count(ALERTS{alertname="WitselfPostgreSQLMemoryNearLimit",alertstate="firing"})
+    eval_time: 52m
     exp_samples: []
   - expr: count(ALERTS{alertname="WitselfPostgreSQLMemoryNearLimit",alertstate="firing"})
-    eval_time: 24m
+    eval_time: 54m
     exp_samples: []
   alert_rule_test:
-  - eval_time: 11m
+  - eval_time: 15m
     alertname: WitselfPostgreSQLMemoryNearLimit
     exp_alerts:
     - exp_labels:
@@ -592,36 +660,8 @@ tests:
         service: witself-postgresql
         witself_alert: 'true'
       exp_annotations:
-        summary: The PostgreSQL container working set is above 90 percent of its memory
-          limit.
-        runbook: docs/observability-and-operations.md#postgresql-alerts
-  - eval_time: 16m
-    alertname: WitselfPostgreSQLMemoryNearLimit
-    exp_alerts:
-    - exp_labels:
-        namespace: witself
-        pod: witself-postgresql-0
-        container: postgresql
-        severity: warning
-        service: witself-postgresql
-        witself_alert: 'true'
-      exp_annotations:
-        summary: The PostgreSQL container working set is above 90 percent of its memory
-          limit.
-        runbook: docs/observability-and-operations.md#postgresql-alerts
-  - eval_time: 18m
-    alertname: WitselfPostgreSQLMemoryNearLimit
-    exp_alerts:
-    - exp_labels:
-        namespace: witself
-        pod: witself-postgresql-0
-        container: postgresql
-        severity: warning
-        service: witself-postgresql
-        witself_alert: 'true'
-      exp_annotations:
-        summary: The PostgreSQL container working set is above 90 percent of its memory
-          limit.
+        summary: PostgreSQL non-file memory is above 80 percent of the container's memory limit.
+        description: The postgresql container's memory usage minus its active and inactive file cache has stayed above 80 percent of its memory limit for 15 minutes. File cache is left out because the kernel drops it under pressure; the rest (process memory, shared buffers, kernel memory) is what leads to an OOM kill. Check first how much of it is process memory (container_memory_rss) and whether work_mem, shared_buffers or the connection count grew; kubectl top shows working set, which still counts active file cache.
         runbook: docs/observability-and-operations.md#postgresql-alerts
   - eval_time: 21m30s
     alertname: WitselfPostgreSQLMemoryNearLimit
@@ -634,21 +674,76 @@ tests:
         service: witself-postgresql
         witself_alert: 'true'
       exp_annotations:
-        summary: The PostgreSQL container working set is above 90 percent of its memory
-          limit.
+        summary: PostgreSQL non-file memory is above 80 percent of the container's memory limit.
+        description: The postgresql container's memory usage minus its active and inactive file cache has stayed above 80 percent of its memory limit for 15 minutes. File cache is left out because the kernel drops it under pressure; the rest (process memory, shared buffers, kernel memory) is what leads to an OOM kill. Check first how much of it is process memory (container_memory_rss) and whether work_mem, shared_buffers or the connection count grew; kubectl top shows working set, which still counts active file cache.
         runbook: docs/observability-and-operations.md#postgresql-alerts
   - eval_time: 22m
     alertname: WitselfPostgreSQLMemoryNearLimit
-    exp_alerts: []
-  - eval_time: 24m
+    exp_alerts:
+    - exp_labels:
+        namespace: witself
+        pod: witself-postgresql-0
+        container: postgresql
+        severity: warning
+        service: witself-postgresql
+        witself_alert: 'true'
+      exp_annotations:
+        summary: PostgreSQL non-file memory is above 80 percent of the container's memory limit.
+        description: The postgresql container's memory usage minus its active and inactive file cache has stayed above 80 percent of its memory limit for 15 minutes. File cache is left out because the kernel drops it under pressure; the rest (process memory, shared buffers, kernel memory) is what leads to an OOM kill. Check first how much of it is process memory (container_memory_rss) and whether work_mem, shared_buffers or the connection count grew; kubectl top shows working set, which still counts active file cache.
+        runbook: docs/observability-and-operations.md#postgresql-alerts
+  - eval_time: 51m30s
+    alertname: WitselfPostgreSQLMemoryNearLimit
+    exp_alerts:
+    - exp_labels:
+        namespace: witself
+        pod: witself-postgresql-0
+        container: postgresql
+        severity: warning
+        service: witself-postgresql
+        witself_alert: 'true'
+      exp_annotations:
+        summary: PostgreSQL non-file memory is above 80 percent of the container's memory limit.
+        description: The postgresql container's memory usage minus its active and inactive file cache has stayed above 80 percent of its memory limit for 15 minutes. File cache is left out because the kernel drops it under pressure; the rest (process memory, shared buffers, kernel memory) is what leads to an OOM kill. Check first how much of it is process memory (container_memory_rss) and whether work_mem, shared_buffers or the connection count grew; kubectl top shows working set, which still counts active file cache.
+        runbook: docs/observability-and-operations.md#postgresql-alerts
+  - eval_time: 52m
     alertname: WitselfPostgreSQLMemoryNearLimit
     exp_alerts: []
-- name: B8 PostgreSQL memory without a limit remains silent
+  - eval_time: 54m
+    alertname: WitselfPostgreSQLMemoryNearLimit
+    exp_alerts: []
+- name: B8 PostgreSQL memory without a limit, with a zero limit, or without either file-cache series remains silent
   interval: 1m
   input_series:
-  - series: container_memory_working_set_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",pod="witself-postgresql-0",container="postgresql",id="/kubepods/postgresql/old",image="postgresql:18",instance="n1:10250",node="n1"}
+  - series: container_memory_usage_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",pod="witself-postgresql-0",container="postgresql",id="/kubepods/postgresql/old",image="postgresql:18",instance="n1:10250",node="n1"}
     values: 382730240+0x40
+  - series: container_memory_total_active_file_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",pod="witself-postgresql-0",container="postgresql",id="/kubepods/postgresql/old",image="postgresql:18",instance="n1:10250",node="n1"}
+    values: 20971520+0x40
+  - series: container_memory_total_inactive_file_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",pod="witself-postgresql-0",container="postgresql",id="/kubepods/postgresql/old",image="postgresql:18",instance="n1:10250",node="n1"}
+    values: 10485760+0x40
+  - series: container_memory_usage_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",pod="witself-postgresql-1",container="postgresql",id="/kubepods/postgresql-1/old",image="postgresql:18",instance="n1:10250",node="n1"}
+    values: 382730240+0x40
+  - series: container_memory_total_active_file_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",pod="witself-postgresql-1",container="postgresql",id="/kubepods/postgresql-1/old",image="postgresql:18",instance="n1:10250",node="n1"}
+    values: 20971520+0x40
+  - series: container_memory_total_inactive_file_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",pod="witself-postgresql-1",container="postgresql",id="/kubepods/postgresql-1/old",image="postgresql:18",instance="n1:10250",node="n1"}
+    values: 10485760+0x40
+  - series: kube_pod_container_resource_limits{job="kube-state-metrics",namespace="witself",pod="witself-postgresql-1",container="postgresql",instance="ksm:8080",uid="postgresql-1-uid",resource="memory",unit="byte"}
+    values: 0+0x40
+  - series: container_memory_usage_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",pod="witself-postgresql-2",container="postgresql",id="/kubepods/postgresql-2/old",image="postgresql:18",instance="n1:10250",node="n1"}
+    values: 382730240+0x40
+  - series: container_memory_total_active_file_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",pod="witself-postgresql-2",container="postgresql",id="/kubepods/postgresql-2/old",image="postgresql:18",instance="n1:10250",node="n1"}
+    values: 20971520+0x40
+  - series: kube_pod_container_resource_limits{job="kube-state-metrics",namespace="witself",pod="witself-postgresql-2",container="postgresql",instance="ksm:8080",uid="postgresql-2-uid",resource="memory",unit="byte"}
+    values: 402653184+0x40
+  - series: container_memory_usage_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",pod="witself-postgresql-3",container="postgresql",id="/kubepods/postgresql-3/old",image="postgresql:18",instance="n1:10250",node="n1"}
+    values: 382730240+0x40
+  - series: container_memory_total_inactive_file_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",pod="witself-postgresql-3",container="postgresql",id="/kubepods/postgresql-3/old",image="postgresql:18",instance="n1:10250",node="n1"}
+    values: 10485760+0x40
+  - series: kube_pod_container_resource_limits{job="kube-state-metrics",namespace="witself",pod="witself-postgresql-3",container="postgresql",instance="ksm:8080",uid="postgresql-3-uid",resource="memory",unit="byte"}
+    values: 402653184+0x40
   promql_expr_test:
+  - expr: count(ALERTS{alertname="WitselfPostgreSQLMemoryNearLimit"})
+    eval_time: 15m
+    exp_samples: []
   - expr: count(ALERTS{alertname="WitselfPostgreSQLMemoryNearLimit",alertstate="firing"})
     eval_time: 15m
     exp_samples: []
@@ -656,6 +751,46 @@ tests:
   - eval_time: 15m
     alertname: WitselfPostgreSQLMemoryNearLimit
     exp_alerts: []
+- name: B9 PostgreSQL memory fires only for the pod in the 2026-11-10 shape, 320Mi of non-file memory under a 384Mi limit
+  interval: 1m
+  input_series:
+  - series: container_memory_usage_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",pod="witself-postgresql-0",container="postgresql",id="/kubepods/postgresql/old",image="postgresql:18",instance="n1:10250",node="n1"}
+    values: 377487360+0x40
+  - series: container_memory_total_active_file_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",pod="witself-postgresql-0",container="postgresql",id="/kubepods/postgresql/old",image="postgresql:18",instance="n1:10250",node="n1"}
+    values: 31457280+0x40
+  - series: container_memory_total_inactive_file_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",pod="witself-postgresql-0",container="postgresql",id="/kubepods/postgresql/old",image="postgresql:18",instance="n1:10250",node="n1"}
+    values: 10485760+0x40
+  - series: kube_pod_container_resource_limits{job="kube-state-metrics",namespace="witself",pod="witself-postgresql-0",container="postgresql",instance="ksm:8080",uid="postgresql-0-uid",resource="memory",unit="byte"}
+    values: 402653184+0x40
+  - series: container_memory_usage_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",pod="witself-postgresql-1",container="postgresql",id="/kubepods/postgresql-1/old",image="postgresql:18",instance="n1:10250",node="n1"}
+    values: 382730240+0x40
+  - series: container_memory_total_active_file_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",pod="witself-postgresql-1",container="postgresql",id="/kubepods/postgresql-1/old",image="postgresql:18",instance="n1:10250",node="n1"}
+    values: 209715200+0x40
+  - series: container_memory_total_inactive_file_bytes{job="kubelet",metrics_path="/metrics/cadvisor",namespace="witself",pod="witself-postgresql-1",container="postgresql",id="/kubepods/postgresql-1/old",image="postgresql:18",instance="n1:10250",node="n1"}
+    values: 10485760+0x40
+  - series: kube_pod_container_resource_limits{job="kube-state-metrics",namespace="witself",pod="witself-postgresql-1",container="postgresql",instance="ksm:8080",uid="postgresql-1-uid",resource="memory",unit="byte"}
+    values: 402653184+0x40
+  promql_expr_test:
+  - expr: count(ALERTS{alertname="WitselfPostgreSQLMemoryNearLimit",alertstate="firing"})
+    eval_time: 20m
+    exp_samples:
+    - labels: "{}"
+      value: 1
+  alert_rule_test:
+  - eval_time: 20m
+    alertname: WitselfPostgreSQLMemoryNearLimit
+    exp_alerts:
+    - exp_labels:
+        namespace: witself
+        pod: witself-postgresql-0
+        container: postgresql
+        severity: warning
+        service: witself-postgresql
+        witself_alert: 'true'
+      exp_annotations:
+        summary: PostgreSQL non-file memory is above 80 percent of the container's memory limit.
+        description: The postgresql container's memory usage minus its active and inactive file cache has stayed above 80 percent of its memory limit for 15 minutes. File cache is left out because the kernel drops it under pressure; the rest (process memory, shared buffers, kernel memory) is what leads to an OOM kill. Check first how much of it is process memory (container_memory_rss) and whether work_mem, shared_buffers or the connection count grew; kubectl top shows working set, which still counts active file cache.
+        runbook: docs/observability-and-operations.md#postgresql-alerts
 - name: C1 Node working set uses allocatable excludes reclaimable memory and applies a
     strict threshold
   interval: 1m
