@@ -41,11 +41,18 @@ end
 memory_alert = "WitselfPostgreSQLMemoryNearLimit"
 volume_alert = "WitselfPostgreSQLVolumeFillingUp"
 node_alert = "WitselfNodeMemoryWorkingSetHigh"
-node_rules = docs.select { |doc| doc["kind"] == "PrometheusRule" }
+rendered_rules = docs.select { |doc| doc["kind"] == "PrometheusRule" }
   .flat_map { |doc| Array(doc.dig("spec", "groups")) }
   .flat_map { |group| Array(group["rules"]) }
-  .select { |rule| rule["alert"] == node_alert }
+node_rules = rendered_rules.select { |rule| rule["alert"] == node_alert }
 abort "#{node_alert}: expected exactly one rendered alert" unless node_rules.length == 1
+memory_rules = rendered_rules.select { |rule| rule["alert"] == memory_alert }
+abort "#{memory_alert}: expected exactly one rendered alert" unless memory_rules.length == 1
+# The alert stays silent when any cAdvisor input is absent, so every series its
+# expression reads must survive the scrape. A changed input set fails here on purpose.
+memory_series = memory_rules.first.fetch("expr").scan(/container_memory_\w*/).uniq.sort
+memory_inputs = %w[container_memory_total_active_file_bytes container_memory_total_inactive_file_bytes container_memory_usage_bytes]
+abort "#{memory_alert}: rule must read exactly the cAdvisor series #{memory_inputs.join(', ')}" unless memory_series == memory_inputs
 node_numerator = <<~PROMQL
   last_over_time(node_memory_MemTotal_bytes{job="node-exporter"}[5m])
   - last_over_time(node_memory_MemFree_bytes{job="node-exporter"}[5m])
@@ -69,7 +76,12 @@ main = main.first
 abort "#{memory_alert}: cAdvisor metrics_path relabeling missing" unless Array(cadvisor["relabelings"]).any? do |entry|
   entry.fetch("action", "replace") == "replace" && entry["sourceLabels"] == ["__metrics_path__"] && entry["targetLabel"] == "metrics_path" && entry.fetch("regex", "(.*)") == "(.*)" && entry.fetch("replacement", "$1") == "$1"
 end
-container_sample = {"__name__" => "container_memory_working_set_bytes", "namespace" => "witself", "pod" => "witself-postgresql-0", "container" => "postgresql", "id" => "/kubepods/x", "image" => "x"}
+postgresql_container = {"namespace" => "witself", "pod" => "witself-postgresql-0", "container" => "postgresql", "id" => "/kubepods/x", "image" => "x"}
+memory_series.each do |series|
+  abort "#{memory_alert}: PostgreSQL #{series} sample dropped" unless survives?(cadvisor, postgresql_container.merge("__name__" => series), memory_alert)
+end
+# Not an alert input: docs/runbook-onboarding-push.md watches this working set (section 5.4 query, section 6 row).
+container_sample = postgresql_container.merge("__name__" => "container_memory_working_set_bytes")
 abort "#{memory_alert}: PostgreSQL working-set sample dropped" unless survives?(cadvisor, container_sample, memory_alert)
 volume_sample = {"__name__" => "kubelet_volume_stats_available_bytes", "namespace" => "witself", "persistentvolumeclaim" => "data-witself-postgresql-0"}
 abort "#{volume_alert}: PostgreSQL volume sample dropped" unless survives?(main, volume_sample, volume_alert)
