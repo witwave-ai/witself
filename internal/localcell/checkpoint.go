@@ -979,7 +979,7 @@ func (c *Cell) admitDeleteCheckpoint(ctx context.Context, options DeleteCheckpoi
 	if _, err := c.checkpointDir(options.CheckpointID); err != nil {
 		return err
 	}
-	// The target and its exact spelling are read through the held recovery/.
+	// On Linux and macOS the target and its exact spelling are read through the held recovery/.
 	tree := c.checkpointTree(options.CheckpointID)
 	defer tree.close()
 	if err := tree.target(); err != nil {

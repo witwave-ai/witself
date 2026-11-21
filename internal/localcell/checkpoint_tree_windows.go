@@ -12,8 +12,8 @@ import (
 )
 
 // checkpointTree on Windows makes today's guarded pathname calls below the
-// checkpoint directory; only delete holds recovery/ and the checkpoint, as
-// roots (checkpoint_root_windows.go). Names are slash paths below it.
+// checkpoint directory. Delete stores both roots on the tree. Failed-create
+// discard holds its roots inside discardOwnCheckpoint. Names are slash paths.
 type checkpointTree struct {
 	c                    *Cell
 	id                   string

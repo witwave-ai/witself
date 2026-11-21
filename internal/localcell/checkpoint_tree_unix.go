@@ -30,7 +30,7 @@ type checkpointTree struct {
 	id       string
 	recovery *os.Root
 	made     map[string]privateBeneathID
-	listed   []int // keep listed checkpoints' inodes alive until the witness reads finish
+	held     []int // keep listed and adopted checkpoint inodes alive until close
 }
 
 func (c *Cell) checkpointTree(checkpointID string) *checkpointTree {
@@ -46,13 +46,21 @@ func (t *checkpointTree) hold() (err error) {
 }
 
 func (t *checkpointTree) close() {
-	for _, fd := range t.listed {
+	for _, fd := range t.held {
 		_ = unix.Close(fd)
 	}
-	t.listed = nil
+	t.held = nil
 	if t.recovery != nil {
 		_ = t.recovery.Close()
 	}
+}
+
+func (t *checkpointTree) retain(fd int) error {
+	dup, err := unix.FcntlInt(uintptr(fd), unix.F_DUPFD_CLOEXEC, 0)
+	if err == nil {
+		t.held = append(t.held, dup)
+	}
+	return err
 }
 
 func (t *checkpointTree) listing() ([]string, []bool, error) {
@@ -89,11 +97,7 @@ func (t *checkpointTree) listing() ([]string, []bool, error) {
 		if directories[i] && checkpointIDPattern.MatchString(name) {
 			t.made[name] = privateBeneathIdentity(stat)
 			err = privateBeneathDirectory(t.recovery, name, t.want, func(fd int, _ privateBeneathID) error {
-				dup, err := unix.FcntlInt(uintptr(fd), unix.F_DUPFD_CLOEXEC, 0)
-				if err == nil {
-					t.listed = append(t.listed, dup)
-				}
-				return err
+				return t.retain(fd)
 			})
 			if err != nil {
 				return nil, nil, errPrivateLayout
@@ -404,14 +408,20 @@ func (t *checkpointTree) target() error {
 
 // adopt holds recovery/ (bound) and records the identity of the directory at
 // the checkpoint's name, opened without following it and on recovery/'s device,
-// while the descriptor that proves it is open: a link, file, FIFO or other
+// keeping it open until close. A link, file, FIFO or other
 // object there refuses before anything is journaled.
 func (t *checkpointTree) adopt() error {
 	t.c.checkpointStage("hold")
 	if err := t.hold(); err != nil {
 		return err
 	}
-	return privateBeneathDirectory(t.recovery, t.id, nil, func(_ int, id privateBeneathID) error { t.made[t.id] = id; return nil })
+	return privateBeneathDirectory(t.recovery, t.id, nil, func(fd int, id privateBeneathID) error {
+		if err := t.retain(fd); err != nil {
+			return err
+		}
+		t.made[t.id] = id
+		return nil
+	})
 }
 
 // unseal removes the witness as itself (a file, link or empty directory) in the
@@ -435,6 +445,9 @@ func (t *checkpointTree) unseal() error {
 // each step binds recovery/ first. An empty directory put at the exact name
 // between that check and the removal (one call apart) is removed instead.
 func (t *checkpointTree) sweep() error {
+	if _, ok := t.made[t.id]; !ok {
+		return errPrivateBeneathMoved
+	}
 	t.c.checkpointStage("sweep")
 	if err := t.bound(); err != nil {
 		return err

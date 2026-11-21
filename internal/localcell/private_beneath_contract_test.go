@@ -35,6 +35,7 @@ var (
 		"discard:privateBeneathLstat": 3, "discard:privateBeneathIdentity": 1, "checkpointTreeRemoveDirectory:privateBeneathID": 1,
 		// delete's admission, adoption, unseal and sweep; the discard removes through the sweep (LC-CKPT-WALK-1C3B).
 		"target:privateBeneathLstat": 1, "adopt:privateBeneathDirectory": 1, "adopt:privateBeneathID": 1, "unseal:privateBeneathRemove": 1,
+		"sweep:errPrivateBeneathMoved": 1,
 		"sweep:privateBeneathDirectory": 1, "sweep:privateBeneathID": 1, "sweep:privateBeneathRemoveBelow": 1, "checkpointTreeRemoveDirectory:privateBeneathAt": 1,
 		"checkpointTreeRemoveDirectory:privateBeneathIdentity": 1, "checkpointTreeRemoveDirectory:errPrivateBeneathMoved": 1,
 		"open:privateBeneathLstat": 1, "open:privateBeneathOpen": 1, "check:privateBeneathList": 1, "record:privateBeneathLstat": 1,

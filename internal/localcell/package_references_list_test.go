@@ -123,8 +123,9 @@ checkpoint_tree_other.go
 checkpoint_tree_unix.go
 	import context errors golang.org/x/sys/unix io/fs os path path/filepath slices
 	(*checkpointTree).hold (*Cell).holdRecovery
-	(*checkpointTree).listing (*os.Root).Open golang.org/x/sys/unix.FcntlInt
+	(*checkpointTree).listing (*os.Root).Open
 	(*checkpointTree).record (*os.File).Write
+	(*checkpointTree).retain golang.org/x/sys/unix.FcntlInt
 	(*checkpointTree).snapshot (*os.Root).Open
 	(*checkpointTree).target (*os.Root).Open
 	checkpointTreeRemoveDirectory golang.org/x/sys/unix.Unlinkat

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime/debug"
 	"slices"
 	"strconv"
 	"strings"
@@ -101,6 +102,53 @@ func TestCheckpointTreeDeleteSweepDevice(t *testing.T) {
 	privateBeneathSameDevice = func(uint64, uint64) bool { return false }
 	heldFailed(t, f, heldDelete(t, c), "remove")
 	heldSame(t, kept)
+}
+
+func TestCheckpointTreeDeleteDescriptorLifetime(t *testing.T) {
+	defer debug.SetGCPercent(debug.SetGCPercent(-1)) // a finalizer must not conceal a leaked descriptor
+	_, c := heldFixture(t)
+	target := treeDirectoryStat(t, c.path("recovery", heldTarget))
+	before, during := treeDescriptorCount(t, target), 0
+	calls := heldAt(c, "unseal", func() { during = treeDescriptorCount(t, target) })
+	err := heldDelete(t, c)
+	after := treeDescriptorCount(t, target)
+
+	t.Logf("%d/%d/%d", before, during, after)
+	if err != nil {
+		t.Error("the descriptor lifetime delete failed")
+	}
+	if calls["unseal"] != 1 {
+		t.Error("the descriptor lifetime delete did not reach unseal exactly once")
+	}
+	if before != 0 {
+		t.Error("a target descriptor was open before delete")
+	}
+	if during != 1 {
+		t.Error("delete did not hold exactly one target descriptor at unseal")
+	}
+	if after != 0 {
+		t.Error("a target descriptor remained open after delete")
+	}
+	inspection, err := c.Inspect(t.Context())
+	if err != nil || len(inspection.Checkpoints) != 1 || inspection.Checkpoints[0].ID != heldOther || !inspection.Checkpoints[0].Complete {
+		t.Error("the descriptor lifetime delete did not leave only the complete sibling")
+	}
+}
+
+func TestCheckpointTreeSweepUnrecorded(t *testing.T) {
+	_, c := heldFixture(t)
+	tree := c.checkpointTree(heldTarget)
+	defer tree.close()
+	if tree.hold() != nil {
+		t.Fatal("cannot hold the recovery directory for the unrecorded sweep")
+	}
+	before := checkpointTreeState(t, c)
+	if !errors.Is(tree.sweep(), errPrivateBeneathMoved) {
+		t.Error("the unrecorded sweep did not refuse the missing identity")
+	}
+	if !reflect.DeepEqual(before, checkpointTreeState(t, c)) {
+		t.Error("the unrecorded sweep changed the checkpoint tree")
+	}
 }
 
 // An identifier that is not a checkpoint's adopts and removes nothing.
@@ -357,7 +405,7 @@ func TestCheckpointTreeReaderBinds(t *testing.T) {
 		held := map[string]bool{}
 		calls := heldAt(c, "listed", func() {
 			for _, id := range []string{heldTarget, heldOther} {
-				held[id] = treeDescriptorHeld(c.path("recovery", id))
+				held[id] = treeDescriptorCount(t, treeDirectoryStat(t, c.path("recovery", id))) > 0
 			}
 		})
 		if _, err := c.Inspect(t.Context()); err != nil || calls["listed"] == 0 || !held[heldTarget] || !held[heldOther] {
@@ -366,16 +414,29 @@ func TestCheckpointTreeReaderBinds(t *testing.T) {
 	})
 }
 
-// treeDescriptorHeld reports whether a descriptor of this process is the directory dir.
-func treeDescriptorHeld(dir string) bool {
-	info, err := os.Lstat(dir)
-	entries, listErr := os.ReadDir("/dev/fd")
-	for index := 0; err == nil && listErr == nil && index < len(entries); index++ {
+func treeDirectoryStat(t *testing.T, dir string) *syscall.Stat_t {
+	t.Helper()
+	var stat syscall.Stat_t
+	if syscall.Lstat(dir, &stat) != nil {
+		t.Fatal("cannot identify the checkpoint directory for the descriptor count")
+	}
+	return &stat
+}
+
+// Count descriptors by the original identity, even after the name is removed.
+func treeDescriptorCount(t *testing.T, want *syscall.Stat_t) int {
+	t.Helper()
+	entries, err := os.ReadDir("/dev/fd")
+	if err != nil {
+		t.Fatal("cannot list this process's descriptors")
+	}
+	count := 0
+	for _, entry := range entries {
 		var stat syscall.Stat_t
-		fd, convErr := strconv.Atoi(entries[index].Name())
-		if want := info.Sys().(*syscall.Stat_t); convErr == nil && syscall.Fstat(fd, &stat) == nil && stat.Dev == want.Dev && stat.Ino == want.Ino {
-			return true
+		fd, err := strconv.Atoi(entry.Name())
+		if err == nil && syscall.Fstat(fd, &stat) == nil && stat.Dev == want.Dev && stat.Ino == want.Ino {
+			count++
 		}
 	}
-	return false
+	return count
 }

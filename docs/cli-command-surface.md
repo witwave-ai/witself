@@ -6322,12 +6322,11 @@ admission passes closes the leftover.
 
 A failure to write standard output can leave a truncated receipt line; the
 command then prints only `local_checkpoint_operation_failed` on standard error
-and exits 1. `cleanup_incomplete: true` means a failed `create` could not remove
-its own partial directory (it removes nothing it cannot prove its own): delete
-that entry by its identifier. On Linux and macOS the same value is also
-reported when that directory is no longer at its name (see Same-user limits);
-then no entry has that identifier, and the partial copy is wherever it was
-moved.
+and exits 1. When a failed `create` reports `cleanup_incomplete: true`, run
+`inspect` first and delete the incomplete entry by its identifier if it is
+listed. If no entry has that identifier, the partial copy was moved away from
+its name (Linux and macOS), or a directory sync failed to confirm its removal
+on disk. In either case there is nothing to delete by identifier.
 
 ### Same-user limits
 
@@ -6340,14 +6339,17 @@ between that check and the removal is removed instead, while a file or link
 there is refused, never removed; a same-user rename onto the exact name BEFORE
 the hold makes that directory the one deleted; a parent of the cell root
 replaced by a link before the hold moves the whole deletion into the linked
-tree, still limited to a directory of that exact name; a directory below the
-checkpoint on another device (a mount) is refused with
-`local_checkpoint_operation_failed`, and nothing on it is removed. On Windows
-`delete` removes through `recovery/` and the checkpoint held as directories:
-one file, link or empty directory planted at the exact checkpoint name between
-the last check and the last removal is removed instead; a same-user rename onto
-the exact name before the directories are held, or a parent of the cell root
-replaced by a link before the hold, acts as on Linux and macOS.
+tree, still limited to a directory of that exact name. At admission, a
+directory below the checkpoint on another device (a mount) is refused with
+`local_checkpoint_state_unsupported` and reason `descendant_refused` before
+the deletion journal is opened. A device change encountered during the sweep
+returns `local_checkpoint_operation_failed`. Both checks leave the other
+device untouched. On Windows `delete` removes through `recovery/` and the
+checkpoint held as directories: one file, link or empty directory planted at
+the exact checkpoint name between the last check and the last removal is
+removed instead; a same-user rename onto the exact name before the directories
+are held, or a parent of the cell root replaced by a link before the hold,
+acts as on Linux and macOS.
 
 On Linux and macOS, `create` copies below `recovery/` without following a link
 at any directory there and without leaving its device: a link, file or other
