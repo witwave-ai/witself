@@ -158,7 +158,8 @@ func TestWindowsPostgresLaunchUsesPublishedPostmasterIdentity(t *testing.T) {
 			c.cfg.Binaries.PostgresDir = directory
 			c.cfg.Timeout = 5 * time.Second
 			if err := testMkdir(c.path("pg"), 0o700); err != nil {
-				t.Fatal(err)
+				t.Logf("PostgreSQL launch class: %s", launchFailureClass("fixture-directory", err))
+				t.Fatal("cannot create PostgreSQL fixture directory")
 			}
 			if mode != "ready" {
 				if err := testWriteFile(c.path("tmp", "postgres-fixture-mode"), []byte(mode), 0o600); err != nil {
@@ -185,20 +186,25 @@ func TestWindowsPostgresLaunchUsesPublishedPostmasterIdentity(t *testing.T) {
 			}
 			cleanupWindowsPostgresFixture(t, c)
 			if err := c.startPostgres(t.Context(), m); err != nil {
+				t.Logf("PostgreSQL launch class: %s", launchFailureClass("postgres", err))
 				t.Fatal("direct PostgreSQL fixture did not launch")
 			}
 			var launched, complete ProcessRecord
-			if readJSON(t.Context(), c.path("tmp", "postgres-fixture-record"), &launched) != nil || !launched.LaunchPending {
+			if err := readJSON(t.Context(), c.path("tmp", "postgres-fixture-record"), &launched); err != nil || !launched.LaunchPending {
+				t.Logf("PostgreSQL launch class: %s", launchFailureClass("pending-identity", err))
 				t.Fatal("PostgreSQL executed without a published pending identity")
 			}
-			if readJSON(t.Context(), c.path("run", "postgres.json"), &complete) != nil || complete.LaunchPending || complete.PID != launched.PID || complete.StartTime != launched.StartTime {
+			if err := readJSON(t.Context(), c.path("run", "postgres.json"), &complete); err != nil || complete.LaunchPending || complete.PID != launched.PID || complete.StartTime != launched.StartTime {
+				t.Logf("PostgreSQL launch class: %s", launchFailureClass("complete-identity", err))
 				t.Fatal("PostgreSQL launch replaced its suspended creation identity")
 			}
 			pid, err := c.postmaster(context.Background())
 			if err != nil || pid != complete.PID {
+				t.Logf("PostgreSQL launch class: %s", launchFailureClass("postmaster", err))
 				t.Fatal("Windows CRLF postmaster identity did not match the actual executable")
 			}
 			if _, err := os.Stat(c.path("tmp", "unexpected-shell-launch")); !errors.Is(err, os.ErrNotExist) {
+				t.Logf("PostgreSQL launch class: %s", launchFailureClass("shell-check", err))
 				t.Fatal("PostgreSQL launch adopted a shell instead of creating postgres.exe")
 			}
 		})

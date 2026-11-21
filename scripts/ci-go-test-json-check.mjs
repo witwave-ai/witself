@@ -210,6 +210,11 @@ function maskedDiagnostic(value, limit) {
 function proofDiagnostic(line, packageName) {
   const assertion = /^[ \t]*([A-Za-z0-9_.-]+_test\.go):[1-9][0-9]*: /.exec(line);
   if (!/^[ \t]*--- FAIL: /.test(line) && !(assertion && testFiles.get(packageName)?.has(assertion[1]))) return null;
+  if (assertion) {
+    const message = line.slice(assertion[0].length).replace(/\r$/, '');
+    const prefix = classPrefix(message, packageName);
+    if (prefix !== undefined) line = assertion[0] + classDiagnostic(message, prefix, packageName);
+  }
   if (packageName === commandPackage) line = line.replace(/\/[^\r\n]*/g, '[MASKED]');
   return maskedDiagnostic(line.replace(/\r$/, ''), 200);
 }
