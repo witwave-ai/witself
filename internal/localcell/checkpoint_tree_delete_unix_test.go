@@ -17,6 +17,26 @@ import (
 	"testing"
 )
 
+func blockCheckpointReceiptSweep(t *testing.T, dir string) func() {
+	t.Helper()
+	if os.Geteuid() == 0 {
+		// Root bypasses read permissions. Refuse descent at the existing device check.
+		original := privateBeneathSameDevice
+		privateBeneathSameDevice = func(uint64, uint64) bool { return false }
+		t.Cleanup(func() { privateBeneathSameDevice = original })
+		return func() { privateBeneathSameDevice = original }
+	}
+	if os.Chmod(dir, 0o300) != nil {
+		t.Fatal("cannot refuse the directory read during discard")
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	return func() {
+		if os.Chmod(dir, 0o700) != nil {
+			t.Fatal("cannot restore directory read permission after discard")
+		}
+	}
+}
+
 // treeDeletePlant moves the target to the cell's tmp/ and puts kind at its name:
 // a link to the other checkpoint or to a directory in recovery/, a file, a FIFO,
 // the other checkpoint renamed there; recovery moves recovery/ out and links it.

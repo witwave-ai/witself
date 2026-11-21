@@ -6324,9 +6324,9 @@ A failure to write standard output can leave a truncated receipt line; the
 command then prints only `local_checkpoint_operation_failed` on standard error
 and exits 1. When a failed `create` reports `cleanup_incomplete: true`, run
 `inspect` first and delete the incomplete entry by its identifier if it is
-listed. If no entry has that identifier, the partial copy was moved away from
-its name (Linux and macOS), or a directory sync failed to confirm on disk that
-it is gone. In either case there is nothing to delete by identifier.
+listed. If `inspect` succeeds and no entry has that identifier, the partial copy
+may have moved away from its name (Linux and macOS), or cleanup may have failed
+to confirm its absence on disk. In either case there is nothing to delete by identifier.
 
 ### Same-user limits
 

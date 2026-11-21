@@ -4,9 +4,14 @@ package localcell
 
 import (
 	"errors"
+	"path/filepath"
 	"reflect"
 	"testing"
 )
+
+func blockCheckpointReceiptSweep(t *testing.T, dir string) func() {
+	return drillRootLock(t, filepath.Join(dir, checkpointInventoryName))
+}
 
 func init() {
 	heldIdentifierRow = func(t *testing.T) {
