@@ -129,6 +129,7 @@ var maintenanceHostSchedulerCallers = map[string]int{
 	"service_maintenance.go/failAfterMaintenanceObservation/observeServiceMaintenance":   1,
 	"service_maintenance.go/failAfterMaintenanceObservation/holdMaintenance":             1,
 	"service_supervisor.go/Run/serviceMaintenanceOnly":                                   1,
+	"service_supervisor.go/Run/projectedStatus":                                          1,
 	"service_supervisor.go/Run/resumeServiceStartup":                                     1,
 	"service_supervisor.go/tick/observeServiceMaintenance":                               1,
 	"service_supervisor.go/tick/resumeServiceStartup":                                    1,
@@ -1090,9 +1091,6 @@ var maintenanceHostSupervisorPins = map[string]string{
 	}()
 	s.phase = "startup"
 	s.pendingStartup = serviceStartupReconcile
-	if err := retryServiceContention(ctx, s.resumeServiceStartup); err != nil {
-		return err
-	}
 	var ticker *time.Ticker
 	ticks := s.hooks.ticks
 	if ticks == nil {
@@ -1100,65 +1098,66 @@ var maintenanceHostSupervisorPins = map[string]string{
 		defer ticker.Stop()
 		ticks = ticker.C
 	}
-	if err := s.tick(ctx); err != nil {
-		return err
+	work := make(chan supervisorWork, 1)
+	inFlight, held, pendingExit := false, ServiceStatus{}, (*serviceCommand)(nil)
+	launch := func(run func() supervisorWork) {
+		held, inFlight = s.projectedStatus(), true
+		go func() { work <- run() }()
 	}
+	launch(func() supervisorWork {
+		if err := retryServiceContention(ctx, s.resumeServiceStartup); err != nil {
+			return supervisorWork{err: err}
+		}
+		return supervisorWork{err: s.tick(ctx)}
+	})
 	for {
-		runDone := ctx.Done()
+		var runDone <-chan struct{}
+		if !inFlight {
+			runDone = ctx.Done()
+		}
 		select {
 		case <-runDone:
 			return nil
 		case <-ticks:
-			if err := s.tick(ctx); err != nil {
-				return err
+			if !inFlight && ctx.Err() == nil {
+				launch(func() supervisorWork { return supervisorWork{err: s.tick(ctx)} })
 			}
 		case command := <-commands:
 			if ctx.Err() != nil {
-				return nil
+				continue
+			}
+			if inFlight && command.action == "exit-host" && pendingExit == nil {
+				pendingExit = &command
+				continue
+			}
+			if inFlight {
+				command.reply <- deferServiceCommand(command.action, held)
+				continue
 			}
 			s.phase = "control"
-			commandCtx, cancel := context.WithCancel(command.ctx)
-			commandCtx = context.WithValue(commandCtx, serviceControlHostContextKey{}, ctx)
-			if command.exit != nil {
-				commandCtx = context.WithValue(commandCtx, serviceHostExitKey{}, *command.exit)
+			launch(func() supervisorWork { return s.serveCommand(ctx, command) })
+		case done := <-work:
+			inFlight = false
+			if done.reply == nil && done.err != nil {
+				return done.err
 			}
-			go func() {
-				select {
-				case <-runDone:
-					cancel()
-				case <-commandCtx.Done():
+			if done.exited {
+				return s.exitDrainResult
+			}
+			if done.reply != nil {
+				if done.action != "exit-host" && ctx.Err() == nil {
+					s.phase, s.operation = "idle", "none"
 				}
-			}()
-			status, err := s.command(commandCtx, command.action)
-			cancel()
-			WriteServiceHostFailure(os.Stderr, err, "supervisor_command")
-			if command.action != "exit-host" && ctx.Err() == nil {
+				done.reply <- serviceReply{status: done.status, err: done.err}
+			}
+			if done.action == "exit-host" && ctx.Err() == nil {
 				s.phase, s.operation = "idle", "none"
 			}
-			command.reply <- serviceReply{status: status, err: err}
-			if command.action == "exit-host" && err == nil {
-				exited := s.finishHostExitCommand(ctx, command)
-				if command.completed != nil {
-					disposition := "refused"
-					if exited {
-						disposition = "drained"
-						if s.exitDrainResult != nil {
-							disposition = "forced"
-						}
-					}
-					command.completed <- disposition
-					select {
-					case <-command.finalized:
-					case <-command.ctx.Done():
-					}
-				}
-				cancel()
-				if exited {
-					return s.exitDrainResult
-				}
-			}
-			if command.action == "exit-host" && ctx.Err() == nil {
-				s.phase, s.operation = "idle", "none"
+			if pendingExit != nil && ctx.Err() == nil {
+				command := *pendingExit
+				pendingExit = nil
+				s.phase = "control"
+				launch(func() supervisorWork { return s.serveCommand(ctx, command) })
 			}
 		}
 	}
