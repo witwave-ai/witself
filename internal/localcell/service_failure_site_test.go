@@ -270,14 +270,12 @@ func TestServiceFailureSiteSourceContract(t *testing.T) {
 			return serviceFailureAt(err, "supervisor_traversal")
 		}`,
 			`status, err := s.command(commandCtx, command.action)
-			cancel()
-			WriteServiceHostFailure(os.Stderr, err, "supervisor_command")
-			// A completed ordinary command is idle before its caller can react
-			// to the reply. Keep interrupted commands and exit-host in control.
-			if command.action != "exit-host" && ctx.Err() == nil {
-				s.phase, s.operation = "idle", "none"
-			}
-			command.reply <- serviceReply{status: status, err: err}`,
+	cancel()
+	WriteServiceHostFailure(os.Stderr, err, "supervisor_command")
+	if command.action != "exit-host" || err != nil {
+		return supervisorWork{action: command.action, reply: command.reply, status: status, err: err}
+	}
+	command.reply <- serviceReply{status: status, err: err}`,
 		},
 		"service_maintenance.go": {
 			`if err := s.call(ctx, "reconcile", func(context.Context) error { return s.hooks.reconcile() }); err != nil {
@@ -449,7 +447,7 @@ func TestServiceFailureSiteProducerInventory(t *testing.T) {
 			"acquireServiceLeaseWithBoot": "openLockFile privateDir publishServiceLease servicePrivateRecord",
 		},
 		"service_supervisor.go": {
-			"Run":                    "ServiceDescriptor acquireLease acquireServiceLeaseWithBoot command load newSupervisor retryServiceContention retryServiceContention retryServiceContention serveServiceControl serviceMaintenanceOnly tick tick",
+			"Run":                    "ServiceDescriptor acquireLease acquireServiceLeaseWithBoot load newSupervisor projectedStatus projectedStatus retryServiceContention retryServiceContention retryServiceContention serveServiceControl serviceMaintenanceOnly tick tick",
 			"call":                   "hook",
 			"command":                "RepairService ServiceDescriptor SetServiceDesiredState SetServiceDesiredState SetServiceDesiredState call observeServiceMaintenance projectedStatus projectedStatus projectedStatus step step step step",
 			"failed":                 "save",
@@ -458,6 +456,7 @@ func TestServiceFailureSiteProducerInventory(t *testing.T) {
 			"rememberProcesses":      "readJSON readJSON",
 			"retryServiceContention": "operation",
 			"save":                   "writeAtomic",
+			"serveCommand":           "command",
 			"step":                   "ServiceDescriptor ServiceDescriptor call call call call call call call failAfterMaintenanceObservation failAfterMaintenanceObservation failAfterMaintenanceObservation holdMaintenance holdMaintenance holdMaintenance holdMaintenance holdMaintenance observeServiceMaintenanceInto save save save save save",
 			"tick":                   "observeServiceMaintenance resumeServiceStartup step",
 		},

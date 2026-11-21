@@ -16,10 +16,16 @@ func (s *supervisor) latchServiceShutdownRefusal(ctx context.Context, operation 
 		return
 	}
 	s.shutdownBlocked, s.shutdownFaultPending = true, true
+	if s.publishStopRefusal != nil {
+		s.publishStopRefusal()
+	}
 	s.persistServiceShutdownFault(context.WithoutCancel(ctx))
 }
 
 func (s *supervisor) persistServiceShutdownFault(ctx context.Context) {
+	if s.shutdownFaultPending && s.hooks.beforeFaultWrite != nil {
+		s.hooks.beforeFaultWrite()
+	}
 	if s.shutdownFaultPending && s.cell.setServiceFaulted(ctx, true) == nil {
 		s.shutdownFaultPending = false
 	}

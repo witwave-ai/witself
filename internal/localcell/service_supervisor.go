@@ -7,6 +7,7 @@ import (
 	"os"
 	"runtime"
 	"slices"
+	"sync/atomic"
 	"time"
 )
 
@@ -28,6 +29,7 @@ type ServiceStatus struct {
 	Generation      string                   `json:"generation"`
 	HostExit        string                   `json:"host_exit,omitempty"`
 	LastStepOutcome string                   `json:"last_step_outcome"`
+	WorkInFlight    bool                     `json:"work_in_flight,omitempty"`
 	Processes       []ServiceProcessIdentity `json:"processes,omitempty"`
 }
 
@@ -52,6 +54,8 @@ type supervisorHooks struct {
 	now                                       func() time.Time
 	shutdownContext                           func(context.Context, time.Duration) (context.Context, context.CancelFunc)
 	ticks                                     <-chan time.Time
+	commands                                  chan serviceCommand
+	beforeFaultWrite                          func()
 	initialBackoff, maxBackoff, failureWindow time.Duration
 	windowsShutdownPolicy                     bool
 }
@@ -89,6 +93,7 @@ type supervisor struct {
 	healthProgress       serviceHealthProgress
 	exitDrained          bool
 	exitDrainResult      error
+	publishStopRefusal   func()
 	shutdownBlocked      bool
 	shutdownFaultPending bool
 	maintenanceHeld      bool
@@ -129,7 +134,10 @@ func (c *Cell) Run(ctx context.Context, policy SupervisorPolicy) (result error) 
 		return err
 	}
 	defer func() { _ = lease.Close() }()
-	commands := make(chan serviceCommand)
+	commands := s.hooks.commands
+	if commands == nil {
+		commands = make(chan serviceCommand)
+	}
 	closeControl, err := c.serveServiceControl(commands)
 	if err != nil {
 		return serviceFailureFallback(err, "control_transport")
@@ -178,9 +186,6 @@ func (c *Cell) Run(ctx context.Context, policy SupervisorPolicy) (result error) 
 	}()
 	s.phase = "startup"
 	s.pendingStartup = serviceStartupReconcile
-	if err := retryServiceContention(ctx, s.resumeServiceStartup); err != nil {
-		return err
-	}
 	var ticker *time.Ticker
 	ticks := s.hooks.ticks
 	if ticks == nil {
@@ -188,70 +193,192 @@ func (c *Cell) Run(ctx context.Context, policy SupervisorPolicy) (result error) 
 		defer ticker.Stop()
 		ticks = ticker.C
 	}
-	if err := s.tick(ctx); err != nil {
-		return err
+	// One worker runs startup, ticks and commands other than observe. The loop
+	// touches s only while none is in flight and answers requests meanwhile.
+	work := make(chan supervisorWork, 1)
+	held := s.projectedStatus()
+	held.State, held.Reason, held.Healthy = "busy", "service_operation_in_progress", false
+	if s.startupFaulted {
+		held.State, held.Reason = "faulted", "service_circuit_open"
 	}
+	var refusedWhileLive atomic.Bool
+	s.publishStopRefusal = func() {
+		if ctx.Err() == nil {
+			refusedWhileLive.Store(true)
+		}
+	}
+	inFlight, pendingExit := false, (*serviceCommand)(nil)
+	var wasBlocked bool
+	launch := func(run func() supervisorWork) {
+		wasBlocked = s.shutdownBlocked
+		refusedWhileLive.Store(false)
+		inFlight = true
+		go func() { work <- run() }()
+	}
+	launch(func() supervisorWork {
+		if err := retryServiceContention(ctx, s.resumeServiceStartup); err != nil {
+			return supervisorWork{err: err}
+		}
+		return supervisorWork{err: s.tick(ctx)}
+	})
 	for {
-		runDone := ctx.Done()
+		// Cancellation is watched only while idle: Run waits for the worker,
+		// whose result then ends it, as an in-flight step's would at HEAD.
+		var runDone <-chan struct{}
+		if !inFlight {
+			runDone = ctx.Done()
+		}
 		select {
 		case <-runDone:
 			return nil
 		case <-ticks:
-			if err := s.tick(ctx); err != nil {
-				return err
+			if !inFlight && ctx.Err() == nil {
+				launch(func() supervisorWork { return supervisorWork{err: s.tick(ctx)} })
 			}
 		case command := <-commands:
 			if ctx.Err() != nil {
-				return nil
+				continue
+			}
+			// One exit-host waits for the work, within its handler's admission budget.
+			if inFlight && command.action == "exit-host" && (pendingExit == nil || pendingExit.ctx.Err() != nil) {
+				pendingExit = &command
+				continue
+			}
+			if inFlight {
+				snapshot := held
+				if refusedWhileLive.Load() {
+					snapshot.State, snapshot.Reason, snapshot.Healthy = "faulted", "service_stop_refused", false
+				}
+				command.reply <- deferServiceCommand(command.action, snapshot)
+				continue
 			}
 			s.phase = "control"
-			commandCtx, cancel := context.WithCancel(command.ctx)
-			commandCtx = context.WithValue(commandCtx, serviceControlHostContextKey{}, ctx)
-			if command.exit != nil {
-				commandCtx = context.WithValue(commandCtx, serviceHostExitKey{}, *command.exit)
-			}
-			go func() {
-				select {
-				case <-runDone:
-					cancel()
-				case <-commandCtx.Done():
+			if command.action == "observe" {
+				observed := s.serveCommand(ctx, command)
+				if ctx.Err() == nil {
+					s.phase, s.operation = "idle", "none"
 				}
-			}()
-			status, err := s.command(commandCtx, command.action)
-			cancel()
-			WriteServiceHostFailure(os.Stderr, err, "supervisor_command")
-			// A completed ordinary command is idle before its caller can react
-			// to the reply. Keep interrupted commands and exit-host in control.
-			if command.action != "exit-host" && ctx.Err() == nil {
+				command.reply <- serviceReply{status: observed.status, err: observed.err}
+				continue
+			}
+			launch(func() supervisorWork { return s.serveCommand(ctx, command) })
+		case done := <-work:
+			inFlight = false
+			if done.reply == nil && done.err != nil {
+				return s.workerExitError(done.err, ctx.Err(), wasBlocked || refusedWhileLive.Load())
+			}
+			if done.exited {
+				return s.exitDrainResult
+			}
+			held = s.projectedStatus()
+			if done.reply != nil {
+				// A completed ordinary command is idle before its caller can react
+				// to the reply. Keep interrupted commands and exit-host in control.
+				if done.action != "exit-host" && ctx.Err() == nil {
+					s.phase, s.operation = "idle", "none"
+				}
+				done.reply <- serviceReply{status: done.status, err: done.err}
+			}
+			if done.action == "exit-host" && ctx.Err() == nil {
 				s.phase, s.operation = "idle", "none"
 			}
-			command.reply <- serviceReply{status: status, err: err}
-			if command.action == "exit-host" && err == nil {
-				exited := s.finishHostExitCommand(ctx, command)
-				if command.completed != nil {
-					disposition := "refused"
-					if exited {
-						disposition = "drained"
-						if s.exitDrainResult != nil {
-							disposition = "forced"
-						}
-					}
-					command.completed <- disposition
-					select {
-					case <-command.finalized:
-					case <-command.ctx.Done():
-					}
+			if pendingExit != nil && ctx.Err() == nil {
+				command := *pendingExit
+				pendingExit = nil
+				if command.ctx.Err() != nil {
+					continue
 				}
-				cancel()
-				if exited {
-					return s.exitDrainResult
-				}
-			}
-			if command.action == "exit-host" && ctx.Err() == nil {
-				s.phase, s.operation = "idle", "none"
+				s.phase = "control"
+				launch(func() supervisorWork { return s.serveCommand(ctx, command) })
 			}
 		}
 	}
+}
+
+// After a live refusal is durable, cancellation has the same result as it
+// would at idle. Neither harness entry point should report a host failure
+// merely because a tick had not returned when the host was stopped.
+func (s *supervisor) workerExitError(err, hostErr error, published bool) error {
+	if s.shutdownBlocked && !s.shutdownFaultPending && published && serviceWorkCanceledOnly(err, hostErr) {
+		return nil
+	}
+	return err
+}
+
+// Only site labels may wrap a clean cancellation. A joined failure must survive.
+func serviceWorkCanceledOnly(err, hostErr error) bool {
+	for {
+		located, ok := err.(*serviceFailure)
+		if !ok {
+			break
+		}
+		err = located.cause
+	}
+	return hostErr != nil && err == hostErr
+}
+
+// supervisorWork hands the loop a command's reply to publish, an accepted
+// exit-host's drain, or the startup or tick error that ends Run.
+type supervisorWork struct {
+	action string
+	reply  chan serviceReply
+	status ServiceStatus
+	err    error
+	exited bool
+}
+
+// deferServiceCommand marks a copy of the last publication for an overlapping request.
+func deferServiceCommand(action string, held ServiceStatus) serviceReply {
+	held.Processes = slices.Clone(held.Processes)
+	held.WorkInFlight = true
+	switch action {
+	case "observe", "status":
+		return serviceReply{status: held}
+	case "exit-host":
+		return serviceReply{status: held, err: hostExitRefused("drain")}
+	}
+	return serviceReply{status: held, err: errServiceControlDeferred}
+}
+
+// serveCommand executes an admitted command. The loop publishes its reply,
+// except an accepted exit-host's, sent here before the drain as at HEAD.
+func (s *supervisor) serveCommand(ctx context.Context, command serviceCommand) supervisorWork {
+	runDone := ctx.Done()
+	commandCtx, cancel := context.WithCancel(command.ctx)
+	commandCtx = context.WithValue(commandCtx, serviceControlHostContextKey{}, ctx)
+	if command.exit != nil {
+		commandCtx = context.WithValue(commandCtx, serviceHostExitKey{}, *command.exit)
+	}
+	go func() {
+		select {
+		case <-runDone:
+			cancel()
+		case <-commandCtx.Done():
+		}
+	}()
+	status, err := s.command(commandCtx, command.action)
+	cancel()
+	WriteServiceHostFailure(os.Stderr, err, "supervisor_command")
+	if command.action != "exit-host" || err != nil {
+		return supervisorWork{action: command.action, reply: command.reply, status: status, err: err}
+	}
+	command.reply <- serviceReply{status: status, err: err}
+	exited := s.finishHostExitCommand(ctx, command)
+	if command.completed != nil {
+		disposition := "refused"
+		if exited {
+			disposition = "drained"
+			if s.exitDrainResult != nil {
+				disposition = "forced"
+			}
+		}
+		command.completed <- disposition
+		select {
+		case <-command.finalized:
+		case <-command.ctx.Done():
+		}
+	}
+	return supervisorWork{action: command.action, exited: exited}
 }
 
 // Operation contention is not a child failure. The lifetime lease remains
@@ -398,6 +525,7 @@ func (s *supervisor) step(ctx context.Context) (result error) {
 	previousStatus := s.status
 	previousHeld, previousDisplay := s.maintenanceHeld, s.maintenanceDisplay
 	previousBusy := s.maintenanceBusy
+	previouslyBlocked := s.shutdownBlocked
 	s.maintenanceDisplay = false
 	s.maintenanceBusy = false
 	defer func() {
@@ -405,6 +533,10 @@ func (s *supervisor) step(ctx context.Context) (result error) {
 			s.status = previousStatus
 			s.maintenanceHeld, s.maintenanceDisplay = previousHeld, previousDisplay
 			s.maintenanceBusy = previousBusy
+			if !previouslyBlocked && s.shutdownBlocked {
+				s.status.State, s.status.Reason, s.status.Healthy = "faulted", "service_stop_refused", false
+				s.maintenanceDisplay, s.maintenanceBusy = false, false
+			}
 			var located *serviceFailure
 			if !errors.As(result, &located) || located.site != "control_cancelled" || !errors.Is(result, ctx.Err()) {
 				result = cancellation

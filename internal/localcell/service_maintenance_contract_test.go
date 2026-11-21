@@ -129,6 +129,7 @@ var maintenanceHostSchedulerCallers = map[string]int{
 	"service_maintenance.go/failAfterMaintenanceObservation/observeServiceMaintenance":   1,
 	"service_maintenance.go/failAfterMaintenanceObservation/holdMaintenance":             1,
 	"service_supervisor.go/Run/serviceMaintenanceOnly":                                   1,
+	"service_supervisor.go/Run/projectedStatus":                                          2,
 	"service_supervisor.go/Run/resumeServiceStartup":                                     1,
 	"service_supervisor.go/tick/observeServiceMaintenance":                               1,
 	"service_supervisor.go/tick/resumeServiceStartup":                                    1,
@@ -140,7 +141,7 @@ var maintenanceHostSchedulerCallers = map[string]int{
 }
 
 var maintenanceHostShapePins = map[string]string{
-	"ServiceStatus":       "type ServiceStatus struct {\nDesiredState string `json:\"desired_state\"`\nState string `json:\"state\"`\nReason string `json:\"reason,omitempty\"`\nHealthy bool `json:\"healthy\"`\nRestarts int `json:\"restarts\"`\nGeneration string `json:\"generation\"`\nHostExit string `json:\"host_exit,omitempty\"`\nLastStepOutcome string `json:\"last_step_outcome\"`\nProcesses []ServiceProcessIdentity `json:\"processes,omitempty\"`\n}",
+	"ServiceStatus":       "type ServiceStatus struct {\nDesiredState string `json:\"desired_state\"`\nState string `json:\"state\"`\nReason string `json:\"reason,omitempty\"`\nHealthy bool `json:\"healthy\"`\nRestarts int `json:\"restarts\"`\nGeneration string `json:\"generation\"`\nHostExit string `json:\"host_exit,omitempty\"`\nLastStepOutcome string `json:\"last_step_outcome\"`\nWorkInFlight bool `json:\"work_in_flight,omitempty\"`\nProcesses []ServiceProcessIdentity `json:\"processes,omitempty\"`\n}",
 	"supervisorRecord":    "type supervisorRecord struct {\nVersion int `json:\"version\"`\nRepairRevision uint64 `json:\"repair_revision\"`\nFailures []time.Time `json:\"failures\"`\nNextStart time.Time `json:\"next_start\"`\nAttempts int `json:\"attempts\"`\n}",
 	"serviceStartupPhase": "type serviceStartupPhase uint8",
 }
@@ -1041,7 +1042,10 @@ var maintenanceHostSupervisorPins = map[string]string{
 		return err
 	}
 	defer func() { _ = lease.Close() }()
-	commands := make(chan serviceCommand)
+	commands := s.hooks.commands
+	if commands == nil {
+		commands = make(chan serviceCommand)
+	}
 	closeControl, err := c.serveServiceControl(commands)
 	if err != nil {
 		return serviceFailureFallback(err, "control_transport")
@@ -1090,9 +1094,6 @@ var maintenanceHostSupervisorPins = map[string]string{
 	}()
 	s.phase = "startup"
 	s.pendingStartup = serviceStartupReconcile
-	if err := retryServiceContention(ctx, s.resumeServiceStartup); err != nil {
-		return err
-	}
 	var ticker *time.Ticker
 	ticks := s.hooks.ticks
 	if ticks == nil {
@@ -1100,65 +1101,96 @@ var maintenanceHostSupervisorPins = map[string]string{
 		defer ticker.Stop()
 		ticks = ticker.C
 	}
-	if err := s.tick(ctx); err != nil {
-		return err
+	work := make(chan supervisorWork, 1)
+	held := s.projectedStatus()
+	held.State, held.Reason, held.Healthy = "busy", "service_operation_in_progress", false
+	if s.startupFaulted {
+		held.State, held.Reason = "faulted", "service_circuit_open"
 	}
+	var refusedWhileLive atomic.Bool
+	s.publishStopRefusal = func() {
+		if ctx.Err() == nil {
+			refusedWhileLive.Store(true)
+		}
+	}
+	inFlight, pendingExit := false, (*serviceCommand)(nil)
+	var wasBlocked bool
+	launch := func(run func() supervisorWork) {
+		wasBlocked = s.shutdownBlocked
+		refusedWhileLive.Store(false)
+		inFlight = true
+		go func() { work <- run() }()
+	}
+	launch(func() supervisorWork {
+		if err := retryServiceContention(ctx, s.resumeServiceStartup); err != nil {
+			return supervisorWork{err: err}
+		}
+		return supervisorWork{err: s.tick(ctx)}
+	})
 	for {
-		runDone := ctx.Done()
+		var runDone <-chan struct{}
+		if !inFlight {
+			runDone = ctx.Done()
+		}
 		select {
 		case <-runDone:
 			return nil
 		case <-ticks:
-			if err := s.tick(ctx); err != nil {
-				return err
+			if !inFlight && ctx.Err() == nil {
+				launch(func() supervisorWork { return supervisorWork{err: s.tick(ctx)} })
 			}
 		case command := <-commands:
 			if ctx.Err() != nil {
-				return nil
+				continue
+			}
+			if inFlight && command.action == "exit-host" && (pendingExit == nil || pendingExit.ctx.Err() != nil) {
+				pendingExit = &command
+				continue
+			}
+			if inFlight {
+				snapshot := held
+				if refusedWhileLive.Load() {
+					snapshot.State, snapshot.Reason, snapshot.Healthy = "faulted", "service_stop_refused", false
+				}
+				command.reply <- deferServiceCommand(command.action, snapshot)
+				continue
 			}
 			s.phase = "control"
-			commandCtx, cancel := context.WithCancel(command.ctx)
-			commandCtx = context.WithValue(commandCtx, serviceControlHostContextKey{}, ctx)
-			if command.exit != nil {
-				commandCtx = context.WithValue(commandCtx, serviceHostExitKey{}, *command.exit)
-			}
-			go func() {
-				select {
-				case <-runDone:
-					cancel()
-				case <-commandCtx.Done():
+			if command.action == "observe" {
+				observed := s.serveCommand(ctx, command)
+				if ctx.Err() == nil {
+					s.phase, s.operation = "idle", "none"
 				}
-			}()
-			status, err := s.command(commandCtx, command.action)
-			cancel()
-			WriteServiceHostFailure(os.Stderr, err, "supervisor_command")
-			if command.action != "exit-host" && ctx.Err() == nil {
+				command.reply <- serviceReply{status: observed.status, err: observed.err}
+				continue
+			}
+			launch(func() supervisorWork { return s.serveCommand(ctx, command) })
+		case done := <-work:
+			inFlight = false
+			if done.reply == nil && done.err != nil {
+				return s.workerExitError(done.err, ctx.Err(), wasBlocked || refusedWhileLive.Load())
+			}
+			if done.exited {
+				return s.exitDrainResult
+			}
+			held = s.projectedStatus()
+			if done.reply != nil {
+				if done.action != "exit-host" && ctx.Err() == nil {
+					s.phase, s.operation = "idle", "none"
+				}
+				done.reply <- serviceReply{status: done.status, err: done.err}
+			}
+			if done.action == "exit-host" && ctx.Err() == nil {
 				s.phase, s.operation = "idle", "none"
 			}
-			command.reply <- serviceReply{status: status, err: err}
-			if command.action == "exit-host" && err == nil {
-				exited := s.finishHostExitCommand(ctx, command)
-				if command.completed != nil {
-					disposition := "refused"
-					if exited {
-						disposition = "drained"
-						if s.exitDrainResult != nil {
-							disposition = "forced"
-						}
-					}
-					command.completed <- disposition
-					select {
-					case <-command.finalized:
-					case <-command.ctx.Done():
-					}
+			if pendingExit != nil && ctx.Err() == nil {
+				command := *pendingExit
+				pendingExit = nil
+				if command.ctx.Err() != nil {
+					continue
 				}
-				cancel()
-				if exited {
-					return s.exitDrainResult
-				}
-			}
-			if command.action == "exit-host" && ctx.Err() == nil {
-				s.phase, s.operation = "idle", "none"
+				s.phase = "control"
+				launch(func() supervisorWork { return s.serveCommand(ctx, command) })
 			}
 		}
 	}
@@ -1220,6 +1252,7 @@ var maintenanceHostSupervisorPins = map[string]string{
 	previousStatus := s.status
 	previousHeld, previousDisplay := s.maintenanceHeld, s.maintenanceDisplay
 	previousBusy := s.maintenanceBusy
+	previouslyBlocked := s.shutdownBlocked
 	s.maintenanceDisplay = false
 	s.maintenanceBusy = false
 	defer func() {
@@ -1227,6 +1260,10 @@ var maintenanceHostSupervisorPins = map[string]string{
 			s.status = previousStatus
 			s.maintenanceHeld, s.maintenanceDisplay = previousHeld, previousDisplay
 			s.maintenanceBusy = previousBusy
+			if !previouslyBlocked && s.shutdownBlocked {
+				s.status.State, s.status.Reason, s.status.Healthy = "faulted", "service_stop_refused", false
+				s.maintenanceDisplay, s.maintenanceBusy = false, false
+			}
 			var located *serviceFailure
 			if !errors.As(result, &located) || located.site != "control_cancelled" || !errors.Is(result, ctx.Err()) {
 				result = cancellation

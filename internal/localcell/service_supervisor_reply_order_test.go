@@ -3,45 +3,78 @@ package localcell
 import (
 	"context"
 	"go/ast"
+	"maps"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 )
 
 // The ordering contract makes the guarantee independent of goroutine scheduling:
-// both fields reset under a live-host guard immediately before publishing a
-// non-exit reply; exit-host retains its old reset after finishHostExitCommand.
+// the loop publishes a reply once, after the worker returned and the live idle
+// reset, also at shutdown (it watches cancellation only while idle); exit-host
+// resets after it, and an accepted one replies on the worker before its drain.
 func TestSupervisorCommandReplyOrder(t *testing.T) {
 	data, err := os.ReadFile("service_supervisor.go")
 	if err != nil {
 		t.Fatal("cannot read supervisor reply ordering source")
 	}
+	const publish = "done.reply <- serviceReply{status: done.status, err: done.err}"
+	pinned := admissionStatements(`inFlight = false
+		if done.reply != nil { if done.action != "exit-host" && ctx.Err() == nil { s.phase, s.operation = "idle", "none" }; ` + publish + ` }
+		if done.action == "exit-host" && ctx.Err() == nil { s.phase, s.operation = "idle", "none" }
+		var runDone <-chan struct{}; if !inFlight { runDone = ctx.Done() }
+		return nil
+		if command.action != "exit-host" || err != nil { return supervisorWork{action: command.action, reply: command.reply, status: status, err: err} }
+		command.reply <- serviceReply{status: status, err: err}
+		exited := s.finishHostExitCommand(ctx, command)`)
+	texts := func(list []ast.Stmt) []string {
+		body := make([]string, len(list))
+		for index, statement := range list {
+			body[index] = admissionNodeText(statement)
+		}
+		return body
+	}
+	sends := func(node ast.Node) map[string]int {
+		found := map[string]int{}
+		ast.Inspect(node, func(node ast.Node) bool {
+			if send, ok := node.(*ast.SendStmt); ok {
+				found[admissionNodeText(send)]++
+			}
+			return true
+		})
+		return found
+	}
 	source := strings.ReplaceAll(string(data), "\r\n", "\n")
 	for _, source := range []string{source, strings.ReplaceAll(source, "\n", "\r\n")} {
-		fn := serviceAdmissionFunction(t, "service_supervisor.go", source, "Run")
-		found := 0
-		ast.Inspect(fn.Body, func(node ast.Node) bool {
+		ordered := 0
+		run, serve := serviceAdmissionFunction(t, "service_supervisor.go", source, "Run"), serviceAdmissionFunction(t, "service_supervisor.go", source, "serveCommand")
+		loop, _ := run.Body.List[len(run.Body.List)-1].(*ast.ForStmt)
+		if loop == nil {
+			t.Fatal("supervisor Run lost its closing control loop")
+		}
+		ast.Inspect(run.Body, func(node ast.Node) bool {
 			clause, ok := node.(*ast.CommClause)
-			if !ok || admissionNodeText(clause.Comm) != "command := <-commands" {
-				return true
-			}
-			for index, statement := range clause.Body {
-				if admissionNodeText(statement) != "command.reply <- serviceReply{status: status, err: err}" {
-					continue
+			if body := []string(nil); ok && admissionNodeText(clause.Comm) == "done := <-work" {
+				body, ordered = texts(clause.Body), ordered+1
+				if published := slices.Index(body, pinned[1]); body[0] != pinned[0] || published < 0 || slices.Index(body, pinned[2]) <= published {
+					t.Fatal("supervisor must reset live ordinary commands before replying and exit commands after the worker")
 				}
-				found++
-				const reset = `if command.action != "exit-host" && ctx.Err() == nil { s.phase, s.operation = "idle", "none" }`
-				const exitReset = `if command.action == "exit-host" && ctx.Err() == nil { s.phase, s.operation = "idle", "none" }`
-				if index == 0 || admissionNodeText(clause.Body[index-1]) != admissionStatements(reset)[0] ||
-					admissionNodeText(clause.Body[len(clause.Body)-1]) != admissionStatements(exitReset)[0] {
-					t.Fatal("supervisor must reset live ordinary commands before replying and exit commands after finishing")
+			} else if ok && admissionNodeText(clause.Comm) == "<-runDone" {
+				if body, ordered = texts(clause.Body), ordered+1; !slices.Equal(body, pinned[5:6]) || len(loop.Body.List) < 2 || !slices.Equal(texts(loop.Body.List[:2]), pinned[3:5]) {
+					t.Fatal("supervisor shutdown must wait for the worker before it returns")
 				}
 			}
 			return true
 		})
-		if found != 1 {
+		if ordered != 2 || !maps.Equal(sends(run.Body), map[string]int{publish: 1, "command.reply <- deferServiceCommand(command.action, snapshot)": 1, "command.reply <- serviceReply{status: observed.status, err: observed.err}": 1, "work <- run()": 1}) {
 			t.Fatal("supervisor reply ordering lost its single command publication boundary")
+		}
+		body := texts(serve.Body.List)
+		accepted := slices.Index(body, pinned[7])
+		if !maps.Equal(sends(serve.Body), map[string]int{pinned[7]: 1, "command.completed <- disposition": 1}) || accepted < 1 || body[accepted-1] != pinned[6] || slices.Index(body, pinned[8]) != accepted+1 {
+			t.Fatal("supervisor exit-host must reply once on the worker before finishing its drain")
 		}
 	}
 }
@@ -73,6 +106,11 @@ func TestSupervisorCommandReplyCancellationReceipt(t *testing.T) {
 			go func() {
 				select {
 				case <-ready:
+					if err := serviceHealthyAfterStartup(budget, cell); err != nil {
+						cancel()
+						completed <- serviceReply{err: err}
+						return
+					}
 					status, err := cell.Control(budget, action)
 					cancel()
 					completed <- serviceReply{status: status, err: err}

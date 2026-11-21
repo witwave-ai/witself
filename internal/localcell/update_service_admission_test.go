@@ -1150,7 +1150,7 @@ func TestServiceMaintenanceRunStartupBoundary(t *testing.T) {
 				defer cancel()
 				select {
 				case <-ready:
-					status, err := c.Control(ctx, "observe")
+					status, err := serviceObserveAfterStartup(ctx, c)
 					observed <- serviceReply{status: status, err: err}
 				case <-ctx.Done():
 					observed <- serviceReply{err: ctx.Err()}

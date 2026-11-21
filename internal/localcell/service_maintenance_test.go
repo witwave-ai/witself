@@ -974,7 +974,7 @@ func serviceMaintenanceHostStartup(t *testing.T, kind string, late bool) {
 	case <-ctx.Done():
 		t.Fatal("Held startup did not reach its owner gate within budget")
 	}
-	status, err := c.Control(t.Context(), "observe")
+	status, err := serviceObserveAfterStartup(ctx, c)
 	if err != nil || status.State != "maintenance" || status.Healthy || status.LastStepOutcome != "ok" {
 		t.Fatal("Held startup did not retain a responsive observation endpoint")
 	}

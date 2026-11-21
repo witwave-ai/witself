@@ -227,6 +227,11 @@ func TestServiceRunExplicitForegroundLeaseAndGracefulStop(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("foreground supervisor did not start")
 	}
+	readyCtx, readyCancel := context.WithTimeout(ctx, 2*time.Second)
+	defer readyCancel()
+	if err := serviceHealthyAfterStartup(readyCtx, c); err != nil {
+		t.Fatal(err)
+	}
 	assertUnregistered()
 	if err := c.Run(t.Context(), SupervisorPolicy{hooks: &h}); !errors.Is(err, ErrServiceHostActive) {
 		t.Fatal("second foreground host was not refused")
