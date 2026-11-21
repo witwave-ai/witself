@@ -68,7 +68,7 @@ func TestSupervisorCommandReplyOrder(t *testing.T) {
 			}
 			return true
 		})
-		if ordered != 2 || !maps.Equal(sends(run.Body), map[string]int{publish: 1, "command.reply <- deferServiceCommand(command.action, held)": 1, "work <- run()": 1}) {
+		if ordered != 2 || !maps.Equal(sends(run.Body), map[string]int{publish: 1, "command.reply <- deferServiceCommand(command.action, snapshot)": 1, "work <- run()": 1}) {
 			t.Fatal("supervisor reply ordering lost its single command publication boundary")
 		}
 		body := texts(serve.Body.List)
@@ -106,6 +106,11 @@ func TestSupervisorCommandReplyCancellationReceipt(t *testing.T) {
 			go func() {
 				select {
 				case <-ready:
+					if err := serviceHealthyAfterStartup(budget, cell); err != nil {
+						cancel()
+						completed <- serviceReply{err: err}
+						return
+					}
 					status, err := cell.Control(budget, action)
 					cancel()
 					completed <- serviceReply{status: status, err: err}

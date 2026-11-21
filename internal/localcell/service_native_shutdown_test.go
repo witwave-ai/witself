@@ -118,12 +118,13 @@ func TestServiceRunInterruptedTickShutdownRepairsBeforeStop(t *testing.T) {
 				}
 			}
 			prepareSupervisorTest(t, c)
-			ctx, cancel := context.WithCancel(t.Context())
+			ctx, cancel := context.WithTimeout(t.Context(), 8*c.cfg.Timeout)
 			defer cancel()
 			h, _, _, _, _ := supervisorTestHooks()
 			if runtime.GOOS != "windows" {
 				h.boot = func() (string, error) { return "synthetic-boot", nil }
 			} // Windows endpoint publication must bind to the same native boot as the lease.
+			firstHealth := make(chan struct{})
 			ticks := make(chan time.Time, 2)
 			h.ticks = ticks
 			var events []string
@@ -160,7 +161,7 @@ func TestServiceRunInterruptedTickShutdownRepairsBeforeStop(t *testing.T) {
 				}
 				healths++
 				if healths == 1 {
-					ticks <- time.Now()
+					close(firstHealth)
 					return nil
 				}
 				return errors.New("synthetic unhealthy tree")
@@ -224,7 +225,30 @@ func TestServiceRunInterruptedTickShutdownRepairsBeforeStop(t *testing.T) {
 			previous := os.Stderr
 			os.Stderr = stderr
 			t.Cleanup(func() { os.Stderr = previous; _ = stderr.Close() })
+			sender := make(chan error, 1)
+			go func() {
+				select {
+				case <-firstHealth:
+					if err := serviceHealthyAfterStartup(ctx, c); err != nil {
+						sender <- err
+						cancel()
+						return
+					}
+					select {
+					case ticks <- time.Now():
+						sender <- nil
+						return
+					case <-ctx.Done():
+					}
+				case <-ctx.Done():
+				}
+				sender <- ctx.Err()
+			}()
 			err = c.Run(ctx, SupervisorPolicy{hooks: &h, ShutdownTimeout: time.Second})
+			cancel()
+			if <-sender != nil {
+				t.Fatal("interrupted tick did not follow settled healthy startup")
+			}
 			os.Stderr = previous
 			if runtime.GOOS == "windows" {
 				// A canceled Windows app stop is no authority for a second

@@ -7,6 +7,7 @@ import (
 	"os"
 	"runtime"
 	"slices"
+	"sync/atomic"
 	"time"
 )
 
@@ -28,6 +29,7 @@ type ServiceStatus struct {
 	Generation      string                   `json:"generation"`
 	HostExit        string                   `json:"host_exit,omitempty"`
 	LastStepOutcome string                   `json:"last_step_outcome"`
+	WorkInFlight    bool                     `json:"work_in_flight,omitempty"`
 	Processes       []ServiceProcessIdentity `json:"processes,omitempty"`
 }
 
@@ -89,6 +91,7 @@ type supervisor struct {
 	healthProgress       serviceHealthProgress
 	exitDrained          bool
 	exitDrainResult      error
+	publishStopRefusal   func()
 	shutdownBlocked      bool
 	shutdownFaultPending bool
 	maintenanceHeld      bool
@@ -188,9 +191,23 @@ func (c *Cell) Run(ctx context.Context, policy SupervisorPolicy) (result error) 
 	// One worker at a time runs startup, each tick and each command; the loop
 	// touches s only while none is in flight and answers requests meanwhile.
 	work := make(chan supervisorWork, 1)
-	inFlight, held, pendingExit := false, ServiceStatus{}, (*serviceCommand)(nil)
+	held := s.projectedStatus()
+	held.State, held.Reason, held.Healthy = "busy", "service_operation_in_progress", false
+	if s.startupFaulted {
+		held.State, held.Reason = "faulted", "service_circuit_open"
+	}
+	var refusedWhileLive atomic.Bool
+	s.publishStopRefusal = func() {
+		if ctx.Err() == nil {
+			refusedWhileLive.Store(true)
+		}
+	}
+	inFlight, pendingExit := false, (*serviceCommand)(nil)
+	var wasBlocked bool
 	launch := func(run func() supervisorWork) {
-		held, inFlight = s.projectedStatus(), true
+		wasBlocked = s.shutdownBlocked
+		refusedWhileLive.Store(false)
+		inFlight = true
 		go func() { work <- run() }()
 	}
 	launch(func() supervisorWork {
@@ -223,7 +240,11 @@ func (c *Cell) Run(ctx context.Context, policy SupervisorPolicy) (result error) 
 				continue
 			}
 			if inFlight {
-				command.reply <- deferServiceCommand(command.action, held)
+				snapshot := held
+				if refusedWhileLive.Load() {
+					snapshot.State, snapshot.Reason, snapshot.Healthy = "faulted", "service_stop_refused", false
+				}
+				command.reply <- deferServiceCommand(command.action, snapshot)
 				continue
 			}
 			s.phase = "control"
@@ -231,11 +252,15 @@ func (c *Cell) Run(ctx context.Context, policy SupervisorPolicy) (result error) 
 		case done := <-work:
 			inFlight = false
 			if done.reply == nil && done.err != nil {
+				if s.shutdownBlocked && !s.shutdownFaultPending && (wasBlocked || refusedWhileLive.Load()) && serviceWorkCanceledOnly(done.err, ctx.Err()) {
+					return nil
+				}
 				return done.err
 			}
 			if done.exited {
 				return s.exitDrainResult
 			}
+			held = s.projectedStatus()
 			if done.reply != nil {
 				// A completed ordinary command is idle before its caller can react
 				// to the reply. Keep interrupted commands and exit-host in control.
@@ -257,6 +282,18 @@ func (c *Cell) Run(ctx context.Context, policy SupervisorPolicy) (result error) 
 	}
 }
 
+// Only site labels may wrap a clean cancellation. A joined failure must survive.
+func serviceWorkCanceledOnly(err, hostErr error) bool {
+	for {
+		located, ok := err.(*serviceFailure)
+		if !ok {
+			break
+		}
+		err = located.cause
+	}
+	return hostErr != nil && err == hostErr
+}
+
 // supervisorWork hands the loop a command's reply to publish, an accepted
 // exit-host's drain, or the startup or tick error that ends Run.
 type supervisorWork struct {
@@ -267,11 +304,10 @@ type supervisorWork struct {
 	exited bool
 }
 
-// deferServiceCommand answers a request made during work from the status held
-// when it began, as busy: nothing is applied, and only observe and status succeed.
+// deferServiceCommand marks a copy of the last publication for an overlapping request.
 func deferServiceCommand(action string, held ServiceStatus) serviceReply {
 	held.Processes = slices.Clone(held.Processes)
-	held.State, held.Reason, held.Healthy = "busy", "service_operation_in_progress", false
+	held.WorkInFlight = true
 	switch action {
 	case "observe", "status":
 		return serviceReply{status: held}
@@ -466,6 +502,7 @@ func (s *supervisor) step(ctx context.Context) (result error) {
 	previousStatus := s.status
 	previousHeld, previousDisplay := s.maintenanceHeld, s.maintenanceDisplay
 	previousBusy := s.maintenanceBusy
+	previouslyBlocked := s.shutdownBlocked
 	s.maintenanceDisplay = false
 	s.maintenanceBusy = false
 	defer func() {
@@ -473,6 +510,10 @@ func (s *supervisor) step(ctx context.Context) (result error) {
 			s.status = previousStatus
 			s.maintenanceHeld, s.maintenanceDisplay = previousHeld, previousDisplay
 			s.maintenanceBusy = previousBusy
+			if !previouslyBlocked && s.shutdownBlocked {
+				s.status.State, s.status.Reason, s.status.Healthy = "faulted", "service_stop_refused", false
+				s.maintenanceDisplay, s.maintenanceBusy = false, false
+			}
 			var located *serviceFailure
 			if !errors.As(result, &located) || located.site != "control_cancelled" || !errors.Is(result, ctx.Err()) {
 				result = cancellation

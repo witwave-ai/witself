@@ -447,7 +447,7 @@ func TestServiceFailureSiteProducerInventory(t *testing.T) {
 			"acquireServiceLeaseWithBoot": "openLockFile privateDir publishServiceLease servicePrivateRecord",
 		},
 		"service_supervisor.go": {
-			"Run":                    "ServiceDescriptor acquireLease acquireServiceLeaseWithBoot load newSupervisor projectedStatus retryServiceContention retryServiceContention retryServiceContention serveServiceControl serviceMaintenanceOnly tick tick",
+			"Run":                    "ServiceDescriptor acquireLease acquireServiceLeaseWithBoot load newSupervisor projectedStatus projectedStatus retryServiceContention retryServiceContention retryServiceContention serveServiceControl serviceMaintenanceOnly tick tick",
 			"call":                   "hook",
 			"command":                "RepairService ServiceDescriptor SetServiceDesiredState SetServiceDesiredState SetServiceDesiredState call observeServiceMaintenance projectedStatus projectedStatus projectedStatus step step step step",
 			"failed":                 "save",

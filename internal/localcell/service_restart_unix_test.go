@@ -103,7 +103,13 @@ func TestServiceRunRestartAfterIdleShutdown(t *testing.T) {
 			requestCtx, requestCancel := context.WithTimeout(ctx, allowance/4)
 			status, statusErr := c.Control(requestCtx, "status")
 			requestCancel()
-			if statusErr == nil {
+			if statusErr == nil && status.WorkInFlight {
+				cold := serviceColdBusy(status)
+				completed := status.LastStepOutcome == "ok" && status.State == "stopped" && status.Reason == "" && !status.Healthy
+				if (!cold && !completed) || status.DesiredState != "stopped" || status.Generation != d.Payload.Generation {
+					t.Fatal("restart fixture received an invalid interim status")
+				}
+			} else if statusErr == nil {
 				if status.DesiredState != "stopped" || status.State != "stopped" || status.Healthy || status.Generation != d.Payload.Generation || status.LastStepOutcome != "ok" {
 					t.Fatal("restart fixture authenticated status did not describe the stopped installation")
 				}
@@ -137,12 +143,7 @@ func TestServiceRunRestartAfterIdleShutdown(t *testing.T) {
 		}
 		previousLease, stableLock = currentLease, currentLock
 		runCtx.armed.Store(true)
-		// Wake the existing select without changing the stopped state. The next
-		// select cancels after Run has restored its idle phase. Cancellation can
-		// beat this response, so its result is deliberately immaterial.
-		wakeCtx, wakeCancel := context.WithTimeout(ctx, allowance/4)
-		_, _ = c.Control(wakeCtx, "observe")
-		wakeCancel()
+		// The native ticker wakes Run for its next idle cancellation check.
 		select {
 		case runErr := <-done:
 			finished = true

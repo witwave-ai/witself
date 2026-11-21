@@ -1,8 +1,13 @@
 package localcell
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
+	"net/http/httptest"
+	"reflect"
 	"slices"
 	"sync"
 	"testing"
@@ -25,8 +30,16 @@ type serviceWorkerHost struct {
 }
 
 func serviceWorkerStart(t *testing.T, block string, armed bool) *serviceWorkerHost {
+	return serviceWorkerConfigured(t, block, armed, nil)
+}
+
+func serviceWorkerConfigured(t *testing.T, block string, armed bool, prepare func(*Cell, ServiceDescriptor)) *serviceWorkerHost {
+	t.Helper()
 	cell := serviceCancellationReceiptCell(t)
-	prepareSupervisorTest(t, cell)
+	d := prepareSupervisorTest(t, cell)
+	if prepare != nil {
+		prepare(cell, d)
+	}
 	w := &serviceWorkerHost{cell: cell, ticks: make(chan time.Time), block: block}
 	if armed {
 		w.arm()
@@ -56,6 +69,10 @@ func serviceWorkerStart(t *testing.T, block string, armed bool) *serviceWorkerHo
 		}
 	}
 	hooks.start, hooks.stop, hooks.repair, hooks.health = hook("start"), hook("stop"), hook("repair"), hook("health")
+	if block == "reconcile" {
+		reconcile := hook("reconcile")
+		hooks.reconcile = func() error { return reconcile(t.Context()) }
+	}
 	ctx, cancel := context.WithCancel(t.Context())
 	w.cancel = cancel
 	w.done = StartJoinedTestRunForTest(t, cancel, serviceControlBudget(cell.cfg.Timeout, 4), func() error {
@@ -101,17 +118,48 @@ func (w *serviceWorkerHost) blockTick(t *testing.T) {
 	w.within(t, w.entered, nil, "the armed hook was not reached within the row bound")
 }
 
-// ready polls observe until the host reads running; a host doing work reads busy.
-func (w *serviceWorkerHost) ready(t *testing.T) {
+func serviceColdBusy(status ServiceStatus) bool {
+	return status.State == "busy" && status.Reason == "service_operation_in_progress" && !status.Healthy && status.LastStepOutcome == "not_run"
+}
+
+// Only the cold, unknown publication can precede the first completed observation here.
+func serviceObserveAfterStartup(ctx context.Context, c *Cell) (ServiceStatus, error) {
+	for ctx.Err() == nil {
+		status, err := c.Control(ctx, "observe")
+		if err != nil || !status.WorkInFlight {
+			return status, err
+		}
+		if !serviceColdBusy(status) {
+			return ServiceStatus{}, errors.New("unexpected provisional startup observation")
+		}
+	}
+	return ServiceStatus{}, ctx.Err()
+}
+
+func serviceHealthyAfterStartup(ctx context.Context, c *Cell) error {
+	status, err := serviceObserveAfterStartup(ctx, c)
+	if err != nil || status.State != "running" || !status.Healthy {
+		return errors.New("startup did not publish healthy running")
+	}
+	return nil
+}
+
+// Endpoint publication may race the first call. Inspect the first settled response.
+func (w *serviceWorkerHost) ready(t *testing.T) ServiceStatus {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), serviceControlBudget(w.cell.cfg.Timeout, 3))
 	defer cancel()
 	for {
-		if status, err := w.cell.Control(ctx, "observe"); err == nil && status.State == "running" {
-			return
+		status, err := w.cell.Control(ctx, "observe")
+		if err == nil && !status.WorkInFlight {
+			if status.State != "running" || !status.Healthy || status.LastStepOutcome != "ok" {
+				t.Fatal("the first settled worker observation was not healthy running")
+			}
+			return status
 		}
 		select {
 		case <-ctx.Done():
-			t.Fatal("the worker host did not read running within the row bound")
+			t.Fatal("the worker host did not settle within the row bound")
 		case <-time.After(time.Millisecond):
 		}
 	}
@@ -134,13 +182,14 @@ func (w *serviceWorkerHost) answer(t *testing.T, call func() (ServiceStatus, err
 }
 
 // A request made while a tick's health hook is blocked is answered before the
-// release: observe and status read busy, every other action is deferred, and
+// release: observe and status read the last publication, every other action is deferred, and
 // nothing it asked for runs then or after.
 func TestServiceWorkerAnswers(t *testing.T) {
 	for _, action := range []string{"observe", "status", "health", "start", "stop", "repair"} {
 		t.Run(action, func(t *testing.T) {
 			w := serviceWorkerStart(t, "health", false)
-			w.ready(t)
+			want := w.ready(t)
+			want.WorkInFlight = true
 			w.blockTick(t)
 			before := w.recorded()
 			status, err := w.answer(t, func() (ServiceStatus, error) { return w.cell.Control(t.Context(), action) })
@@ -148,22 +197,22 @@ func TestServiceWorkerAnswers(t *testing.T) {
 				if err != nil {
 					t.Fatal("a query made during work was answered with an error")
 				}
-				if status.State != "busy" || status.Reason != "service_operation_in_progress" || status.Healthy {
-					t.Fatal("a query made during work did not read the held status as busy")
+				if !reflect.DeepEqual(status, want) {
+					t.Fatal("a query during work changed the last published snapshot")
 				}
-			} else if !errors.Is(err, errServiceControlDeferred) {
-				t.Fatal("a control action made during work was not deferred")
+			} else if err != errServiceControlDeferred || !reflect.DeepEqual(status, ServiceStatus{}) {
+				t.Fatal("deferred action changed service effects")
 			}
 			if !slices.Equal(w.recorded(), before) {
-				t.Fatal("a request made during work ran a lifecycle hook")
+				t.Fatal("deferred action changed service effects")
 			}
 			w.free()
 			w.ready(t)
 			if !slices.Equal(w.recorded(), append(before, "health_returned")) {
-				t.Fatal("a request made during work was applied after the work ended")
+				t.Fatal("deferred action changed service effects")
 			}
 			if d, err := w.cell.ServiceDescriptor(); err != nil || d.DesiredState != "running" {
-				t.Fatal("a request made during work changed the desired state")
+				t.Fatal("deferred action changed service effects")
 			}
 		})
 	}
@@ -202,8 +251,8 @@ func TestServiceWorkerReplyThenNext(t *testing.T) {
 	w := serviceWorkerStart(t, "", false)
 	w.ready(t)
 	for range 200 {
-		if status, err := w.cell.Control(t.Context(), "status"); err != nil || status.State != "running" {
-			t.Fatal("a sequential status request was deferred by the one before it")
+		if status, err := w.cell.Control(t.Context(), "status"); err != nil || status.State != "running" || status.WorkInFlight {
+			t.Fatal("completed command remained marked as active")
 		}
 	}
 }
@@ -255,28 +304,215 @@ func TestServiceWorkerCommandReplyOnShutdown(t *testing.T) {
 	}
 }
 
-// Startup is work too: observe reads busy while its repair hook is blocked.
 func TestServiceWorkerStartupBusy(t *testing.T) {
-	w := serviceWorkerStart(t, "repair", true)
-	w.within(t, w.entered, nil, "the armed hook was not reached within the row bound")
-	if status, err := w.answer(t, func() (ServiceStatus, error) { return w.cell.Control(t.Context(), "observe") }); err != nil || status.State != "busy" {
-		t.Fatal("observe during startup did not read busy at once")
+	for _, plant := range []string{"unknown", "wrong_revision"} {
+		t.Run(plant, func(t *testing.T) { serviceWorkerCold(t, plant, false) })
+	}
+}
+
+func TestServiceWorkerStartupFault(t *testing.T) {
+	for _, plant := range []string{"descriptor", "circuit"} {
+		t.Run(plant, func(t *testing.T) { serviceWorkerCold(t, plant, true) })
+	}
+}
+
+func serviceWorkerCold(t *testing.T, plant string, faulted bool) {
+	t.Helper()
+	var want ServiceStatus
+	w := serviceWorkerConfigured(t, "reconcile", true, func(c *Cell, d ServiceDescriptor) {
+		want = ServiceStatus{DesiredState: d.DesiredState, Generation: d.Payload.Generation, WorkInFlight: true, LastStepOutcome: "not_run", State: "busy", Reason: "service_operation_in_progress"}
+		if faulted {
+			want.State, want.Reason = "faulted", "service_circuit_open"
+		}
+		if plant == "descriptor" && c.setServiceFaulted(t.Context(), true) != nil {
+			t.Fatal("could not seed a descriptor fault")
+		}
+		if plant == "wrong_revision" || plant == "circuit" {
+			r := supervisorRecord{Version: 1, RepairRevision: d.RepairRevision, Failures: make([]time.Time, 5)}
+			if plant == "wrong_revision" {
+				d.RepairRevision++
+				if c.writeServiceDescriptor(d) != nil {
+					t.Fatal("could not supersede the failure record")
+				}
+			}
+			if writeAtomic(c.path("service", "supervisor.json"), r, nil) != nil {
+				t.Fatal("could not seed the failure record")
+			}
+		}
+	})
+	w.within(t, w.entered, nil, "first reconcile did not enter")
+	var lease serviceLeaseRecord
+	if readJSON(w.cell.path("service", "lease.json"), &lease) != nil || lease.PID <= 1 || lease.StartIdentity == "" {
+		t.Fatal("cold fixture did not publish its lease identity")
+	}
+	want.Processes = []ServiceProcessIdentity{{Component: "service-host", PID: lease.PID, StartTime: lease.StartIdentity}}
+	for _, action := range []string{"observe", "status"} {
+		got, err := w.answer(t, func() (ServiceStatus, error) { return w.cell.Control(t.Context(), action) })
+		if err != nil || !reflect.DeepEqual(want, got) {
+			if faulted {
+				t.Fatal("cold host hid a known circuit fault")
+			}
+			t.Fatal("cold host reported desired state as observed")
+		}
 	}
 	w.free()
-	w.ready(t)
+	if !faulted {
+		w.ready(t)
+	}
 }
 
 // The observe row once more on one host, for the race detector (R9 cut it from
 // fifty rounds to one): the loop and the worker hand the supervisor over.
 func TestServiceWorkerRace(t *testing.T) {
 	w := serviceWorkerStart(t, "health", false)
-	w.ready(t)
+	want := w.ready(t)
+	want.WorkInFlight = true
 	for range 1 {
 		w.blockTick(t)
-		if status, err := w.answer(t, func() (ServiceStatus, error) { return w.cell.Control(t.Context(), "observe") }); err != nil || status.State != "busy" {
-			t.Fatal("a round of observe during work did not read busy")
+		if status, err := w.answer(t, func() (ServiceStatus, error) { return w.cell.Control(t.Context(), "observe") }); err != nil || !reflect.DeepEqual(status, want) {
+			t.Fatal("a query during work changed the last published snapshot")
 		}
 		w.free()
 		w.ready(t)
+	}
+}
+
+func TestServiceWorkerMaintenanceSnapshot(t *testing.T) {
+	w := serviceWorkerStart(t, "health", false)
+	w.ready(t)
+	serviceMaintenanceHostPlant(t, w.cell, "Valid")
+	want, err := w.cell.Control(t.Context(), "status")
+	if err != nil || want.State != "maintenance" || want.Healthy || want.WorkInFlight {
+		t.Fatal("fixture did not publish a settled maintenance hold")
+	}
+	serviceMaintenanceHostClear(t, w.cell)
+	w.blockTick(t)
+	want.WorkInFlight = true
+	for _, action := range []string{"observe", "status"} {
+		got, err := w.answer(t, func() (ServiceStatus, error) { return w.cell.Control(t.Context(), action) })
+		if err != nil || !reflect.DeepEqual(got, want) {
+			t.Fatal("the in-flight query lost the published hold")
+		}
+	}
+	w.free()
+	w.ready(t)
+}
+
+func TestServiceWorkerSnapshotCopy(t *testing.T) {
+	const original = 42
+	s := supervisor{status: ServiceStatus{Processes: []ServiceProcessIdentity{{PID: original}}}}
+	held := s.projectedStatus()
+	first := deferServiceCommand("observe", held)
+	first.status.Processes[0].PID++
+	second := deferServiceCommand("status", held)
+	if held.Processes[0].PID != original || second.status.Processes[0].PID != original {
+		t.Fatal("held response modified an earlier observation")
+	}
+	held.Processes[0].PID++
+	if s.status.Processes[0].PID != original || second.status.Processes[0].PID != original {
+		t.Fatal("held response modified an earlier observation")
+	}
+}
+
+func TestServiceWorkerStatusWire(t *testing.T) {
+	for _, name := range []string{"settled", "marked"} {
+		t.Run(name, func(t *testing.T) {
+			w := serviceWorkerStart(t, "health", false)
+			want := w.ready(t)
+			if name == "marked" {
+				want.WorkInFlight = true
+				w.blockTick(t)
+			}
+			got, err := w.cell.Control(t.Context(), "observe")
+			body := httptest.NewRecorder()
+			writeServiceControlResponse(body, "observe", got, io.Discard)
+			raw := body.Body.Bytes()
+			count := 0
+			if want.WorkInFlight {
+				count = 1
+			}
+			if err != nil || !reflect.DeepEqual(got, want) || body.Code != 200 || bytes.Count(raw, []byte(`"work_in_flight"`)) != count || bytes.Count(raw, []byte(`"work_in_flight":true`)) != count {
+				t.Fatal("work marker changed settled response shape")
+			}
+			decode := func(input []byte) (ServiceStatus, error) {
+				var status ServiceStatus
+				d := json.NewDecoder(bytes.NewReader(input))
+				d.DisallowUnknownFields()
+				err := d.Decode(&status)
+				return status, err
+			}
+			roundTrip, decodeErr := decode(raw)
+			_, unknownErr := decode(bytes.Replace(raw, []byte("{"), []byte(`{"other":true,`), 1))
+			if decodeErr != nil || !reflect.DeepEqual(roundTrip, want) || unknownErr == nil {
+				t.Fatal("work marker changed settled response shape")
+			}
+		})
+	}
+}
+
+// One of two concurrent exit clients must receive a drain refusal while a
+// status worker is held. The other receives its ACK before stop can finish.
+func TestServiceWorkerPairedExit(t *testing.T) {
+	const fail = "held exit changed its admission outcome"
+	w := serviceWorkerStart(t, "health", false)
+	w.ready(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 8*time.Second)
+	defer cancel()
+	w.arm()
+	status := StartJoinedTestRunForTest(t, cancel, w.cell.cfg.Timeout, func() error {
+		_, err := w.cell.Control(ctx, "status")
+		return err
+	})
+	defer w.free()
+	w.within(t, w.entered, nil, fail)
+	drain := make(chan struct{})
+	var release sync.Once
+	unblock := func() { release.Do(func() { close(drain) }) }
+	defer unblock()
+	w.mu.Lock()
+	w.gated, w.gate = "stop", drain
+	w.mu.Unlock()
+	type reply struct {
+		session *serviceHostExitSession
+		err     error
+	}
+	acks := make(chan reply, 2)
+	for range 2 {
+		envelope, _, err := w.cell.newHostExitEnvelope()
+		if err != nil {
+			t.Fatal(fail)
+		}
+		_ = StartJoinedTestRunForTest(t, cancel, w.cell.cfg.Timeout, func() error {
+			session, err := w.cell.startHostExitRequest(ctx, envelope)
+			acks <- reply{session, err}
+			return nil
+		})
+	}
+	first := <-acks
+	var refused *serviceControlRefusal
+	if first.session != nil || !errors.As(first.err, &refused) || refused.step != "host_exit:drain" || errors.Is(first.err, context.DeadlineExceeded) {
+		t.Fatal(fail)
+	}
+	w.free()
+	if err := <-status; err != nil {
+		t.Fatal(fail)
+	}
+	second := <-acks
+	if second.err != nil || second.session == nil {
+		t.Fatal(fail)
+	}
+	defer second.session.cancel()
+	select {
+	case <-w.done:
+		t.Fatal(fail)
+	default:
+	}
+	unblock()
+	second.session.finish()
+	if second.session.err != nil || second.session.disposition != "drained" {
+		t.Fatal(fail)
+	}
+	if err := <-w.done; err != nil {
+		t.Fatal(fail)
 	}
 }

@@ -209,6 +209,11 @@ func TestServiceHealthControlShutdownSubstep(t *testing.T) {
 	case <-time.After(8 * c.cfg.Timeout):
 		t.Fatal("control health host did not enter its initial tick")
 	}
+	readyCtx, readyCancel := context.WithTimeout(ctx, 8*c.cfg.Timeout)
+	defer readyCancel()
+	if err := serviceHealthyAfterStartup(readyCtx, c); err != nil {
+		t.Fatal(err)
+	}
 	// Host shutdown may close the response transport; the decisive evidence
 	// is the host's completed cancellation and shutdown receipts.
 	_, _ = c.Control(t.Context(), "health")

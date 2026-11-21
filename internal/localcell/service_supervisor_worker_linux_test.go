@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -17,7 +18,7 @@ import (
 
 // The start command under a kept lease (ceiling 2 s) on the real start, stop and
 // repair hooks: observe 0.3 s after the holder's first break is answered within a
-// tenth of the ceiling as busy; the start's own outcome is HEAD's (LC-LEASE-2-SPEC1
+// tenth of the ceiling with the marked stopped snapshot; the start's own outcome is HEAD's (LC-LEASE-2-SPEC1
 // H36, H18, H45, H54).
 func TestServiceWorkerLease(t *testing.T) {
 	for _, row := range []struct {
@@ -61,7 +62,8 @@ func TestServiceWorkerLease(t *testing.T) {
 				return c.Run(ctx, SupervisorPolicy{hooks: &hooks, ShutdownTimeout: time.Second})
 			})
 			(&serviceWorkerHost{cell: c}).ready(t)
-			if status, err := c.Control(t.Context(), "stop"); err != nil || status.State != "stopped" {
+			stopped, err := c.Control(t.Context(), "stop")
+			if err != nil || stopped.State != "stopped" || stopped.WorkInFlight {
 				t.Fatal("the worker lease host did not stop cleanly before the lease")
 			}
 			mu.Lock()
@@ -86,8 +88,9 @@ func TestServiceWorkerLease(t *testing.T) {
 			if time.Since(asked) >= ceiling/10 {
 				t.Fatal("observe during the lease wait was not answered within a tenth of the ceiling")
 			}
-			if err != nil || status.State != "busy" || status.Reason != "service_operation_in_progress" {
-				t.Fatal("observe during the lease wait did not read busy")
+			stopped.WorkInFlight = true
+			if err != nil || !reflect.DeepEqual(status, stopped) {
+				t.Fatal("held lease query changed the stopped snapshot")
 			}
 			reply := <-started
 			l.release()

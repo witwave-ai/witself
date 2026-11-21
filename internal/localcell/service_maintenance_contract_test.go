@@ -129,7 +129,7 @@ var maintenanceHostSchedulerCallers = map[string]int{
 	"service_maintenance.go/failAfterMaintenanceObservation/observeServiceMaintenance":   1,
 	"service_maintenance.go/failAfterMaintenanceObservation/holdMaintenance":             1,
 	"service_supervisor.go/Run/serviceMaintenanceOnly":                                   1,
-	"service_supervisor.go/Run/projectedStatus":                                          1,
+	"service_supervisor.go/Run/projectedStatus":                                          2,
 	"service_supervisor.go/Run/resumeServiceStartup":                                     1,
 	"service_supervisor.go/tick/observeServiceMaintenance":                               1,
 	"service_supervisor.go/tick/resumeServiceStartup":                                    1,
@@ -141,7 +141,7 @@ var maintenanceHostSchedulerCallers = map[string]int{
 }
 
 var maintenanceHostShapePins = map[string]string{
-	"ServiceStatus":       "type ServiceStatus struct {\nDesiredState string `json:\"desired_state\"`\nState string `json:\"state\"`\nReason string `json:\"reason,omitempty\"`\nHealthy bool `json:\"healthy\"`\nRestarts int `json:\"restarts\"`\nGeneration string `json:\"generation\"`\nHostExit string `json:\"host_exit,omitempty\"`\nLastStepOutcome string `json:\"last_step_outcome\"`\nProcesses []ServiceProcessIdentity `json:\"processes,omitempty\"`\n}",
+	"ServiceStatus":       "type ServiceStatus struct {\nDesiredState string `json:\"desired_state\"`\nState string `json:\"state\"`\nReason string `json:\"reason,omitempty\"`\nHealthy bool `json:\"healthy\"`\nRestarts int `json:\"restarts\"`\nGeneration string `json:\"generation\"`\nHostExit string `json:\"host_exit,omitempty\"`\nLastStepOutcome string `json:\"last_step_outcome\"`\nWorkInFlight bool `json:\"work_in_flight,omitempty\"`\nProcesses []ServiceProcessIdentity `json:\"processes,omitempty\"`\n}",
 	"supervisorRecord":    "type supervisorRecord struct {\nVersion int `json:\"version\"`\nRepairRevision uint64 `json:\"repair_revision\"`\nFailures []time.Time `json:\"failures\"`\nNextStart time.Time `json:\"next_start\"`\nAttempts int `json:\"attempts\"`\n}",
 	"serviceStartupPhase": "type serviceStartupPhase uint8",
 }
@@ -1099,9 +1099,23 @@ var maintenanceHostSupervisorPins = map[string]string{
 		ticks = ticker.C
 	}
 	work := make(chan supervisorWork, 1)
-	inFlight, held, pendingExit := false, ServiceStatus{}, (*serviceCommand)(nil)
+	held := s.projectedStatus()
+	held.State, held.Reason, held.Healthy = "busy", "service_operation_in_progress", false
+	if s.startupFaulted {
+		held.State, held.Reason = "faulted", "service_circuit_open"
+	}
+	var refusedWhileLive atomic.Bool
+	s.publishStopRefusal = func() {
+		if ctx.Err() == nil {
+			refusedWhileLive.Store(true)
+		}
+	}
+	inFlight, pendingExit := false, (*serviceCommand)(nil)
+	var wasBlocked bool
 	launch := func(run func() supervisorWork) {
-		held, inFlight = s.projectedStatus(), true
+		wasBlocked = s.shutdownBlocked
+		refusedWhileLive.Store(false)
+		inFlight = true
 		go func() { work <- run() }()
 	}
 	launch(func() supervisorWork {
@@ -1131,7 +1145,11 @@ var maintenanceHostSupervisorPins = map[string]string{
 				continue
 			}
 			if inFlight {
-				command.reply <- deferServiceCommand(command.action, held)
+				snapshot := held
+				if refusedWhileLive.Load() {
+					snapshot.State, snapshot.Reason, snapshot.Healthy = "faulted", "service_stop_refused", false
+				}
+				command.reply <- deferServiceCommand(command.action, snapshot)
 				continue
 			}
 			s.phase = "control"
@@ -1139,11 +1157,15 @@ var maintenanceHostSupervisorPins = map[string]string{
 		case done := <-work:
 			inFlight = false
 			if done.reply == nil && done.err != nil {
+				if s.shutdownBlocked && !s.shutdownFaultPending && (wasBlocked || refusedWhileLive.Load()) && serviceWorkCanceledOnly(done.err, ctx.Err()) {
+					return nil
+				}
 				return done.err
 			}
 			if done.exited {
 				return s.exitDrainResult
 			}
+			held = s.projectedStatus()
 			if done.reply != nil {
 				if done.action != "exit-host" && ctx.Err() == nil {
 					s.phase, s.operation = "idle", "none"
@@ -1219,6 +1241,7 @@ var maintenanceHostSupervisorPins = map[string]string{
 	previousStatus := s.status
 	previousHeld, previousDisplay := s.maintenanceHeld, s.maintenanceDisplay
 	previousBusy := s.maintenanceBusy
+	previouslyBlocked := s.shutdownBlocked
 	s.maintenanceDisplay = false
 	s.maintenanceBusy = false
 	defer func() {
@@ -1226,6 +1249,10 @@ var maintenanceHostSupervisorPins = map[string]string{
 			s.status = previousStatus
 			s.maintenanceHeld, s.maintenanceDisplay = previousHeld, previousDisplay
 			s.maintenanceBusy = previousBusy
+			if !previouslyBlocked && s.shutdownBlocked {
+				s.status.State, s.status.Reason, s.status.Healthy = "faulted", "service_stop_refused", false
+				s.maintenanceDisplay, s.maintenanceBusy = false, false
+			}
 			var located *serviceFailure
 			if !errors.As(result, &located) || located.site != "control_cancelled" || !errors.Is(result, ctx.Err()) {
 				result = cancellation

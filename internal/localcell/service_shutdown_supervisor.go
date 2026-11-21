@@ -16,6 +16,9 @@ func (s *supervisor) latchServiceShutdownRefusal(ctx context.Context, operation 
 		return
 	}
 	s.shutdownBlocked, s.shutdownFaultPending = true, true
+	if s.publishStopRefusal != nil {
+		s.publishStopRefusal()
+	}
 	s.persistServiceShutdownFault(context.WithoutCancel(ctx))
 }
 

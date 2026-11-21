@@ -518,7 +518,7 @@ service_shutdown_windows.go
 	waitShutdownReady readJSON
 	windowsShutdownRequest (*net.UnixListener).Close
 service_supervisor.go
-	import context errors fmt os runtime slices time
+	import context errors fmt os runtime slices sync/atomic time
 	(*Cell).Run (*os.File).Write x2
 	(*supervisor).call (*os.File).Write
 	(*supervisor).load readJSON

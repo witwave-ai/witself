@@ -201,6 +201,9 @@ func testServiceFailureReceiptActualControlPath(t *testing.T, windowsPolicy bool
 	case <-ctx.Done():
 		t.Fatal("foreground never became ready")
 	}
+	if err := serviceHealthyAfterStartup(ctx, cell); err != nil {
+		t.Fatal(err)
+	}
 	_, controlErr := cell.Control(ctx, "stop")
 	cancel()
 	select {

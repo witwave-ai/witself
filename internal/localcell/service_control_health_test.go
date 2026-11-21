@@ -238,6 +238,9 @@ func TestServiceControlSlowHealthVerdictActualHost(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("health fixture did not enter first tick")
 	}
+	if err := serviceHealthyAfterStartup(ctx, cell); err != nil {
+		t.Fatal(err)
+	}
 	_, verdict := cell.Control(ctx, "health")
 	cancel()
 	select {

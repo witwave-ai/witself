@@ -102,6 +102,9 @@ func TestServiceControlCancellationReceiptActualHost(t *testing.T) {
 			case <-budget.Done():
 				t.Fatal("foreground cancellation fixture never became ready")
 			}
+			if err := serviceHealthyAfterStartup(budget, cell); err != nil {
+				t.Fatal(err)
+			}
 			clientCtx, clientCancel := context.WithCancel(budget)
 			defer clientCancel()
 			controlDone := make(chan error, 1)
@@ -131,6 +134,10 @@ func TestServiceControlCancellationReceiptActualHost(t *testing.T) {
 			}
 			if origin == "client" {
 				status, err := cell.Control(budget, "observe")
+				// A marked reply can precede the canceled status worker's idle reset.
+				for err == nil && status.WorkInFlight {
+					status, err = cell.Control(budget, "observe")
+				}
 				if err != nil || status.State != "running" || !status.Healthy || status.LastStepOutcome != "ok" {
 					t.Fatal("client cancellation stopped the host or changed its completed snapshot")
 				}
