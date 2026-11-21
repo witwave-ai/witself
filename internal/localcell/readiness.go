@@ -113,7 +113,7 @@ func (c *Cell) childReadinessExit(ctx context.Context, component string, record 
 	// This is diagnostic only: never retry readiness or signal from a recovered
 	// observation. Compare the exact original fence, not a reread process record.
 	exit.recoveredAlive = c.readinessIdentityRecovered(component, record, processIdentity)
-	if diagnostic := c.lastValueFreeDiagnostic(component, observation.logOffset); diagnostic != "" {
+	if diagnostic := c.lastValueFreeDiagnostic(context.Background(), component, observation.logOffset); diagnostic != "" {
 		exit.diagnostic = diagnostic
 	}
 	return exit
@@ -134,8 +134,8 @@ const maxReadinessDiagnostic = 256
 // Restrict reading to this launch and a bounded tail, never an entire log. The
 // log opens without waiting and a link at its name is refused, so a FIFO or a
 // link swapped in during the readiness wait yields no diagnostic.
-func (c *Cell) lastValueFreeDiagnostic(component string, offset int64) string {
-	f, err := openPrivateReader(context.Background(), c.path("logs", component+".log"))
+func (c *Cell) lastValueFreeDiagnostic(ctx context.Context, component string, offset int64) string {
+	f, err := openPrivateReader(ctx, c.path("logs", component+".log"))
 	if err != nil {
 		return ""
 	}

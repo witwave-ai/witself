@@ -383,8 +383,10 @@ func TestFileIdentitySourceContractRejectsMutations(t *testing.T) {
 		// the pathname afterwards fails the identity check below.
 		return "", ErrLocalPrincipalCredentialsRefused
 	}
-	f, err := openPrincipalCredentialFile(path, os.O_RDONLY, 0)
-	if err != nil {
+	f, err := openPrincipalCredentialFile(ctx, path, os.O_RDONLY, 0)
+	if cut := (*leaseWaitCut)(nil); errors.As(err, &cut) {
+		return "", cut
+	} else if err != nil {
 		return "", ErrLocalPrincipalCredentialsRefused
 	}
 	defer func() { _ = f.Close() }()
@@ -411,8 +413,8 @@ func TestFileIdentitySourceContractRejectsMutations(t *testing.T) {
 		{"windows_intervening_stat", windows, "if !os.SameFile(before, before) {",
 			"os.Stat(path)\n\tif !os.SameFile(before, before) {", []string{"R4"}, false, false, false, false},
 		{"journal_comparison_removed", journal, " || info != nil && !os.SameFile(info, opened)", "", []string{"R5"}, false, false, false, false},
-		{"credential_second_lstat", credential, "f, err := openPrincipalCredentialFile(path, os.O_RDONLY, 0)",
-			"before, err = os.Lstat(path)\n\tf, err := openPrincipalCredentialFile(path, os.O_RDONLY, 0)", []string{"R1"}, false, false, false, false},
+		{"credential_second_lstat", credential, "f, err := openPrincipalCredentialFile(ctx, path, os.O_RDONLY, 0)",
+			"before, err = os.Lstat(path)\n\tf, err := openPrincipalCredentialFile(ctx, path, os.O_RDONLY, 0)", []string{"R1"}, false, false, false, false},
 		{"inventory_unlisted_file", "identity_unlisted.go", "", "package localcell\nimport \"os\"\nfunc f(a, b os.FileInfo) bool { return os.SameFile(a, b) }",
 			nil, true, false, true, false},
 		{"inventory_stale_entry", "service_systemd_adapter.go", "", "", nil, true, false, false, true},

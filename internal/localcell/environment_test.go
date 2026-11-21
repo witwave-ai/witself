@@ -59,8 +59,8 @@ func installerChildArgumentsPrivate(root string) bool {
 	}
 	seen := make(map[string]bool)
 	for _, purpose := range append([]credentialPurpose{credentialBootstrap}, principalCredentialPurposes[:]...) {
-		secret, secretErr := c.credentialPassword(m, purpose)
-		connection, connectionErr := c.principalDSN(m, purpose)
+		secret, secretErr := c.credentialPassword(context.Background(), m, purpose)
+		connection, connectionErr := c.principalDSN(context.Background(), m, purpose)
 		path, pathErr := c.credentialPath(purpose)
 		if secretErr != nil || connectionErr != nil || pathErr != nil || secret == "" || connection == "" || path == "" || seen[secret] {
 			return false

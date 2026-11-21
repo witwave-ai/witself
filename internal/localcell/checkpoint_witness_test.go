@@ -208,7 +208,7 @@ func checkpointWitnessContract(source string) []string {
 		ast.Inspect(&ast.BlockStmt{List: bodies["listCheckpoints"]}, func(node ast.Node) bool {
 			if block, ok := node.(*ast.BlockStmt); ok {
 				for index, current := range block.List {
-					if checkpointWitnessStatement(current) != "witness;complete;err;checkpointComplete(context.Background(), dir, entry.Name());" {
+					if checkpointWitnessStatement(current) != "witness;complete;err;checkpointComplete(ctx, dir, entry.Name());" {
 						continue
 					}
 					if calls++; index+1 < len(block.List) && checkpointWitnessStatement(block.List[index+1]) == "err != nil;nil;0;err;" {

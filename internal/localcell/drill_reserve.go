@@ -215,7 +215,7 @@ func (c *Cell) reserveDrillLocked(ctx context.Context, checkpointID, operationID
 		return "", drillStorageError{reason: "checkpoint_absent"}
 	}
 	budget := checkpointRetryBudget{limit: checkpointRetryFloor}
-	witness, inventory, err := verifyCheckpointDocuments(ctx, &budget, c.checkpointOps(), dir, checkpointID)
+	witness, inventory, err := verifyCheckpointDocuments(ctx, &budget, c.checkpointOps(context.Background()), dir, checkpointID)
 	if ctx.Err() != nil {
 		return "", drillStorageError{reason: "cancelled"}
 	}

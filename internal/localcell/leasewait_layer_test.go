@@ -18,6 +18,9 @@ import (
 
 const leaseLayerID = "ckpt_abcdefghijklmnop"
 
+// leaseCommandDiagnostic is a value-free diagnostic the server's log holds.
+const leaseCommandDiagnostic = "witself-server: listener bind failed: address in use"
+
 // leaseJournalPlant gives c a journal holding one closed stop, then, by
 // prepare, an open stop, an open retained remove or a torn tail, all with the
 // placeholder; it returns the journal's progress then.
@@ -202,6 +205,176 @@ func TestLeaseWaitLayerUnleased(t *testing.T) {
 			t.Fatal("a done context let an ordinary caller past an active maintenance fence")
 		}
 	})
+	// LC-LEASE-2D R5: commands, credentials, ports, reinstall, checkpoint internals.
+	failed, listed := errors.New("unleased command row step failed"), func(i Inspection) bool { return len(i.Checkpoints) == 1 && i.Checkpoints[0].Complete }
+	t.Run("prepareComponentPorts_postgres", func(t *testing.T) {
+		c, m := unitCell(t)
+		if err := selectedFixtureDataDirectory(c); err != nil {
+			t.Fatal("cannot prepare the postgres port directory")
+		}
+		original := m.Ports.Postgres
+		if err := c.prepareComponentPorts(done, m, "postgres", false, true); err != nil {
+			t.Fatal("done context rejected an unleased postgres port reallocation")
+		}
+		if m.Ports.Postgres == original {
+			t.Fatal("postgres reallocation retained the original port")
+		}
+		saved, err := readManifest(c.cfg.Root)
+		if err != nil {
+			t.Fatal("cannot read the manifest after postgres reallocation")
+		}
+		if saved.Ports.Postgres != m.Ports.Postgres {
+			t.Fatal("manifest did not publish the reallocated postgres port")
+		}
+		config, err := os.ReadFile(c.path("pg", "postgresql.conf"))
+		if err != nil {
+			t.Fatal("cannot read the reallocated postgres configuration")
+		}
+		if !strings.Contains(string(config), "\nport = "+strconv.Itoa(saved.Ports.Postgres)+"\n") {
+			t.Fatal("postgres configuration did not publish the manifest port")
+		}
+		data, err := os.ReadFile(c.path("journal", "operations.jsonl"))
+		if err != nil {
+			t.Fatal("cannot read the postgres reallocation journal")
+		}
+		entries, ok := journalDirectorySyncLines(data)
+		if !ok || len(entries) != 1 {
+			t.Fatal("postgres reallocation did not write one complete journal entry")
+		}
+		want := journalEntry{Operation: "start", Step: "postgres", State: "started", At: entries[0].At, Cause: "port_reallocated=postgres"}
+		if entries[0] != want {
+			t.Fatal("journal did not record the postgres port reallocation")
+		}
+	})
+	journaled := func(c *Cell, cause string) bool {
+		data, _ := os.ReadFile(c.path("journal", "operations.jsonl"))
+		return strings.Contains(string(data), cause)
+	}
+	for _, row := range []struct {
+		name, prepare string
+		call          func(c *Cell, m *Manifest) (bool, error)
+	}{
+		{"password", "", func(c *Cell, _ *Manifest) (bool, error) { value, err := c.password(done); return value != "", err }},
+		{"logFile", "", func(c *Cell, _ *Manifest) (bool, error) { return opened(c.logFile(done, "server")) }},
+		{"childEnvironment", "", func(c *Cell, m *Manifest) (bool, error) {
+			environment, err := c.childEnvironment(done, m, "server")
+			return slices.ContainsFunc(environment, func(value string) bool { return strings.HasPrefix(value, "WITSELF_DATABASE_URL=postgres") }), err
+		}},
+		{"prepareComponentPorts", "", func(c *Cell, m *Manifest) (bool, error) {
+			err := c.prepareComponentPorts(done, m, "server", false, true)
+			return journaled(c, "port_reallocated=server"), err
+		}},
+		{"prepareComponentPortsFor", "", func(c *Cell, m *Manifest) (bool, error) {
+			err := c.prepareComponentPortsFor(done, "reinstall", m, "worker", false, true)
+			return journaled(c, "port_reallocated=worker"), err
+		}},
+		{"credentialPassword", "selected", func(c *Cell, m *Manifest) (bool, error) {
+			value, err := c.credentialPassword(done, m, credentialServer)
+			return len(value) == 43, err
+		}},
+		{"validatePrincipalPasswords", "selected", func(c *Cell, m *Manifest) (bool, error) { return true, c.validatePrincipalPasswords(done, m) }},
+		{"makePrincipalPasswords", "fresh", func(c *Cell, m *Manifest) (bool, error) {
+			err := c.makePrincipalPasswords(done, m)
+			entries, _ := os.ReadDir(c.path("run", "credentials"))
+			return len(entries) == len(principalCredentialPurposes), err
+		}},
+		{"principalDSN", "selected", func(c *Cell, m *Manifest) (bool, error) {
+			dsn, err := c.principalDSN(done, m, credentialServer)
+			return strings.HasPrefix(dsn, "postgres:"), err
+		}},
+		{"maintenanceDSN", "selected", func(c *Cell, m *Manifest) (bool, error) {
+			dsn, err := c.maintenanceDSN(done, m)
+			return strings.HasPrefix(dsn, "postgres:"), err
+		}},
+		{"lastValueFreeDiagnostic", "", func(c *Cell, _ *Manifest) (bool, error) {
+			return c.lastValueFreeDiagnostic(done, "server", 0) == leaseCommandDiagnostic, nil
+		}},
+		{"admitReinstall", "retained", func(c *Cell, m *Manifest) (bool, error) {
+			admitted, err := c.admitReinstall(done, ReinstallOptions{InstallationID: m.InstallationID})
+			return admitted != nil && admitted.RemovalRetained, err
+		}},
+		{"reinstallAvailable", "retained", func(c *Cell, m *Manifest) (bool, error) { return true, c.reinstallAvailable(done, m, state(c)) }},
+		{"finishReinstall", "reinstall", func(c *Cell, m *Manifest) (bool, error) {
+			err := c.finishReinstall(done, m)
+			return state(c).pending == nil && m.LastOperation == "reinstall", err
+		}},
+		{"checkpointOps", "", func(c *Cell, _ *Manifest) (bool, error) {
+			return opened(c.checkpointOps(done).open(c.path("manifest.json")))
+		}},
+		{"checkpointSummaries", "", func(c *Cell, _ *Manifest) (bool, error) {
+			inspection, lock, err := Inspection{}, (*operationLock)(nil), error(nil)
+			if lock, err = acquireLock(context.Background(), c.cfg.Root, true); err == nil {
+				defer func() { _ = lock.Close() }()
+				err = c.checkpointSummaries(done, lock, &inspection)
+			}
+			return listed(inspection), err
+		}},
+		{"closeCheckpointFailure", "checkpoint", func(c *Cell, _ *Manifest) (bool, error) {
+			return c.closeCheckpointFailure(done, "checkpoint", failed, true, nil) == failed && state(c).pending == nil, nil
+		}},
+		{"closeCheckpointLeftover", "checkpoint", func(c *Cell, _ *Manifest) (bool, error) {
+			err := c.closeCheckpointLeftover(done)
+			return state(c).pending == nil, err
+		}},
+		{"listCheckpoints", "", func(c *Cell, _ *Manifest) (bool, error) {
+			summaries, unknown, err := c.listCheckpoints(done)
+			return listed(Inspection{Checkpoints: summaries}) && unknown == 0, err
+		}},
+		{"openCheckpointEntry", "", func(c *Cell, _ *Manifest) (bool, error) {
+			return opened(c.openCheckpointEntry(done, checkpointEntry{path: "manifest.json"}, nil))
+		}},
+		{"admitDeleteCheckpoint", "", func(c *Cell, _ *Manifest) (bool, error) {
+			return true, c.admitDeleteCheckpoint(done, DeleteCheckpointOptions{CheckpointID: leaseLayerID})
+		}},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			normal, err := row.call(leaseCommandPlant(t, row.prepare))
+			if err != nil {
+				t.Fatal("a command declaration refused an unleased file under a done context")
+			}
+			if !normal {
+				t.Fatal("a command declaration gave another result for an unleased file under a done context")
+			}
+		})
+	}
+	t.Run("closeCheckpointFailure_unreadable", func(t *testing.T) {
+		c, _ := unitCell(t)
+		if err := os.Mkdir(readerJournalPath(c), 0o700); err != nil {
+			t.Fatal("cannot prepare the unreadable checkpoint journal")
+		}
+		if got := c.closeCheckpointFailure(done, "checkpoint", failed, true, nil); got != failed {
+			t.Fatal("unreadable journal lost the original checkpoint failure")
+		}
+	})
+}
+
+// leaseCommandPlant prepares an LC-LEASE-2D row's cell: the selected layout's
+// credentials (fresh: none yet), a retained cell, or a legacy cell holding its
+// password, a value-free log diagnostic and a complete checkpoint, with the
+// operation prepare names open.
+func leaseCommandPlant(t *testing.T, prepare string) (*Cell, *Manifest) {
+	c, m, err := (*Cell)(nil), (*Manifest)(nil), error(nil)
+	switch prepare {
+	case "selected", "fresh":
+		if c, m, _ = selectedCredentialFixture(t); prepare == "fresh" {
+			err = os.RemoveAll(c.path("run", "credentials"))
+		}
+	case "retained":
+		f, _ := reinstallFixture(t, "legacy", false)
+		c = f.cell
+		m, err = readManifest(c.cfg.Root)
+	default:
+		c, m = unitCell(t)
+		checkpointPlant(t, c, leaseLayerID, leaseLayerID)
+		err = errors.Join(c.makePassword(), writeAtomicBytes(c.path("logs", "server.log"), []byte(leaseCommandDiagnostic+"\n"), nil))
+		if prepare != "" {
+			err = errors.Join(err, c.begin(context.Background(), prepare))
+		}
+	}
+	if err != nil {
+		t.Fatal("cannot prepare the command row cell")
+	}
+	return c, m
 }
 
 // LC-LEASE-2C2-F1 (G3): Inspect and DeleteCheckpoint started with a context

@@ -3,6 +3,7 @@
 package localcell
 
 import (
+	"context"
 	"os"
 	"path"
 	"testing"
@@ -25,7 +26,7 @@ func TestLogLeaseWaitedOut(t *testing.T) {
 			}
 			started := time.Now()
 			leaseTaken(t, l, log)
-			got := readerWatchdog(t, func() error { f, err := c.logFile("server"); _ = f.Close(); return err }, l.release)
+			got := readerWatchdog(t, func() error { f, err := c.logFile(context.Background(), "server"); _ = f.Close(); return err }, l.release)
 			l.do(func(fd uintptr) { held, _ = unix.FcntlInt(fd, unix.F_GETLEASE, 0) })
 			if path.Base(name) == "lets_go" && (got != nil || !l.broken()) || path.Base(name) == "kept" && (got == nil || got.Error() != "cannot open local cell log" ||
 				writerSize(log) != int64(len(readerJournalLine)) || held != unix.F_UNLCK || time.Since(started) < leaseKeptAfter) {

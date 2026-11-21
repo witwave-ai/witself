@@ -65,7 +65,7 @@ func TestWindowsConsoleControlHelperProcess(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		log, err := c.logFile("server")
+		log, err := c.logFile(context.Background(), "server")
 		if err != nil {
 			t.Fatal(err)
 		}

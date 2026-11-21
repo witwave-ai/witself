@@ -54,7 +54,7 @@ func (c *Cell) Reinstall(ctx context.Context, options ReinstallOptions) error {
 }
 
 func (c *Cell) reinstallLocked(ctx context.Context, options ReinstallOptions) error {
-	m, err := c.admitReinstall(options)
+	m, err := c.admitReinstall(context.Background(), options)
 	if err != nil {
 		return err
 	}
@@ -74,7 +74,7 @@ func (c *Cell) reinstallLocked(ctx context.Context, options ReinstallOptions) er
 		run  func(context.Context) error
 	}{
 		{"postgres", func(ctx context.Context) error {
-			if err := c.prepareComponentPortsFor("reinstall", m, "postgres", false, false); err != nil {
+			if err := c.prepareComponentPortsFor(context.Background(), "reinstall", m, "postgres", false, false); err != nil {
 				return err
 			}
 			return ops.postgres(ctx, m)
@@ -104,19 +104,19 @@ func (c *Cell) reinstallLocked(ctx context.Context, options ReinstallOptions) er
 		if ops.stop(rollbackCtx) != nil {
 			return errors.New("local cell reinstall failed; rollback incomplete, repair required")
 		}
-		if finishErr := c.finishReinstall(m); finishErr != nil {
+		if finishErr := c.finishReinstall(context.Background(), m); finishErr != nil {
 			return finishErr
 		}
 		return err
 	}
-	return c.finishReinstall(m)
+	return c.finishReinstall(context.Background(), m)
 }
 
 // admitReinstall runs under the operation lock and writes nothing; nothing is
 // signalled, minted or repaired. A refusal leaves the tree as the pinned lock
 // prefix left it: like Start's, that prefix creates run/ and run/operation.lock
 // when a purge removed them, and nothing else.
-func (c *Cell) admitReinstall(options ReinstallOptions) (*Manifest, error) {
+func (c *Cell) admitReinstall(ctx context.Context, options ReinstallOptions) (*Manifest, error) {
 	if options.InstallationID == "" {
 		return nil, errReinstallIdentity
 	}
@@ -130,11 +130,11 @@ func (c *Cell) admitReinstall(options ReinstallOptions) (*Manifest, error) {
 	if m.InstallationID != options.InstallationID {
 		return nil, errReinstallIdentity
 	}
-	progress, err := c.readJournal(context.Background())
+	progress, err := c.readJournal(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if err := c.reinstallAvailable(m, progress); err != nil {
+	if err := c.reinstallAvailable(ctx, m, progress); err != nil {
 		return nil, err
 	}
 	if err := c.verifyAll(); err != nil {
@@ -152,11 +152,11 @@ func (c *Cell) admitReinstall(options ReinstallOptions) (*Manifest, error) {
 	if err := c.reinstallServiceFence(); err != nil {
 		return nil, err
 	}
-	if _, err := c.password(); err != nil {
+	if _, err := c.password(ctx); err != nil {
 		return nil, err
 	}
 	if m.PrincipalLayoutVersion != 0 {
-		if err := c.validatePrincipalPasswords(m); err != nil {
+		if err := c.validatePrincipalPasswords(ctx, m); err != nil {
 			return nil, err
 		}
 	}
@@ -172,7 +172,7 @@ func (c *Cell) admitReinstall(options ReinstallOptions) (*Manifest, error) {
 // account at this build's schema, a closed journal without a torn tail, private
 // PGDATA and PostgreSQL 16. Liveness, the caller's identity, the service fence
 // and custody are admission's alone.
-func (c *Cell) reinstallAvailable(m *Manifest, progress journalProgress) error {
+func (c *Cell) reinstallAvailable(ctx context.Context, m *Manifest, progress journalProgress) error {
 	if !m.RemovalRetained || !m.Installed || m.Cleanup != nil {
 		return errReinstallState
 	}
@@ -193,9 +193,11 @@ func (c *Cell) reinstallAvailable(m *Manifest, progress journalProgress) error {
 	// regular file: the open never waits, so a FIFO at the name, even one renamed
 	// in after any earlier check, cannot block the lock holder, and a symlink at
 	// the name is refused, never followed.
-	version, err := readRegular(context.Background(), openPostgresReader, func(info os.FileInfo) bool { return info.Size() <= 64 }, c.path("pg", "PG_VERSION"),
+	version, err := readRegular(ctx, openPostgresReader, func(info os.FileInfo) bool { return info.Size() <= 64 }, c.path("pg", "PG_VERSION"),
 		errReinstallState, errReinstallState, errReinstallState)
-	if err != nil {
+	if cut := (*leaseWaitCut)(nil); errors.As(err, &cut) {
+		return cut
+	} else if err != nil {
 		return errReinstallState
 	}
 	if strings.TrimSuffix(string(version), "\n") != "16" {
@@ -257,7 +259,7 @@ func (c *Cell) verifyRetainedIdentity(ctx context.Context, m *Manifest, query fu
 
 // finishReinstall closes the operation. After a failed proof the marker is still
 // set: the cell stays removed and a new Reinstall call may retry.
-func (c *Cell) finishReinstall(m *Manifest) error {
+func (c *Cell) finishReinstall(ctx context.Context, m *Manifest) error {
 	m.LastOperation = "reinstall"
 	if err := writeAtomic(c.path("manifest.json"), m, nil); err != nil {
 		return err
@@ -265,7 +267,7 @@ func (c *Cell) finishReinstall(m *Manifest) error {
 	if err := c.reinstallBoundary("operation_manifest"); err != nil {
 		return err
 	}
-	return c.journal(context.Background(), "reinstall", "operation", "done")
+	return c.journal(ctx, "reinstall", "operation", "done")
 }
 
 func (c *Cell) reinstallBoundary(name string) error {

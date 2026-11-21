@@ -1,6 +1,7 @@
 package localcell
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -12,7 +13,7 @@ import (
 // preserve literal plus signs. Exercise the parser used by physical connections.
 func TestInstallerPrincipalsMigrationStartupOption(t *testing.T) {
 	c, m, _ := selectedCredentialFixture(t)
-	environment, err := c.childEnvironment(m, "migration")
+	environment, err := c.childEnvironment(context.Background(), m, "migration")
 	if err != nil {
 		t.Fatal("migration startup option fixture failed")
 	}

@@ -49,13 +49,13 @@ func TestInstallerPrincipalsSelection(t *testing.T) {
 		t.Fatal("selection fixture password failed")
 	}
 	before, _ := os.ReadFile(c.path("manifest.json"))
-	legacyEnvironment, err := c.childEnvironment(m, "server")
+	legacyEnvironment, err := c.childEnvironment(context.Background(), m, "server")
 	if err != nil {
 		t.Fatal("legacy environment fixture failed")
 	}
 	t.Setenv("WITSELF_LOCAL_MANAGED_PRINCIPALS", "1")
 	t.Setenv("WITSELF_LOCAL_MIGRATION_PHASE", "1")
-	afterEnvironment, err := c.childEnvironment(m, "server")
+	afterEnvironment, err := c.childEnvironment(context.Background(), m, "server")
 	if err != nil || !slices.Equal(legacyEnvironment, afterEnvironment) {
 		t.Fatal("legacy environment bytes changed by ambient selection")
 	}

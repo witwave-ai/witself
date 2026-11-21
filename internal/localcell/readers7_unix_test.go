@@ -37,7 +37,7 @@ func TestLogOpenNeverWaits(t *testing.T) {
 			reader, filled, err := row.plant(name, target)
 			t.Cleanup(func() { _ = reader.Close() })
 			size := writerSize(target)
-			got := readerWatchdog(t, func() error { f, err := c.logFile("server"); _ = f.Close(); return err }, func() {
+			got := readerWatchdog(t, func() error { f, err := c.logFile(context.Background(), "server"); _ = f.Close(); return err }, func() {
 				for _, fifo := range []string{name, target} {
 					opened, _ := os.OpenFile(fifo, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 					_ = opened.Close()
@@ -64,7 +64,7 @@ func TestLogChildInheritsBlocking(t *testing.T) {
 			if held != "" {
 				err = os.WriteFile(log, []byte(held), 0o600)
 			}
-			err = errors.Join(err, readerWatchdog(t, func() (err error) { f, err = c.logFile("server"); return err }, func() {}))
+			err = errors.Join(err, readerWatchdog(t, func() (err error) { f, err = c.logFile(context.Background(), "server"); return err }, func() {}))
 			info, statErr := f.Stat()
 			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 			defer cancel()

@@ -27,10 +27,10 @@ func (p Ports) all() []int {
 
 func addr(port int) string { return net.JoinHostPort("127.0.0.1", strconv.Itoa(port)) }
 
-func (c *Cell) password() (string, error) {
+func (c *Cell) password(ctx context.Context) (string, error) {
 	path := c.path("run", "postgres.password")
 	unavailable, invalid := errors.New("local cell password file is unavailable or not private"), errors.New("local cell password file is invalid")
-	data, err := readRegular(context.Background(), openPrivateReader, func(info os.FileInfo) bool { return info.Size() <= 128 && privatePassword(path, info) },
+	data, err := readRegular(ctx, openPrivateReader, func(info os.FileInfo) bool { return info.Size() <= 128 && privatePassword(path, info) },
 		path, unavailable, unavailable, invalid)
 	switch {
 	case errors.Is(err, os.ErrNotExist):
@@ -51,13 +51,13 @@ func (c *Cell) makePassword() error {
 	return writeAtomicBytes(c.path("run", "postgres.password"), []byte(base64.RawURLEncoding.EncodeToString(data)+"\n"), nil)
 }
 
-func (c *Cell) childEnvironment(m *Manifest, component string) ([]string, error) {
+func (c *Cell) childEnvironment(ctx context.Context, m *Manifest, component string) ([]string, error) {
 	if err := validatePrincipalLayout(m); err != nil {
 		return nil, err
 	}
 	var databaseURL string
 	if m.PrincipalLayoutVersion != 0 {
-		if err := c.validatePrincipalPasswords(m); err != nil {
+		if err := c.validatePrincipalPasswords(ctx, m); err != nil {
 			return nil, err
 		}
 		var purpose credentialPurpose
@@ -72,12 +72,12 @@ func (c *Cell) childEnvironment(m *Manifest, component string) ([]string, error)
 			return nil, ErrLocalPrincipalCredentialsRefused
 		}
 		var err error
-		databaseURL, err = c.principalDSN(m, purpose)
+		databaseURL, err = c.principalDSN(ctx, m, purpose)
 		if err != nil {
 			return nil, err
 		}
 	} else {
-		password, err := c.password()
+		password, err := c.password(ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -127,23 +127,23 @@ func (c *Cell) command(ctx context.Context, binary string, args ...string) (*exe
 	return cmd, nil
 }
 
-// logFile refuses what is not a regular file at the name before opening, then
-// opens through openRegularWriter: a FIFO, link or lease never makes it wait,
-// and every child inherits a regular file in blocking mode as its output.
-func (c *Cell) logFile(component string) (*os.File, error) {
+// logFile refuses non-regular targets before opening. openRegularWriter can
+// wait out a conflicting lease on a regular file and returns a blocking handle
+// for the child to inherit as its output.
+func (c *Cell) logFile(ctx context.Context, component string) (*os.File, error) {
 	path := c.path("logs", component+".log")
 	irregular := errors.New("local cell log must be a regular file")
 	if info, err := os.Lstat(path); err == nil && !info.Mode().IsRegular() {
 		return nil, irregular
 	}
-	return openRegularWriter(context.Background(), path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600, irregular, errors.New("cannot open local cell log"))
+	return openRegularWriter(ctx, path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600, irregular, errors.New("cannot open local cell log"))
 }
 
 func (c *Cell) pgCommand(ctx context.Context, tool string, args ...string) error {
 	if !filepath.IsAbs(c.cfg.Binaries.PostgresDir) {
 		return errors.New("explicit PostgreSQL binary directory is required")
 	}
-	log, err := c.logFile("postgres")
+	log, err := c.logFile(context.Background(), "postgres")
 	if err != nil {
 		return err
 	}
@@ -248,7 +248,7 @@ func (c *Cell) databaseCommand(ctx context.Context, m *Manifest, tool string, ar
 	if !filepath.IsAbs(c.cfg.Binaries.PostgresDir) {
 		return "", errors.New("explicit PostgreSQL binary directory is required")
 	}
-	password, err := c.credentialPassword(m, purpose)
+	password, err := c.credentialPassword(context.Background(), m, purpose)
 	if err != nil {
 		return "", err
 	}
@@ -325,11 +325,11 @@ func (c *Cell) startChildPrepared(ctx context.Context, m *Manifest, component st
 	if binary == "" {
 		return errors.New("component binary is required")
 	}
-	environment, err := c.childEnvironment(m, component)
+	environment, err := c.childEnvironment(context.Background(), m, component)
 	if err != nil {
 		return err
 	}
-	log, err := c.logFile(component)
+	log, err := c.logFile(context.Background(), component)
 	if err != nil {
 		return err
 	}

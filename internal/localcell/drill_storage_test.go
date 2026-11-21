@@ -244,7 +244,7 @@ var drillStorageCallees = []string{"(context.Context).Err", "context.Background"
 var drillReserveCallees = []string{"errors.As", "errors.Is", "(*os.Root).Open", "(*os.File).Close", "(*os.File).Fd", "(*os.File).Stat",
 	"(io/fs.FileInfo).Size", "os.NewFile", "strings.Contains", "strings.Split", "localcell.drillStorageAdd", "path/filepath.FromSlash", "path/filepath.Join",
 	"strings.Repeat", "localcell.checkpointPathFits", "os.SameFile", "(*os.Root).OpenRoot", "(*os.Root).Stat", "(*os.Root).Close",
-	"(context.Context).Err", "encoding/json.Marshal", "errors.Join", "os.OpenRoot", "os.Lstat", "path.Join", "(*os.File).Sync", "(*os.File).Write",
+	"(context.Context).Err", "context.Background", "encoding/json.Marshal", "errors.Join", "os.OpenRoot", "os.Lstat", "path.Join", "(*os.File).Sync", "(*os.File).Write",
 	"(*os.Root).Lstat", "(*os.Root).Remove", "(*os.Root).Rename", "localcell.drillPlatformVolume", "(*localcell.Cell).admitDrillStorageLocked",
 	"(*localcell.Cell).checkpointDir", "(*localcell.Cell).checkpointOps", "(*localcell.Cell).recoveryDir", "localcell.readManifest",
 	"localcell.verifyCheckpointDocuments", "localcell.checkpointVerifyShape", "localcell.drillCloneBytes", "localcell.drillStorageAdmits",
@@ -345,7 +345,7 @@ func TestDrillStorageSourceContract(t *testing.T) {
 		{"lock", "localcell.acquireLock", [][3]string{{"drill_storage.go", tail, "func (c *Cell) drillStorageProbe() { _, _ = acquireLock(c.cfg.Root, true) }\n\n"}}},
 		{"dot_import", "io.WriteString", [][3]string{{"drill_storage.go", imports, "\t. \"io\"\n"}, {"drill_storage.go", tail, "func drillStorageProbe(w Writer) { _, _ = WriteString(w, \"x\") }\n\n"}}},
 		{"renamed_import", "(*os.File).Write", [][3]string{{"drill_storage.go", imports, "\tfiles \"os\"\n"}, {"drill_storage.go", tail, "func drillStorageProbe(f *files.File) { write := f.Write; _, _ = write(nil) }\n\n"}}},
-		{"field_value", "localcell.publish", [][3]string{{"drill_storage.go", tail, "func (c *Cell) drillStorageProbe() { _ = c.checkpointOps().publish }\n\n"}}},
+		{"field_value", "localcell.publish", [][3]string{{"drill_storage.go", tail, "func (c *Cell) drillStorageProbe() { _ = c.checkpointOps(context.Background()).publish }\n\n"}}},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			for _, ending := range []string{"\n", "\r\n"} {

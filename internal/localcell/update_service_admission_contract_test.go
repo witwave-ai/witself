@@ -78,7 +78,7 @@ defer func() { _ = lock.Close() }()
 ` + maintenanceReleasedAdmissionStatement + `
 return c.checkpointLocked(ctx, options)`,
 	"DeleteCheckpoint": `ctx = leaseWaitDetached(ctx)
-if err := c.refuseBeforeLockNames(ctx, func() error { return c.admitDeleteCheckpoint(options) }); err != nil { return err }
+if err := c.refuseBeforeLockNames(ctx, func() error { return c.admitDeleteCheckpoint(ctx, options) }); err != nil { return err }
 lock, err := c.own(false)
 if err != nil { return err }
 defer func() { _ = lock.Close() }()

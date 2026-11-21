@@ -47,7 +47,7 @@ func (c *Cell) principalOperations() installerPrincipalOperations {
 		return *c.installerPrincipals
 	}
 	return installerPrincipalOperations{
-		credentials:    func(_ context.Context, m *Manifest) error { return c.makePrincipalPasswords(m) },
+		credentials:    func(_ context.Context, m *Manifest) error { return c.makePrincipalPasswords(context.Background(), m) },
 		provision:      c.provisionInstallerPrincipals,
 		migrate:        c.runPrincipalMigration,
 		grants:         c.grantInstallerStartupAccess,
@@ -94,7 +94,7 @@ func (c *Cell) installerAdmin(ctx context.Context, m *Manifest, fn func(*pgx.Con
 	if err != nil || !state.Alive || !state.Matches {
 		return errPrincipalProvision
 	}
-	dsn, err := c.principalDSN(m, credentialBootstrap)
+	dsn, err := c.principalDSN(context.Background(), m, credentialBootstrap)
 	if err != nil {
 		return err
 	}
@@ -217,7 +217,7 @@ func (c *Cell) provisionInstallerPrincipals(ctx context.Context, m *Manifest) er
 						if err != nil {
 							return err
 						}
-						password, err := c.credentialPassword(m, purpose)
+						password, err := c.credentialPassword(context.Background(), m, purpose)
 						if err != nil {
 							return err
 						}
@@ -245,7 +245,7 @@ func (c *Cell) provisionInstallerPrincipals(ctx context.Context, m *Manifest) er
 				return errPrincipalProvision
 			}
 		}
-		dsn, err := c.principalDSN(m, credentialBootstrap)
+		dsn, err := c.principalDSN(context.Background(), m, credentialBootstrap)
 		if err != nil {
 			return err
 		}
@@ -370,7 +370,7 @@ func (c *Cell) verifyPrincipalCredentialPairs(ctx context.Context, m *Manifest) 
 
 func (c *Cell) verifyCredentialPurposes(ctx context.Context, m *Manifest, purposes []credentialPurpose) error {
 	for _, purpose := range purposes {
-		dsn, err := c.principalDSN(m, purpose)
+		dsn, err := c.principalDSN(context.Background(), m, purpose)
 		if err != nil {
 			return err
 		}
@@ -394,7 +394,7 @@ func (c *Cell) verifyCredentialPurposes(ctx context.Context, m *Manifest, purpos
 }
 
 func (c *Cell) verifyRuntimePrincipalStart(ctx context.Context, m *Manifest) error {
-	if err := c.validatePrincipalPasswords(m); err != nil {
+	if err := c.validatePrincipalPasswords(context.Background(), m); err != nil {
 		return err
 	}
 	if err := c.verifyCredentialPurposes(ctx, m, []credentialPurpose{credentialServer, credentialWorker, credentialMaintenance}); err != nil {
@@ -404,7 +404,7 @@ func (c *Cell) verifyRuntimePrincipalStart(ctx context.Context, m *Manifest) err
 }
 
 func (c *Cell) runPrincipalMigration(ctx context.Context, m *Manifest) error {
-	environment, err := c.childEnvironment(m, "migration")
+	environment, err := c.childEnvironment(context.Background(), m, "migration")
 	if err != nil {
 		return err
 	}
@@ -470,7 +470,7 @@ func (c *Cell) verifyMaintenanceTopology(ctx context.Context, m *Manifest) error
 }
 
 func (c *Cell) verifyInstallerStartupCatalog(ctx context.Context, m *Manifest) error {
-	dsn, err := c.maintenanceDSN(m)
+	dsn, err := c.maintenanceDSN(context.Background(), m)
 	if err != nil {
 		return err
 	}
@@ -517,7 +517,7 @@ func verifyInstallerStartupGrants(ctx context.Context, q installerCatalog) error
 }
 
 func (c *Cell) openMaintenance(ctx context.Context, m *Manifest) (*store.Store, error) {
-	dsn, err := c.maintenanceDSN(m)
+	dsn, err := c.maintenanceDSN(context.Background(), m)
 	if err != nil {
 		return nil, err
 	}
@@ -531,7 +531,7 @@ func (c *Cell) openMaintenance(ctx context.Context, m *Manifest) (*store.Store, 
 // usesysid identifies the authenticated login even when current_user is owner
 // through SET ROLE. The observer must close before the caller launches a child.
 func (c *Cell) observePrivilegedSessions(ctx context.Context, m *Manifest) error {
-	dsn, err := c.maintenanceDSN(m)
+	dsn, err := c.maintenanceDSN(context.Background(), m)
 	if err != nil {
 		return err
 	}
@@ -581,11 +581,11 @@ func (c *Cell) prepareSelectedHealthCredential(ctx context.Context, m *Manifest)
 
 // maintenanceDSN preserves production credential selection. A package-local
 // fixture can substitute its read-only wire endpoint without a native cluster.
-func (c *Cell) maintenanceDSN(m *Manifest) (string, error) {
+func (c *Cell) maintenanceDSN(ctx context.Context, m *Manifest) (string, error) {
 	if c.maintenanceTest != nil {
 		return c.maintenanceTest.dsn(), nil
 	}
-	return c.principalDSN(m, credentialMaintenance)
+	return c.principalDSN(ctx, m, credentialMaintenance)
 }
 
 // installerMaintenanceOperations exposes only read-only connection boundaries.

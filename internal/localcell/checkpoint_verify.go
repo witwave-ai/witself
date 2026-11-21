@@ -63,7 +63,7 @@ func (c *Cell) verifyCheckpoint(ctx context.Context, lock *operationLock, id str
 	if err != nil {
 		return "", checkpointVerifyError{checkpointVerifyIdentityMismatch}
 	}
-	ops := c.checkpointOps()
+	ops := c.checkpointOps(context.Background())
 	budget := checkpointRetryBudget{limit: checkpointRetryFloor}
 	witness, inventory, err := verifyCheckpointDocuments(ctx, &budget, ops, dir, id)
 	if err != nil {

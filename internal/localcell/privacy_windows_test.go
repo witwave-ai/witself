@@ -263,7 +263,7 @@ func TestWindowsFreshCellObjectsHaveExactPrivateDACL(t *testing.T) {
 	if err := c.journal(context.Background(), "install", "operation", "started"); err != nil {
 		t.Fatal(err)
 	}
-	log, err := c.logFile("server")
+	log, err := c.logFile(context.Background(), "server")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -382,7 +382,7 @@ func TestWindowsPasswordReplacementACLRefusedBeforeReadOrWrite(t *testing.T) {
 		t.Fatal(err)
 	}
 	setTestDACL(t, path, "(A;;FR;;;WD)", false, false)
-	password, err := c.password()
+	password, err := c.password(context.Background())
 	assertPrivateRefusal(t, err, path)
 	if password != "" {
 		t.Fatal("password with broadened ACL was exposed")

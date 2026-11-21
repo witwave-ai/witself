@@ -37,7 +37,7 @@ var reader2UnixRows = []reader2Row{
 		c, m := unitCell(t)
 		m.RemovalRetained, m.AccountID, m.LastVerifiedSchemaVersion = true, "acc_aaaaaaaaaaaaaaaa", store.SchemaVersion()
 		path := reader2PostgresFile(t, c, "PG_VERSION", "16\n")
-		return path, func() error { plant(path); return c.reinstallAvailable(m, journalProgress{}) }
+		return path, func() error { plant(path); return c.reinstallAvailable(context.Background(), m, journalProgress{}) }
 	}},
 	{"launchdPlist", "plist_file:identity", "plist_file:open", "plist_file:content", func(t *testing.T, plant func(string)) (string, func() error) {
 		a, d, _ := launchdFixture(t)

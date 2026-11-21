@@ -187,7 +187,7 @@ func TestCheckpointRetryCumulative(t *testing.T) {
 				for i := range 20 {
 					checkpointWrite(t, c, fmt.Sprintf("pg/base/1/retry%d", i), "synthetic retry file")
 				}
-				plan, err := c.admitCheckpoint(t.Context(), checkpointOptions(f), c.checkpointOps())
+				plan, err := c.admitCheckpoint(t.Context(), checkpointOptions(f), c.checkpointOps(context.Background()))
 				if err != nil {
 					t.Fatal("cannot plan retry fixture")
 				}
@@ -286,7 +286,7 @@ func TestCheckpointRetryCancellation(t *testing.T) {
 }
 
 func TestCheckpointRetrySleepCancellation(t *testing.T) {
-	ops := (&Cell{}).checkpointOps()
+	ops := (&Cell{}).checkpointOps(context.Background())
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	done := make(chan struct{})
