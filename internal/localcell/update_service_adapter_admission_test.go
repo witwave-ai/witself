@@ -432,7 +432,7 @@ func TestWindowsTaskMaintenanceLockBinding(t *testing.T) {
 			if decoyLock.Close() != nil {
 				t.Fatal("Decoy root lock did not release")
 			}
-			serviceMaintenanceCause(t, cell.maintenanceFenceAllows(0))
+			serviceMaintenanceCause(t, cell.maintenanceFenceAllows(context.Background(), 0))
 			unlock()
 			serviceMaintenanceReleased(t, target)
 		})
@@ -446,7 +446,7 @@ func TestWindowsTaskMaintenanceLockBinding(t *testing.T) {
 			t.Fatal("Decoy fence fixture could not acquire the target lock")
 		}
 		defer unlock()
-		if cell.maintenanceFenceAllows(0) != nil {
+		if cell.maintenanceFenceAllows(context.Background(), 0) != nil {
 			t.Fatal("Production mutation lock consulted decoy maintenance evidence")
 		}
 		unlock()

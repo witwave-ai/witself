@@ -140,7 +140,7 @@ func maintenanceRemovalAdmissionOwner(filename string, fn *ast.FuncDecl) string 
 				fenceCalls++
 				fencePosition = node.Pos()
 				selector, ok := node.Fun.(*ast.SelectorExpr)
-				if !ok || admissionNodeText(node) != "cell.maintenanceFenceAllows(0)" {
+				if !ok || admissionNodeText(node) != "cell.maintenanceFenceAllows(context.Background(), 0)" {
 					invalid = true
 				} else if id, ok := selector.X.(*ast.Ident); !ok || id.Obj != cell.Obj {
 					invalid = true

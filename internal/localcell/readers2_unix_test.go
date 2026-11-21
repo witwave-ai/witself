@@ -3,6 +3,7 @@
 package localcell
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -25,7 +26,7 @@ var reader2UnixRows = []reader2Row{
 		path := reader2PostgresFile(t, c, "postmaster.pid", "4242\n"+c.path("pg")+"\n1700000000\n")
 		return path, func() error {
 			plant(path)
-			pid, err := c.postmaster()
+			pid, err := c.postmaster(context.Background())
 			if err == nil && pid != 4242 {
 				return errors.New("postmaster content lost")
 			}

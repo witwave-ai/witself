@@ -194,7 +194,7 @@ func (c *Cell) PrepareService(ctx context.Context, d ServiceDescriptor) error {
 	if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	if err := c.maintenanceFenceAllows(0); err != nil {
+	if err := c.maintenanceFenceAllows(context.Background(), 0); err != nil {
 		return err
 	}
 	if err := privateDir(c.path("service"), true); err != nil {
@@ -301,7 +301,7 @@ func (c *Cell) setServiceDesiredStateLocked(state string) error {
 		if _, err := os.Lstat(c.path("service", "transition.json")); !errors.Is(err, os.ErrNotExist) {
 			return ErrServiceDesiredState
 		}
-		if err := c.maintenanceFenceAllows(0); err != nil {
+		if err := c.maintenanceFenceAllows(context.Background(), 0); err != nil {
 			return err
 		}
 	}
@@ -347,7 +347,7 @@ func (c *Cell) RepairService(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if err := c.maintenanceFenceAllows(0); err != nil {
+	if err := c.maintenanceFenceAllows(context.Background(), 0); err != nil {
 		return err
 	}
 	d.Faulted, d.Revision, d.RepairRevision = false, d.Revision+1, d.RepairRevision+1

@@ -426,7 +426,7 @@ func TestOwnershipFailureWrapperWiringRejectsMutations(t *testing.T) {
 		{"existing_validation", "func (c *Cell) ownExisting() (*operationLock, error) {\n\tif err := c.validateRoot(false); err != nil {\n\t\t" + wrapper, "func (c *Cell) ownExisting() (*operationLock, error) {\n\tif err := c.validateRoot(false); err != nil {\n\t\treturn nil, err", "ownExisting initial validation refusal lacks its classifier"},
 		{"existing_lock", "lock, err := acquireLock(context.Background(), c.cfg.Root, false)\n\tif err != nil {\n\t\t" + wrapper, "lock, err := acquireLock(context.Background(), c.cfg.Root, false)\n\tif err != nil {\n\t\treturn nil, err", "ownExisting lock acquisition refusal lacks its classifier"},
 		{"post_acquisition", "_ = lock.Close()\n\t\treturn nil, err", "_ = lock.Close()\n\t\t" + wrapper, "post acquisition validation refusal must retain its original return"},
-		{"inspect", "func (c *Cell) Inspect(_ context.Context) (Inspection, error) {", "func (c *Cell) Inspect(_ context.Context) (Inspection, error) {\n\t_ = classifyOwnershipFailure(c.cfg.Root, nil)", "ownership classifier call appeared outside ownership wrappers"},
+		{"inspect", "func (c *Cell) Inspect(ctx context.Context) (Inspection, error) {", "func (c *Cell) Inspect(ctx context.Context) (Inspection, error) {\n\t_ = classifyOwnershipFailure(c.cfg.Root, nil)", "ownership classifier call appeared outside ownership wrappers"},
 		{"direct_probe", "\treturn lock, nil\n}\n\nfunc (c *Cell) ownExisting", "\t_ = probeOwnershipFailure(c.cfg.Root, nil, lockDirectory, openLockFile, lockFile, unlockFile)\n\treturn lock, nil\n}\n\nfunc (c *Cell) ownExisting", "ownership probe call appeared outside its classifier"},
 	} {
 		t.Run(test.name, func(t *testing.T) {

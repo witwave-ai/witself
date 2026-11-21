@@ -63,7 +63,7 @@ func TestLeaseWaitContextSourceContract(t *testing.T) {
 	for name, source := range admissionReadSources(t) {
 		sources[name] = strings.ReplaceAll(source, "\r\n", "\n")
 	}
-	const pause = "\t\tpause := time.NewTimer(delay)\n\t\tselect {\n\t\tcase <-ctx.Done():\n\t\t\tpause.Stop()\n\t\t\treturn result, &leaseWaitCut{cause: ctx.Err()}\n\t\tcase <-pause.C:\n\t\t}\n"
+	const pause = "\t\tpause := time.NewTimer(delay)\n\t\tselect {\n\t\tcase <-leaseWaitDone(ctx):\n\t\t\tpause.Stop()\n\t\t\treturn result, &leaseWaitCut{cause: ctx.Err()}\n\t\tcase <-pause.C:\n\t\t}\n"
 	const cut = "\tif cut := (*leaseWaitCut)(nil); errors.As(err, &cut) {\n\t\treturn nil, cut\n\t}\n"
 	const classified = "\tif err != nil {\n\t\tinfo, err := os.Lstat(path)\n\t\tswitch {\n\t\tcase errors.Is(err, os.ErrNotExist) && absentBelowDirectory(path):\n\t\t\treturn nil, os.ErrNotExist\n" +
 		"\t\tcase err != nil:\n\t\t\treturn nil, inspect\n\t\tcase !regularFile(info, accept):\n\t\t\treturn nil, irregular\n\t\t}\n\t\treturn nil, open\n\t}\n"

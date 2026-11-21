@@ -15,7 +15,11 @@ import (
 	"testing"
 )
 
-const maintenanceAdmissionStatement = `if err := c.maintenanceFenceAllows(0); err != nil { return err }`
+const maintenanceAdmissionStatement = `if err := c.maintenanceFenceAllows(context.Background(), 0); err != nil { return err }`
+
+// maintenanceReleasedAdmissionStatement is Checkpoint's and DeleteCheckpoint's
+// admission: they pass their own detached ctx (LC-LEASE-2C2).
+const maintenanceReleasedAdmissionStatement = `if err := c.maintenanceFenceAllows(ctx, 0); err != nil { return err }`
 
 func admissionNodeText(node ast.Node) string {
 	var buffer bytes.Buffer
@@ -412,10 +416,10 @@ func TestMaintenanceFenceAdmissionSourceContractMutations(t *testing.T) {
 			mutations := []admissionSourceMutation{
 				{"Delete", "literal_zero_direct_error_return", func(body string) string { return strings.Replace(body, gate, "", 1) }},
 				{"PositiveGeneration", "literal_zero_direct_error_return", func(body string) string {
-					return strings.Replace(body, "maintenanceFenceAllows(0)", "maintenanceFenceAllows(7)", 1)
+					return strings.Replace(body, "Allows(context.Background(), 0)", "Allows(context.Background(), 7)", 1)
 				}},
 				{"VariableGeneration", "literal_zero_direct_error_return", func(body string) string {
-					return strings.Replace(body, "maintenanceFenceAllows(0)", "maintenanceFenceAllows(generation)", 1)
+					return strings.Replace(body, "Allows(context.Background(), 0)", "Allows(context.Background(), generation)", 1)
 				}},
 				{"IgnoreError", "literal_zero_direct_error_return", func(body string) string { return strings.Replace(body, gate, "_ = c.maintenanceFenceAllows(0)", 1) }},
 				{"DeferredClosure", "literal_zero_direct_error_return", func(body string) string {
@@ -455,6 +459,9 @@ func TestMaintenanceFenceAdmissionSourceContractMutations(t *testing.T) {
 				mutations = append(mutations, admissionSourceMutation{"BeforeServiceFence", "position", func(body string) string {
 					body = strings.Replace(body, gate, "", 1)
 					return strings.Replace(body, "if err := c.serviceStartFence()", gate+"\nif err := c.serviceStartFence()", 1)
+				}})
+				mutations = append(mutations, admissionSourceMutation{"fence_literal_moved", "literal_zero_direct_error_return", func(body string) string {
+					return strings.Replace(body, "Allows(context.Background(), 0)", "Allows(context.Background(), 1)", 1) // LC-LEASE-2C2
 				}})
 			}
 			if owner == "Remove" {
@@ -580,9 +587,9 @@ func (c *Cell) readUpdateJournal() error { return nil }
 			{"StoredClosure", "gate := func() { _ = c.maintenanceFenceAllows(0) }; _ = gate"},
 			{"Deferred", "defer func() { _ = c.maintenanceFenceAllows(0) }()"},
 			{"Goroutine", "go func() { _ = c.maintenanceFenceAllows(0) }()"},
-			{"Nonzero", strings.ReplaceAll(maintenanceAdmissionStatement, "Allows(0)", "Allows(7)")},
-			{"Variable", strings.ReplaceAll(maintenanceAdmissionStatement, "Allows(0)", "Allows(generation)")},
-			{"HexZero", strings.ReplaceAll(maintenanceAdmissionStatement, "Allows(0)", "Allows(0x0)")},
+			{"Nonzero", strings.ReplaceAll(maintenanceAdmissionStatement, ", 0)", ", 7)")},
+			{"Variable", strings.ReplaceAll(maintenanceAdmissionStatement, ", 0)", ", generation)")},
+			{"HexZero", strings.ReplaceAll(maintenanceAdmissionStatement, ", 0)", ", 0x0)")},
 			{"IgnoredError", "_ = c.maintenanceFenceAllows(0)"},
 			{"WrappedError", strings.ReplaceAll(maintenanceAdmissionStatement, "return err", "return fmt.Errorf(\"suffix: %w\", err)")},
 			{"OtherBinding", strings.ReplaceAll(maintenanceAdmissionStatement, "c.maintenance", "other.maintenance")},

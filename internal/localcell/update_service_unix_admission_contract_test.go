@@ -12,7 +12,7 @@ import (
 const maintenanceUnixAdapterBlock = `cell, fresh, unlock, err := serviceAdapterAdmission(a.uid, d, a.ARTIFACT)
 if err != nil { return err }
 defer unlock()
-if err := cell.maintenanceFenceAllows(0); err != nil { return err }
+if err := cell.maintenanceFenceAllows(context.Background(), 0); err != nil { return err }
 if !reflect.DeepEqual(fresh, d) { return serviceSystemdError(ErrServiceOwnershipConflict, "apply:descriptor", "stale_plan") }`
 
 var maintenanceUnixAdapterFiles = map[string]string{
@@ -416,8 +416,8 @@ func TestUnixServiceMaintenanceAdmissionSourceContract(t *testing.T) {
 			fixtures = append(fixtures, mutation{receiver + "_" + name, filename, "Apply", receiver + "_" + invariant, change})
 		}
 		appendFixture("missing_fence", "position", replace(gate, ""))
-		appendFixture("positive_generation", "position", replace("maintenanceFenceAllows(0)", "maintenanceFenceAllows(1)"))
-		appendFixture("variable_generation", "position", replace("maintenanceFenceAllows(0)", "maintenanceFenceAllows(generation)"))
+		appendFixture("positive_generation", "position", replace("(), 0)", "(), 1)"))
+		appendFixture("variable_generation", "position", replace("(), 0)", "(), generation)"))
 		appendFixture("discarded_error", "position", replace(gate, "_ = cell.maintenanceFenceAllows(0)"))
 		appendFixture("cell_receiver", "position", replace("cell.maintenanceFenceAllows", "c.maintenanceFenceAllows"))
 		appendFixture("helper_wrong_owner", "position", replace("serviceAdapterAdmission(a.uid", "serviceAdapterAdmission(other"))

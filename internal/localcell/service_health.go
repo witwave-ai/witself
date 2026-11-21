@@ -82,7 +82,7 @@ func (c *Cell) ServiceHealth(ctx context.Context) (result error) {
 	if err != nil || m.AccountID == "" {
 		return errServiceHealth
 	}
-	if err := c.maintenanceFenceAllows(0); err != nil {
+	if err := c.maintenanceFenceAllows(context.Background(), 0); err != nil {
 		return err
 	}
 	role, password, err := c.healthPrincipal(m)

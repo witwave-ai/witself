@@ -17,7 +17,7 @@ const (
 	referencesAtProgress = "// journalProgress contains only"
 	referencesAtPending  = "func (c *Cell) sweepPostgresPending() {"
 	referencesAtImports  = "import (\n"
-	referencesAtVersion  = "\tif version, err := readRegular(context.Background(), openPostgresReader, func(info os.FileInfo) bool { return info.Size() <= 64 }, c.path(\"pg\", \"PG_VERSION\"), errCheckpointSource"
+	referencesAtVersion  = "\tif version, err := readRegular(ctx, openPostgresReader, func(info os.FileInfo) bool { return info.Size() <= 64 }, c.path(\"pg\", \"PG_VERSION\"), errCheckpointSource"
 	referencesAtJournal  = "\tf, err := openRegularWriter(ctx, path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600, irregular, errors.New(\"cannot open local cell journal\"))\n\tif err != nil {\n\t\treturn err\n\t}\n"
 	referencesAtTail     = "\tf, err := openRegularWriter(ctx, c.path(\"journal\", \"operations.jsonl\"), os.O_WRONLY, 0, torn, torn)\n"
 	referencesAtVars     = "var (\n"

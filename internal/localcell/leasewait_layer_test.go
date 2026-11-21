@@ -1,13 +1,19 @@
 package localcell
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"maps"
 	"os"
+	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 const leaseLayerID = "ckpt_abcdefghijklmnop"
@@ -28,6 +34,24 @@ func leaseJournalPlant(c *Cell, m *Manifest, prepare string) (journalProgress, e
 	}
 	progress, readErr := c.readJournal(bg)
 	return progress, errors.Join(err, readErr)
+}
+
+// leaseRecordPlant prepares c for an LC-LEASE-2C2 R5 row: postmaster.pid of
+// an unallocated PID, a fence, or the owner lock without the run lock.
+func leaseRecordPlant(t *testing.T, c *Cell, prepare string) error {
+	switch prepare {
+	case "record":
+		record := strconv.Itoa(checkpointUnallocatedPID) + "\n" + c.path("pg") + "\n1\n"
+		return errors.Join(testMkdir(c.path("pg"), 0o700), testWriteFile(c.path("pg", "postmaster.pid"), []byte(record), 0o600))
+	case "fence":
+		updateTestFence(t, c)
+		return nil
+	}
+	lock, err := acquireLock(context.Background(), c.cfg.Root, true)
+	if err != nil {
+		return err
+	}
+	return errors.Join(lock.Close(), os.Remove(c.path("run", "operation.lock")))
 }
 
 // LC-LEASE-2B R5: with its context already done, each threaded declaration
@@ -137,6 +161,137 @@ func TestLeaseWaitLayerUnleased(t *testing.T) {
 				t.Fatal("a journal declaration gave another result for an unleased journal under a done context")
 			}
 		})
+	}
+	// LC-LEASE-2C2 R5: the process record, the fence, the lockless lock probe.
+	admitted := errors.New("unleased lockless row admitted")
+	for _, row := range []struct {
+		name, prepare string
+		call          func(c *Cell) (bool, error)
+	}{
+		{"postmaster", "record", func(c *Cell) (bool, error) {
+			pid, err := c.postmaster(done)
+			return pid == checkpointUnallocatedPID, err
+		}},
+		{"maintenanceFenceAllows", "fence", func(c *Cell) (bool, error) { return true, c.maintenanceFenceAllows(done, 1) }},
+		{"refuseBeforeLockNames", "lockless", func(c *Cell) (bool, error) {
+			return c.refuseBeforeLockNames(done, func() error { return admitted }) == admitted, nil
+		}},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			c, _ := unitCell(t)
+			if leaseRecordPlant(t, c, row.prepare) != nil {
+				t.Fatal("cannot prepare the unleased record or fence row")
+			}
+			normal, err := row.call(c)
+			if err != nil {
+				t.Fatal("a record or fence declaration refused an unleased file under a done context")
+			}
+			if !normal {
+				t.Fatal("a record or fence declaration gave another result for an unleased file under a done context")
+			}
+		})
+	}
+	// LC-LEASE-2C2-F1 (G4): under a done context the active fence still refuses
+	// an ordinary caller (generation 0); nil there would admit past it.
+	t.Run("maintenanceFenceAllows_active", func(t *testing.T) {
+		c, _ := unitCell(t)
+		if leaseRecordPlant(t, c, "fence") != nil {
+			t.Fatal("cannot prepare the unleased active fence row")
+		}
+		if !errors.Is(c.maintenanceFenceAllows(done, 0), errMaintenanceFenceActive) {
+			t.Fatal("a done context let an ordinary caller past an active maintenance fence")
+		}
+	})
+}
+
+// LC-LEASE-2C2-F1 (G3): Inspect and DeleteCheckpoint started with a context
+// already done end exactly as under context.Background() (the parent ignored
+// their contexts): the same error and inspection, the same journal records,
+// the named checkpoint deleted; one check per expectation, each with its own
+// text (Windows and macOS run it in CI only).
+func TestLeaseWaitReleasedDone(t *testing.T) {
+	done, cancel := context.WithCancel(context.Background())
+	cancel()
+	f, _ := checkpointFixture(t, "legacy", false)
+	c := f.cell
+	if errors.Join(c.Checkpoint(t.Context(), checkpointOptions(f)), c.Checkpoint(t.Context(), checkpointOptions(f))) != nil || len(checkpointIDs(t, c)) != 2 {
+		t.Fatal("cannot prepare the two checkpoints the done context rows read and delete")
+	}
+	ids, contexts := checkpointIDs(t, c), []context.Context{context.Background(), done}
+	t.Run("inspect", func(t *testing.T) {
+		background, backgroundErr := c.Inspect(contexts[0])
+		inspection, err := c.Inspect(contexts[1])
+		if backgroundErr != nil || len(background.Checkpoints) != 2 {
+			t.Fatal("the background Inspect row did not list both checkpoints")
+		}
+		if fmt.Sprint(err) != fmt.Sprint(backgroundErr) {
+			t.Fatal("an already done context changed the Inspect error")
+		}
+		if !reflect.DeepEqual(inspection, background) {
+			t.Fatal("an already done context changed the Inspect result")
+		}
+	})
+	t.Run("delete", func(t *testing.T) {
+		errs, records, kept := [2]error{}, [2][]journalEntry{}, [2]bool{}
+		for index, ctx := range contexts {
+			before := retainedRead(t, c, "journal/operations.jsonl")
+			errs[index] = c.DeleteCheckpoint(ctx, DeleteCheckpointOptions{CheckpointID: ids[index]})
+			for line := range bytes.Lines(bytes.TrimPrefix(retainedRead(t, c, "journal/operations.jsonl"), before)) {
+				entry := journalEntry{}
+				_ = json.Unmarshal(line, &entry)
+				entry.At = time.Time{}
+				records[index] = append(records[index], entry)
+			}
+			kept[index] = slices.Contains(checkpointIDs(t, c), ids[index])
+		}
+		if errs[0] != nil || kept[0] || len(records[0]) == 0 {
+			t.Fatal("the background DeleteCheckpoint row did not delete its checkpoint")
+		}
+		if fmt.Sprint(errs[1]) != fmt.Sprint(errs[0]) {
+			t.Fatal("an already done context changed the DeleteCheckpoint error")
+		}
+		if !slices.Equal(records[1], records[0]) {
+			t.Fatal("an already done context changed the DeleteCheckpoint journal records")
+		}
+		if kept[1] != kept[0] {
+			t.Fatal("an already done context changed whether DeleteCheckpoint removed its checkpoint")
+		}
+	})
+}
+
+// leaseWaitDetachedRows are TestLeaseWaitDetached's rows that only Linux runs
+// (leasewait_detached_linux_test.go adds them), by name.
+var leaseWaitDetachedRows = map[string]func(*testing.T){}
+
+// LC-LEASE-2C2 R3: the detached value keeps its parent's Done, Err and Deadline
+// before and after the cancel and carries the wait's mark, on every system
+// (Windows and macOS in CI only); Linux rows wait out a lease under it.
+func TestLeaseWaitDetached(t *testing.T) {
+	t.Run("value", func(t *testing.T) {
+		parent, cancel := context.WithTimeout(context.Background(), time.Hour)
+		defer cancel()
+		detached := leaseWaitDetached(parent)
+		for _, phase := range []string{"before", "after"} {
+			if phase == "after" {
+				cancel()
+			}
+			if detached.Done() != parent.Done() {
+				t.Fatalf("the detached value does not share its parent's Done channel %s the cancel", phase)
+			}
+			if detached.Err() != parent.Err() {
+				t.Fatalf("the detached value does not give its parent's error %s the cancel", phase)
+			}
+			at, ok := detached.Deadline()
+			if want, wantOK := parent.Deadline(); !at.Equal(want) || ok != wantOK {
+				t.Fatalf("the detached value does not keep its parent's deadline %s the cancel", phase)
+			}
+		}
+		if detached.Value(leaseWaitDetachedKey{}) == nil {
+			t.Fatal("the detached value does not carry the lease wait mark")
+		}
+	})
+	for _, name := range slices.Sorted(maps.Keys(leaseWaitDetachedRows)) {
+		t.Run(name, leaseWaitDetachedRows[name])
 	}
 }
 

@@ -32,8 +32,9 @@ func checkpointFreeSpace(path string) (free, total uint64, err error) {
 // name is refused unopened, so nothing waits; a link at pg/ is followed as
 // before (admission refused one present then). The returned opener never waits
 // on what stands at a file's name (a FIFO opens at once) but waits out a lease
-// on a regular file there (waitOutLease, ended early by ctx), and every caller
-// decides the opened handle before a byte is read.
+// on a regular file there (waitOutLease, ended early at leaseWaitDone(ctx), so
+// never under a released command's detached context), and every caller decides
+// the opened handle before a byte is read.
 func (c *Cell) openCheckpointSource(ctx context.Context) (func(string) (*os.File, error), func(), error) {
 	root, err := os.OpenRoot(c.path("pg") + checkpointRootHere)
 	if err != nil {

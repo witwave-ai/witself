@@ -313,7 +313,7 @@ func TestServiceMaintenanceTransitionContractFixtures(t *testing.T) {
 	fixtures := []fixture{
 		{"W3DeleteGate", "service_descriptor.go", setter, setter + "_reference_count", replace(nestedGate, "")},
 		{"W3DuplicateGate", "service_descriptor.go", setter, setter + "_reference_count", replace(nestedGate, nestedGate+"\n\t"+gate)},
-		{"W3LiteralOne", "service_descriptor.go", setter, setter + "_literal_zero_direct_error_return", replace("maintenanceFenceAllows(0)", "maintenanceFenceAllows(1)")},
+		{"W3LiteralOne", "service_descriptor.go", setter, setter + "_literal_zero_direct_error_return", replace("(), 0)", "(), 1)")},
 		{"W3HoistTopLevel", "service_descriptor.go", setter, setter + "_position", func(source string) string {
 			return serviceAdmissionInsert(strings.Replace(source, nestedGate, "", 1), 3, maintenanceAdmissionStatement)
 		}},
@@ -338,7 +338,7 @@ func TestServiceMaintenanceTransitionContractFixtures(t *testing.T) {
 		{"SetterCallerEarlyUnlock", "service_descriptor.go", "SetServiceDesiredState", setter + "_caller_shape", replace("return c.setServiceDesiredStateLocked(state)", "_ = lock.Close(); return c.setServiceDesiredStateLocked(state)")},
 		{"SetterCallerReceiverAlias", "service_descriptor.go", "SetServiceDesiredState", setter + "_caller_shape", replace("return c.setServiceDesiredStateLocked(state)", "other := c; return other.setServiceDesiredStateLocked(state)")},
 		{"SetterCallerStateLiteral", "service_descriptor.go", "SetServiceDesiredState", setter + "_caller_shape", replace("setServiceDesiredStateLocked(state)", `setServiceDesiredStateLocked("stopped")`)},
-		{"W8LiteralOne", "service_descriptor.go", "RepairService", "RepairService_literal_zero_direct_error_return", replace("maintenanceFenceAllows(0)", "maintenanceFenceAllows(1)")},
+		{"W8LiteralOne", "service_descriptor.go", "RepairService", "RepairService_literal_zero_direct_error_return", replace("(), 0)", "(), 1)")},
 		{"W8DeleteGate", "service_descriptor.go", "RepairService", "RepairService_reference_count", replace(gate, "")},
 		{"W8BeforeDescriptorRead", "service_descriptor.go", "RepairService", "RepairService_position", func(source string) string {
 			return serviceAdmissionInsert(strings.Replace(source, gate, "", 1), 6, maintenanceAdmissionStatement)

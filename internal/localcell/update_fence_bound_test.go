@@ -57,7 +57,7 @@ func TestUpdateFenceBound(t *testing.T) {
 				t.Error("refused fence did not return nil and exact maintenance cause")
 			}
 			for _, generation := range []int{0, want.Generation, want.Generation + 1} {
-				err := c.maintenanceFenceAllows(generation)
+				err := c.maintenanceFenceAllows(context.Background(), generation)
 				if fixture.allowed && generation == want.Generation {
 					if err != nil {
 						t.Error("complete in-bound fence refused matching generation")

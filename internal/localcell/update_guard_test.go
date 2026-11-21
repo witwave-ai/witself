@@ -380,7 +380,7 @@ func updateOrdinaryAdmissions(file string, fn *ast.FuncDecl) map[*ast.SelectorEx
 			continue
 		}
 		call, ok := assignment.Rhs[0].(*ast.CallExpr)
-		if !ok || len(call.Args) != 1 || call.Ellipsis.IsValid() {
+		if !ok || len(call.Args) != 2 || call.Ellipsis.IsValid() || !maintenanceFenceContext(fn, call.Args[0]) {
 			continue
 		}
 		selector, ok := call.Fun.(*ast.SelectorExpr)
@@ -391,7 +391,7 @@ func updateOrdinaryAdmissions(file string, fn *ast.FuncDecl) map[*ast.SelectorEx
 		if !ok || owner.Obj == nil || owner.Obj != ownerBinding.Obj {
 			continue
 		}
-		generation, ok := call.Args[0].(*ast.BasicLit)
+		generation, ok := call.Args[1].(*ast.BasicLit)
 		if !ok || generation.Kind != token.INT || generation.Value != "0" {
 			continue
 		}
@@ -415,4 +415,14 @@ func updateOrdinaryAdmissions(file string, fn *ast.FuncDecl) map[*ast.SelectorEx
 		return nil
 	}
 	return map[*ast.SelectorExpr]bool{admitted[0]: true}
+}
+
+// maintenanceFenceContext accepts exactly two first arguments of an admission,
+// whose generation is the second (LC-LEASE-2C2): Checkpoint's and
+// DeleteCheckpoint's own ctx, and context.Background() at every other owner.
+func maintenanceFenceContext(fn *ast.FuncDecl, argument ast.Expr) bool {
+	if fn.Name.Name != "Checkpoint" && fn.Name.Name != "DeleteCheckpoint" {
+		return admissionNodeText(argument) == "context.Background()"
+	}
+	return leaseWaitOwnContext(fn, argument) && admissionNodeText(argument) == "ctx"
 }

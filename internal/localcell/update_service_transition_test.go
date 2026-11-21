@@ -145,7 +145,7 @@ func TestServiceMaintenanceRepairTransitions(t *testing.T) {
 					if kind == "Absent" {
 						return
 					}
-					if timing == "late" && (*planted != 1 || c.maintenanceFenceAllows(0) != errMaintenanceFenceActive) {
+					if timing == "late" && (*planted != 1 || c.maintenanceFenceAllows(context.Background(), 0) != errMaintenanceFenceActive) {
 						t.Fatal("late repair did not retain exactly one planted fence")
 					}
 					secondBefore := serviceMaintenanceSnapshot(t, c)

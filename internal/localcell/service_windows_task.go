@@ -318,7 +318,7 @@ func (a *windowsLogonTaskAdapter) Apply(ctx context.Context, plan ServicePlan) e
 	if err != nil || !reflect.DeepEqual(windowsTaskImmutable(current), windowsTaskImmutable(d)) {
 		return windowsTaskError(ErrServiceOwnershipConflict, "create", 0, "stale_plan")
 	}
-	if err := cell.maintenanceFenceAllows(0); err != nil {
+	if err := cell.maintenanceFenceAllows(context.Background(), 0); err != nil {
 		return err
 	}
 	if !reflect.DeepEqual(current, d) || d.DesiredState != "running" || d.Faulted {
@@ -395,7 +395,7 @@ func (a *windowsLogonTaskAdapter) Start(ctx context.Context, d ServiceIdentity) 
 	if !observation.Owned {
 		return windowsTaskError(ErrServiceOwnershipConflict, "inspect:host_owner", 0, "not_owned")
 	}
-	if err := cell.maintenanceFenceAllows(0); err != nil {
+	if err := cell.maintenanceFenceAllows(context.Background(), 0); err != nil {
 		return err
 	}
 	name, _ := WindowsLogonTaskName(d)
@@ -447,7 +447,7 @@ func (a *windowsLogonTaskAdapter) Remove(ctx context.Context, d ServiceIdentity)
 		return windowsTaskError(ErrServiceRemovalFailed, "remove:host_lease", 0, "unavailable")
 	}
 	defer releaseHost()
-	if err := cell.maintenanceFenceAllows(0); err != nil {
+	if err := cell.maintenanceFenceAllows(context.Background(), 0); err != nil {
 		return err
 	}
 	records, err := a.records(d)

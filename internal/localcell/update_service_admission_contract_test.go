@@ -70,18 +70,25 @@ if err != nil { return err }
 defer func() { _ = lock.Close() }()
 ` + maintenanceAdmissionStatement + `
 return c.reinstallLocked(ctx, options)`,
-	"Checkpoint": `if err := c.refuseBeforeLockNames(func() error { return c.admitCheckpointDry(ctx, options) }); err != nil { return err }
+	"Checkpoint": `ctx = leaseWaitDetached(ctx)
+if err := c.refuseBeforeLockNames(ctx, func() error { return c.admitCheckpointDry(ctx, options) }); err != nil { return err }
 lock, err := c.own(false)
 if err != nil { return err }
 defer func() { _ = lock.Close() }()
-` + maintenanceAdmissionStatement + `
+` + maintenanceReleasedAdmissionStatement + `
 return c.checkpointLocked(ctx, options)`,
-	"DeleteCheckpoint": `if err := c.refuseBeforeLockNames(func() error { return c.admitDeleteCheckpoint(options) }); err != nil { return err }
+	"DeleteCheckpoint": `ctx = leaseWaitDetached(ctx)
+if err := c.refuseBeforeLockNames(ctx, func() error { return c.admitDeleteCheckpoint(options) }); err != nil { return err }
 lock, err := c.own(false)
 if err != nil { return err }
 defer func() { _ = lock.Close() }()
-` + maintenanceAdmissionStatement + `
+` + maintenanceReleasedAdmissionStatement + `
 return c.deleteCheckpointLocked(ctx, options)`,
+}
+
+// maintenanceOwnerStatement is owner's admission (LC-LEASE-2C2).
+func maintenanceOwnerStatement(owner string) string {
+	return map[bool]string{true: maintenanceReleasedAdmissionStatement, false: maintenanceAdmissionStatement}[owner == "Checkpoint" || owner == "DeleteCheckpoint"]
 }
 
 var maintenanceServiceAdmissionFiles = map[string]string{
@@ -437,7 +444,7 @@ func serviceAdmissionInsert(source string, index int, text string) string {
 
 func serviceAdmissionMutations(owner string) []admissionSourceMutation {
 	gateIndex := len(admissionStatements(maintenanceServiceAdmissionBoundaries[owner])) - 2
-	gate := admissionIndent(admissionStatements(maintenanceAdmissionStatement)[0])
+	gate := admissionIndent(admissionStatements(maintenanceOwnerStatement(owner))[0])
 	replaceGate := func(text string) func(string) string {
 		return func(source string) string { return strings.Replace(source, gate, text, 1) }
 	}
@@ -466,11 +473,11 @@ func serviceAdmissionMutations(owner string) []admissionSourceMutation {
 		ownIndex, manifestIndex = 0, 1
 	}
 	if owner == "Checkpoint" || owner == "DeleteCheckpoint" {
-		ownIndex, manifestIndex = 1, 2
+		ownIndex, manifestIndex = 2, 3
 	}
 	mutations := []admissionSourceMutation{
 		{"DeleteGate", "reference_count", replaceGate("")},
-		{"MatchPositiveGeneration", "position", replaceGate(strings.ReplaceAll(maintenanceAdmissionStatement, "Allows(0)", "Allows(7)"))},
+		{"MatchPositiveGeneration", "position", replaceGate(strings.ReplaceAll(maintenanceOwnerStatement(owner), ", 0)", ", 7)"))},
 		{"IgnoreError", "position", replaceGate("_ = c.maintenanceFenceAllows(0)")},
 		{"MoveGateBeforeOwn", "position", moveGate(ownIndex)},
 		{"MoveGateBeforeManifestOrBoot", "position", moveGate(manifestIndex)},
@@ -561,7 +568,7 @@ func serviceAdmissionApprovedOwners(t *testing.T) map[string]string {
 	result := make(map[string]string)
 	for owner, filename := range maintenanceServiceAdmissionFiles {
 		fn := serviceAdmissionFunction(t, filename, sources[filename], owner)
-		gate := admissionStatements(maintenanceAdmissionStatement)[0]
+		gate := admissionStatements(maintenanceOwnerStatement(owner))[0]
 		found := false
 		for index, statement := range fn.Body.List {
 			if admissionNodeText(statement) != gate {
@@ -657,18 +664,18 @@ func TestServiceMaintenanceAdmissionGuardFixtures(t *testing.T) {
 					}
 				})
 			}
-			gate := admissionIndent(admissionStatements(maintenanceAdmissionStatement)[0])
+			gate := admissionIndent(admissionStatements(maintenanceOwnerStatement(owner))[0])
 			for _, fixture := range []struct{ name, replacement string }{
 				{"AliasOrMethodValue", "gate := c.maintenanceFenceAllows; _ = gate"},
 				{"AliasCall", "gate := c.maintenanceFenceAllows; _ = gate(0)"},
 				{"Closure", "func() { _ = c.maintenanceFenceAllows(0) }()"},
 				{"Deferred", "defer func() { _ = c.maintenanceFenceAllows(0) }()"},
 				{"Go", "go func() { _ = c.maintenanceFenceAllows(0) }()"},
-				{"Nonzero", strings.ReplaceAll(maintenanceAdmissionStatement, "Allows(0)", "Allows(7)")},
-				{"HexZero", strings.ReplaceAll(maintenanceAdmissionStatement, "Allows(0)", "Allows(0x0)")},
-				{"Variable", strings.ReplaceAll(maintenanceAdmissionStatement, "Allows(0)", "Allows(generation)")},
+				{"Nonzero", strings.ReplaceAll(maintenanceOwnerStatement(owner), ", 0)", ", 7)")},
+				{"HexZero", strings.ReplaceAll(maintenanceOwnerStatement(owner), ", 0)", ", 0x0)")},
+				{"Variable", strings.ReplaceAll(maintenanceOwnerStatement(owner), ", 0)", ", generation)")},
 				{"WrapFenceWithPrivateSuffix", strings.ReplaceAll(maintenanceAdmissionStatement, "return err", "return fmt.Errorf(\"private-suffix: %w\", err)")},
-				{"WrongHelper", strings.ReplaceAll(maintenanceAdmissionStatement, "maintenanceFenceAllows(0)", "readMaintenanceFence()")},
+				{"WrongHelper", strings.ReplaceAll(maintenanceAdmissionStatement, "maintenanceFenceAllows(context.Background(), 0)", "readMaintenanceFence()")},
 			} {
 				t.Run(fixture.name, func(t *testing.T) {
 					changed := strings.Replace(original, gate, fixture.replacement, 1)

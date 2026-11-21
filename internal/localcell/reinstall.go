@@ -47,7 +47,7 @@ func (c *Cell) Reinstall(ctx context.Context, options ReinstallOptions) error {
 		return err
 	}
 	defer func() { _ = lock.Close() }()
-	if err := c.maintenanceFenceAllows(0); err != nil {
+	if err := c.maintenanceFenceAllows(context.Background(), 0); err != nil {
 		return err
 	}
 	return c.reinstallLocked(ctx, options)

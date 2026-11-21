@@ -194,7 +194,7 @@ func TestWindowsPostgresLaunchUsesPublishedPostmasterIdentity(t *testing.T) {
 			if readJSON(c.path("run", "postgres.json"), &complete) != nil || complete.LaunchPending || complete.PID != launched.PID || complete.StartTime != launched.StartTime {
 				t.Fatal("PostgreSQL launch replaced its suspended creation identity")
 			}
-			pid, err := c.postmaster()
+			pid, err := c.postmaster(context.Background())
 			if err != nil || pid != complete.PID {
 				t.Fatal("Windows CRLF postmaster identity did not match the actual executable")
 			}

@@ -163,7 +163,7 @@ func readers4Contract(sources map[string]string) []string {
 	})
 	reread, first := calls["recoverPostgresRecord"], calls["postmaster"]
 	fail("reread_call", len(reread) != 1 || len(first) != 1 || len(reread[0].Args) != 7 || len(first[0].Args) != 7 ||
-		types.ExprString(reread[0].Args[0]) != "context.Background()" || types.ExprString(first[0].Args[0]) != "context.Background()")
+		types.ExprString(reread[0].Args[0]) != "context.Background()" || types.ExprString(first[0].Args[0]) != "ctx") // postmaster's own (LC-LEASE-2C2)
 	if !failed["reread_call"] {
 		args, bound, body, valid := reread[0].Args[1:], named(reread[0].Args[2]), bodies["recoverPostgresRecord"], false
 		fail("reread_opener", declared(named(args[0])) != "localcell.openPostgresReader")
