@@ -345,7 +345,7 @@ func TestDrillStorageSourceContract(t *testing.T) {
 		{"lock", "localcell.acquireLock", [][3]string{{"drill_storage.go", tail, "func (c *Cell) drillStorageProbe() { _, _ = acquireLock(c.cfg.Root, true) }\n\n"}}},
 		{"dot_import", "io.WriteString", [][3]string{{"drill_storage.go", imports, "\t. \"io\"\n"}, {"drill_storage.go", tail, "func drillStorageProbe(w Writer) { _, _ = WriteString(w, \"x\") }\n\n"}}},
 		{"renamed_import", "(*os.File).Write", [][3]string{{"drill_storage.go", imports, "\tfiles \"os\"\n"}, {"drill_storage.go", tail, "func drillStorageProbe(f *files.File) { write := f.Write; _, _ = write(nil) }\n\n"}}},
-		{"field_value", "localcell.publish", [][3]string{{"drill_storage.go", tail, "func (c *Cell) drillStorageProbe() { _ = c.checkpointOps().publish }\n\n"}}},
+		{"field_value", "localcell.publish", [][3]string{{"drill_storage.go", tail, "func (c *Cell) drillStorageProbe() { _ = c.checkpointOps(context.Background()).publish }\n\n"}}},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			for _, ending := range []string{"\n", "\r\n"} {

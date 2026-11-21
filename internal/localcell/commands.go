@@ -127,9 +127,9 @@ func (c *Cell) command(ctx context.Context, binary string, args ...string) (*exe
 	return cmd, nil
 }
 
-// logFile refuses what is not a regular file at the name before opening, then
-// opens through openRegularWriter: a FIFO, link or lease never makes it wait,
-// and every child inherits a regular file in blocking mode as its output.
+// logFile refuses non-regular targets before opening. openRegularWriter can
+// wait out a conflicting lease on a regular file and returns a blocking handle
+// for the child to inherit as its output.
 func (c *Cell) logFile(ctx context.Context, component string) (*os.File, error) {
 	path := c.path("logs", component+".log")
 	irregular := errors.New("local cell log must be a regular file")

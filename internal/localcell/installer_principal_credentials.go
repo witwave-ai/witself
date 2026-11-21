@@ -32,7 +32,8 @@ const (
 const installerMigratorRole = "witself_sync_migrator"
 
 // openPrincipalCredentialFile permits replacement tests at the inspected-file open boundary.
-// Its read open never waits on what it opens; the handle checks then decide.
+// The read open avoids blocking on a FIFO and can wait out a conflicting lease
+// on a regular file before the caller checks the opened handle.
 var openPrincipalCredentialFile = func(ctx context.Context, path string, _ int, _ os.FileMode) (*os.File, error) {
 	return openPrivateReader(ctx, path)
 }

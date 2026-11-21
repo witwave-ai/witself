@@ -207,6 +207,45 @@ func TestLeaseWaitLayerUnleased(t *testing.T) {
 	})
 	// LC-LEASE-2D R5: commands, credentials, ports, reinstall, checkpoint internals.
 	failed, listed := errors.New("unleased command row step failed"), func(i Inspection) bool { return len(i.Checkpoints) == 1 && i.Checkpoints[0].Complete }
+	t.Run("prepareComponentPorts_postgres", func(t *testing.T) {
+		c, m := unitCell(t)
+		if err := selectedFixtureDataDirectory(c); err != nil {
+			t.Fatal("cannot prepare the postgres port directory")
+		}
+		original := m.Ports.Postgres
+		if err := c.prepareComponentPorts(done, m, "postgres", false, true); err != nil {
+			t.Fatal("done context rejected an unleased postgres port reallocation")
+		}
+		if m.Ports.Postgres == original {
+			t.Fatal("postgres reallocation retained the original port")
+		}
+		saved, err := readManifest(c.cfg.Root)
+		if err != nil {
+			t.Fatal("cannot read the manifest after postgres reallocation")
+		}
+		if saved.Ports.Postgres != m.Ports.Postgres {
+			t.Fatal("manifest did not publish the reallocated postgres port")
+		}
+		config, err := os.ReadFile(c.path("pg", "postgresql.conf"))
+		if err != nil {
+			t.Fatal("cannot read the reallocated postgres configuration")
+		}
+		if !strings.Contains(string(config), "\nport = "+strconv.Itoa(saved.Ports.Postgres)+"\n") {
+			t.Fatal("postgres configuration did not publish the manifest port")
+		}
+		data, err := os.ReadFile(c.path("journal", "operations.jsonl"))
+		if err != nil {
+			t.Fatal("cannot read the postgres reallocation journal")
+		}
+		entries, ok := journalDirectorySyncLines(data)
+		if !ok || len(entries) != 1 {
+			t.Fatal("postgres reallocation did not write one complete journal entry")
+		}
+		want := journalEntry{Operation: "start", Step: "postgres", State: "started", At: entries[0].At, Cause: "port_reallocated=postgres"}
+		if entries[0] != want {
+			t.Fatal("journal did not record the postgres port reallocation")
+		}
+	})
 	journaled := func(c *Cell, cause string) bool {
 		data, _ := os.ReadFile(c.path("journal", "operations.jsonl"))
 		return strings.Contains(string(data), cause)
@@ -298,6 +337,15 @@ func TestLeaseWaitLayerUnleased(t *testing.T) {
 			}
 		})
 	}
+	t.Run("closeCheckpointFailure_unreadable", func(t *testing.T) {
+		c, _ := unitCell(t)
+		if err := os.Mkdir(readerJournalPath(c), 0o700); err != nil {
+			t.Fatal("cannot prepare the unreadable checkpoint journal")
+		}
+		if got := c.closeCheckpointFailure(done, "checkpoint", failed, true, nil); got != failed {
+			t.Fatal("unreadable journal lost the original checkpoint failure")
+		}
+	})
 }
 
 // leaseCommandPlant prepares an LC-LEASE-2D row's cell: the selected layout's
