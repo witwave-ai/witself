@@ -3,6 +3,7 @@
 package localcell
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -84,18 +85,18 @@ func TestCheckpointTreeWitnessLeaf(t *testing.T) {
 
 func TestCheckpointTreeListingBoundary(t *testing.T) {
 	c := checkpointInspectCase(t).c
-	if sums, unknown, err := c.listCheckpoints(); err != nil || len(sums) != 0 || unknown != 0 {
+	if sums, unknown, err := c.listCheckpoints(context.Background()); err != nil || len(sums) != 0 || unknown != 0 {
 		t.Fatal("the missing recovery boundary did not yield an empty listing")
 	}
 	if os.Symlink("missing", c.recoveryDir()) != nil {
 		t.Fatal("cannot plant the dangling boundary link")
 	}
-	_, _, err := c.listCheckpoints()
+	_, _, err := c.listCheckpoints(context.Background())
 	if ClassifyCheckpointFailure(err) != (CheckpointFailure{Class: "local_checkpoint_state_unsupported", Reason: "boundary_unreadable"}) {
 		t.Fatal("the dangling recovery boundary was reported empty or with another refusal")
 	}
 	c.cfg.Root = filepath.Join(c.cfg.Root, "missing-cell")
-	if _, _, err := c.listCheckpoints(); ClassifyCheckpointFailure(err) != (CheckpointFailure{Class: "local_checkpoint_state_unsupported", Reason: "boundary_unreadable"}) {
+	if _, _, err := c.listCheckpoints(context.Background()); ClassifyCheckpointFailure(err) != (CheckpointFailure{Class: "local_checkpoint_state_unsupported", Reason: "boundary_unreadable"}) {
 		t.Fatal("the missing cell root was reported empty or with another refusal")
 	}
 	checkpointDiagnosticReason(t, c.validateRecovery(), "boundary_unreadable")
@@ -258,7 +259,7 @@ func TestCheckpointTreePathLimit(t *testing.T) {
 			c.cfg.Root = long
 			if strings.HasPrefix(row.name, "empty_boundary") {
 				checkpointDiagnosticReason(t, c.validateRecovery(), "boundary_unreadable")
-				_, _, err := c.listCheckpoints()
+				_, _, err := c.listCheckpoints(context.Background())
 				checkpointDiagnosticReason(t, err, "boundary_unreadable")
 			}
 			read := func() string {

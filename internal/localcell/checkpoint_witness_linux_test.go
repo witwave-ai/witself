@@ -3,6 +3,7 @@
 package localcell
 
 import (
+	"context"
 	"errors"
 	"path/filepath"
 	"reflect"
@@ -31,7 +32,7 @@ func TestCheckpointWitnessLease(t *testing.T) {
 			var listed []CheckpointSummary
 			started := time.Now()
 			read := readerWatchdog(t, func() (err error) {
-				listed, _, err = c.listCheckpoints()
+				listed, _, err = c.listCheckpoints(context.Background())
 				return err
 			}, lease.release)
 			if holder != "lets_go" && time.Since(started) < leaseKeptAfter {
