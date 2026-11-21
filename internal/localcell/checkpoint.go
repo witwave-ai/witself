@@ -976,24 +976,14 @@ func (c *Cell) admitDeleteCheckpoint(ctx context.Context, options DeleteCheckpoi
 	if err := c.validateRecovery(); err != nil {
 		return err
 	}
-	dir, err := c.checkpointDir(options.CheckpointID)
-	if err != nil {
+	if _, err := c.checkpointDir(options.CheckpointID); err != nil {
 		return err
 	}
-	if _, err := os.Lstat(dir); errors.Is(err, fs.ErrNotExist) {
-		return errCheckpointIdentity
-	} else if err != nil || privateDir(dir, false) != nil {
-		return errCheckpointState
-	}
-	// A case-insensitive volume also resolves another spelling: only the exact
-	// on-disk name is deleted.
-	entries, err := os.ReadDir(c.recoveryDir())
-	names := make([]string, 0, len(entries))
-	for _, entry := range entries {
-		names = append(names, entry.Name())
-	}
-	if err != nil || !recoveryEntryCanonical(names, options.CheckpointID) {
-		return errCheckpointIdentity
+	// On Linux and macOS the target and its exact spelling are read through the held recovery/.
+	tree := c.checkpointTree(options.CheckpointID)
+	defer tree.close()
+	if err := tree.target(); err != nil {
+		return err
 	}
 	return nil
 }
@@ -1002,11 +992,11 @@ func (c *Cell) deleteCheckpointLocked(ctx context.Context, options DeleteCheckpo
 	if err := c.admitDeleteCheckpoint(ctx, options); err != nil {
 		return err
 	}
-	// recovery/ and the checkpoint are held as directories; every removal goes
-	// through them once both names are bound (checkpoint_root.go).
-	recovery, checkpoint, err := c.holdCheckpoint(options.CheckpointID)
-	defer closeCheckpointRoots(recovery, checkpoint)
-	if err != nil {
+	// recovery/ is held and the checkpoint adopted at its name; every removal
+	// goes through the tree while recovery/ is bound (checkpoint_tree_*.go).
+	tree := c.checkpointTree(options.CheckpointID)
+	defer tree.close()
+	if tree.adopt() != nil {
 		return errCheckpointState
 	}
 	// A purge removed journal/; nothing else is recreated.
@@ -1023,8 +1013,8 @@ func (c *Cell) deleteCheckpointLocked(ctx context.Context, options DeleteCheckpo
 		name string
 		run  func() error
 	}{
-		{"unseal", func() error { return c.unsealCheckpointHeld(recovery, checkpoint, options.CheckpointID) }},
-		{"remove", func() error { return c.removeCheckpointHeld(recovery, checkpoint, options.CheckpointID) }},
+		{"unseal", tree.unseal},
+		{"remove", tree.sweep},
 	} {
 		if err := c.step(ctx, "checkpoint_delete", step.name, step.run); errors.Is(err, errInterrupted) {
 			return err

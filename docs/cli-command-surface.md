@@ -6322,20 +6322,34 @@ admission passes closes the leftover.
 
 A failure to write standard output can leave a truncated receipt line; the
 command then prints only `local_checkpoint_operation_failed` on standard error
-and exits 1. `cleanup_incomplete: true` means a failed `create` could not remove
-its own partial directory (it removes nothing it cannot prove its own): delete
-that entry by its identifier.
+and exits 1. When a failed `create` reports `cleanup_incomplete: true`, run
+`inspect` first and delete the incomplete entry by its identifier if it is
+listed. If no entry has that identifier, the partial copy was moved away from
+its name (Linux and macOS), or a directory sync failed to confirm on disk that
+it is gone. In either case there is nothing to delete by identifier.
 
 ### Same-user limits
 
-`delete` removes through `recovery/` and the checkpoint held as directories.
-Only a process running as the same user can cause these: one file, link or empty
-directory planted at the exact checkpoint name inside the held recovery
-directory between the last check and the last removal is removed instead; a
-same-user rename onto the exact name BEFORE the directories are held makes that
-directory the one deleted; a parent of the cell root replaced by a link before
-the hold moves the whole deletion into the linked tree, still limited to a
-directory of that exact name.
+On Linux and macOS, `delete` removes through `recovery/` held as a directory:
+it reaches the checkpoint without following a link and without leaving its
+device, and removes the checkpoint directory only once its identity at the name
+is checked again. Only a process running as the same user can cause these: an
+empty directory planted at the exact checkpoint name in the one system call
+between that check and the removal is removed instead, while a file or link
+there is refused, never removed; a same-user rename onto the exact name BEFORE
+the hold makes that directory the one deleted; a parent of the cell root
+replaced by a link before the hold moves the whole deletion into the linked
+tree, still limited to a directory of that exact name. At admission, a
+directory below the checkpoint on another device (a mount) is refused with
+`local_checkpoint_state_unsupported` and reason `descendant_refused` before
+the deletion journal is opened. A device change encountered during the sweep
+returns `local_checkpoint_operation_failed`. Both checks leave the other
+device untouched. On Windows `delete` removes through `recovery/` and the
+checkpoint held as directories: one file, link or empty directory planted at
+the exact checkpoint name between the last check and the last removal is
+removed instead; a same-user rename onto the exact name before the directories
+are held, or a parent of the cell root replaced by a link before the hold,
+acts as on Linux and macOS.
 
 On Linux and macOS, `create` copies below `recovery/` without following a link
 at any directory there and without leaving its device: a link, file or other
@@ -6360,8 +6374,9 @@ again every file below that directory: renamed after that, it does not fail
 `create`, and the checkpoint is reported complete. Nothing is written into what
 was moved, though the entry being written at that instant can still land in the
 moved directory. The failed `create` leaves the moved directory where it was
-moved, and reports `cleanup_incomplete: true` when `recovery/` was moved or
-another object now stands at the checkpoint's name. Such a process can already
+moved, and reports `cleanup_incomplete: true` when `recovery/` was moved, when
+another object now stands at the checkpoint's name, or when the checkpoint
+directory itself was moved away from its name. Such a process can already
 read the copied files, password files included. There, a FIFO or a link put at
 `journal/operations.jsonl` after the command's checks is refused at once, with
 nothing written to it. A FIFO
@@ -6380,10 +6395,10 @@ it, the read refuses the replacement. The observation is `unavailable` with
 `local_checkpoint_operation_failed` and reports no entries. A read that already
 opened the witness can finish from that handle. These reads can recognize a
 complete or incomplete checkpoint even when a descendant's full pathname
-exceeds the system limit. `delete` validates `recovery/` the same way, but
-still examines the checkpoint it removes by pathname: a checkpoint whose own
-pathname reaches the system limit is listed and is refused by `delete` with
-`local_checkpoint_state_unsupported`.
+exceeds the system limit. `delete` validates `recovery/` the same way and
+examines the checkpoint it removes through the held directory too, so a
+checkpoint whose own pathname reaches the system limit is deleted like any
+other.
 
 On Linux, another process can hold a lease on a file (`fcntl(2)`): a process
 running as the cell's user, or a privileged one such as a file server that
