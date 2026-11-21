@@ -26,7 +26,7 @@ groups:
         # failure, and 1 on success. Empty tables have attempt timestamp zero.
         # Keep a completed failure firing until a later attempt replaces it;
         # a historical failures counter or exporter restart is not a new failure.
-        # A killed pod may leave an unfinished row. Page once it exceeds the
+        # A killed pod may leave an unfinished row. Warn once it exceeds the
         # schema's maximum allowed activeDeadlineSeconds (7200 seconds).
         expr: |
           max by (namespace) (
@@ -41,8 +41,14 @@ groups:
             and
             (time() - witself_postgres_backup_last_attempt_timestamp_seconds{namespace="witself",service="witself-postgresql-metrics"} > 7200)
           )
+        # The next attempt replaces the failed row while it runs (-1). Hold the
+        # warning for ten minutes from that moment so a failure that persists
+        # across attempts stays one warning instead of closing and reopening at
+        # each attempt. An attempt that runs longer than ten minutes and then
+        # fails does reopen it.
+        keep_firing_for: 10m
         labels:
-          severity: critical
+          severity: warning
           service: witself-postgresql
           witself_alert: "true"
         annotations:

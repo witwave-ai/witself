@@ -1618,16 +1618,26 @@ can prevent any telemetry update, so the absence/staleness alert remains
 necessary. This table is outside the `witself` logical dump and starts fresh on
 a replacement cluster after provisioning.
 
-When the rules render, `WitselfPostgresBackupStale` fires after five minutes
-without a successful-backup series, with a zero last-success timestamp, or with
-a success older than 8 hours. A never-successful backup therefore alerts after
-activation. `WitselfPostgresBackupFailed` fires immediately for a completed
-failed latest attempt, or when an unfinished attempt exceeds 7,200 seconds (the
-chart's maximum configurable deadline). It remains firing until a later attempt
-replaces the failure; a historical failure count or exporter restart alone does
-not trigger it. Both rules are absent when backup or the monitoring stack is
-off. Firing alerts only deliver pages when the independent receiver policy is
-active.
+When the rules render, `WitselfPostgresBackupStale` (critical) fires after five
+minutes without a successful-backup series, with a zero last-success timestamp,
+or with a success older than 8 hours. A never-successful backup therefore alerts
+after activation. `WitselfPostgresBackupFailed` (warning) fires immediately for
+a completed failed latest attempt, or when an unfinished attempt exceeds 7,200
+seconds (the chart's maximum configurable deadline). It remains firing until a
+later attempt replaces the failure; a historical failure count or exporter
+restart alone does not trigger it. The next attempt replaces the failed row
+while it runs, and the rule holds the warning for ten minutes from that moment
+(`keep_firing_for: 10m`): a failure that persists across attempts stays one
+warning when each attempt ends within ten minutes, and after a successful
+attempt the warning clears about ten minutes after that attempt started. Both
+rules are absent when backup or the monitoring stack is off.
+
+Both alerts take the incident route and carry their severity to the receiver.
+One failed dump is a warning because the previous dump still bounds the
+recovery point; the overdue backup is the critical alert. Firing alerts only
+deliver to the receiver when the independent receiver policy is active, and
+what a warning does there (a low-urgency incident, for example) is the
+receiver's own setting.
 
 Restore into a **new, empty, disposable database first**, using a compatible
 PostgreSQL major with required extensions (including pgvector) already available.
