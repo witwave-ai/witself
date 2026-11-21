@@ -13,5 +13,3 @@ func checkpointFreeSpace(string) (uint64, uint64, error) { return 0, 0, errCheck
 func (c *Cell) openCheckpointSource(_ context.Context) (func(string) (*os.File, error), func(), error) {
 	return nil, nil, errCheckpointState
 }
-
-func validateRecoveryObject(string, bool) error { return errCheckpointState }

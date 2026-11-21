@@ -100,11 +100,11 @@ checkpoint.go
 	(*Cell).copyCheckpoint (*Cell).openCheckpointSource (*os.File).Write privateDir
 	(*Cell).deleteCheckpointLocked (*Cell).holdCheckpoint (*Cell).journal (*Cell).removeCheckpointHeld (*Cell).unsealCheckpointHeld privateDir
 	(*Cell).inventoryCheckpoint openPrivateReader x2
-	(*Cell).listCheckpoints os.ReadDir
 	(*Cell).openCheckpointEntry openPrivateReader x2
 	(*Cell).planCheckpoint path/filepath.WalkDir
+	(*Cell).recoveryAbsent os.OpenRoot
 	(*Cell).refuseBeforeLockNames acquireLock
-	(*Cell).validateRecovery os.ReadDir path/filepath.WalkDir privateDir
+	(*Cell).validateRecovery os.ReadDir privateDir
 	(*Cell).witnessCheckpoint (*Cell).openCheckpointSource
 	checkpointComplete openRegular
 checkpoint_other.go
@@ -122,22 +122,26 @@ checkpoint_root_windows.go
 checkpoint_tree_other.go
 	import context io/fs os
 checkpoint_tree_unix.go
-	import context errors golang.org/x/sys/unix io/fs os path path/filepath
+	import context errors golang.org/x/sys/unix io/fs os path path/filepath slices
 	(*checkpointTree).hold (*Cell).holdRecovery
+	(*checkpointTree).listing (*os.Root).Open golang.org/x/sys/unix.FcntlInt
 	(*checkpointTree).record (*os.File).Write
+	(*checkpointTree).snapshot (*os.Root).Open
 	checkpointTreeRemoveDirectory golang.org/x/sys/unix.Unlinkat
 checkpoint_tree_windows.go
 	import context errors io/fs os path path/filepath
 	(*checkpointTree).check path/filepath.WalkDir
 	(*checkpointTree).createTemp createPrivateTemp
 	(*checkpointTree).discard (*Cell).discardOwnCheckpoint
+	(*checkpointTree).listing os.ReadDir
 	(*checkpointTree).mkdir privateDir
 	(*checkpointTree).open openPrivateReader
 	(*checkpointTree).publish publishPrivateFile
 	(*checkpointTree).record writeAtomicBytes
+	(*checkpointTree).snapshot path/filepath.WalkDir
 	(*checkpointTree).sync syncDirectory
 checkpoint_unix.go
-	import context errors io/fs os path/filepath reflect syscall
+	import context os path/filepath reflect syscall
 	(*Cell).openCheckpointSource (*os.Root).OpenFile os.OpenRoot
 checkpoint_verify.go
 	import bytes context crypto/sha256 encoding/hex encoding/json io io/fs math os path/filepath reflect strings time unicode/utf8

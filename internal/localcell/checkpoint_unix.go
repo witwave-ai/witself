@@ -4,8 +4,6 @@ package localcell
 
 import (
 	"context"
-	"errors"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -44,21 +42,4 @@ func (c *Cell) openCheckpointSource(ctx context.Context) (func(string) (*os.File
 		name := filepath.FromSlash(rel)
 		return waitOutLease(ctx, name, root.Lstat, func() (*os.File, error) { return root.OpenFile(name, os.O_RDONLY|syscall.O_NONBLOCK, 0) })
 	}, func() { _ = root.Close() }, nil
-}
-
-// validateRecoveryObject decides one object by Lstat and never opens it: a
-// private directory or a regular 0600 file owned by this user. A vanished
-// object returns its Lstat error unchanged so the snapshot retry applies.
-func validateRecoveryObject(path string, directory bool) error {
-	info, err := os.Lstat(path)
-	if errors.Is(err, fs.ErrNotExist) {
-		return err
-	}
-	if err != nil || info.IsDir() != directory || (directory && !privateOwnedDir(path, info)) {
-		return errCheckpointState
-	}
-	if stat, ok := info.Sys().(*syscall.Stat_t); !directory && (!ok || info.Mode() != 0o600 || stat.Uid != uint32(os.Geteuid())) {
-		return errCheckpointState
-	}
-	return nil
 }

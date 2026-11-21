@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -77,7 +78,12 @@ func TestCheckpointRecoveryDiagnostics(t *testing.T) {
 		checkpointDiagnosticReason(t, k.c.Checkpoint(t.Context(), *k.options), "unknown_entries")
 	})
 	t.Run("read-error", func(t *testing.T) {
-		for _, row := range []string{"walk-error", "nil-entry", "vanished-leaf"} {
+		// Unix exercises its descriptor-based snapshot in TestCheckpointTreeSnapshotVanished.
+		var walkRows []string
+		if runtime.GOOS == "windows" {
+			walkRows = []string{"walk-error", "nil-entry", "vanished-leaf"}
+		}
+		for _, row := range walkRows {
 			t.Run(row, func(t *testing.T) {
 				k := checkpointInspectCase(t)
 				dir := checkpointPlant(t, k.c, "ckpt_aaaaaaaaaaaaaaaa", "", "object")
@@ -96,7 +102,11 @@ func TestCheckpointRecoveryDiagnostics(t *testing.T) {
 					if name == filepath.Join(dir, "object") {
 						return os.ErrNotExist
 					}
-					return validateRecoveryObject(name, directory)
+					// The only other visited objects in this fixture are directories.
+					if !directory {
+						t.Fatal("unexpected diagnostic fixture leaf")
+					}
+					return privateDir(name, false)
 				}
 				err := validatePrivateTreeSnapshot(k.c.recoveryDir(), walk, validate, os.Lstat)
 				checkpointDiagnosticReason(t, recoveryTreeFailure(err), "tree_unreadable")

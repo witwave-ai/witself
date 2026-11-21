@@ -26,6 +26,30 @@ func (t *checkpointTree) hold() error { return nil }
 
 func (t *checkpointTree) close() {}
 
+func (t *checkpointTree) listing() ([]string, []bool, error) {
+	entries, err := os.ReadDir(t.c.recoveryDir())
+	if err != nil {
+		return nil, nil, err
+	}
+	names, directories := make([]string, len(entries)), make([]bool, len(entries))
+	for i, entry := range entries {
+		names[i], directories[i] = entry.Name(), entry.IsDir()
+	}
+	return names, directories, nil
+}
+
+func (t *checkpointTree) witness(ctx context.Context, id string) (checkpointWitness, bool, error) {
+	dir, err := t.c.checkpointDir(id)
+	if err != nil {
+		return checkpointWitness{}, false, err
+	}
+	return checkpointComplete(ctx, dir, id)
+}
+
+func (t *checkpointTree) snapshot() error {
+	return validatePrivateTreeSnapshot(t.c.recoveryDir(), filepath.WalkDir, validateRecoveryObject, os.Lstat)
+}
+
 // name is name's slash path below recovery/.
 func (t *checkpointTree) name(name string) string { return path.Join(t.id, name) }
 
