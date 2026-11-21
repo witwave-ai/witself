@@ -3,10 +3,15 @@
 package localcell
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"syscall"
 	"testing"
 )
@@ -95,5 +100,137 @@ func TestCheckpointTreeInventoryExtra(t *testing.T) {
 				t.Fatal("the extra entry row left its journal open or torn")
 			}
 		})
+	}
+}
+
+// One plant at one existing seam per row pins one behaviour of the tree's open, check or record (MINOR-2 of
+// LC-CKPT-WALK-1C1R): recovery/ moved out of the cell and linked back at the first inventory open (open binds first), or
+// at the witness temporary's file sync (record binds before its rename); an empty planned directory replaced after the
+// copy (check lists each directory as the one it recorded, and a refused listing refuses); a link put at witness.json at
+// the witness step, and a directory there at that sync (record refuses all but a regular file or nothing, and returns a
+// refused rename); the checkpoint directory replaced at that sync, the call's temporary moved into the replacement
+// (record renames only in the directory it recorded). record_synced plants nothing: each record syncs its temporary.
+func TestCheckpointTreeRecordSteps(t *testing.T) {
+	for _, row := range []string{"open_bound", "rename_bound", "check_identity", "record_regular", "rename_refused", "rename_identity", "record_synced"} {
+		t.Run(row, func(t *testing.T) {
+			f, r := checkpointFixture(t, "legacy", false)
+			c, kept, controls, copied, synced, reached := f.cell, heldTrees{}, 0, false, 0, false
+			checkpoint := c.path("recovery", heldTarget)
+			witness, temporary := filepath.Join(checkpoint, checkpointWitnessName), filepath.Join(checkpoint, ".pending-*")
+			r.nextID = func() (string, error) { return heldTarget, nil }
+			plant := func(at, kind string) {
+				if !reached {
+					reached = true
+					treePlant(t, c, at, kind, kept)
+				}
+			}
+			c.checkpointTest.beforeStep = func(step, _ string) {
+				if step == "open" && row == "open_bound" {
+					plant(c.recoveryDir(), "link_out")
+				}
+			}
+			r.after = func(dir string) {
+				if copied = true; row == "check_identity" {
+					plant(filepath.Join(dir, "pg", "pg_notify"), "dir")
+				}
+			}
+			control := c.checkpointTest.control
+			c.checkpointTest.control = func(ctx context.Context) (pgControlData, error) {
+				if controls++; controls == 2 && row == "record_regular" {
+					plant(witness, "link_out")
+				}
+				return control(ctx)
+			}
+			original := syncFile
+			t.Cleanup(func() { syncFile = original })
+			syncFile = func(file *os.File) error {
+				if file.Name() == temporary && copied {
+					synced++
+				}
+				switch {
+				case controls != 2 || file.Name() != temporary || reached:
+				case row == "rename_bound":
+					plant(c.recoveryDir(), "link_out")
+				case row == "rename_refused":
+					plant(witness, "dir")
+				case row == "rename_identity":
+					plant(checkpoint, "dir")
+					entries, err := os.ReadDir(c.path("tmp", "moved"))
+					for _, entry := range entries {
+						if strings.HasPrefix(entry.Name(), ".pending-") {
+							heldMove(t, filepath.Join(c.path("tmp", "moved"), entry.Name()), filepath.Join(checkpoint, entry.Name()))
+						}
+					}
+					if err != nil {
+						t.Fatal("cannot list the moved checkpoint directory")
+					}
+				}
+				return original(file)
+			}
+			failure := ClassifyCheckpointFailure(c.Checkpoint(t.Context(), checkpointOptions(f)))
+			if !reached && row != "record_synced" {
+				t.Fatal("the record step row never reached its plant")
+			}
+			moved := ""
+			for dir := range kept {
+				moved = dir
+			}
+			switch row {
+			case "open_bound":
+				if failure.Class != "local_checkpoint_witness_mismatch" {
+					t.Fatalf("the open bound row ended in class %q", failure.Class)
+				}
+			case "rename_bound":
+				if failure.Class != "local_checkpoint_copy_failed" {
+					t.Fatalf("the rename bound row ended in class %q", failure.Class)
+				}
+				if _, err := os.Lstat(filepath.Join(moved, heldTarget, checkpointWitnessName)); !errors.Is(err, fs.ErrNotExist) {
+					t.Fatal("the rename bound row published its witness in the moved recovery directory")
+				}
+			case "check_identity":
+				if failure.Class != "local_checkpoint_witness_mismatch" {
+					t.Fatalf("the check identity row ended in class %q", failure.Class)
+				}
+			case "record_regular":
+				if failure.Class != "local_checkpoint_copy_failed" {
+					t.Fatalf("the record kind row ended in class %q", failure.Class)
+				}
+			case "rename_refused":
+				if failure.Class != "local_checkpoint_copy_failed" {
+					t.Fatalf("the rename refusal row ended in class %q", failure.Class)
+				}
+			case "rename_identity":
+				if failure.Class != "local_checkpoint_copy_failed" {
+					t.Fatalf("the rename identity row ended in class %q", failure.Class)
+				}
+				if treeAt(t, witness) != nil {
+					t.Fatal("the rename identity row published its witness in the replacement directory")
+				}
+			case "record_synced":
+				if failure.Class != "" {
+					t.Fatalf("the record sync row ended in class %q", failure.Class)
+				}
+				if synced != 2 {
+					t.Fatalf("the record sync row synced %d record temporaries", synced)
+				}
+			}
+		})
+	}
+}
+
+// A created witness is today's encoding: the two-space indented document and one trailing newline (N9 of 1C1R).
+func TestCheckpointTreeWitnessEncoding(t *testing.T) {
+	f, r := checkpointFixture(t, "legacy", false)
+	r.nextID = func() (string, error) { return heldTarget, nil }
+	if f.cell.Checkpoint(t.Context(), checkpointOptions(f)) != nil {
+		t.Fatal("cannot create the witness encoding checkpoint")
+	}
+	data, err := os.ReadFile(f.cell.path("recovery", heldTarget, checkpointWitnessName))
+	var witness checkpointWitness
+	if err != nil || json.Unmarshal(data, &witness) != nil {
+		t.Fatal("cannot read the witness encoding checkpoint")
+	}
+	if encoded, err := json.MarshalIndent(witness, "", "  "); err != nil || !bytes.Equal(data, append(encoded, '\n')) {
+		t.Fatal("the witness encoding row found bytes other than the indented document and its newline")
 	}
 }

@@ -6351,12 +6351,15 @@ copy's own, so a failed `create` removes it with its content. Below
 `recovery/`, a mount of the same file system is not detected (only a different
 device is), and making one needs privileges the cell's user does not have; a
 mount at `recovery/` itself is not detected, whatever its device. A same-user
-process renaming `recovery/` or a directory the copy made while `create` runs
-fails it (`local_checkpoint_copy_failed`, or `local_checkpoint_witness_mismatch`
-at the inventory), and nothing is written into what was moved; the entry being
-written at that instant can still land in the moved directory. Once the
-inventory is published, only renaming `recovery/` or the checkpoint directory
-still fails it. The failed `create` leaves the moved directory where it was
+process renaming `recovery/` after `create` holds it for the copy, or renaming
+the checkpoint directory, before the witness is published fails `create`
+(`local_checkpoint_copy_failed`, or `local_checkpoint_witness_mismatch` at the
+inventory). Renaming a directory the copy made below the checkpoint directory
+fails it too, but only until the inventory has checked the copy and opened
+again every file below that directory: renamed after that, it does not fail
+`create`, and the checkpoint is reported complete. Nothing is written into what
+was moved, though the entry being written at that instant can still land in the
+moved directory. The failed `create` leaves the moved directory where it was
 moved, and reports `cleanup_incomplete: true` when `recovery/` was moved or
 another object now stands at the checkpoint's name. Such a process can already
 read the copied files, password files included. There, a FIFO or a link put at

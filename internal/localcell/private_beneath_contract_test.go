@@ -34,7 +34,10 @@ var (
 		"publish:privateBeneathPublish": 1, "sync:privateBeneathDirectory": 1, "sync:privateBeneathID": 1, "sync:privateBeneathSync": 1,
 		"discard:privateBeneathLstat": 3, "discard:privateBeneathIdentity": 1, "discard:privateBeneathDirectory": 1, "discard:privateBeneathID": 1,
 		"discard:privateBeneathRemoveBelow": 1, "checkpointTreeRemoveDirectory:privateBeneathID": 1, "checkpointTreeRemoveDirectory:privateBeneathAt": 1,
-		"checkpointTreeRemoveDirectory:privateBeneathIdentity": 1, "checkpointTreeRemoveDirectory:errPrivateBeneathMoved": 1}
+		"checkpointTreeRemoveDirectory:privateBeneathIdentity": 1, "checkpointTreeRemoveDirectory:errPrivateBeneathMoved": 1,
+		"open:privateBeneathLstat": 1, "open:privateBeneathOpen": 1, "check:privateBeneathList": 1, "record:privateBeneathLstat": 1,
+		"record:privateBeneathRemove": 1, "record:privateBeneathReplace": 1, "record:privateBeneathDirectory": 1, "record:privateBeneathID": 1,
+		"record:privateBeneathSync": 1}
 )
 
 // privateBeneathContract returns the keys sources break, sorted: the walk file's build line, imports, calls, constants,
@@ -141,6 +144,12 @@ func TestPrivateBeneathSourceContract(t *testing.T) {
 		{"tree_remove_named", "checkpoint_tree_unix.go", [][2]string{{"\tt.c.checkpointStage(\"sweep\")\n", "\tt.c.checkpointStage(\"sweep\")\n\t_ = privateBeneathRemove\n"}},
 			[]string{"private_beneath_tree:discard:privateBeneathRemove"}},
 		{"tree_parent_unsynced", "checkpoint_tree_unix.go", [][2]string{{"func() error { return privateBeneathSync(fd) })", "func() error { return nil })"}}, []string{"private_beneath_tree:mkdir:privateBeneathSync"}},
+		{"tree_open_pathname", "checkpoint_tree_unix.go", [][2]string{{"func() (*os.File, error) { return privateBeneathOpen(t.recovery, t.name(name), t.want, label) })", "func() (*os.File, error) { return os.Open(label) })"}},
+			[]string{"private_beneath_tree:open:privateBeneathOpen"}},
+		{"tree_check_unlisted", "checkpoint_tree_unix.go", [][2]string{{"entries, err := privateBeneathList(t.recovery, t.name(directory), t.want)", "entries, err := []privateBeneathEntry(nil), error(nil)"}},
+			[]string{"private_beneath_tree:check:privateBeneathEntry", "private_beneath_tree:check:privateBeneathList"}},
+		{"tree_record_unsynced", "checkpoint_tree_unix.go", [][2]string{{"t.name(path.Dir(name)), t.want, func(fd int, _ privateBeneathID) error { return privateBeneathSync(fd) })", "t.name(path.Dir(name)), t.want, func(fd int, _ privateBeneathID) error { return nil })"}},
+			[]string{"private_beneath_tree:record:privateBeneathSync"}},
 		{"root_method", walk, [][2]string{{"\tparts := strings.Split(name, \"/\")\n", "\tparts := strings.Split(name, \"/\")\n\t_ = root.Mkdir\n"}}, []string{"private_beneath_os:root.Mkdir"}},
 	} {
 		t.Run(row.name, func(t *testing.T) {

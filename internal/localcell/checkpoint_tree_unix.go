@@ -165,7 +165,10 @@ func (t *checkpointTree) check(planned map[string]bool) (int, error) {
 // directory the walk reaches: a private temporary made there, written, synced
 // and closed, renamed over name in that one directory (a link put at name is
 // replaced, never followed), then the directory synced. A temporary a failure
-// left is removed through the walk.
+// left is removed through the walk. It binds first, before the rename and after
+// it: the walk starts from the held descriptor and never re-proves that
+// recovery/'s name still names it, so only that last bind refuses a recovery/
+// moved in the instant after the rename.
 func (t *checkpointTree) record(name string, data []byte) error {
 	if err := t.bound(); err != nil {
 		return err
