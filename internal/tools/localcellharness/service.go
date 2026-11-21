@@ -193,7 +193,9 @@ func runServiceCommandForGOOS(ctx context.Context, args []string, out io.Writer,
 	case "repair":
 		err = cell.RepairService(ctx)
 	default:
-		status, controlErr := cell.Control(ctx, action)
+		status, controlErr := controlServiceCommand(ctx, action, func() (localcell.ServiceStatus, error) {
+			return cell.Control(ctx, action)
+		})
 		if controlErr != nil {
 			return controlErr
 		}
@@ -206,4 +208,24 @@ func runServiceCommandForGOOS(ctx context.Context, args []string, out io.Writer,
 		Operation string `json:"operation"`
 		State     string `json:"state"`
 	}{"service " + action, "done"})
+}
+
+func controlServiceCommand(ctx context.Context, action string, control func() (localcell.ServiceStatus, error)) (localcell.ServiceStatus, error) {
+	if action != "start" && action != "stop" && action != "health" {
+		return control()
+	}
+	for {
+		status, err := control()
+		// Cell.Control returns this private sentinel verbatim for HTTP 202.
+		if err == nil || err.Error() != "localcell: service_control_deferred" {
+			return status, err
+		}
+		select {
+		case <-ctx.Done():
+		case <-time.After(10 * time.Millisecond):
+		}
+		if ctx.Err() != nil {
+			return status, err
+		}
+	}
 }

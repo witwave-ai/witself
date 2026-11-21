@@ -27,6 +27,19 @@ import (
 // harness package reserves 24s, excluding its bounded compilation.
 const windowsSyntheticTestBudget = 90 * time.Second
 
+type windowsForegroundClient struct {
+	host, root  string
+	environment []string
+}
+
+func (client windowsForegroundClient) invoke(ctx context.Context, action string) string {
+	command := exec.CommandContext(ctx, client.host, "service", action, "--root", client.root)
+	command.Env = client.environment
+	command.WaitDelay = windowsSyntheticTestBudget / 90
+	output, err := command.CombinedOutput()
+	return classifyWindowsStoppedCommand(ctx.Err(), output, err)
+}
+
 // Exercise the production main/run dispatch and named-pipe transport in fresh
 // processes. A stopped private installation needs no PostgreSQL or task adapter.
 // GenerateConsoleCtrlEvent function and Process Creation Flags supply only the
@@ -99,14 +112,7 @@ func TestWindowsServiceForegroundSubprocessCommands(t *testing.T) {
 		t.Logf("service_install class=%s", class)
 		t.Fatal("Windows service install did not preserve adapter refusal")
 	}
-	invoke := func(args ...string) ([]byte, error) {
-		ctx, cancel := context.WithTimeout(commandCtx, allowance)
-		defer cancel()
-		command := exec.CommandContext(ctx, host, args...)
-		command.Env = environment
-		command.WaitDelay = windowsSyntheticTestBudget / 90
-		return command.CombinedOutput()
-	}
+	client := windowsForegroundClient{host: host, root: root, environment: environment}
 	var oldStart, oldBoot string
 	commandDeadline, _ := commandCtx.Deadline()
 	for iteration := 0; iteration < 2; iteration++ {
@@ -214,10 +220,13 @@ func TestWindowsServiceForegroundSubprocessCommands(t *testing.T) {
 		}
 		oldStart, oldBoot = endpoint.HostStartIdentity, endpoint.BootID
 		for _, action := range []string{"status", "observe", "stop", "status", "observe"} {
-			output, err := invoke("service", action, "--root", root)
-			var status localcell.ServiceStatus
-			if err != nil || json.Unmarshal(output, &status) != nil || status.DesiredState != "stopped" || status.State != "stopped" || status.Healthy || status.Generation == "" {
-				t.Logf("foreground_exit class=%s", "command_state")
+			class, gaps := windowsStoppedCommand(commandCtx, allowance, action, client.invoke)
+			if gaps > 0 {
+				t.Logf("foreground_exit class=%s", "endpoint_record_retry")
+				t.Logf("foreground endpoint record refusals=%d", gaps)
+			}
+			if class != "" {
+				t.Logf("foreground_exit class=%s", "command_state "+action+" "+class)
 				t.Fatal("foreground command did not preserve durable stopped state")
 			}
 		}

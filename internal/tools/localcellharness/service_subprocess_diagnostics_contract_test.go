@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -75,6 +76,9 @@ func assertForegroundSubprocessDiagnosticSites(t *testing.T, source string) {
 	for _, site := range foregroundSubprocessDiagnosticSites {
 		t.Run(site.class, func(t *testing.T) {
 			log := fmt.Sprintf(`t.Logf("foreground_exit class=%%s", %q)`, site.class)
+			if site.class == "command_state" {
+				log = `t.Logf("foreground_exit class=%s", "command_state "+action+" "+class)`
+			}
 			method := "Fatal"
 			if site.class == "cleanup_budget" {
 				method = "Error"
@@ -116,6 +120,18 @@ func assertForegroundSubprocessDiagnosticSites(t *testing.T, source string) {
 			}
 		})
 	}
+	t.Run("command_loop", func(t *testing.T) {
+		for _, fragment := range []string{
+			`for _, action := range []string{"status", "observe", "stop", "status", "observe"} {`,
+			`class, gaps := windowsStoppedCommand(commandCtx, allowance, action, client.invoke)`,
+			`t.Logf("foreground_exit class=%s", "endpoint_record_retry")`,
+			`t.Logf("foreground endpoint record refusals=%d", gaps)`,
+		} {
+			if strings.Count(source, fragment) != 1 {
+				t.Fatal("stopped command loop lost its fixed actions, shared allowance or endpoint accounting")
+			}
+		}
+	})
 }
 
 func TestWindowsForegroundSubprocessClassEnrollment(t *testing.T) {
@@ -128,6 +144,14 @@ func TestWindowsForegroundSubprocessClassEnrollment(t *testing.T) {
 		const allowance = "foreground host did not expose authenticated status within allowance on first start"
 		rows = append(rows, foregroundClassEnrollment{outcome, outcome, outcome, allowance, allowance})
 	}
+	const stopped = "foreground command did not preserve durable stopped state"
+	for _, action := range []string{"status", "observe", "stop"} {
+		for _, failure := range []string{"exit_nonzero", "command_error", "bad_json", "wrong_state", "timeout"} {
+			class := "command_state " + action + " " + failure
+			rows = append(rows, foregroundClassEnrollment{action + "_" + failure, class, class, stopped, stopped})
+		}
+	}
+	rows = append(rows, foregroundClassEnrollment{"endpoint_record_retry", "endpoint_record_retry", "endpoint_record_retry", stopped, stopped})
 	// The cold install classifier already has a portable truth table. Exercise
 	// its vocabulary through the foreground prefix as well as service_install.
 	for _, class := range []string{"deadline", "parent_budget", "exit_zero", "exit_without_cause", "start_failed"} {
@@ -137,6 +161,44 @@ func TestWindowsForegroundSubprocessClassEnrollment(t *testing.T) {
 	// Raw strings are deliberately outside the checker's vocabulary scan.
 	rows = append(rows, foregroundClassEnrollment{"reject_unknown", `outsidevocabularyprivate`, "(rejected)", "", "(unclassified)"})
 	assertForegroundClassEnrollments(t, rows)
+}
+
+// The Windows subprocess is the only source of raw command output. Follow its
+// return into the portable classifier and require a literal at every exit.
+func TestWindowsForegroundStoppedCommandClassBoundary(t *testing.T) {
+	for _, row := range []struct {
+		file, function string
+		returns        []string
+	}{
+		{"service_subprocess_windows_test.go", "invoke", []string{`return classifyWindowsStoppedCommand(ctx.Err(), output, err)`}},
+		{"service_subprocess_command_test.go", "classifyWindowsStoppedCommand", []string{
+			`return ""`, `return "endpoint_record_retry"`, `return "timeout"`, `return "exit_nonzero"`,
+			`return "command_error"`, `return "bad_json"`, `return "wrong_state"`,
+		}},
+	} {
+		file, err := parser.ParseFile(token.NewFileSet(), row.file, nil, 0)
+		if err != nil {
+			t.Fatal("cannot read stopped command class boundary")
+		}
+		var seen []string
+		for _, declaration := range file.Decls {
+			function, ok := declaration.(*ast.FuncDecl)
+			if !ok || function.Name.Name != row.function {
+				continue
+			}
+			ast.Inspect(function.Body, func(node ast.Node) bool {
+				if statement, ok := node.(*ast.ReturnStmt); ok {
+					seen = append(seen, foregroundSource(t, statement))
+				}
+				return true
+			})
+		}
+		slices.Sort(seen)
+		slices.Sort(row.returns)
+		if !slices.Equal(slices.Compact(seen), row.returns) {
+			t.Fatal("stopped command output may only return its fixed classes")
+		}
+	}
 }
 
 func TestWindowsForegroundShortReceiptClassEnrollment(t *testing.T) {
