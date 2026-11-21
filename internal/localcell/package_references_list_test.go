@@ -92,13 +92,12 @@ checkpoint.go
 	import bytes context crypto/sha256 encoding/hex encoding/json errors github.com/witwave-ai/witself/internal/id github.com/witwave-ai/witself/internal/runtimeconfig io io/fs math os os/exec path path/filepath regexp runtime slices sort strings sync time unicode/utf16 unicode/utf8
 	(*Cell).DeleteCheckpoint (*Cell).deleteCheckpointLocked
 	(*Cell).admitCheckpoint openPostgresReader readRegular
-	(*Cell).admitDeleteCheckpoint os.ReadDir privateDir
 	(*Cell).checkpointLocked (*Cell).copyCheckpoint (*Cell).inventoryCheckpoint (*Cell).journal (*Cell).witnessCheckpoint
 	(*Cell).checkpointOps openPrivateReader x3
 	(*Cell).closeCheckpointFailure (*Cell).journal
 	(*Cell).closeCheckpointLeftover (*Cell).journal
 	(*Cell).copyCheckpoint (*Cell).openCheckpointSource (*os.File).Write privateDir
-	(*Cell).deleteCheckpointLocked (*Cell).holdCheckpoint (*Cell).journal (*Cell).removeCheckpointHeld (*Cell).unsealCheckpointHeld privateDir
+	(*Cell).deleteCheckpointLocked (*Cell).journal privateDir
 	(*Cell).inventoryCheckpoint openPrivateReader x2
 	(*Cell).openCheckpointEntry openPrivateReader x2
 	(*Cell).planCheckpoint path/filepath.WalkDir
@@ -110,26 +109,29 @@ checkpoint.go
 checkpoint_other.go
 	import context os
 checkpoint_root.go
-	import errors io/fs os path/filepath runtime
-	(*Cell).holdCheckpoint (*Cell).holdRecovery (*os.Root).OpenRoot
+	import errors os path/filepath runtime
 	(*Cell).holdRecovery os.OpenRoot
-	(*Cell).removeCheckpointHeld (*os.Root).Open (*os.Root).Remove (*os.Root).RemoveAll
-	(*Cell).unsealCheckpointHeld (*os.Root).Remove
 	syncRootDirectory (*os.Root).Open
 checkpoint_root_windows.go
-	import errors io/fs
+	import errors io/fs os
 	(*Cell).discardOwnCheckpoint (*Cell).holdCheckpoint (*Cell).removeCheckpointHeld (*os.Root).Remove
+	(*Cell).holdCheckpoint (*Cell).holdRecovery (*os.Root).OpenRoot
+	(*Cell).removeCheckpointHeld (*os.Root).Open (*os.Root).Remove (*os.Root).RemoveAll
+	(*Cell).unsealCheckpointHeld (*os.Root).Remove
 checkpoint_tree_other.go
 	import context io/fs os
 checkpoint_tree_unix.go
 	import context errors golang.org/x/sys/unix io/fs os path path/filepath slices
 	(*checkpointTree).hold (*Cell).holdRecovery
-	(*checkpointTree).listing (*os.Root).Open golang.org/x/sys/unix.FcntlInt
+	(*checkpointTree).listing (*os.Root).Open
 	(*checkpointTree).record (*os.File).Write
+	(*checkpointTree).retain golang.org/x/sys/unix.FcntlInt
 	(*checkpointTree).snapshot (*os.Root).Open
+	(*checkpointTree).target (*os.Root).Open
 	checkpointTreeRemoveDirectory golang.org/x/sys/unix.Unlinkat
 checkpoint_tree_windows.go
 	import context errors io/fs os path path/filepath
+	(*checkpointTree).adopt (*Cell).holdCheckpoint
 	(*checkpointTree).check path/filepath.WalkDir
 	(*checkpointTree).createTemp createPrivateTemp
 	(*checkpointTree).discard (*Cell).discardOwnCheckpoint
@@ -139,7 +141,10 @@ checkpoint_tree_windows.go
 	(*checkpointTree).publish publishPrivateFile
 	(*checkpointTree).record writeAtomicBytes
 	(*checkpointTree).snapshot path/filepath.WalkDir
+	(*checkpointTree).sweep (*Cell).removeCheckpointHeld
 	(*checkpointTree).sync syncDirectory
+	(*checkpointTree).target os.ReadDir privateDir
+	(*checkpointTree).unseal (*Cell).unsealCheckpointHeld
 checkpoint_unix.go
 	import context os path/filepath reflect syscall
 	(*Cell).openCheckpointSource (*os.Root).OpenFile os.OpenRoot

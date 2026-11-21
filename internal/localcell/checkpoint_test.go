@@ -1148,6 +1148,15 @@ func TestCheckpointDirectorySyncOrder(t *testing.T) {
 		r.after = func(dir string) { checkpointRewrite(t, filepath.Join(dir, "pg", "base", "1", "1259")) }
 		heldAt(f.cell, "hold", func() { heldMove(t, f.cell.path("recovery", target), f.cell.path("aside")) })
 		err := f.cell.Checkpoint(t.Context(), checkpointOptions(f))
+		if _, asideErr := os.Lstat(f.cell.path("aside", "pg")); runtime.GOOS != "windows" {
+			// Linux and macOS: the directory this call recorded left its name and may survive where it went, so the
+			// cleanup is incomplete and syncs nothing (LC-CKPT-WALK-1C3B); TestCheckpointTreeDiscardEmpty pins the sync.
+			if !checkpointSameError(err, "local_checkpoint_witness_mismatch") || !ClassifyCheckpointFailure(err).CleanupIncomplete ||
+				slices.Contains(seams, "root:.") || asideErr != nil {
+				t.Fatal("a cleanup reported a directory it recorded that had left its name")
+			}
+			return
+		}
 		if !checkpointSameError(err, "local_checkpoint_witness_mismatch") || ClassifyCheckpointFailure(err).CleanupIncomplete ||
 			!slices.Contains(seams, "root:.") || !slices.Contains(*synced, ".-") || slices.Contains(seams, "path:.") {
 			t.Fatal("an emptied cleanup name did not sync recovery through the held root alone")
@@ -1189,7 +1198,9 @@ func TestCheckpointDirectorySyncOrder(t *testing.T) {
 			if fail == "" && (err != nil || !slices.Equal(*synced, []string{target + " unsealed", ". gone"})) {
 				t.Fatal("deletion did not sync its directory once the witness was gone and before anything else was, then recovery/ once it was removed")
 			}
-			if !slices.Equal(seams, []string{"root:" + target, "root:."}[:min(len(seams), 2)]) {
+			// Linux and macOS sync the unsealed directory through the tree's seam, Windows through its held root.
+			unseal := map[bool]string{true: "root:", false: "path:"}[runtime.GOOS == "windows"] + target
+			if !slices.Equal(seams, []string{unseal, "root:."}[:min(len(seams), 2)]) {
 				t.Fatal("a deletion synced a directory other than through its held root")
 			}
 			// A failed unseal sync is returned, closes the operation and leaves the data in place without its witness.

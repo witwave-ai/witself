@@ -30,7 +30,7 @@ type checkpointTree struct {
 	id       string
 	recovery *os.Root
 	made     map[string]privateBeneathID
-	listed   []int // keep listed checkpoints' inodes alive until the witness reads finish
+	held     []int // keep listed and adopted checkpoint inodes alive until close
 }
 
 func (c *Cell) checkpointTree(checkpointID string) *checkpointTree {
@@ -46,13 +46,21 @@ func (t *checkpointTree) hold() (err error) {
 }
 
 func (t *checkpointTree) close() {
-	for _, fd := range t.listed {
+	for _, fd := range t.held {
 		_ = unix.Close(fd)
 	}
-	t.listed = nil
+	t.held = nil
 	if t.recovery != nil {
 		_ = t.recovery.Close()
 	}
+}
+
+func (t *checkpointTree) retain(fd int) error {
+	dup, err := unix.FcntlInt(uintptr(fd), unix.F_DUPFD_CLOEXEC, 0)
+	if err == nil {
+		t.held = append(t.held, dup)
+	}
+	return err
 }
 
 func (t *checkpointTree) listing() ([]string, []bool, error) {
@@ -89,11 +97,7 @@ func (t *checkpointTree) listing() ([]string, []bool, error) {
 		if directories[i] && checkpointIDPattern.MatchString(name) {
 			t.made[name] = privateBeneathIdentity(stat)
 			err = privateBeneathDirectory(t.recovery, name, t.want, func(fd int, _ privateBeneathID) error {
-				dup, err := unix.FcntlInt(uintptr(fd), unix.F_DUPFD_CLOEXEC, 0)
-				if err == nil {
-					t.listed = append(t.listed, dup)
-				}
-				return err
+				return t.retain(fd)
 			})
 			if err != nil {
 				return nil, nil, errPrivateLayout
@@ -367,10 +371,105 @@ func (t *checkpointTree) record(name string, data []byte) error {
 	return privateBeneathDirectory(t.recovery, t.name(path.Dir(name)), t.want, func(fd int, _ privateBeneathID) error { return privateBeneathSync(fd) })
 }
 
+// target is delete's admission of the checkpoint at its exact name, read
+// through the held recovery/ and writing nothing: nothing there, or the name
+// not listed byte for byte, is errCheckpointIdentity; anything but a private
+// directory of the effective user there, or a failed hold, is
+// errCheckpointState.
+func (t *checkpointTree) target() error {
+	if err := t.hold(); errors.Is(err, fs.ErrNotExist) && t.c.recoveryAbsent() {
+		// The boundary absent by name inside the open cell root: no checkpoint.
+		return errCheckpointIdentity
+	} else if err != nil {
+		return errCheckpointState
+	}
+	info, err := privateBeneathLstat(t.recovery, t.id, nil)
+	if errors.Is(err, fs.ErrNotExist) {
+		// The no-follow fstatat of the one name in the bound recovery/: nothing is there.
+		return errCheckpointIdentity
+	} else if err != nil {
+		return errCheckpointState
+	}
+	if stat := info.Sys().(*unix.Stat_t); stat.Mode&unix.S_IFMT != unix.S_IFDIR || stat.Uid != uint32(os.Geteuid()) || stat.Mode&0o777 != 0o700 {
+		return errCheckpointState
+	}
+	// A case-insensitive volume also resolves another spelling: only the exact
+	// on-disk name, listed through the held descriptor, is deleted.
+	dir, err := t.recovery.Open(".")
+	if err != nil {
+		return errCheckpointIdentity
+	}
+	names, err := dir.Readdirnames(-1)
+	if closed := dir.Close(); err != nil || closed != nil || !recoveryEntryCanonical(names, t.id) {
+		return errCheckpointIdentity
+	}
+	return nil
+}
+
+// adopt holds recovery/ (bound) and records the identity of the directory at
+// the checkpoint's name, opened without following it and on recovery/'s device,
+// its descriptor duplicated and kept until close: a link, file, FIFO or other
+// object there refuses before anything is journaled.
+func (t *checkpointTree) adopt() error {
+	t.c.checkpointStage("hold")
+	if err := t.hold(); err != nil {
+		return err
+	}
+	return privateBeneathDirectory(t.recovery, t.id, nil, func(fd int, id privateBeneathID) error {
+		if err := t.retain(fd); err != nil {
+			return err
+		}
+		t.made[t.id] = id
+		return nil
+	})
+}
+
+// unseal removes the witness as itself (a file, link or empty directory) in the
+// adopted directory while recovery/ is bound, then syncs that directory. Absent
+// is already removed: the walk reached the adopted directory and the name is
+// absent in it (a walk that fails to reach it refuses, not-exist too).
+func (t *checkpointTree) unseal() error {
+	t.c.checkpointStage("unseal")
+	if err := t.bound(); err != nil {
+		return err
+	} else if err := privateBeneathRemove(t.recovery, t.name(checkpointWitnessName), t.want); err != nil {
+		return err
+	}
+	return t.sync(".")
+}
+
+// sweep removes everything below the adopted (or recorded) directory through a
+// descriptor opened for that one call, never through a link and never on
+// another device (EXDEV before anything on it is removed), then that directory
+// only once its identity at the name is checked again, and syncs recovery/;
+// each step binds recovery/ first. An empty directory put at the exact name
+// between that check and the removal (one call apart) is removed instead.
+func (t *checkpointTree) sweep() error {
+	if _, ok := t.made[t.id]; !ok {
+		return errPrivateBeneathMoved
+	}
+	t.c.checkpointStage("sweep")
+	if err := t.bound(); err != nil {
+		return err
+	} else if err := privateBeneathDirectory(t.recovery, t.id, t.want, func(fd int, _ privateBeneathID) error { return privateBeneathRemoveBelow(fd) }); err != nil {
+		return err
+	}
+	t.c.checkpointStage("directory")
+	if err := t.bound(); err != nil {
+		return err
+	} else if err := checkpointTreeRemoveDirectory(t.recovery, t.id, t.made[t.id]); err != nil {
+		return err
+	}
+	return syncCheckpointRoot(t.recovery)
+}
+
 // discard removes this call's directory only while it has no witness, only as
-// the identity it recorded, through the held recovery/ while bound. A witness
-// in it, still bound, is not a failed discard. Anything else at the name (a
-// link, a file, a directory it did not record) is left: incomplete.
+// the identity it recorded, through the held recovery/ while bound, by the
+// sweep. A regular file at the witness name, still bound, is not a failed
+// discard; a link, FIFO, directory or other object there is no witness and goes
+// with the directory. Anything else at the name (a link, a file, a directory it
+// did not record) is left, and so is a directory it recorded that is gone from
+// the name (it may survive wherever it was moved): incomplete.
 func (t *checkpointTree) discard() error {
 	t.c.checkpointStage("hold")
 	if t.bound() != nil {
@@ -378,25 +477,24 @@ func (t *checkpointTree) discard() error {
 	}
 	recorded, made := t.made[t.id]
 	switch info, err := privateBeneathLstat(t.recovery, t.id, nil); {
-	case errors.Is(err, fs.ErrNotExist):
-		// The no-follow fstatat of the one name in the bound recovery/: nothing is there.
+	case errors.Is(err, fs.ErrNotExist) && !made:
+		// The no-follow fstatat of the one name in the bound recovery/: nothing
+		// is there, and this call recorded no directory there.
 		return syncCheckpointRoot(t.recovery)
 	case err != nil || !made || !info.IsDir() || privateBeneathIdentity(info.Sys().(*unix.Stat_t)) != recorded:
 		return errCheckpointCopy
 	}
 	// Not-exist is the witness's fstatat in the recorded directory, or that
 	// directory gone: the sweep's own open then refuses.
-	if _, err := privateBeneathLstat(t.recovery, t.name(checkpointWitnessName), t.want); err == nil && t.bound() == nil {
+	if witness, err := privateBeneathLstat(t.recovery, t.name(checkpointWitnessName), t.want); err == nil && witness.Mode().IsRegular() {
+		if t.bound() != nil {
+			return errCheckpointCopy
+		}
 		return nil
-	} else if !errors.Is(err, fs.ErrNotExist) {
+	} else if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return errCheckpointCopy
 	}
-	t.c.checkpointStage("sweep")
-	if t.bound() != nil || privateBeneathDirectory(t.recovery, t.id, t.want, func(fd int, _ privateBeneathID) error { return privateBeneathRemoveBelow(fd) }) != nil {
-		return errCheckpointCopy
-	}
-	t.c.checkpointStage("directory")
-	if t.bound() != nil || checkpointTreeRemoveDirectory(t.recovery, t.id, recorded) != nil || syncCheckpointRoot(t.recovery) != nil {
+	if t.sweep() != nil {
 		return errCheckpointCopy
 	}
 	// The no-follow fstatat of the one name in the bound recovery/ again.
