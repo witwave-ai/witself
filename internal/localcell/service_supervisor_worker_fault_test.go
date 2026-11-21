@@ -151,7 +151,7 @@ func serviceWorkerRefusal(t *testing.T, stage string) {
 	switch stage {
 	case "after_repair":
 		v, err := c.Control(ctx, "observe")
-		serviceWorkerCheckControl(t, err, "could not observe the tick after repair")
+		serviceWorkerCheckControl(t, err, func() { t.Fatal("could not observe the tick after repair") })
 		if !v.WorkInFlight {
 			t.Fatal("tick after repair was not in flight")
 		}
@@ -252,7 +252,7 @@ func serviceWorkerObserveDuringRefresh(ctx context.Context, t *testing.T, w *ser
 	reply := w.boundaryCommand(t, "observe")
 	select {
 	case r := <-reply:
-		serviceWorkerCheckControl(t, r.err, "scheduler refused observation during endpoint refresh")
+		serviceWorkerCheckControl(t, r.err, func() { t.Fatal("scheduler refused observation during endpoint refresh") })
 		if r.status.Reason != "service_stop_refused" {
 			t.Fatal("scheduler did not publish the stop refusal during endpoint refresh")
 		}
@@ -270,11 +270,13 @@ func serviceWorkerObserveDuringRefresh(ctx context.Context, t *testing.T, w *ser
 			t.Fatal("independent Windows client was answered during endpoint refresh; the pinned gap has closed")
 		}
 		if !errors.As(err, &refusal) || refusal.step != "endpoint:record" {
-			serviceWorkerCheckControl(t, err, "independent Windows client failed outside the endpoint record during endpoint refresh")
+			serviceWorkerCheckControl(t, err, func() {
+				t.Fatal("independent Windows client failed outside the endpoint record during endpoint refresh")
+			})
 		}
 		return
 	}
-	serviceWorkerCheckControl(t, err, "independent client could not observe during endpoint refresh")
+	serviceWorkerCheckControl(t, err, func() { t.Fatal("independent client could not observe during endpoint refresh") })
 	if !v.WorkInFlight {
 		t.Fatal("independent client missed work in flight during endpoint refresh")
 	}

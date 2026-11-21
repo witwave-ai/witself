@@ -340,17 +340,21 @@ func main() {
 	if err != nil {
 		t.Fatal("cannot set bounded readiness timeout")
 	}
+	failureClass := cell.ObserveStartFailureForTest()
 	started := time.Now()
 	err = startLifecycle(t, cell, root)
 	if err == nil || !strings.Contains(err.Error(), "server") {
+		t.Logf("Lifecycle start class: %s", failureClass(err))
 		t.Fatal("start succeeded without server readiness or omitted the failed component")
 	}
 	component, cause, state, observationFailed, ok := localcell.ReadinessFailureForTest(err)
 	if !ok || component != "server" || cause != "local cell server readiness deadline exceeded" ||
 		state.PID <= 1 || !state.Alive || !state.Matches || observationFailed {
+		t.Logf("Lifecycle start class: %s", failureClass(err))
 		t.Fatal("readiness deadline lost the live matching identity observed before rollback")
 	}
 	if time.Since(started) < time.Second {
+		t.Logf("Lifecycle start class: %s", failureClass(err))
 		t.Fatal("start skipped the bounded readiness wait")
 	}
 	assertStopped(t, cell)

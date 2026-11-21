@@ -3,6 +3,7 @@ package localcell
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"runtime"
 	"sync/atomic"
@@ -10,21 +11,73 @@ import (
 	"time"
 )
 
-func serviceWorkerCheckControl(t *testing.T, err error, message string) {
+func serviceWorkerCheckControl(t *testing.T, err error, fail func()) {
 	t.Helper()
 	if err == nil {
 		return
 	}
-	step, site := "none", "none"
+	kind, step, site := serviceWorkerControlClasses(err)
+	t.Logf("worker control type class=%s", kind)
+	t.Logf("worker control step class=%s", step)
+	t.Logf("worker control site class=%s", site)
+	fail()
+}
+
+func serviceWorkerControlClasses(err error) (kind, step, site string) {
+	// The checker also shows raw annotated lines in proof mode. Classify the
+	// outer type and every refusal step before logging, even in that mode.
+	kind = "unclassified"
+	switch reflect.TypeOf(err) {
+	case reflect.TypeFor[*serviceFailure]():
+		kind = "service_failure"
+	case reflect.TypeFor[*serviceControlRefusal]():
+		kind = "service_control_refusal"
+	case reflect.TypeFor[*serviceControlClientCancellation]():
+		kind = "service_control_client_cancellation"
+	case reflect.TypeOf(ErrServiceControlRefused):
+		kind = "errors_error_string"
+	case reflect.TypeOf(fmt.Errorf("%w", ErrServiceControlRefused)):
+		kind = "fmt_wrap_error"
+	case reflect.TypeOf(context.DeadlineExceeded):
+		kind = "context_deadline_exceeded_error"
+	}
+	step, site = "none", "none"
 	var refusal *serviceControlRefusal
 	if errors.As(err, &refusal) {
-		step = refusal.step
+		step = serviceWorkerRefusalSteps[refusal.step]
+		if step == "" {
+			step = "unclassified"
+		}
 	}
 	var located *serviceFailure
 	if errors.As(err, &located) {
 		site = serviceFailureSite(located.site)
+		if site == "unknown" {
+			site = "unclassified"
+		}
 	}
-	t.Fatalf("%s (type=%T step=%s site=%s)", message, err, step, site)
+	return kind, step, site
+}
+
+var serviceWorkerRefusalSteps = map[string]string{
+	"endpoint:record": "endpoint_record", "endpoint:random": "endpoint_random", "endpoint:host_identity": "endpoint_host_identity",
+	"peer:pid": "peer_pid", "peer:identity": "peer_identity", "peer:sid": "peer_sid",
+	"pipe:name": "pipe_name", "pipe:policy": "pipe_policy", "pipe:event": "pipe_event", "pipe:wait": "pipe_wait",
+	"pipe:io": "pipe_io", "pipe:create": "pipe_create", "pipe:connect": "pipe_connect", "pipe:open": "pipe_open",
+	"host_exit:envelope": "host_exit_envelope", "host_exit:drain": "host_exit_drain",
+	"host_exit:child_tree_unknown": "host_exit_child_tree_unknown", "host_exit:child_tree_live": "host_exit_child_tree_live",
+}
+
+func TestServiceWorkerControlClasses(t *testing.T) {
+	known := serviceFailureAt(serviceEndpointRefused("record"), "endpoint_read")
+	if kind, step, site := serviceWorkerControlClasses(known); kind != "service_failure" || step != "endpoint_record" || site != "endpoint_read" {
+		t.Fatal("worker control lost the endpoint refusal classes")
+	}
+	// Both words are enrolled elsewhere in the package, but neither is valid here.
+	unknown := errors.Join(&serviceFailure{cause: &serviceControlRefusal{step: "running"}, site: "status"})
+	if kind, step, site := serviceWorkerControlClasses(unknown); kind != "unclassified" || step != "unclassified" || site != "unclassified" {
+		t.Fatal("worker control admitted an unclassified error field")
+	}
 }
 
 // On Windows a client that asks while the host publishes its descriptor and its endpoint record is refused at the
@@ -42,7 +95,7 @@ func serviceWorkerSettled(ctx context.Context, t *testing.T, c *Cell) ServiceSta
 		v, err := c.Control(ctx, "observe")
 		gap := serviceWorkerEndpointGap(err)
 		if !gap {
-			serviceWorkerCheckControl(t, err, "could not obtain a settled control observation")
+			serviceWorkerCheckControl(t, err, func() { t.Fatal("could not obtain a settled control observation") })
 			if !v.WorkInFlight {
 				return v
 			}

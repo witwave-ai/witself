@@ -928,6 +928,33 @@ test('class diagnostics enroll the real journal repair format and reject an unkn
   }
 });
 
+test('control and launch classes preserve fixed failures and reject unknown words in proof diagnostics', async () => {
+  const pkg = packages[0];
+  const name = 'TestFixture';
+  for (const [file, why, logs] of [
+    ['service_supervisor_worker_rollback_test.go', 'could not obtain a settled control observation', [
+      ['worker control type class=', 'service_failure'], ['worker control step class=', 'endpoint_record'],
+      ['worker control site class=', 'endpoint_read']]],
+    ...['not-found', 'access-denied', 'sharing-violation', 'timeout', 'other', 'other at=create-process'].map(kind =>
+      ['postgres_launch_windows_test.go', 'direct PostgreSQL fixture did not launch', [['PostgreSQL launch class: ', `step=postgres kind=${kind}`]]]),
+    ['lifecycle_integration_test.go', 'readiness deadline lost the live matching identity observed before rollback', [
+      ['Lifecycle start class: ', 'step=server_ready kind=timeout']]],
+  ]) {
+    for (const invalid of [false, true]) {
+      const location = `    ${file}:12: `;
+      const output = logs.map(([prefix, value]) => prefix + (invalid ? 'unenrolledprivateword' : value));
+      const shown = logs.map(([prefix, value]) => prefix + (invalid ? '(rejected)' : value));
+      const input = stream([event('start', pkg), event('run', pkg, name), event('output', pkg, name,
+        {Output: [...output, why].map(line => location + line + '\r\n').join('')}), event('fail', pkg, name), event('fail', pkg)]);
+      const result = await checkGoTestJSON([input], [name], {diagnose: true});
+      assert.equal(result.reason, failureDiagnostic.trimEnd());
+      assert.deepEqual(result.lines, [`package ${pkg} pass=0 skip=0 fail=1`, `fail ${pkg} ${name}`, `why ${pkg} ${name} :: ${why}`,
+        ...shown.map(line => `class ${pkg} ${name} :: ${line}`),
+        ...[...shown, why].map(line => `diagnose ${pkg} ${name} :: ${location}${line}`)]);
+    }
+  }
+});
+
 const shutdownClassDiagnostics = [
   {
     name: 'TestWindowsShutdownEscalation/idempotent-ack',
