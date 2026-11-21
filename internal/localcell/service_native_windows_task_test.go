@@ -170,8 +170,15 @@ func nativeWindowsTaskManagerLifecycle(t *testing.T, started time.Time, pgbin st
 	closed = nativeServiceEndpointClosureProof(t, primary.root)
 	stage("persisted_read", func(t *testing.T) { read(t) })
 	stage("durable_stop", func(t *testing.T) {
-		if _, err := primary.cell.Control(phase(nativeServiceHostBound), "stop"); err != nil {
-			t.Fatal("cannot durably stop native task children")
+		// A busy host defers a stop. A client that needs the stop done asks again within its own deadline.
+		for ctx := phase(nativeServiceHostBound); ; time.Sleep(10 * time.Millisecond) {
+			_, err := primary.cell.Control(ctx, "stop")
+			if err == nil {
+				break
+			}
+			if !errors.Is(err, errServiceControlDeferred) || ctx.Err() != nil {
+				t.Fatal("cannot durably stop native task children")
+			}
 		}
 		assertStopped(t, primary.cell, phase(nativeServiceHostBound))
 		current, err := primary.cell.ServiceDescriptor()

@@ -586,8 +586,20 @@ func (c *Cell) exitServiceHostForRemoval(ctx context.Context) error {
 	// The live host owns its endpoint revision. Persist intent through its
 	// authenticated stop command so Windows endpoint discovery remains bound
 	// to that owner's descriptor publication, then request host exit.
-	if _, err := c.Control(ctx, "stop"); err != nil {
-		return hostExitRefused("drain")
+	for {
+		_, err := c.Control(ctx, "stop")
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, errServiceControlDeferred) {
+			return hostExitRefused("drain")
+		}
+		// A busy host did not admit the stop. Give its worker time to finish.
+		select {
+		case <-ctx.Done():
+			return hostExitRefused("drain")
+		case <-time.After(10 * time.Millisecond):
+		}
 	}
 	envelope, lease, err := c.newHostExitEnvelope()
 	if err != nil {
