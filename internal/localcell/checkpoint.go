@@ -56,7 +56,8 @@ func (e checkpointStateError) Unwrap() error { return errCheckpointState }
 
 // CheckpointFailure is safe to render: Class and Reason contain only closed
 // constants. A nil failure has the zero value. CleanupIncomplete means that
-// the failed operation could not remove its own witness-less directory.
+// the failed create did not attempt cleanup of its own witness-less directory
+// or could not confirm its removal.
 type CheckpointFailure struct {
 	Class             string
 	Reason            string
@@ -141,10 +142,25 @@ var errCheckpointAllocation = errors.New("cannot allocate local cell checkpoint 
 var errCheckpointCleanup = errors.New("local cell checkpoint failed; cleanup incomplete")
 
 // checkpointCleanupError: the own witness-less directory could not be removed.
-type checkpointCleanupError struct{ cause error }
+type checkpointCleanupError struct {
+	cause         error
+	keepCauseText bool
+}
 
-func (e checkpointCleanupError) Error() string { return errCheckpointCleanup.Error() }
+func (e checkpointCleanupError) Error() string {
+	if e.keepCauseText {
+		return e.cause.Error()
+	}
+	return errCheckpointCleanup.Error()
+}
 func (e checkpointCleanupError) Unwrap() error { return e.cause }
+
+func checkpointFailureWithCleanup(err error, incomplete bool) error {
+	if incomplete {
+		return checkpointCleanupError{cause: err, keepCauseText: true}
+	}
+	return err
+}
 
 // checkpointOperations replaces Checkpoint's external boundaries in tests.
 type checkpointOperations struct {
@@ -401,7 +417,7 @@ func (c *Cell) checkpointLocked(ctx context.Context, options CheckpointOptions) 
 		// A crash leaves the operation open and discards nothing; Repair or the next
 		// admitted Checkpoint or DeleteCheckpoint closes it.
 		if err := c.step(ctx, "checkpoint", step.name, step.run); errors.Is(err, errInterrupted) {
-			return err
+			return checkpointFailureWithCleanup(err, step.name == "copy" || step.name == "inventory")
 		} else if err != nil {
 			discarded := !created || discard() == nil
 			return c.closeCheckpointFailure(ctx, "checkpoint", err, discarded, ops.beforeClose)
@@ -913,10 +929,10 @@ func (c *Cell) closeCheckpointFailure(ctx context.Context, operation string, ste
 	}
 	progress, err := c.readJournal(ctx)
 	if err != nil || progress.tornTail || progress.pending == nil || progress.pending.Operation != operation {
-		return stepErr
+		return checkpointFailureWithCleanup(stepErr, !discarded)
 	}
 	if err := c.journal(ctx, operation, "operation", "done"); err != nil {
-		return err
+		return checkpointFailureWithCleanup(err, !discarded)
 	}
 	var cause fixedCause
 	if discarded {
