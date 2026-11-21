@@ -410,7 +410,7 @@ var locklessCallees = map[string][]string{
 		"(*localcell.Cell).validateRoot", "(*localcell.Cell).recoveryDir", "param admit"},
 	"admitCheckpointDry": {"errors.Is", "(*localcell.Cell).checkpointOps", "(*localcell.Cell).admitCheckpoint"},
 	// The target's reads moved onto the tree (LC-CKPT-WALK-1C3B), whose target method TestCheckpointSourceContract pins on every system.
-	"admitDeleteCheckpoint": {"context.Background", "localcell.checkpointLeftover", "(*localcell.Cell).readJournal", "(*localcell.Cell).checkpointCold",
+	"admitDeleteCheckpoint": {"localcell.checkpointLeftover", "(*localcell.Cell).readJournal", "(*localcell.Cell).checkpointCold",
 		"(*localcell.Cell).validateRecovery", "(*localcell.Cell).checkpointDir", "(*regexp.Regexp).MatchString", "(*localcell.Cell).checkpointTree",
 		"(*localcell.checkpointTree).target", "(*localcell.checkpointTree).close"},
 }
