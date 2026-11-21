@@ -408,7 +408,7 @@ func (t *checkpointTree) target() error {
 
 // adopt holds recovery/ (bound) and records the identity of the directory at
 // the checkpoint's name, opened without following it and on recovery/'s device,
-// keeping it open until close. A link, file, FIFO or other
+// its descriptor duplicated and kept until close: a link, file, FIFO or other
 // object there refuses before anything is journaled.
 func (t *checkpointTree) adopt() error {
 	t.c.checkpointStage("hold")
