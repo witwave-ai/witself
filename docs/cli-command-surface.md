@@ -6337,10 +6337,25 @@ directory the one deleted; a parent of the cell root replaced by a link before
 the hold moves the whole deletion into the linked tree, still limited to a
 directory of that exact name.
 
-On Linux and macOS, `create` writes its copy by pathname: a same-user process
-renaming a directory inside the cell during the copy can make the private copy,
-password files included, land outside the cell while `create` reports success.
-Such a process can already read those files. There, a FIFO or a link put at
+On Linux and macOS, `create` copies below `recovery/` without following a link
+at any directory there and without leaving its device: a link, file or other
+object a same-user process puts at a directory the copy made, or at a name it
+is about to publish, fails the `create` with `local_checkpoint_copy_failed`
+before anything is written through it, and one at the checkpoint's own name is
+left in place with `cleanup_incomplete: true`. Three windows of a single call
+remain: an empty directory put at the checkpoint's name during a failed
+`create`'s removal is removed instead; anything but a directory put at a name
+between a publication's check and its rename is replaced, never followed; and a
+directory moved onto a name in the instant the copy makes it is taken for the
+copy's own, so a failed `create` removes it with its content. Below
+`recovery/`, a mount of the same file system is not detected (only a different
+device is), and making one needs privileges the cell's user does not have; a
+mount at `recovery/` itself is not detected, whatever its device. It still
+writes its inventory and witness by pathname: a same-user process renaming
+`recovery/` or the checkpoint directory out of the cell after the copy can make
+the private copy, password files included, end up outside the cell while
+`create` reports success. Such a process can already read those files.
+There, a FIFO or a link put at
 `journal/operations.jsonl` after the command's checks is refused at once, with
 nothing written to it. A FIFO
 put at the database directory `pg/`, or at a directory the command syncs after

@@ -27,11 +27,20 @@ var (
 		"privateBeneathSameDevice(uint64(self.Dev), uint64(stat.Dev))": 1, "dir.Sync()": 1}
 	privateBeneathConstants = strings.Fields("AT_REMOVEDIR AT_SYMLINK_NOFOLLOW EBADF EEXIST EINVAL ENOENT ENOTDIR EXDEV F_DUPFD_CLOEXEC O_CLOEXEC O_CREAT O_DIRECTORY O_EXCL O_NOCTTY O_NOFOLLOW O_NONBLOCK O_RDONLY O_RDWR S_IFDIR S_IFIFO S_IFLNK S_IFMT S_IFREG Stat_t")
 	privateBeneathPathname  = strings.Fields("os.Open os.OpenFile os.Lstat os.Stat os.Mkdir os.MkdirAll os.Rename os.Remove os.RemoveAll os.ReadDir os.Create os.CreateTemp os.Chmod os.OpenRoot unix.Fsync")
+	// The walk's declarations the copy's tree (checkpoint_tree_unix.go) may name, by owning declaration (the type
+	// checkpointTree and its constructor share one) and count (N5 of LC-CKPT-WALK-1BR); anything else breaks a key.
+	privateBeneathTreeNames = map[string]int{"checkpointTree:privateBeneathID": 2, "want:privateBeneathID": 1, "lstat:privateBeneathLstat": 1,
+		"mkdir:privateBeneathMkdir": 1, "mkdir:privateBeneathSync": 1, "mkdir:privateBeneathID": 1, "createTemp:privateBeneathCreateTemp": 1,
+		"publish:privateBeneathPublish": 1, "sync:privateBeneathDirectory": 1, "sync:privateBeneathID": 1, "sync:privateBeneathSync": 1,
+		"discard:privateBeneathLstat": 3, "discard:privateBeneathIdentity": 1, "discard:privateBeneathDirectory": 1, "discard:privateBeneathID": 1,
+		"discard:privateBeneathRemoveBelow": 1, "checkpointTreeRemoveDirectory:privateBeneathID": 1, "checkpointTreeRemoveDirectory:privateBeneathAt": 1,
+		"checkpointTreeRemoveDirectory:privateBeneathIdentity": 1, "checkpointTreeRemoveDirectory:errPrivateBeneathMoved": 1}
 )
 
 // privateBeneathContract returns the keys sources break, sorted: the walk file's build line, imports, calls, constants,
-// pathname calls and os uses (root.Open("."), a called os.NewFile, no other root method or os name), and any other
-// non-test file naming privateBeneath... or errPrivateBeneath... (R7).
+// pathname calls and os uses (root.Open("."), a called os.NewFile, no other root method or os name), any other
+// non-test file but the copy's tree naming privateBeneath... or errPrivateBeneath... (R7), and the tree naming exactly
+// privateBeneathTreeNames.
 func privateBeneathContract(sources map[string]string) []string {
 	const walk = "private_beneath_unix.go"
 	keys, calls, texts, roots, called, imports := map[string]bool{}, map[string]int{}, map[string]int{}, map[string]bool{}, map[ast.Expr]string{}, []string{}
@@ -73,17 +82,35 @@ func privateBeneathContract(sources map[string]string) []string {
 	for _, text := range slices.Concat(slices.Collect(maps.Keys(calls)), slices.Collect(maps.Keys(privateBeneathCalls))) {
 		keys["private_beneath_call:"+text] = keys["private_beneath_call:"+text] || texts[text] != privateBeneathCalls[text]
 	}
+	tree := map[string]int{}
 	for name, source := range sources {
 		if name == walk || !strings.Contains(source, "rivateBeneath") {
 			continue // a file that cannot name the walk's declarations is not parsed
 		}
 		other, err := parser.ParseFile(token.NewFileSet(), name, source, parser.SkipObjectResolution)
-		for node := range ast.Preorder(other) {
-			if identifier, ok := node.(*ast.Ident); ok && (strings.HasPrefix(identifier.Name, "privateBeneath") || strings.HasPrefix(identifier.Name, "errPrivateBeneath")) {
-				keys["private_beneath_reference:"+name+":"+identifier.Name] = true
+		for _, declaration := range other.Decls {
+			owner := ""
+			if fn, ok := declaration.(*ast.FuncDecl); ok {
+				owner = fn.Name.Name
+			} else if group, ok := declaration.(*ast.GenDecl); ok && len(group.Specs) > 0 {
+				if spec, ok := group.Specs[0].(*ast.TypeSpec); ok {
+					owner = spec.Name.Name
+				}
+			}
+			for node := range ast.Preorder(declaration) {
+				if identifier, ok := node.(*ast.Ident); !ok || !strings.HasPrefix(identifier.Name, "privateBeneath") && !strings.HasPrefix(identifier.Name, "errPrivateBeneath") {
+					continue
+				} else if name == "checkpoint_tree_unix.go" {
+					tree[owner+":"+identifier.Name]++
+				} else {
+					keys["private_beneath_reference:"+name+":"+identifier.Name] = true
+				}
 			}
 		}
 		keys["private_beneath_parse:"+name] = err != nil
+	}
+	for _, name := range slices.Concat(slices.Collect(maps.Keys(tree)), slices.Collect(maps.Keys(privateBeneathTreeNames))) {
+		keys["private_beneath_tree:"+name] = tree[name] != privateBeneathTreeNames[name]
 	}
 	maps.DeleteFunc(keys, func(_ string, failed bool) bool { return !failed })
 	return slices.Sorted(maps.Keys(keys))
@@ -106,9 +133,14 @@ func TestPrivateBeneathSourceContract(t *testing.T) {
 			[]string{"private_beneath_call:dir.Sync()", "private_beneath_pathname:unix.Fsync"}},
 		{"reference_elsewhere", "checkpoint.go", [][2]string{{"\nfunc ClassifyCheckpointFailure(", "\nfunc zz() { _ = privateBeneathAt }\n\nfunc ClassifyCheckpointFailure("}},
 			[]string{"private_beneath_reference:checkpoint.go:privateBeneathAt"}},
+		{"reference_windows_tree", "checkpoint_tree_windows.go", [][2]string{{"\nfunc (t *checkpointTree) close() {}\n", "\nfunc (t *checkpointTree) close() { _ = privateBeneathAt }\n"}},
+			[]string{"private_beneath_reference:checkpoint_tree_windows.go:privateBeneathAt"}},
 		{"import_added", walk, [][2]string{{"\t\"errors\"\n", "\t\"errors\"\n\t\"path/filepath\"\n"}, {"\nfunc privateBeneathPart(", "\nvar _ = filepath.Base\n\nfunc privateBeneathPart("}},
 			[]string{"private_beneath_import:path/filepath", "private_beneath_pathname:filepath.Base"}},
 		{"unix_constant", walk, [][2]string{{"\tdir := int(held.Fd())\n", "\tdir := unix.AT_FDCWD\n"}}, []string{"private_beneath_call:unix.AT_FDCWD"}},
+		{"tree_remove_named", "checkpoint_tree_unix.go", [][2]string{{"\tt.c.checkpointStage(\"sweep\")\n", "\tt.c.checkpointStage(\"sweep\")\n\t_ = privateBeneathRemove\n"}},
+			[]string{"private_beneath_tree:discard:privateBeneathRemove"}},
+		{"tree_parent_unsynced", "checkpoint_tree_unix.go", [][2]string{{"func() error { return privateBeneathSync(fd) })", "func() error { return nil })"}}, []string{"private_beneath_tree:mkdir:privateBeneathSync"}},
 		{"root_method", walk, [][2]string{{"\tparts := strings.Split(name, \"/\")\n", "\tparts := strings.Split(name, \"/\")\n\t_ = root.Mkdir\n"}}, []string{"private_beneath_os:root.Mkdir"}},
 	} {
 		t.Run(row.name, func(t *testing.T) {

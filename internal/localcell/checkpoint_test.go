@@ -1088,7 +1088,7 @@ func TestCheckpointNameSupported(t *testing.T) {
 // directory is gone (MX5); the unseal syncs the directory once the witness is
 // gone and before anything else is (MX4), and a failed unseal sync is returned.
 func TestCheckpointDirectorySyncOrder(t *testing.T) {
-	if reflect.ValueOf(syncCheckpointDirectory).Pointer() != reflect.ValueOf(syncDirectory).Pointer() ||
+	if calls := 0; syncCheckpointTreeDirectory("", func() error { calls++; return nil }) != nil || calls != 1 ||
 		reflect.ValueOf(syncCheckpointRoot).Pointer() != reflect.ValueOf(syncRootDirectory).Pointer() {
 		t.Fatal("checkpoint directory sync no longer defaults to syncDirectory")
 	}
@@ -1098,9 +1098,9 @@ func TestCheckpointDirectorySyncOrder(t *testing.T) {
 	var seams []string
 	fixture := func(t *testing.T, fail *string, probe func(string) string) (*retainedFixture, *checkpointRecorder, *[]string) {
 		f, r := checkpointFixture(t, "legacy", false)
-		dir, synced, original, originalRoot := f.cell.path("recovery", target), &[]string{}, syncCheckpointDirectory, syncCheckpointRoot
+		dir, synced, original, originalRoot := f.cell.path("recovery", target), &[]string{}, syncCheckpointTreeDirectory, syncCheckpointRoot
 		r.nextID, seams = func() (string, error) { return target, nil }, nil
-		t.Cleanup(func() { syncCheckpointDirectory, syncCheckpointRoot = original, originalRoot })
+		t.Cleanup(func() { syncCheckpointTreeDirectory, syncCheckpointRoot = original, originalRoot })
 		record := func(seam, name string, sync func() error) error {
 			rel, err := filepath.Rel(f.cell.recoveryDir(), name)
 			if *synced, seams = append(*synced, filepath.ToSlash(rel)+probe(dir)), append(seams, seam+filepath.ToSlash(rel)); err != nil || filepath.ToSlash(rel) == *fail {
@@ -1108,7 +1108,9 @@ func TestCheckpointDirectorySyncOrder(t *testing.T) {
 			}
 			return sync()
 		}
-		syncCheckpointDirectory = func(name string) error { return record("path:", name, func() error { return original(name) }) }
+		syncCheckpointTreeDirectory = func(name string, sync func() error) error {
+			return record("path:", filepath.Join(f.cell.recoveryDir(), filepath.FromSlash(name)), func() error { return original(name, sync) })
+		}
 		syncCheckpointRoot = func(held *os.Root) error {
 			return record("root:", filepath.Clean(held.Name()), func() error { return originalRoot(held) })
 		}

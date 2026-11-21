@@ -90,8 +90,8 @@ func init() {
 				t.Fatal("a held deletion removed its target through a moved recovery directory")
 			}
 		})
-		// The failed create's name a link, its directory moved aside: a dangling
-		// link is removed itself, one escaping recovery/ is left and incomplete.
+		// The failed create's name a link, its directory moved aside: any link,
+		// dangling or escaping recovery/, is left and incomplete (OQ-D).
 		for name, target := range map[string]string{"discard_dangling_link": "missing", "discard_escaping_link": "/"} {
 			t.Run(name, func(t *testing.T) {
 				kept := heldTrees{}
@@ -102,7 +102,7 @@ func init() {
 						drillRootLink(t, c.path("recovery", heldTarget), target)
 					})
 				})
-				if _, err := os.Lstat(c.path("recovery", heldTarget)); failure.CleanupIncomplete == (target == "missing") || errors.Is(err, os.ErrNotExist) != (target == "missing") {
+				if _, err := os.Lstat(c.path("recovery", heldTarget)); !failure.CleanupIncomplete || err != nil {
 					t.Fatal("a failed checkpoint mishandled a link at its name")
 				}
 				heldSame(t, kept)

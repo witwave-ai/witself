@@ -27,7 +27,7 @@ github.com/witwave-ai/witself/internal/runtimeconfig.WindowsPrivatePostgresOpen 
 github.com/witwave-ai/witself/internal/runtimeconfig.WindowsPrivateOpenRoot github.com/witwave-ai/witself/internal/runtimeconfig.OpenSpoolRoot
 openPrivateFile openPrivateReader openPrivateWriter openPlainReader openPostgresReader readPrivateFile readPostgresFile createPrivateTemp
 openLockFile openRegular openRegularBy openRegularWriter readRegular openServiceRecord readWindowsTaskRecord readJSON readMaintenanceFenceJSON
-syncDirectory (*Cell).openCheckpointSource (*Cell).holdCheckpoint
+syncDirectory (*Cell).openCheckpointSource (*Cell).holdCheckpoint (*Cell).holdRecovery
 (reflect.Value).Call (reflect.Value).CallSlice (reflect.Value).Method (reflect.Value).MethodByName (reflect.Type).Method (reflect.Type).MethodByName
 unsafe.Pointer unsafe.Add unsafe.Slice unsafe.String unsafe.StringData unsafe.SliceData
 golang.org/x/sys/windows.NewLazySystemDLL golang.org/x/sys/windows.NewLazyDLL golang.org/x/sys/windows.LoadDLL golang.org/x/sys/windows.MustLoadDLL
@@ -93,11 +93,11 @@ checkpoint.go
 	(*Cell).DeleteCheckpoint (*Cell).deleteCheckpointLocked
 	(*Cell).admitCheckpoint openPostgresReader readRegular
 	(*Cell).admitDeleteCheckpoint os.ReadDir privateDir
-	(*Cell).checkpointLocked (*Cell).copyCheckpoint (*Cell).discardOwnCheckpoint (*Cell).inventoryCheckpoint (*Cell).journal (*Cell).witnessCheckpoint
-	(*Cell).checkpointOps openPrivateReader x3 publishPrivateFile x3
+	(*Cell).checkpointLocked (*Cell).copyCheckpoint (*Cell).inventoryCheckpoint (*Cell).journal (*Cell).witnessCheckpoint
+	(*Cell).checkpointOps openPrivateReader x3
 	(*Cell).closeCheckpointFailure (*Cell).journal
 	(*Cell).closeCheckpointLeftover (*Cell).journal
-	(*Cell).copyCheckpoint (*Cell).openCheckpointSource (*os.File).Write createPrivateTemp privateDir x3 publishPrivateFile syncDirectory x2
+	(*Cell).copyCheckpoint (*Cell).openCheckpointSource (*os.File).Write privateDir
 	(*Cell).deleteCheckpointLocked (*Cell).holdCheckpoint (*Cell).journal (*Cell).removeCheckpointHeld (*Cell).unsealCheckpointHeld privateDir
 	(*Cell).inventoryCheckpoint openPrivateReader path/filepath.WalkDir writeAtomicBytes
 	(*Cell).listCheckpoints os.ReadDir
@@ -107,16 +107,31 @@ checkpoint.go
 	(*Cell).validateRecovery os.ReadDir path/filepath.WalkDir privateDir
 	(*Cell).witnessCheckpoint (*Cell).openCheckpointSource writeAtomic
 	checkpointComplete openRegular
-	syncCheckpointDirectory syncDirectory
 checkpoint_other.go
 	import context os
 checkpoint_root.go
 	import errors io/fs os path/filepath runtime
-	(*Cell).discardOwnCheckpoint (*Cell).holdCheckpoint (*Cell).removeCheckpointHeld (*os.Root).Remove
-	(*Cell).holdCheckpoint (*os.Root).OpenRoot os.OpenRoot
+	(*Cell).holdCheckpoint (*Cell).holdRecovery (*os.Root).OpenRoot
+	(*Cell).holdRecovery os.OpenRoot
 	(*Cell).removeCheckpointHeld (*os.Root).Open (*os.Root).Remove (*os.Root).RemoveAll
 	(*Cell).unsealCheckpointHeld (*os.Root).Remove
 	syncRootDirectory (*os.Root).Open
+checkpoint_root_windows.go
+	import errors io/fs
+	(*Cell).discardOwnCheckpoint (*Cell).holdCheckpoint (*Cell).removeCheckpointHeld (*os.Root).Remove
+checkpoint_tree_other.go
+	import io/fs os
+checkpoint_tree_unix.go
+	import errors golang.org/x/sys/unix io/fs os path path/filepath
+	(*checkpointTree).hold (*Cell).holdRecovery
+	checkpointTreeRemoveDirectory golang.org/x/sys/unix.Unlinkat
+checkpoint_tree_windows.go
+	import io/fs os path path/filepath
+	(*checkpointTree).createTemp createPrivateTemp
+	(*checkpointTree).discard (*Cell).discardOwnCheckpoint
+	(*checkpointTree).mkdir privateDir
+	(*checkpointTree).publish publishPrivateFile
+	(*checkpointTree).sync syncDirectory
 checkpoint_unix.go
 	import context errors io/fs os path/filepath reflect syscall
 	(*Cell).openCheckpointSource (*os.Root).OpenFile os.OpenRoot

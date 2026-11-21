@@ -162,7 +162,7 @@ func TestAtomicPublicationSharedRetrySourceContract(t *testing.T) {
 		{"checkpoint_second_engine_caller", "checkpoint.go", "func checkpointDigits(", "func checkpointUnexpectedRetry() { _ = retryPublish }\nfunc checkpointDigits("},
 		{"checkpoint_nested_bytes", "checkpoint.go", "return attempt()", `return writeAtomicBytes("", nil, nil)`},
 		{"checkpoint_nested_atomic", "checkpoint.go", "return attempt()", "_, err := publishAtomic(attempt, leasePublishHooks{}); return err"},
-		{"checkpoint_recopies", "checkpoint.go", "return ops.publish(temporary.Name(), target)", "_, _ = io.Copy(io.Discard, nil); return ops.publish(temporary.Name(), target)"},
+		{"checkpoint_recopies", "checkpoint.go", "return tree.publish(pending, entry.path)", "_, _ = io.Copy(io.Discard, nil); return tree.publish(pending, entry.path)"},
 		{"verifier_retry_bypass", "checkpoint_verify.go", "err := retryCheckpointStep(ctx, budget, ops, func() error {", "err := func(_ context.Context, _ *checkpointRetryBudget, _ checkpointOperations, attempt func() error) error { return attempt() }(ctx, budget, ops, func() error {"},
 		{"verifier_second_retry_owner", "checkpoint_verify.go", "func checkpointVerifyReadError(", "func checkpointVerifyUnexpectedRetry() { _ = retryCheckpointStep }\nfunc checkpointVerifyReadError("},
 		{"verifier_open_bypass", "checkpoint_verify.go", "file, err := ops.open(name)", "file, err := openPrivateFile(name, os.O_RDONLY, 0)"},
