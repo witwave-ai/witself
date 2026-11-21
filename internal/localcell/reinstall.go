@@ -120,7 +120,7 @@ func (c *Cell) admitReinstall(ctx context.Context, options ReinstallOptions) (*M
 	if options.InstallationID == "" {
 		return nil, errReinstallIdentity
 	}
-	m, err := readManifest(c.cfg.Root)
+	m, err := readManifest(ctx, c.cfg.Root)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, errReinstallState
 	}
@@ -141,7 +141,7 @@ func (c *Cell) admitReinstall(ctx context.Context, options ReinstallOptions) (*M
 		return nil, err
 	}
 	for _, component := range []string{"postgres", "server", "worker"} {
-		state, err := c.processState(component)
+		state, err := c.processState(ctx, component)
 		if err != nil {
 			return nil, err
 		}

@@ -87,7 +87,7 @@ func (c *Cell) Install(ctx context.Context, options InstallOptions) error {
 		return err
 	}
 	defer func() { _ = lock.Close() }()
-	if _, err := readManifest(c.cfg.Root); !errors.Is(err, os.ErrNotExist) {
+	if _, err := readManifest(context.Background(), c.cfg.Root); !errors.Is(err, os.ErrNotExist) {
 		if err != nil {
 			return err
 		}
@@ -240,7 +240,7 @@ func (c *Cell) Start(ctx context.Context) error {
 		return err
 	}
 	defer func() { _ = lock.Close() }()
-	m, err := readManifest(c.cfg.Root)
+	m, err := readManifest(context.Background(), c.cfg.Root)
 	if err != nil {
 		return err
 	}
@@ -272,7 +272,7 @@ func (c *Cell) Start(ctx context.Context) error {
 	}
 	before := map[string]bool{}
 	for _, component := range []string{"postgres", "server", "worker"} {
-		state, err := c.processState(component)
+		state, err := c.processState(context.Background(), component)
 		if err != nil {
 			return err
 		}
@@ -303,7 +303,7 @@ func (c *Cell) Start(ctx context.Context) error {
 			if err := c.verifyAll(); err != nil {
 				return err
 			}
-			state, err := c.processState("postgres")
+			state, err := c.processState(context.Background(), "postgres")
 			if err != nil {
 				return err
 			}
@@ -396,7 +396,7 @@ func (c *Cell) stopWithServiceFence(ctx context.Context, fence bool) error {
 			return err
 		}
 	}
-	m, err := readManifest(c.cfg.Root)
+	m, err := readManifest(context.Background(), c.cfg.Root)
 	if err != nil {
 		return err
 	}
@@ -428,7 +428,7 @@ func (c *Cell) Repair(ctx context.Context) error {
 		return err
 	}
 	defer func() { _ = lock.Close() }()
-	m, manifestErr := readManifest(c.cfg.Root)
+	m, manifestErr := readManifest(context.Background(), c.cfg.Root)
 	if manifestErr != nil && !errors.Is(manifestErr, os.ErrNotExist) {
 		return manifestErr
 	}
@@ -540,7 +540,7 @@ func (c *Cell) Remove(ctx context.Context, options RemoveOptions) error {
 	if err := c.setServiceDesiredStateLocked("stopped"); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	m, err := readManifest(c.cfg.Root)
+	m, err := readManifest(context.Background(), c.cfg.Root)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
@@ -635,7 +635,7 @@ func (c *Cell) Inspect(ctx context.Context) (Inspection, error) {
 	} else if lock != nil {
 		defer func() { _ = lock.Close() }()
 	}
-	result.Manifest, err = readManifest(c.cfg.Root)
+	result.Manifest, err = readManifest(ctx, c.cfg.Root)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return result, err
 	}
@@ -679,7 +679,7 @@ func (c *Cell) Inspect(ctx context.Context) (Inspection, error) {
 		return result, err
 	}
 	for _, component := range []string{"postgres", "server", "worker"} {
-		state, err := c.processState(component)
+		state, err := c.processState(ctx, component)
 		if err != nil {
 			return result, err
 		}
@@ -730,7 +730,7 @@ func (c *Cell) Status(ctx context.Context) (Status, error) {
 		ready *bool
 	}{{"server", &result.ServerReady}, {"worker", &result.WorkerReady}} {
 		if *component.ready {
-			current, err := c.processState(component.name)
+			current, err := c.processState(context.Background(), component.name)
 			previous := inspection.Processes[component.name]
 			*component.ready = err == nil && current.Alive && current.Matches && current.PID == previous.PID
 			if err == nil {
@@ -741,16 +741,16 @@ func (c *Cell) Status(ctx context.Context) (Status, error) {
 	return result, nil
 }
 
-func (c *Cell) processState(component string) (ProcessState, error) {
-	state, _, err := c.processStateWithRecord(component)
+func (c *Cell) processState(ctx context.Context, component string) (ProcessState, error) {
+	state, _, err := c.processStateWithRecord(ctx, component)
 	return state, err
 }
 
 // Return the exact record used by the observation. Readiness retains this
 // fence even if rollback or another actor later changes the durable record.
-func (c *Cell) processStateWithRecord(component string) (ProcessState, ProcessRecord, error) {
+func (c *Cell) processStateWithRecord(ctx context.Context, component string) (ProcessState, ProcessRecord, error) {
 	var record ProcessRecord
-	if err := readJSON(c.path("run", component+".json"), &record); err != nil {
+	if err := readJSON(ctx, c.path("run", component+".json"), &record); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return ProcessState{}, record, nil
 		}
@@ -799,7 +799,7 @@ func (c *Cell) verifyAll() error {
 		return err
 	}
 	for _, component := range []string{"postgres", "server", "worker"} {
-		state, err := c.processState(component)
+		state, err := c.processState(context.Background(), component)
 		if err != nil {
 			return err
 		}
@@ -829,7 +829,7 @@ func (c *Cell) recoverPostgresRecord() error {
 	if err != nil || pid == 0 {
 		return err
 	}
-	state, err := c.processState("postgres")
+	state, err := c.processState(context.Background(), "postgres")
 	if err != nil {
 		return err
 	}
@@ -901,7 +901,7 @@ func (c *Cell) stopSelected(ctx context.Context, keep map[string]bool) error {
 		return err
 	}
 	return drainServiceTree(ctx, keep, func(ctx context.Context, component string) serviceStopOutcome {
-		state, err := c.processState(component)
+		state, err := c.processState(context.Background(), component)
 		if err != nil || (state.Alive && !state.Matches) {
 			return serviceStopOutcome{Kind: serviceStopRefused, Component: component, Detail: "shutdown:incarnation"}
 		}
@@ -913,7 +913,7 @@ func (c *Cell) stopSelected(ctx context.Context, keep map[string]bool) error {
 		if err := c.verifyAll(); err != nil {
 			return err
 		}
-		state, err := c.processState("postgres")
+		state, err := c.processState(context.Background(), "postgres")
 		if err != nil || !state.Alive {
 			return err
 		}
@@ -932,7 +932,7 @@ func (c *Cell) stopSelectedLegacy(ctx context.Context, keep map[string]bool) err
 		if keep[component] {
 			continue
 		}
-		state, err := c.processState(component)
+		state, err := c.processState(context.Background(), component)
 		if err != nil {
 			return err
 		}
@@ -946,7 +946,7 @@ func (c *Cell) stopSelectedLegacy(ctx context.Context, keep map[string]bool) err
 			return err
 		}
 		for {
-			current, err := c.processState(component)
+			current, err := c.processState(context.Background(), component)
 			if err != nil {
 				return err
 			}
@@ -966,7 +966,7 @@ func (c *Cell) stopSelectedLegacy(ctx context.Context, keep map[string]bool) err
 	if err := c.verifyAll(); err != nil {
 		return err
 	}
-	state, err := c.processState("postgres")
+	state, err := c.processState(context.Background(), "postgres")
 	if err != nil || !state.Alive {
 		return err
 	}

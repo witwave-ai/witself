@@ -92,7 +92,7 @@ func checkpointFixture(t *testing.T, layout string, retained bool) (*retainedFix
 	if retained && c.Remove(t.Context(), RemoveOptions{}) != nil {
 		t.Fatal("cannot retain checkpoint fixture")
 	}
-	current, err := readManifest(c.cfg.Root)
+	current, err := readManifest(t.Context(), c.cfg.Root)
 	if err != nil {
 		t.Fatal("cannot read checkpoint fixture manifest")
 	}

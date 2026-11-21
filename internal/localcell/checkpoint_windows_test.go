@@ -215,7 +215,7 @@ func TestWindowsCheckpointPrivateCopy(t *testing.T) {
 		t.Fatal("a PGDATA junction was not refused before the checkpoint admission")
 	}
 	checkpointUnchanged(t, c, snapshot)
-	m, err := readManifest(c.cfg.Root)
+	m, err := readManifest(t.Context(), c.cfg.Root)
 	if err != nil {
 		t.Fatal("cannot read the PGDATA checkpoint fixture manifest")
 	}

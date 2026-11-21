@@ -133,7 +133,7 @@ func TestServiceRunRestartAfterIdleShutdown(t *testing.T) {
 		}
 		var leaseRecord serviceLeaseRecord
 		identity, alive, identityErr := processIdentity(os.Getpid())
-		if readJSON(c.path("service", "lease.json"), &leaseRecord) != nil || identityErr != nil || !alive || leaseRecord.Version != 1 || leaseRecord.PID != os.Getpid() || leaseRecord.StartIdentity != identity || leaseRecord.BootID != boot || leaseRecord.Owner != d.UID || leaseRecord.InstallationID != d.InstallationID {
+		if readJSON(t.Context(), c.path("service", "lease.json"), &leaseRecord) != nil || identityErr != nil || !alive || leaseRecord.Version != 1 || leaseRecord.PID != os.Getpid() || leaseRecord.StartIdentity != identity || leaseRecord.BootID != boot || leaseRecord.Owner != d.UID || leaseRecord.InstallationID != d.InstallationID {
 			t.Fatal("restart host did not publish its fenced lease record")
 		}
 		currentLease, leaseStatErr := os.Stat(c.path("service", "lease.json"))
@@ -197,14 +197,14 @@ func serviceRestartStoppedArtifacts(t *testing.T, c *Cell, d ServiceDescriptor, 
 		}
 	}
 	var bootRecord serviceBootRecord
-	if readJSON(c.path("service", "boot.json"), &bootRecord) != nil || bootRecord.InstallationID != d.InstallationID || bootRecord.BootID != boot {
+	if readJSON(t.Context(), c.path("service", "boot.json"), &bootRecord) != nil || bootRecord.InstallationID != d.InstallationID || bootRecord.BootID != boot {
 		t.Fatal("restart fixture shutdown lost the same-boot installation fence")
 	}
 	progress, err := c.readJournal(context.Background())
 	if err != nil || progress.pending != nil || progress.tornTail || progress.durableBytes <= previousJournal {
 		t.Fatal("restart fixture shutdown did not retain a completed advancing journal")
 	}
-	manifest, err := readManifest(c.cfg.Root)
+	manifest, err := readManifest(t.Context(), c.cfg.Root)
 	if err != nil || !manifest.Installed || manifest.LastOperation != "stop" {
 		t.Fatal("restart fixture shutdown did not finish the production stop operation")
 	}

@@ -53,7 +53,7 @@ func installerChildArgumentsPrivate(root string) bool {
 	if err != nil {
 		return false
 	}
-	m, err := readManifest(root)
+	m, err := readManifest(context.Background(), root)
 	if err != nil || m.PrincipalLayoutVersion != 1 {
 		return false
 	}
@@ -98,7 +98,7 @@ func assertInstallerChildArguments(t *testing.T, c *Cell, m *Manifest, component
 		t.Fatal("selected argument fixture child could not start")
 	}
 	var record ProcessRecord
-	if readJSON(c.path("run", component+".json"), &record) != nil {
+	if readJSON(t.Context(), c.path("run", component+".json"), &record) != nil {
 		t.Fatal("selected argument fixture did not publish its process fence")
 	}
 	t.Cleanup(func() {
@@ -250,7 +250,7 @@ func TestChildrenReceiveOnlyAllowlistedEnvironmentNames(t *testing.T) {
 						t.Fatal(err)
 					}
 					var record ProcessRecord
-					if err := readJSON(c.path("run", component+".json"), &record); err != nil {
+					if err := readJSON(t.Context(), c.path("run", component+".json"), &record); err != nil {
 						t.Fatal(err)
 					}
 					t.Cleanup(func() {
@@ -302,7 +302,7 @@ func TestInstallerPrincipalsChildEnvironmentNames(t *testing.T) {
 				t.Fatal("selected environment child could not start")
 			}
 			var record ProcessRecord
-			if readJSON(c.path("run", component+".json"), &record) != nil {
+			if readJSON(t.Context(), c.path("run", component+".json"), &record) != nil {
 				t.Fatal("selected environment child did not publish its process fence")
 			}
 			t.Cleanup(func() {

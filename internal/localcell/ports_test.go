@@ -16,7 +16,7 @@ func TestPortsReallocationPublication(t *testing.T) {
 		for _, outcome := range []string{"reallocated", "exhausted"} {
 			t.Run(component+"/"+outcome, func(t *testing.T) {
 				c, m := unitCell(t)
-				before, err := readManifest(c.cfg.Root)
+				before, err := readManifest(t.Context(), c.cfg.Root)
 				if err != nil {
 					t.Fatal("cannot read initial valid reallocation manifest")
 				}
@@ -78,7 +78,7 @@ func TestPortsReallocationPublication(t *testing.T) {
 				if os.SameFile(beforeInfo, afterInfo) {
 					t.Fatal("port reallocation rewrote the durable manifest in place")
 				}
-				after, err := readManifest(c.cfg.Root)
+				after, err := readManifest(t.Context(), c.cfg.Root)
 				if err != nil || after.Ports != m.Ports {
 					t.Fatal("reallocated durable manifest did not match the selected ports")
 				}
@@ -110,7 +110,7 @@ func TestPostgresPortConfigRecoversInterruptedReallocation(t *testing.T) {
 	if err := c.prepareComponentPorts(context.Background(), m, "postgres", false, true); err == nil {
 		t.Fatal("invalid config target did not fail reallocation publication")
 	}
-	saved, err := readManifest(c.cfg.Root)
+	saved, err := readManifest(t.Context(), c.cfg.Root)
 	if err != nil || saved.Ports != m.Ports || saved.Ports.Postgres == ports.Postgres {
 		t.Fatal("config interruption did not retain the new durable manifest")
 	}

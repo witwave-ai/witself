@@ -67,7 +67,7 @@ func readers4Recover(t *testing.T, size int) error {
 	c.recoveryProcessStartedAt = func(int) (time.Time, error) { return time.Unix(1700000000-5, 0), nil }
 	var fence ProcessRecord
 	err := c.recoverPostgresRecord()
-	if err == nil && (readJSON(c.path("run", "postgres.json"), &fence) != nil || fence != (ProcessRecord{PID: 4242, StartTime: "identity-A", Root: c.cfg.Root, Component: "postgres"})) {
+	if err == nil && (readJSON(t.Context(), c.path("run", "postgres.json"), &fence) != nil || fence != (ProcessRecord{PID: 4242, StartTime: "identity-A", Root: c.cfg.Root, Component: "postgres"})) {
 		err = errors.New("recovery fence lost")
 	}
 	return err

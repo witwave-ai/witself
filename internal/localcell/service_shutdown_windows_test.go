@@ -291,7 +291,7 @@ func launchShutdownFixture(t *testing.T, mode string, barrier bool) windowsShutd
 		t.Fatal("synthetic launch did not reach expected release fence")
 	}
 	var record ProcessRecord
-	if readJSON(c.path("run", "server.json"), &record) != nil || record.LaunchKind != shutdownLaunchPipe {
+	if readJSON(t.Context(), c.path("run", "server.json"), &record) != nil || record.LaunchKind != shutdownLaunchPipe {
 		t.Fatal("synthetic pipe record unavailable")
 	}
 	if !barrier {
@@ -451,7 +451,7 @@ func TestWindowsShutdownEscalation(t *testing.T) {
 			t.Fatal("clean cancel request refused")
 		}
 		assertWindowsProcessExited(t, f.handle)
-		state, err := f.cell.processState("server")
+		state, err := f.cell.processState(t.Context(), "server")
 		if err != nil || state.Alive {
 			t.Fatal("fixture did not expose exited process observation")
 		}

@@ -200,7 +200,7 @@ func TestUpdateFenceObservedThenGone(t *testing.T) {
 		if err := os.Remove(path); err != nil {
 			t.Fatal("cannot simulate fixture fence disappearing after observation")
 		}
-		return readJSON(path, dst)
+		return readJSON(t.Context(), path, dst)
 	})
 	if !called || fence != nil || !errors.Is(err, errMaintenanceFenceActive) {
 		t.Fatal("observed fence disappearing during read did not fail closed")

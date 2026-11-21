@@ -146,7 +146,7 @@ func leaseWaitOwnContext(function *ast.FuncDecl, argument ast.Expr) bool {
 }
 
 // leaseWaitOpeners are the declarations that take the operation's context first
-// (LC-LEASE-2A, 2B, 2C1, 2C2 and 2D R5; 2D's seam), in the package reference contract's notation.
+// (LC-LEASE-2A, 2B, 2C1, 2C2, 2D R5 and 2D2; 2D's seam), in the package reference contract's notation.
 var leaseWaitOpeners = []string{"waitOutLease", "openPrivateReader", "openPrivateWriter", "openPostgresReader", "openPlainReader", "openLockFile",
 	"(*Cell).openCheckpointSource", "openRegularBy", "readRegular", "openRegular", "openRegularWriter", "openServiceRecord", "checkpointComplete",
 	"readMaintenanceFenceJSON", "(*Cell).readMaintenanceFence", "acquireLock", "(*Cell).readJournal", "(*Cell).journal", "(*Cell).journalCause",
@@ -155,36 +155,49 @@ var leaseWaitOpeners = []string{"waitOutLease", "openPrivateReader", "openPrivat
 	"(*Cell).prepareComponentPorts", "(*Cell).prepareComponentPortsFor", "(*Cell).credentialPassword", "(*Cell).validatePrincipalPasswords", "(*Cell).makePrincipalPasswords",
 	"(*Cell).principalDSN", "(*Cell).maintenanceDSN", "(*Cell).lastValueFreeDiagnostic", "(*Cell).admitReinstall", "(*Cell).reinstallAvailable", "(*Cell).finishReinstall",
 	"(*Cell).checkpointOps", "(*Cell).checkpointSummaries", "(*Cell).closeCheckpointFailure", "(*Cell).closeCheckpointLeftover", "(*Cell).listCheckpoints",
-	"(*Cell).openCheckpointEntry", "(*Cell).admitDeleteCheckpoint", "openPrincipalCredentialFile", "(*checkpointTree).open", "(*checkpointTree).witness"}
+	"(*Cell).openCheckpointEntry", "(*Cell).admitDeleteCheckpoint", "openPrincipalCredentialFile", "(*checkpointTree).open", "(*checkpointTree).witness",
+	"readJSON", "readManifest", "(*Cell).cleanupInterruption", "(*Cell).processState", "(*Cell).processStateWithRecord", "serviceAdapterRemovalHostLock", "(*Cell).checkpointCold"}
 
 // leaseWaitPlaceholders are the non-test calls into leaseWaitOpeners that pass
 // context.Background() instead of their declaration's own context, by file and
 // declaration with their counts (R6); it grows until the host's slices (OQ-H).
 var leaseWaitPlaceholders = map[string]int{"checkpoint_verify.go:(*Cell).verifyCheckpoint": 1, "commands.go:(*Cell).databaseCommand": 1,
-	"commands.go:(*Cell).pgCommand": 1, "commands.go:(*Cell).startChildPrepared": 2, "drill_reserve.go:(*Cell).reserveDrillLocked": 1,
-	"drill_root.go:(*Cell).deleteDrillLocked": 1, "drill_storage.go:(*Cell).admitDrillStorageLocked": 2, "files.go:(*Cell).readUpdateJournal": 1, "files.go:readJSON": 1,
-	"installer_principals.go:(*Cell).installPrincipals": 1, "installer_principals.go:(*Cell).installerAdmin": 2,
+	"commands.go:(*Cell).pgCommand": 1, "commands.go:(*Cell).startChildPrepared": 3, "commands.go:(*Cell).waitReady": 2, "drill_reserve.go:(*Cell).reserveDrillLocked": 2,
+	"drill_root.go:(*Cell).deleteDrillLocked": 2, "drill_root.go:(*Cell).drillRootList": 1, "drill_storage.go:(*Cell).admitDrillStorageLocked": 3,
+	"files.go:(*Cell).readUpdateJournal":                3,
+	"installer_principals.go:(*Cell).installPrincipals": 1, "installer_principals.go:(*Cell).installerAdmin": 4,
 	"installer_principals.go:(*Cell).observePrivilegedSessions": 1, "installer_principals.go:(*Cell).openMaintenance": 1,
 	"installer_principals.go:(*Cell).principalOperations": 1, "installer_principals.go:(*Cell).provisionInstallerPrincipals": 2,
 	"installer_principals.go:(*Cell).runPrincipalMigration": 1, "installer_principals.go:(*Cell).verifyCredentialPurposes": 1,
 	"installer_principals.go:(*Cell).verifyInstallerStartupCatalog": 1, "installer_principals.go:(*Cell).verifyRuntimePrincipalStart": 1,
-	"lifecycle.go:(*Cell).Install": 4, "lifecycle.go:(*Cell).Remove": 8, "lifecycle.go:(*Cell).Repair": 7,
-	"lifecycle.go:(*Cell).Start": 9, "lifecycle.go:(*Cell).own": 1, "lifecycle.go:(*Cell).ownExisting": 1, "lifecycle.go:(*Cell).recoverPostgresRecord": 2,
-	"lifecycle.go:(*Cell).stopWithServiceFence": 3, "lifecycle.go:(*Cell).verifyAll": 1, "lock_contention.go:classifyOwnershipFailure": 1,
-	"port_recovery.go:(*Cell).waitReadyWithPortRecovery": 2, "postgres_unix.go:(*Cell).startPostgres": 1, "postgres_windows.go:(*Cell).startPostgres": 1,
+	"launch_unix.go:(*Cell).launchChild": 1, "lifecycle.go:(*Cell).Install": 5, "lifecycle.go:(*Cell).Remove": 9, "lifecycle.go:(*Cell).Repair": 8,
+	"lifecycle.go:(*Cell).Start": 12, "lifecycle.go:(*Cell).Status": 1, "lifecycle.go:(*Cell).own": 1, "lifecycle.go:(*Cell).ownExisting": 1,
+	"lifecycle.go:(*Cell).recoverPostgresRecord": 3,
+	"lifecycle.go:(*Cell).stopSelected":          2, "lifecycle.go:(*Cell).stopSelectedLegacy": 3, "lifecycle.go:(*Cell).stopWithServiceFence": 4, "lifecycle.go:(*Cell).verifyAll": 2,
+	"lock_contention.go:classifyOwnershipFailure":        1,
+	"port_recovery.go:(*Cell).waitReadyWithPortRecovery": 2, "postgres_unix.go:(*Cell).startPostgres": 2, "postgres_windows.go:(*Cell).pendingPostgresWithoutPID": 1,
+	"postgres_windows.go:(*Cell).pendingPostmasterPID": 1, "postgres_windows.go:(*Cell).startPostgres": 2,
 	"readiness.go:(*Cell).childReadinessExit": 1, "reinstall.go:(*Cell).Reinstall": 1, "reinstall.go:(*Cell).reinstallLocked": 6,
-	"service_adapter_admission.go:serviceAdapterRemovalHostLock": 1, "service_boot.go:(*Cell).reconcileOldBoot": 1, "service_boot.go:(*Cell).reconcileServiceBoot": 1,
-	"service_control_endpoint.go:(*Cell).readServiceControlEndpointRecord": 1, "service_control_exit.go:(*Cell).exitServiceHostForRemoval": 1,
-	"service_control_exit.go:(*Cell).serviceHostLeaseHeld": 1, "service_control_exit.go:(*supervisor).finishHostExit": 1,
-	"service_descriptor.go:(*Cell).PrepareService": 1, "service_descriptor.go:(*Cell).RepairService": 1, "service_descriptor.go:(*Cell).serviceControlSecret": 1,
+	"service_boot.go:(*Cell).bindServiceProcessBootWithReader": 1, "service_boot.go:(*Cell).reconcileOldBoot": 2, "service_boot.go:(*Cell).reconcileServiceBoot": 2,
+	"service_control_endpoint.go:(*Cell).publishServiceControlEndpointWithBoot": 1, "service_control_endpoint.go:(*Cell).readServiceControlEndpointRecord": 1,
+	"service_control_endpoint.go:(*Cell).readServiceControlEndpointWithBoot": 1, "service_control_exit.go:(*Cell).exitServiceHostForRemoval": 2,
+	"service_control_exit.go:(*Cell).serviceHostExitIdentity": 1, "service_control_exit.go:(*Cell).serviceHostLeaseHeld": 1,
+	"service_control_exit.go:(*Cell).waitServiceHostExit": 2, "service_control_exit.go:(*supervisor).finishHostExit": 1,
+	"service_descriptor.go:(*Cell).PrepareService": 2, "service_descriptor.go:(*Cell).RepairService": 1, "service_descriptor.go:(*Cell).readServiceDescriptorForOwner": 2,
+	"service_descriptor.go:(*Cell).serviceControlSecret":         1,
 	"service_descriptor.go:(*Cell).setServiceDesiredStateLocked": 1, "service_foreground.go:(*Cell).acquireServiceLeaseWithBoot": 1,
-	"service_health.go:(*Cell).ServiceHealth": 1, "service_health.go:(*Cell).healthPrincipal": 1,
-	"service_launchd.go:(*launchdAgentAdapter).Apply": 1, "service_launchd.go:(*launchdAgentAdapter).Remove": 1,
+	"service_health.go:(*Cell).ServiceHealth": 2, "service_health.go:(*Cell).healthPrincipal": 1,
+	"service_health.go:(*Cell).serviceAPICredential": 1, "service_health.go:(*Cell).serviceLiveTree": 1, "service_launchd.go:(*launchdAgentAdapter).Apply": 1,
+	"service_launchd.go:(*launchdAgentAdapter).Remove":     2,
 	"service_launchd.go:(*launchdAgentAdapter).ownedPlist": 1, "service_maintenance.go:(*Cell).serviceMaintenanceObservation": 1,
-	"service_supervisor.go:(*Cell).Run": 1, "service_systemd_adapter.go:(*systemdUserAdapter).Apply": 1, "service_systemd_adapter.go:(*systemdUserAdapter).Remove": 1,
+	"service_shutdown_other.go:(*Cell).stopChildOutcome": 1, "service_shutdown_windows.go:(*Cell).stopChildOutcomeWithBudget": 1,
+	"service_shutdown_windows.go:waitShutdownReady": 1, "service_supervisor.go:(*Cell).Run": 1, "service_supervisor.go:(*supervisor).load": 1,
+	"service_supervisor.go:(*supervisor).rememberProcesses": 2, "service_systemd_adapter.go:(*systemdUserAdapter).Apply": 1,
+	"service_systemd_adapter.go:(*systemdUserAdapter).Remove":    2,
 	"service_systemd_adapter.go:(*systemdUserAdapter).ownedUnit": 1, "service_windows_task.go:(*windowsLogonTaskAdapter).Apply": 1,
-	"service_windows_task.go:(*windowsLogonTaskAdapter).Remove": 1, "service_windows_task.go:(*windowsLogonTaskAdapter).Start": 1,
-	"stop_windows.go:(*Cell).stopPostgres": 1, "update_record.go:(*Cell).readDerivedUpdateRecord": 1}
+	"service_windows_task.go:(*windowsLogonTaskAdapter).Remove": 2, "service_windows_task.go:(*windowsLogonTaskAdapter).Start": 1,
+	"stop_windows.go:(*Cell).stopPostgres": 1, "stop_windows.go:(*Cell).windowsStopRecord": 1, "update_record.go:(*Cell).authenticateUpdateInstallation": 1,
+	"update_record.go:(*Cell).readDerivedUpdateRecord": 1, "update_record.go:(*Cell).readUpdateIntent": 1}
 
 // leaseWaitCutText: per file, each text exactly once. files.go's cut, then
 // openRegularBy's and openRegularWriter's opens with the cut returned before
@@ -224,8 +237,7 @@ var leaseWaitReleased = []string{"checkpoint.go:(*Cell).Checkpoint", "checkpoint
 
 // leaseWaitDetachedHeld are the rest of 2C2's R1 twenty and checkpointOps, whose
 // ops.open binds its own context (2D): openers the opener census decides (a
-// placeholder handed to one is counted, an own context is live), or
-// checkpointCold, context-free until 2D3 (2C2's cut plan); checkpointOps is
+// placeholder handed to one is counted, an own context is live); checkpointOps is
 // shared with the dark drill, whose calls pass the placeholder (2C2's report).
 var leaseWaitDetachedHeld = []string{"checkpoint_unix.go:(*Cell).openCheckpointSource", "checkpoint_windows.go:(*Cell).openCheckpointSource",
 	"checkpoint_other.go:(*Cell).openCheckpointSource", "checkpoint.go:checkpointComplete", "checkpoint.go:(*Cell).refuseBeforeLockNames",

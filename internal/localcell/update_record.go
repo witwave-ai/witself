@@ -103,7 +103,7 @@ func (c *Cell) authenticateUpdateInstallation(record *updateRecord) error {
 		privateDir(c.path("journal"), false) != nil || servicePrivateRecord(c.path("manifest.json")) != nil {
 		return errUpdatePartialState
 	}
-	manifest, err := readManifest(c.cfg.Root)
+	manifest, err := readManifest(context.Background(), c.cfg.Root)
 	if err != nil || !manifest.Installed || manifest.InstallationID != record.InstallationID || manifest.LayoutVersion != record.LayoutVersion {
 		return errUpdatePartialState
 	}
@@ -202,7 +202,7 @@ func (c *Cell) readUpdateIntent(id string) (*updateRecord, error) {
 		return nil, errUpdatePartialState
 	}
 	var intent updateRecord
-	if servicePrivateRecord(c.updateIntentPath(id)) != nil || readJSON(c.updateIntentPath(id), &intent) != nil ||
+	if servicePrivateRecord(c.updateIntentPath(id)) != nil || readJSON(context.Background(), c.updateIntentPath(id), &intent) != nil ||
 		c.authenticateUpdateInstallation(&intent) != nil || intent.OperationID != id || intent.State != updatePrepared || intent.AckedGeneration != 0 {
 		return nil, errUpdatePartialState
 	}

@@ -343,7 +343,7 @@ func serviceMaintenanceHostHealthCell(t *testing.T) (*Cell, ServiceDescriptor) {
 	if privateDir(c.path("pg"), true) != nil || writeAtomicBytes(c.path("pg", "postmaster.pid"), []byte(fmt.Sprintf("%d\n%s\n1\n", os.Getpid(), c.path("pg"))), nil) != nil {
 		t.Fatal("Health fixture could not seed matching postmaster identity")
 	}
-	m, err := readManifest(c.cfg.Root)
+	m, err := readManifest(t.Context(), c.cfg.Root)
 	if err != nil {
 		t.Fatal("Health fixture could not read its owned manifest")
 	}
@@ -417,7 +417,7 @@ func TestServiceMaintenanceHostHealthAdmission(t *testing.T) {
 					t.Fatal("Health precedence could not remove a component record")
 				}
 			case "account":
-				m, err := readManifest(c.cfg.Root)
+				m, err := readManifest(t.Context(), c.cfg.Root)
 				if err != nil {
 					t.Fatal("Health precedence could not read account fixture")
 				}

@@ -19,7 +19,7 @@ if err := ctx.Err(); err != nil { return err }
 lock, err := c.own(false)
 if err != nil { return err }
 defer func() { _ = lock.Close() }()
-m, err := readManifest(c.cfg.Root)
+m, err := readManifest(context.Background(), c.cfg.Root)
 if err != nil || !m.Installed || m.RemovalRetained { return errors.New("service_installation_required") }
 uid, err := serviceOwner()
 if err != nil { return err }
@@ -58,7 +58,7 @@ if err != nil { return err }
 d, err := c.ServiceDescriptor()
 if err != nil { return err }
 var previous serviceBootRecord
-err = readJSON(c.path("service", "boot.json"), &previous)
+err = readJSON(context.Background(), c.path("service", "boot.json"), &previous)
 if err != nil && !errors.Is(err, os.ErrNotExist) { return err }
 if err == nil && (previous.InstallationID != d.InstallationID || previous.BootID == "") { return ErrServiceOwnershipConflict }
 ` + maintenanceAdmissionStatement + `

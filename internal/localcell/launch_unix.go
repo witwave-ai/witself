@@ -89,7 +89,7 @@ func (c *Cell) launchChild(ctx context.Context, binary, component string, enviro
 	ticker := time.NewTicker(5 * time.Millisecond)
 	defer ticker.Stop()
 	for launchCtx.Err() == nil {
-		state, stateErr := c.processState(component)
+		state, stateErr := c.processState(context.Background(), component)
 		if stateErr == nil && state.PID == cmd.Process.Pid && state.Alive && state.Matches {
 			if _, err := permit.Write([]byte{1}); err != nil {
 				return errors.New("cannot authorize local cell component launch")

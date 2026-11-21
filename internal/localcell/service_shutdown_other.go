@@ -22,7 +22,7 @@ func (c *Cell) stopChildOutcome(ctx context.Context, component string, state Pro
 		return serviceStopOutcome{Kind: serviceStopRefused, Component: component, Detail: "shutdown:incarnation"}
 	}
 	for {
-		current, err := c.processState(component)
+		current, err := c.processState(context.Background(), component)
 		if err != nil {
 			return serviceStopOutcome{Kind: serviceStopRefused, Component: component, Detail: "shutdown:incarnation"}
 		}

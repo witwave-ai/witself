@@ -167,14 +167,14 @@ func windowsManifestUnchanged(t *testing.T, c *Cell, before windowsBootPublishSn
 	if !bytes.Equal(before.data, after.data) || !os.SameFile(before.info, after.info) {
 		t.Fatal("refused manifest publication changed the published manifest")
 	}
-	if _, err := readManifest(c.cfg.Root); err != nil {
+	if _, err := readManifest(t.Context(), c.cfg.Root); err != nil {
 		t.Fatal("refused manifest publication left an unreadable manifest")
 	}
 }
 
 func windowsManifestStopped(t *testing.T, c *Cell) {
 	t.Helper()
-	m, err := readManifest(c.cfg.Root)
+	m, err := readManifest(t.Context(), c.cfg.Root)
 	if err != nil || m.LastOperation != "stop" {
 		t.Fatal("Stop did not publish its stopped manifest")
 	}

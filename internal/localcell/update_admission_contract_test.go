@@ -58,7 +58,7 @@ if options.ManagedPrincipals {
 lock, err := c.own(true)
 if err != nil { return err }
 defer func() { _ = lock.Close() }()
-if _, err := readManifest(c.cfg.Root); !errors.Is(err, os.ErrNotExist) {
+if _, err := readManifest(context.Background(), c.cfg.Root); !errors.Is(err, os.ErrNotExist) {
  if err != nil { return err }
  return errors.New("local cell is already installed")
 }
@@ -72,7 +72,7 @@ if err := c.layout(); err != nil { return err }`,
 	"Start": `lock, err := c.own(false)
 if err != nil { return err }
 defer func() { _ = lock.Close() }()
-m, err := readManifest(c.cfg.Root)
+m, err := readManifest(context.Background(), c.cfg.Root)
 if err != nil { return err }
 if !m.Installed { return errors.New("local cell installation is incomplete") }
 if err := c.serviceStartFence(); err != nil { return err }
@@ -84,7 +84,7 @@ defer cancel()
 lock, err := c.ownExisting()
 if err != nil { return err }
 defer func() { _ = lock.Close() }()
-m, manifestErr := readManifest(c.cfg.Root)
+m, manifestErr := readManifest(context.Background(), c.cfg.Root)
 if manifestErr != nil && !errors.Is(manifestErr, os.ErrNotExist) { return manifestErr }
 if m != nil && m.PrincipalLayoutVersion != 0 {
  selected, selectedCancel := context.WithTimeout(parent, c.readinessTimeout("server", m))

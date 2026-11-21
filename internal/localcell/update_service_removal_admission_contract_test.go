@@ -123,9 +123,9 @@ func maintenanceRemovalAdmissionOwner(filename string, fn *ast.FuncDecl) string 
 				lockCalls++
 			case "serviceAdapterRemovalHostLock":
 				hostCalls++
-				if len(node.Args) != 1 {
+				if len(node.Args) != 2 || admissionNodeText(node.Args[0]) != "context.Background()" {
 					invalid = true
-				} else if id, ok := node.Args[0].(*ast.Ident); !ok || id.Obj != cell.Obj {
+				} else if id, ok := node.Args[1].(*ast.Ident); !ok || id.Obj != cell.Obj {
 					invalid = true
 				}
 			case "drain":
@@ -219,7 +219,9 @@ func maintenanceRemovalSourceContract(sources map[string]string) []string {
 			if fn.Name.Name == "serviceAdapterRemovalHostLock" {
 				owners["host"]++
 				text := admissionNodeText(fn)
-				if !strings.Contains(text, "servicePrivateRecord(") || !strings.Contains(text, `openLockFile(context.Background(), c.path(".service-host.lock"), true)`) || !strings.Contains(text, "lockFile(") {
+				_, afterPrivate, checked := strings.Cut(text, `servicePrivateRecord(c.path(".service-host.lock"))`)
+				_, afterOpen, opened := strings.Cut(afterPrivate, `openLockFile(ctx, c.path(".service-host.lock"), true)`)
+				if !checked || !opened || !strings.Contains(afterOpen, "lockFile(file)") {
 					failures = append(failures, "host_acquisition")
 				}
 				ast.Inspect(fn.Body, func(node ast.Node) bool {

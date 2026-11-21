@@ -439,7 +439,7 @@ func (a *windowsLogonTaskAdapter) Remove(ctx context.Context, d ServiceIdentity)
 	if err != nil || !reflect.DeepEqual(windowsTaskImmutable(currentDescriptor), windowsTaskImmutable(d)) || currentDescriptor.DesiredState != "stopped" {
 		return windowsTaskError(ErrServiceOwnershipConflict, "remove:ownership", 0, "changed")
 	}
-	releaseHost, err := serviceAdapterRemovalHostLock(cell)
+	releaseHost, err := serviceAdapterRemovalHostLock(context.Background(), cell)
 	if err != nil {
 		if errors.Is(err, ErrLocked) {
 			return windowsTaskError(ErrServiceHostActive, "remove:host_lease", 0, "active")

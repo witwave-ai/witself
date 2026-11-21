@@ -101,7 +101,7 @@ func TestUpdateRecordAndJournal(t *testing.T) {
 			}
 			err := c.updateStep(record, state, func() error {
 				var current updateRecord
-				if readJSON(c.updateRecordPath(record.OperationID), &current) != nil || current.State != state {
+				if readJSON(t.Context(), c.updateRecordPath(record.OperationID), &current) != nil || current.State != state {
 					t.Fatal("action ran before derived record publication")
 				}
 				return nil
@@ -148,7 +148,7 @@ func TestUpdateRecordAndJournal(t *testing.T) {
 				t.Fatal("durable journal did not repair the incomplete record")
 			}
 			var durable updateRecord
-			if readJSON(c.updateRecordPath(record.OperationID), &durable) != nil || durable != *first {
+			if readJSON(t.Context(), c.updateRecordPath(record.OperationID), &durable) != nil || durable != *first {
 				t.Fatal("reconstructed update record was not durably published")
 			}
 			originalSync := syncFile

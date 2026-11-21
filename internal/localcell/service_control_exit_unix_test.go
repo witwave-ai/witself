@@ -363,7 +363,7 @@ func TestServiceRemoveWaitsForObservedHostExitUnix(t *testing.T) {
 		t.Fatal("host failed graceful removal")
 	}
 	// Ordinary removal retains cell data; completion is a settled retained manifest.
-	m, manifestErr := readManifest(c.cfg.Root)
+	m, manifestErr := readManifest(t.Context(), c.cfg.Root)
 	if _, statErr := os.Stat(marker); manifestErr != nil || statErr != nil || m.Cleanup != nil || !m.RemovalRetained {
 		t.Fatal("removal did not settle retained data")
 	}

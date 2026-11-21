@@ -28,7 +28,7 @@ func TestRetainedRemovalRepairStopsRecordedTreeBeforeMarker(t *testing.T) {
 		if writeAtomic(c.path("run", component+".json"), record, nil) != nil {
 			t.Fatal("cannot record a live synthetic component")
 		}
-		if state, err := c.processState(component); err != nil || !state.Alive || !state.Matches {
+		if state, err := c.processState(t.Context(), component); err != nil || !state.Alive || !state.Matches {
 			t.Fatal("synthetic component is not a live owned record")
 		}
 	}
@@ -45,7 +45,7 @@ func TestRetainedRemovalRepairStopsRecordedTreeBeforeMarker(t *testing.T) {
 			if data, err := os.ReadFile(file.Name()); err == nil && bytes.Contains(data, []byte(`"removal_retained": true`)) {
 				live := false
 				for _, component := range components {
-					state, err := c.processState(component)
+					state, err := c.processState(t.Context(), component)
 					live = live || err != nil || state.Alive
 				}
 				published = append(published, live)

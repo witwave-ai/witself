@@ -64,6 +64,22 @@ func leaseRecordPlant(t *testing.T, c *Cell, prepare string) error {
 func TestLeaseWaitLayerUnleased(t *testing.T) {
 	done, cancel := context.WithCancel(context.Background())
 	cancel()
+	t.Run("serviceAdapterRemovalHostLock", func(t *testing.T) {
+		c, _ := unitCell(t)
+		release, err := serviceAdapterRemovalHostLock(done, c)
+		if err != nil || release == nil {
+			t.Fatal("a done context refused the unleased removal host lock")
+		}
+		defer release()
+		second, err := serviceAdapterRemovalHostLock(t.Context(), c)
+		if second != nil {
+			second()
+			t.Fatal("a second removal host lock returned a release while the first was held")
+		}
+		if !errors.Is(err, ErrLocked) {
+			t.Fatal("a second removal host lock did not report contention while the first was held")
+		}
+	})
 	refused, opened := errors.New("unleased layer row refused"), func(f *os.File, err error) (bool, error) { return f != nil && f.Close() == nil, err }
 	for _, row := range []struct {
 		name string
@@ -219,7 +235,7 @@ func TestLeaseWaitLayerUnleased(t *testing.T) {
 		if m.Ports.Postgres == original {
 			t.Fatal("postgres reallocation retained the original port")
 		}
-		saved, err := readManifest(c.cfg.Root)
+		saved, err := readManifest(t.Context(), c.cfg.Root)
 		if err != nil {
 			t.Fatal("cannot read the manifest after postgres reallocation")
 		}
@@ -362,7 +378,7 @@ func leaseCommandPlant(t *testing.T, prepare string) (*Cell, *Manifest) {
 	case "retained":
 		f, _ := reinstallFixture(t, "legacy", false)
 		c = f.cell
-		m, err = readManifest(c.cfg.Root)
+		m, err = readManifest(t.Context(), c.cfg.Root)
 	default:
 		c, m = unitCell(t)
 		checkpointPlant(t, c, leaseLayerID, leaseLayerID)

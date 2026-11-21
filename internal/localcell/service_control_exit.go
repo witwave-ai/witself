@@ -126,7 +126,7 @@ func (c *Cell) serviceHostExitIdentity() (ServiceDescriptor, serviceLeaseRecord,
 	if err := servicePrivateRecord(c.path("service", "lease.json")); err != nil {
 		return d, lease, hostExitFailure("lease_validate", false, errors.Join(hostExitRefused("envelope"), err))
 	}
-	if err := readJSON(c.path("service", "lease.json"), &lease); err != nil {
+	if err := readJSON(context.Background(), c.path("service", "lease.json"), &lease); err != nil {
 		return d, lease, hostExitFailure("lease_validate", false, errors.Join(hostExitRefused("envelope"), err))
 	}
 	boot, err := serviceBootID()
@@ -554,7 +554,7 @@ func (c *Cell) exitServiceHostForRemoval(ctx context.Context) error {
 				return err
 			}
 			var record ProcessRecord
-			if err := readJSON(c.path("run", component+".json"), &record); errors.Is(err, os.ErrNotExist) {
+			if err := readJSON(context.Background(), c.path("run", component+".json"), &record); errors.Is(err, os.ErrNotExist) {
 				continue
 			} else if err != nil {
 				return hostExitRefused("child_tree_unknown")
@@ -655,7 +655,7 @@ func (c *Cell) waitServiceHostExit(ctx context.Context, lease serviceLeaseRecord
 		if err := servicePrivateRecord(c.path("service", "lease.json")); err != nil {
 			return hostExitFailure("lease_validate", true, errors.Join(hostExitRefused("envelope"), err))
 		}
-		if err := readJSON(c.path("service", "lease.json"), &current); err != nil || current != lease {
+		if err := readJSON(context.Background(), c.path("service", "lease.json"), &current); err != nil || current != lease {
 			return hostExitFailure("lease_validate", true, errors.Join(hostExitRefused("envelope"), err))
 		}
 		held, err := c.serviceHostLeaseHeld()
@@ -669,7 +669,7 @@ func (c *Cell) waitServiceHostExit(ctx context.Context, lease serviceLeaseRecord
 		if !held && exited {
 			for _, component := range []string{"worker", "server", "postgres"} {
 				var record ProcessRecord
-				if err := readJSON(c.path("run", component+".json"), &record); errors.Is(err, os.ErrNotExist) {
+				if err := readJSON(context.Background(), c.path("run", component+".json"), &record); errors.Is(err, os.ErrNotExist) {
 					continue
 				} else if err != nil {
 					return hostExitFailure("observe", true, errors.Join(hostExitRefused("drain"), ctx.Err()))

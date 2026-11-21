@@ -200,7 +200,7 @@ func controlRecords(t *testing.T, c *Cell, count int, bound, poll time.Duration,
 	records := make([]controlRecord, count)
 	for i := range records {
 		name := strconv.Itoa(i + 1)
-		if readJSON(filepath.Join(dir, "record-"+name), &records[i]) != nil {
+		if readJSON(t.Context(), filepath.Join(dir, "record-"+name), &records[i]) != nil {
 			t.Fatal("stand-in invocation record missing")
 		}
 		r := records[i]
@@ -296,7 +296,7 @@ func TestCheckpointControlRunner(t *testing.T) {
 				t.Fatal("equal readings did not publish one checkpoint")
 			}
 			var witness checkpointWitness
-			if readJSON(c.path("recovery", ids[0], checkpointWitnessName), &witness) != nil || witness.Control != checkpointSyntheticControl {
+			if readJSON(t.Context(), c.path("recovery", ids[0], checkpointWitnessName), &witness) != nil || witness.Control != checkpointSyntheticControl {
 				t.Fatal("published witness control fields differ")
 			}
 			for _, record := range records {

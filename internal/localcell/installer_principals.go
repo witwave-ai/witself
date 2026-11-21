@@ -82,7 +82,7 @@ func (c *Cell) installerAdmin(ctx context.Context, m *Manifest, fn func(*pgx.Con
 	if m.Installed || m.PrincipalLayoutVersion != PrincipalLayoutVersion || validatePrincipalLayout(m) != nil || c.validateRoot(false) != nil {
 		return errPrincipalProvision
 	}
-	durable, err := readManifest(c.cfg.Root)
+	durable, err := readManifest(context.Background(), c.cfg.Root)
 	if err != nil || durable.InstallationID != m.InstallationID || durable.Installed || validatePrincipalLayout(durable) != nil {
 		return errPrincipalProvision
 	}
@@ -90,7 +90,7 @@ func (c *Cell) installerAdmin(ctx context.Context, m *Manifest, fn func(*pgx.Con
 	if err != nil || progress.pending == nil || progress.pending.Operation != "install" || !progress.done["database"] {
 		return errPrincipalProvision
 	}
-	state, err := c.processState("postgres")
+	state, err := c.processState(context.Background(), "postgres")
 	if err != nil || !state.Alive || !state.Matches {
 		return errPrincipalProvision
 	}

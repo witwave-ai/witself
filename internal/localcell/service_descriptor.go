@@ -121,7 +121,7 @@ func (c *Cell) readServiceDescriptorForOwner(owner string) (ServiceDescriptor, e
 	if err := servicePrivateRecord(path); err != nil {
 		return d, err
 	}
-	if err := readJSON(path, &d); err != nil {
+	if err := readJSON(context.Background(), path, &d); err != nil {
 		return d, err
 	}
 	if owner == "" {
@@ -131,7 +131,7 @@ func (c *Cell) readServiceDescriptorForOwner(owner string) (ServiceDescriptor, e
 	} else if err := validateServiceDescriptorOwner(d, owner); err != nil {
 		return d, err
 	}
-	m, err := readManifest(c.cfg.Root)
+	m, err := readManifest(context.Background(), c.cfg.Root)
 	if err != nil {
 		return d, err
 	}
@@ -155,7 +155,7 @@ func (c *Cell) PrepareService(ctx context.Context, d ServiceDescriptor) error {
 		return err
 	}
 	defer func() { _ = lock.Close() }()
-	m, err := readManifest(c.cfg.Root)
+	m, err := readManifest(context.Background(), c.cfg.Root)
 	if err != nil || !m.Installed || m.RemovalRetained {
 		return errors.New("service_installation_required")
 	}

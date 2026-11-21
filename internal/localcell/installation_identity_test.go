@@ -38,7 +38,7 @@ func TestWindowsTaskDoesNotAliasLegacyInstallationIdentity(t *testing.T) {
 	if _, err := newLocalCellInstallationID("windows"); err != nil {
 		t.Fatal("cannot allocate new Windows identity")
 	}
-	after, err := readManifest(c.cfg.Root)
+	after, err := readManifest(t.Context(), c.cfg.Root)
 	if err != nil || after.InstallationID != before {
 		t.Fatal("allocating a task identity rewrote an existing installation")
 	}

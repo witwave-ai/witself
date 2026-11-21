@@ -73,7 +73,7 @@ func serviceMaintenanceAbsentLifecycle(t *testing.T, action string) {
 	f := newAdmissionFixture(t, "StartLegacy")
 	c := f.cell
 	d := prepareSupervisorTest(t, c)
-	m, err := readManifest(c.cfg.Root)
+	m, err := readManifest(t.Context(), c.cfg.Root)
 	if err != nil {
 		t.Fatal("Cannot read absent lifecycle manifest")
 	}
@@ -336,7 +336,7 @@ func serviceMaintenanceAbsentRow(t *testing.T, row string) {
 	exceptions := []string{"service/supervisor.json", "service/descriptor.json"}
 	if action == "repair" {
 		serviceMaintenanceStopJournal(t, c)
-		m, manifestErr := readManifest(c.cfg.Root)
+		m, manifestErr := readManifest(t.Context(), c.cfg.Root)
 		if manifestErr != nil {
 			t.Fatal("Cannot read absent repair manifest")
 		}

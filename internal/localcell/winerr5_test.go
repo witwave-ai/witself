@@ -74,7 +74,7 @@ func TestWinerr5ReadersParentFile(t *testing.T) {
 			return err == nil && progress.pending == nil && progress.durableBytes == 0, err
 		}},
 		{"process_record", "run", "cannot inspect local cell record", func(c *Cell) (bool, error) {
-			state, err := c.processState("server")
+			state, err := c.processState(t.Context(), "server")
 			return err == nil && state == (ProcessState{}), err
 		}},
 		{"postmaster", "pg", "invalid PostgreSQL process record", func(c *Cell) (bool, error) {
@@ -167,7 +167,7 @@ func TestWinerr5RepairCutRemoval(t *testing.T) {
 			if syncs != 0 || !reflect.DeepEqual(before, retainedSnapshot(t, c)) {
 				t.Fatal("the refused repair synced or changed the tree")
 			}
-			if m, err := readManifest(c.cfg.Root); err != nil || m.Cleanup == nil || !m.RemovalRetained {
+			if m, err := readManifest(t.Context(), c.cfg.Root); err != nil || m.Cleanup == nil || !m.RemovalRetained {
 				t.Fatal("the refused repair cleared the retained cleanup checkpoint")
 			}
 			if moved, err := os.ReadFile(filepath.Join(aside, "operations.jsonl")); err != nil || !bytes.Equal(moved, journal) {

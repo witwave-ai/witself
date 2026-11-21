@@ -19,7 +19,7 @@ var readerRows = []struct {
 	read          func(c *Cell) error
 }{
 	{"readJSON", "local cell record must be a regular file", func(c *Cell) string { return c.path("manifest.json") }, func(c *Cell) error {
-		m, err := readManifest(c.cfg.Root)
+		m, err := readManifest(context.Background(), c.cfg.Root)
 		if err == nil && m.InstallationID != "lc_test" {
 			return errors.New("manifest content lost")
 		}

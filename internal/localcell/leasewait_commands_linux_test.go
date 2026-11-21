@@ -50,7 +50,7 @@ func leaseCommandRows() []leaseCommandRow {
 	}
 	open := func(operation string, written func(c *Cell, m, disk *Manifest, before map[string][]byte) bool) func(*Cell, *Manifest, map[string][]byte) bool {
 		return func(c *Cell, m *Manifest, before map[string][]byte) bool {
-			disk, err := readManifest(c.cfg.Root)
+			disk, err := readManifest(context.Background(), c.cfg.Root)
 			now, readErr := os.ReadFile(c.path("journal", "operations.jsonl"))
 			progress, journalErr := c.readJournal(context.Background())
 			return err == nil && readErr == nil && journalErr == nil && bytes.Equal(before["journal/operations.jsonl"], now) &&

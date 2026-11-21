@@ -706,7 +706,7 @@ func (a *launchdAgentAdapter) Remove(ctx context.Context, d ServiceIdentity) err
 	if fresh.DesiredState != "stopped" {
 		return serviceSystemdError(ErrServiceOwnershipConflict, "remove:descriptor", "not_stopped")
 	}
-	releaseHost, err := serviceAdapterRemovalHostLock(cell)
+	releaseHost, err := serviceAdapterRemovalHostLock(context.Background(), cell)
 	if err != nil {
 		if errors.Is(err, ErrLocked) {
 			return serviceSystemdError(ErrServiceHostActive, "remove:host_lease", "active")

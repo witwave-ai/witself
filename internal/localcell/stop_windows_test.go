@@ -193,7 +193,7 @@ func TestWindowsPostgresStopCompletion(t *testing.T) {
 	t.Run("identity-mismatch", func(t *testing.T) {
 		c, state, handle := windowsPostgresStopFixture(t, directory)
 		var record ProcessRecord
-		if err := readJSON(c.path("run", "postgres.json"), &record); err != nil {
+		if err := readJSON(t.Context(), c.path("run", "postgres.json"), &record); err != nil {
 			t.Fatal("stop fixture ownership record unavailable")
 		}
 		record.StartTime = "mismatched-creation-identity"

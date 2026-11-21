@@ -220,7 +220,7 @@ func TestWriterRepairSitesRefuseSwapped(t *testing.T) {
 			}
 			s.check(t, readerWatchdog(t, func() error { return c.Repair(t.Context()) }, s.unblock), "cannot open local cell journal", size)
 			c.cfg.Failpoint = nil
-			if m, err := readManifest(c.cfg.Root); err != nil || m.Cleanup == nil || c.Repair(t.Context()) != nil {
+			if m, err := readManifest(t.Context(), c.cfg.Root); err != nil || m.Cleanup == nil || c.Repair(t.Context()) != nil {
 				t.Fatal("the refused retained sync cleared its cleanup, or repair did not settle with the journal back")
 			}
 		})

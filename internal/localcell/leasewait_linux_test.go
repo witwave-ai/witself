@@ -331,7 +331,7 @@ func TestLeaseWaitRepairSwap(t *testing.T) {
 				}
 				err = readerWatchdog(t, func() error { return c.Repair(t.Context()) }, l.release)
 				returned, at := time.Now(), <-swapped
-				m, manifestErr := readManifest(c.cfg.Root)
+				m, manifestErr := readManifest(t.Context(), c.cfg.Root)
 				if size == "plain" {
 					if err != nil || syncs != 1 || manifestErr != nil || m.Cleanup != nil || site == "torn" && writerSize(name) != int64(len(durable)) {
 						t.Fatal("repair without a lease or a swap did not succeed as before")

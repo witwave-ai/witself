@@ -32,7 +32,7 @@ func TestServiceControlEndpointUnixPrivateRecord(t *testing.T) {
 		t.Fatal("endpoint record symlink accepted")
 	}
 	var retained serviceControlEndpointRecord
-	if readJSON(target, &retained) != nil || retained != r {
+	if readJSON(t.Context(), target, &retained) != nil || retained != r {
 		t.Fatal("endpoint refusal changed symlink target")
 	}
 }

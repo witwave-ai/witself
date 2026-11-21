@@ -416,7 +416,7 @@ func (c *Cell) admitCheckpoint(ctx context.Context, options CheckpointOptions, o
 	if options.InstallationID == "" {
 		return nil, errCheckpointIdentity
 	}
-	m, err := readManifest(c.cfg.Root)
+	m, err := readManifest(ctx, c.cfg.Root)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, errCheckpointState
 	} else if err != nil {
@@ -434,7 +434,7 @@ func (c *Cell) admitCheckpoint(ctx context.Context, options CheckpointOptions, o
 	} else if (progress.pending != nil || progress.tornTail) && !checkpointLeftover(progress) {
 		return nil, errCheckpointState
 	}
-	if err := c.checkpointCold(); err != nil {
+	if err := c.checkpointCold(ctx); err != nil {
 		return nil, err
 	}
 	// A Faulted service is admitted: no server or postmaster is started, only
@@ -502,12 +502,12 @@ func (c *Cell) admitCheckpoint(ctx context.Context, options CheckpointOptions, o
 }
 
 // checkpointCold proves no recorded postgres, server or worker is alive.
-func (c *Cell) checkpointCold() error {
+func (c *Cell) checkpointCold(ctx context.Context) error {
 	if err := c.verifyAll(); err != nil {
 		return err
 	}
 	for _, component := range []string{"postgres", "server", "worker"} {
-		if state, err := c.processState(component); err != nil {
+		if state, err := c.processState(ctx, component); err != nil {
 			return err
 		} else if state.Alive {
 			return errCheckpointState
@@ -950,7 +950,7 @@ func (c *Cell) closeCheckpointLeftover(ctx context.Context) error {
 	if err != nil || !checkpointLeftover(progress) {
 		return err
 	}
-	if cleanup, err := c.cleanupInterruption(); err != nil {
+	if cleanup, err := c.cleanupInterruption(ctx); err != nil {
 		return err
 	} else if cleanup != nil {
 		return errCheckpointState
@@ -970,7 +970,7 @@ func (c *Cell) admitDeleteCheckpoint(ctx context.Context, options DeleteCheckpoi
 	} else if (progress.pending != nil || progress.tornTail) && !checkpointLeftover(progress) {
 		return errCheckpointState
 	}
-	if err := c.checkpointCold(); err != nil {
+	if err := c.checkpointCold(ctx); err != nil {
 		return err
 	}
 	if err := c.validateRecovery(); err != nil {

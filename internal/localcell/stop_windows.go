@@ -63,7 +63,7 @@ func (c *Cell) windowsStopRecord(component string, state ProcessState) (ProcessR
 	if component != "server" && component != "worker" && component != "postgres" {
 		return record, errors.New("localcell: invalid component for process control")
 	}
-	if err := readJSON(c.path("run", component+".json"), &record); err != nil {
+	if err := readJSON(context.Background(), c.path("run", component+".json"), &record); err != nil {
 		return record, errors.New("localcell: cannot read process control identity")
 	}
 	if (state.Alive && !state.Matches) || record.PID != state.PID || record.PID <= 1 ||

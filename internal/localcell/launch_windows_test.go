@@ -129,7 +129,7 @@ func TestWindowsLaunchSyncPublishResumeOrder(t *testing.T) {
 		}
 		if stage == "published" {
 			var record ProcessRecord
-			if syncs != 1 || readJSON(c.path("run", "server.json"), &record) != nil || !record.LaunchPending || record.PID != int(pi.ProcessId) {
+			if syncs != 1 || readJSON(t.Context(), c.path("run", "server.json"), &record) != nil || !record.LaunchPending || record.PID != int(pi.ProcessId) {
 				t.Error("pending process record not durably published before resume")
 			}
 			if _, err := os.Stat(c.path("tmp", "first-run")); !errors.Is(err, os.ErrNotExist) {
@@ -145,7 +145,7 @@ func TestWindowsLaunchSyncPublishResumeOrder(t *testing.T) {
 		t.Fatal("launch ownership stages did not preserve sync/publish/resume/transfer ordering")
 	}
 	var record ProcessRecord
-	if readJSON(c.path("run", "server.json"), &record) != nil || record.LaunchPending {
+	if readJSON(t.Context(), c.path("run", "server.json"), &record) != nil || record.LaunchPending {
 		t.Fatal("successful launch retained a pending record")
 	}
 	deadline := time.Now().Add(5 * time.Second)
@@ -240,7 +240,7 @@ func TestWindowsLaunchCrashParentHelper(_ *testing.T) {
 		}
 		return nil
 	}
-	m, err := readManifest(root)
+	m, err := readManifest(context.Background(), root)
 	if err != nil || c.startChild(m, "server") != nil {
 		os.Exit(125)
 	}

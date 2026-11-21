@@ -158,7 +158,7 @@ func TestServiceDescriptorInterruptedTransitionFailsClosed(t *testing.T) {
 		t.Fatal("control start erased pending maintenance")
 	}
 	var pending ServiceDescriptor
-	if err := readJSON(c.path("service", "transition.json"), &pending); err != nil || pending.DesiredState != "maintenance" {
+	if err := readJSON(t.Context(), c.path("service", "transition.json"), &pending); err != nil || pending.DesiredState != "maintenance" {
 		t.Fatal("refused start mutated maintenance transition")
 	}
 	if err := c.SetServiceDesiredState(t.Context(), "stopped"); err != nil {

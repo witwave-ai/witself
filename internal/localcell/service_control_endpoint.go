@@ -129,7 +129,7 @@ func (c *Cell) readServiceControlEndpointWithBoot(readBoot func() (string, error
 		return serviceControlEndpointRecord{}, err
 	}
 	var lease serviceLeaseRecord
-	if servicePrivateRecord(c.path("service", "lease.json")) != nil || readJSON(c.path("service", "lease.json"), &lease) != nil {
+	if servicePrivateRecord(c.path("service", "lease.json")) != nil || readJSON(context.Background(), c.path("service", "lease.json"), &lease) != nil {
 		return serviceControlEndpointRecord{}, serviceFailureAt(serviceEndpointRefused("host_identity"), "endpoint_lease")
 	}
 	boot, err := readBoot()
@@ -154,7 +154,7 @@ func (c *Cell) publishServiceControlEndpointWithBoot(pipeName string, readBoot f
 		return serviceControlEndpointRecord{}, serviceFailureAt(serviceEndpointRefused("record"), "endpoint_descriptor")
 	}
 	var lease serviceLeaseRecord
-	if readJSON(c.path("service", "lease.json"), &lease) != nil || servicePrivateRecord(c.path("service", "lease.json")) != nil {
+	if readJSON(context.Background(), c.path("service", "lease.json"), &lease) != nil || servicePrivateRecord(c.path("service", "lease.json")) != nil {
 		return serviceControlEndpointRecord{}, serviceFailureAt(serviceEndpointRefused("host_identity"), "endpoint_lease")
 	}
 	boot, err := readBoot()

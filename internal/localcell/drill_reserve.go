@@ -206,7 +206,7 @@ func (c *Cell) reserveDrillLocked(ctx context.Context, checkpointID, operationID
 	if !drillStorageAdmits(volume.free, estimate.need) {
 		return "", drillStorageError{reason: "storage_insufficient"}
 	}
-	manifest, err := readManifest(c.cfg.Root)
+	manifest, err := readManifest(context.Background(), c.cfg.Root)
 	if err != nil {
 		return "", drillStorageError{reason: "boundary_refused"}
 	}

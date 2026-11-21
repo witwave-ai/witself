@@ -360,7 +360,7 @@ func TestServiceMaintenanceBootAdmission(t *testing.T) {
 						t.Fatal("unfenced boot owner did not reach publication or cleanup")
 					}
 					var got serviceBootRecord
-					if readJSON(c.path("service", "boot.json"), &got) != nil || got != (serviceBootRecord{d.InstallationID, boot}) {
+					if readJSON(t.Context(), c.path("service", "boot.json"), &got) != nil || got != (serviceBootRecord{d.InstallationID, boot}) {
 						t.Fatal("unfenced boot owner did not publish current boot")
 					}
 					after := serviceMaintenanceSnapshot(t, c)
@@ -447,7 +447,7 @@ func TestServiceMaintenanceLegacyOrdering(t *testing.T) {
 					}
 					want = "service_installation_required"
 				case "manifest_uninstalled":
-					m, err := readManifest(c.cfg.Root)
+					m, err := readManifest(t.Context(), c.cfg.Root)
 					if err != nil {
 						t.Fatal("cannot read fixture manifest")
 					}
@@ -709,7 +709,7 @@ func TestServiceMaintenanceProtectivePathsRemainUsable(t *testing.T) {
 			if !reflect.DeepEqual(trace, []string{"stop:stop"}) {
 				t.Fatal("protective Stop changed its guarded step order")
 			}
-			m, err := readManifest(c.cfg.Root)
+			m, err := readManifest(t.Context(), c.cfg.Root)
 			if err != nil || m.LastOperation != "stop" {
 				t.Fatal("protective Stop lost its completed manifest")
 			}
@@ -875,7 +875,7 @@ func TestServiceMaintenanceAbsentParity(t *testing.T) {
 					serviceMaintenanceParityUnchanged(t, c, before)
 					return
 				}
-				m, readErr := readManifest(c.cfg.Root)
+				m, readErr := readManifest(t.Context(), c.cfg.Root)
 				uid, ownerErr := serviceOwner()
 				if readErr != nil || ownerErr != nil {
 					t.Fatal("parity fixture identity unavailable")
