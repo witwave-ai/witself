@@ -162,7 +162,7 @@ func TestWindowsTaskMaintenanceAdmissionPrecedence(t *testing.T) {
 				if err != nil {
 					t.Fatal("Apply precedence contender cannot be constructed")
 				}
-				lock, err := other.own(false)
+				lock, err := other.own(context.Background(), false)
 				if err != nil {
 					t.Fatal("Apply precedence contender cannot acquire its lock")
 				}
@@ -314,7 +314,7 @@ func TestWindowsTaskMaintenanceRealLockLifetime(t *testing.T) {
 						}
 					}
 					reached++
-					lock, err := other.own(false)
+					lock, err := other.own(context.Background(), false)
 					if lock != nil {
 						_ = lock.Close()
 					}
@@ -344,7 +344,7 @@ func TestWindowsTaskMaintenanceRealLockLifetime(t *testing.T) {
 					t.Fatal("Start run lock proof was not reached exactly once")
 				}
 			}
-			lock, err := other.own(false)
+			lock, err := other.own(context.Background(), false)
 			if err != nil {
 				t.Fatal("Lock lifetime contender could not acquire after return")
 			}
@@ -418,14 +418,14 @@ func TestWindowsTaskMaintenanceLockBinding(t *testing.T) {
 			if err != nil {
 				t.Fatal("Target binding contender cannot be constructed")
 			}
-			lock, err := other.own(false)
+			lock, err := other.own(context.Background(), false)
 			if lock != nil {
 				_ = lock.Close()
 			}
 			if err != ErrLocked {
 				t.Fatal("Production mutation lock did not exclude the target contender")
 			}
-			decoyLock, err := decoy.own(false)
+			decoyLock, err := decoy.own(context.Background(), false)
 			if err != nil {
 				t.Fatal("Production mutation lock interfered with the decoy root")
 			}
@@ -454,7 +454,7 @@ func TestWindowsTaskMaintenanceLockBinding(t *testing.T) {
 	})
 	t.Run("contender", func(t *testing.T) {
 		target, _ := serviceMaintenanceCell(t, false)
-		lock, err := target.own(false)
+		lock, err := target.own(context.Background(), false)
 		if err != nil {
 			t.Fatal("Binding contention fixture cannot acquire the target lock")
 		}

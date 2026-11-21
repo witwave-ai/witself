@@ -108,7 +108,7 @@ func windowsCheckpointFixture(t *testing.T, root string) (*Cell, *checkpointReco
 	if writeAtomic(c.path("manifest.json"), m, nil) != nil || c.makePassword() != nil {
 		t.Fatal("cannot publish the PGDATA checkpoint fixture custody")
 	}
-	held, err := c.own(false) // the stable locks exist, as in any used cell
+	held, err := c.own(context.Background(), false) // the stable locks exist, as in any used cell
 	if err != nil {
 		t.Fatal("cannot prepare the PGDATA checkpoint fixture locks")
 	}

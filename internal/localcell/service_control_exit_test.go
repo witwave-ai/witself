@@ -100,7 +100,7 @@ func TestServiceHostExitRemoveOrderingContract(t *testing.T) {
 	body := normalized[start : start+end]
 	check := func(body string) bool {
 		observed := strings.Index(body, "c.exitServiceHostForRemoval(ctx)")
-		locked := strings.Index(body, "c.ownExisting()")
+		locked := strings.Index(body, "c.ownExisting(context.Background())")
 		removed := strings.Index(body, "os.RemoveAll(c.path(name))")
 		return observed >= 0 && locked > observed && removed > locked
 	}

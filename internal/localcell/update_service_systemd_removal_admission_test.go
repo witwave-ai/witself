@@ -86,7 +86,7 @@ func TestServiceAdapterRemovalDrainOutsideLockSystemd(t *testing.T) {
 	a, d, m := serviceRemovalSystemdFixture(t, true)
 	called := false
 	a.drain = func(_ context.Context, value ServiceDescriptor) error {
-		lock, err := unixServiceContender(t, m.cell).own(false)
+		lock, err := unixServiceContender(t, m.cell).own(context.Background(), false)
 		if err != nil {
 			t.Fatal("Systemd drain could not acquire operation lock")
 		}
@@ -109,7 +109,7 @@ func TestServiceAdapterRemovalFreshIdentitySystemd(t *testing.T) {
 		t.Run(change, func(t *testing.T) {
 			a, d, m := serviceRemovalSystemdFixture(t, true)
 			a.drain = func(_ context.Context, fresh ServiceDescriptor) error {
-				lock, err := m.cell.own(false)
+				lock, err := m.cell.own(context.Background(), false)
 				if err != nil {
 					t.Fatal("Systemd fresh identity lock acquisition failed")
 				}
@@ -163,7 +163,7 @@ func TestServiceAdapterRemovalPrecedenceSystemd(t *testing.T) {
 				}
 				step, detail = "inspect:exec_start", "argv_length_mismatch"
 			case "drain_lock", "lock_identity":
-				lock, err := unixServiceContender(t, m.cell).own(false)
+				lock, err := unixServiceContender(t, m.cell).own(context.Background(), false)
 				if err != nil {
 					t.Fatal("Systemd precedence lock fixture failed")
 				}

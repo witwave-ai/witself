@@ -42,7 +42,7 @@ func (c *Cell) reinstallOps() reinstallOperations {
 // created, rotated or deleted, and nothing is migrated, converted, purged or
 // deleted.
 func (c *Cell) Reinstall(ctx context.Context, options ReinstallOptions) error {
-	lock, err := c.own(false)
+	lock, err := c.own(context.Background(), false)
 	if err != nil {
 		return err
 	}
@@ -137,7 +137,7 @@ func (c *Cell) admitReinstall(ctx context.Context, options ReinstallOptions) (*M
 	if err := c.reinstallAvailable(ctx, m, progress); err != nil {
 		return nil, err
 	}
-	if err := c.verifyAll(); err != nil {
+	if err := c.verifyAll(ctx); err != nil {
 		return nil, err
 	}
 	for _, component := range []string{"postgres", "server", "worker"} {

@@ -179,7 +179,7 @@ func TestServiceMaintenanceControlQueryFlagCleared(t *testing.T) {
 				}
 				var release func() error
 				if outcome == "locked" {
-					lock, err := f.cell.own(false)
+					lock, err := f.cell.own(context.Background(), false)
 					if err != nil {
 						t.Fatal("Query flag fixture could not acquire contention lock")
 					}

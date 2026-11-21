@@ -32,7 +32,7 @@ func serviceRemovalHoldHost(t *testing.T, c *Cell) func() {
 
 func serviceRemovalStopped(t *testing.T, c *Cell, d ServiceDescriptor) {
 	t.Helper()
-	held, err := c.own(false)
+	held, err := c.own(context.Background(), false)
 	if err != nil {
 		t.Fatal("Removal drain operation lock was unavailable")
 	}
@@ -43,7 +43,7 @@ func serviceRemovalStopped(t *testing.T, c *Cell, d ServiceDescriptor) {
 
 func serviceRemovalLocksHeld(t *testing.T, c *Cell) {
 	t.Helper()
-	held, err := unixServiceContender(t, c).own(false)
+	held, err := unixServiceContender(t, c).own(context.Background(), false)
 	if held != nil {
 		_ = held.Close()
 	}
@@ -256,7 +256,7 @@ func TestServiceAdapterRemovalDrainOutsideLock(t *testing.T) {
 			f := newServiceRemovalFixture(t, family)
 			reached := false
 			f.setDrain(func(context.Context, ServiceDescriptor) error {
-				held, err := unixServiceContender(t, f.cell).own(false)
+				held, err := unixServiceContender(t, f.cell).own(context.Background(), false)
 				if err != nil {
 					t.Fatal("Removal held the operation lock across its drain")
 				}
@@ -299,7 +299,7 @@ func TestServiceAdapterRemovalFreshIdentity(t *testing.T) {
 						case "running":
 							fresh.DesiredState = "running"
 						}
-						held, err := f.cell.own(false)
+						held, err := f.cell.own(context.Background(), false)
 						if err != nil {
 							t.Fatal("Removal identity drain lock failed")
 						}
@@ -345,7 +345,7 @@ func TestServiceAdapterRemovalPrecedence(t *testing.T) {
 					case "drain":
 						f.setDrain(func(context.Context, ServiceDescriptor) error { return errors.New("fixture drain refusal") })
 						sentinel = ErrServiceRemovalFailed
-						held, err := unixServiceContender(t, f.cell).own(false)
+						held, err := unixServiceContender(t, f.cell).own(context.Background(), false)
 						if err != nil {
 							t.Fatal("Removal drain precedence contender failed")
 						}
@@ -355,7 +355,7 @@ func TestServiceAdapterRemovalPrecedence(t *testing.T) {
 							fresh := f.d
 							fresh.Payload.Generation += "other"
 							serviceRemovalStopped(t, f.cell, fresh)
-							held, err := unixServiceContender(t, f.cell).own(false)
+							held, err := unixServiceContender(t, f.cell).own(context.Background(), false)
 							if err != nil {
 								t.Fatal("Removal precedence operation contender failed")
 							}
@@ -371,7 +371,7 @@ func TestServiceAdapterRemovalPrecedence(t *testing.T) {
 							if earlier == "identity" {
 								fresh.Payload.Generation += "other"
 							}
-							held, err := f.cell.own(false)
+							held, err := f.cell.own(context.Background(), false)
 							if err != nil {
 								t.Fatal("Removal identity precedence drain lock failed")
 							}

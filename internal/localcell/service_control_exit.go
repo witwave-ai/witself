@@ -541,7 +541,7 @@ func (c *Cell) exitServiceHostForRemoval(ctx context.Context) error {
 		// intent prevents a new launch, but is not an exit receipt. Observe the
 		// recorded tree under the operation lock; never signal an unverified PID
 		// or erase recovery records when liveness is unknown.
-		lock, err := c.own(false)
+		lock, err := c.own(context.Background(), false)
 		if err != nil {
 			return hostExitRefused("child_tree_unknown")
 		}

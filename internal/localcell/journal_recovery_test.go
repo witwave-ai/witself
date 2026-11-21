@@ -184,7 +184,7 @@ func TestJournalTornTailRepair(t *testing.T) {
 					t.Fatalf("Inspect did not recover the validated prefix: %v", err)
 				}
 				assertFileBytes(t, path, data, "Inspect changed the journal")
-				lock, err := c.own(false)
+				lock, err := c.own(context.Background(), false)
 				if err != nil {
 					t.Logf("journal repair error class: %s", journalRepairErrorClass(err))
 					t.Fatal(err)

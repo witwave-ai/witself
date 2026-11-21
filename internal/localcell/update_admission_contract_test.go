@@ -55,7 +55,7 @@ if options.ManagedPrincipals {
  if _, err := os.Lstat(c.path("manifest.json")); !errors.Is(err, os.ErrNotExist) { return errPrincipalLayout }
  if entries, err := os.ReadDir(c.path("pg")); (err == nil && len(entries) != 0) || (err != nil && !errors.Is(err, os.ErrNotExist)) { return errPrincipalLayout }
 }
-lock, err := c.own(true)
+lock, err := c.own(context.Background(), true)
 if err != nil { return err }
 defer func() { _ = lock.Close() }()
 if _, err := readManifest(context.Background(), c.cfg.Root); !errors.Is(err, os.ErrNotExist) {
@@ -69,7 +69,7 @@ if entries, err := os.ReadDir(c.path("pg")); err == nil && len(entries) > 0 {
 }
 ` + maintenanceAdmissionStatement + `
 if err := c.layout(); err != nil { return err }`,
-	"Start": `lock, err := c.own(false)
+	"Start": `lock, err := c.own(context.Background(), false)
 if err != nil { return err }
 defer func() { _ = lock.Close() }()
 m, err := readManifest(context.Background(), c.cfg.Root)
@@ -81,7 +81,7 @@ m.MigrationWait, m.JobRestartPolicy = c.runtimeSettings(m)`,
 	"Repair": `parent := ctx
 ctx, cancel := c.deadline(ctx)
 defer cancel()
-lock, err := c.ownExisting()
+lock, err := c.ownExisting(context.Background())
 if err != nil { return err }
 defer func() { _ = lock.Close() }()
 m, manifestErr := readManifest(context.Background(), c.cfg.Root)
@@ -96,7 +96,7 @@ progress, err := c.readJournal(context.Background())`,
 	"Remove": `ctx, cancel := c.serviceShutdownDeadline(ctx)
 defer cancel()
 if err := c.exitServiceHostForRemoval(ctx); err != nil { return err }
-lock, err := c.ownExisting()
+lock, err := c.ownExisting(context.Background())
 if err != nil { return err }
 defer func() { _ = lock.Close() }()
 ` + maintenanceAdmissionStatement + `
@@ -433,11 +433,11 @@ func TestMaintenanceFenceAdmissionSourceContractMutations(t *testing.T) {
 					return strings.Replace(body, "lock, err :=", gate+"\nlock, err :=", 1)
 				}},
 				{"CloseAndReacquire", "continuous_hold", func(body string) string {
-					return strings.Replace(body, gate, gate+"\n_ = lock.Close()\nlock, err = c.ownExisting()\nif err != nil { return err }", 1)
+					return strings.Replace(body, gate, gate+"\n_ = lock.Close()\nlock, err = c.ownExisting(context.Background())\nif err != nil { return err }", 1)
 				}},
 				{"OmitDeferredClose", "continuous_hold", func(body string) string { return strings.Replace(body, closeLock, "", 1) }},
 				{"NestedOwn", "continuous_hold", func(body string) string {
-					return strings.Replace(body, gate, gate+"\nfunc() { _, _ = c.ownExisting() }()", 1)
+					return strings.Replace(body, gate, gate+"\nfunc() { _, _ = c.ownExisting(context.Background()) }()", 1)
 				}},
 				{"WrongReceiver", "literal_zero_direct_error_return", func(body string) string { return strings.Replace(body, "(c *Cell)", "(c *Other)", 1) }},
 				{"DuplicateGate", "literal_zero_direct_error_return", func(body string) string { return strings.Replace(body, gate, gate+"\n"+gate, 1) }},

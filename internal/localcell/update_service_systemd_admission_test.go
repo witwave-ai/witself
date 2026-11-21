@@ -97,7 +97,7 @@ func TestUnixServiceMaintenanceApplyPrecedenceSystemd(t *testing.T) {
 				if err != nil {
 					t.Fatal("Systemd contender construction failed")
 				}
-				held, err = other.own(false)
+				held, err = other.own(context.Background(), false)
 				if err != nil {
 					t.Fatal("Systemd contender acquisition failed")
 				}
@@ -186,7 +186,7 @@ func TestUnixServiceMaintenanceApplyContentionSystemd(t *testing.T) {
 		if err != nil {
 			t.Fatal("Systemd second cell construction failed")
 		}
-		lock, err := other.own(false)
+		lock, err := other.own(context.Background(), false)
 		if err != nil {
 			t.Fatal("Systemd second cell lock failed")
 		}
@@ -224,7 +224,7 @@ func TestUnixServiceMaintenanceApplyContentionSystemd(t *testing.T) {
 				}
 			}
 			if site != "" {
-				lock, lockErr := other.own(false)
+				lock, lockErr := other.own(context.Background(), false)
 				if lock != nil {
 					_ = lock.Close()
 				}

@@ -1,6 +1,7 @@
 package localcell
 
 import (
+	"context"
 	"testing"
 	"time"
 )
@@ -24,4 +25,6 @@ func SetPostgresRecoveryObserversForTest(c *Cell, identity func(int) (string, bo
 
 // RecoverPostgresRecordForTest exercises recovery without starting or signaling
 // the synthetic PID supplied by the test's identity observer.
-func RecoverPostgresRecordForTest(c *Cell) error { return c.recoverPostgresRecord() }
+func RecoverPostgresRecordForTest(c *Cell) error {
+	return c.recoverPostgresRecord(context.Background())
+}

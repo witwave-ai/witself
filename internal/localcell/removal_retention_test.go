@@ -74,7 +74,7 @@ func seedRetainedFixture(t *testing.T, c *Cell, m *Manifest) *retainedFixture {
 	if c.begin(context.Background(), "stop") != nil || c.journal(context.Background(), "stop", "stop", "started") != nil || c.journal(context.Background(), "stop", "stop", "done") != nil || c.journal(context.Background(), "stop", "operation", "done") != nil {
 		t.Fatal("cannot prepare completed journal prefix")
 	}
-	held, err := c.own(false)
+	held, err := c.own(context.Background(), false)
 	if err != nil {
 		t.Fatal("cannot prepare stable operation lock")
 	}
@@ -826,7 +826,7 @@ func TestRetainedRemovalRefusalsPreserveBytes(t *testing.T) {
 					t.Fatal("cannot prepare corrupt fence")
 				}
 			case "contention":
-				held, err := c.own(false)
+				held, err := c.own(context.Background(), false)
 				if err != nil {
 					t.Fatal("cannot hold operation lock")
 				}

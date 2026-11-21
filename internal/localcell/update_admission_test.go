@@ -119,7 +119,7 @@ func newAdmissionFixture(t *testing.T, name string) admissionFixture {
 	c.cfg.Failpoint = func(operation, step string) error { trace = append(trace, operation+":"+step); return nil }
 	// Create the stable lock before byte inventories, as production admission
 	// may create this persistent inode even when the requested work is refused.
-	lock, err := c.ownExisting()
+	lock, err := c.ownExisting(context.Background())
 	if err != nil {
 		t.Fatal("cannot prepare fixture lock")
 	}
@@ -254,7 +254,7 @@ func TestMaintenanceFenceLegacyOrdering(t *testing.T) {
 			t.Run("Lock", func(t *testing.T) {
 				f := newAdmissionFixture(t, name)
 				updateTestFence(t, f.cell)
-				lock, err := f.cell.ownExisting()
+				lock, err := f.cell.ownExisting(context.Background())
 				if err != nil {
 					t.Fatal("cannot hold contender lock")
 				}
@@ -455,7 +455,7 @@ func TestMaintenanceFenceAdmissionLockLifetime(t *testing.T) {
 			var probes []string
 			probe := func(site string) {
 				probes = append(probes, site)
-				lock, err := other.ownExisting()
+				lock, err := other.ownExisting(context.Background())
 				if lock != nil {
 					_ = lock.Close()
 				}
@@ -507,7 +507,7 @@ func TestMaintenanceFenceAdmissionLockLifetime(t *testing.T) {
 			if name == "StartPortReallocation" && !slices.Contains(probes, "reallocate") {
 				t.Fatal("lock fixture missed occupied-port reallocation")
 			}
-			lock, err := other.ownExisting()
+			lock, err := other.ownExisting(context.Background())
 			if err != nil || lock == nil {
 				t.Fatal("operation lock was not released after return")
 			}
@@ -789,7 +789,7 @@ func admissionRunShutdownParity(t *testing.T) {
 		calls = append(calls, "health")
 		// Model the unfinished operation that Run's deferred Repair must settle.
 		// Passing cancellation occurs here after stopping the startup guard.
-		lock, err := c.ownExisting()
+		lock, err := c.ownExisting(context.Background())
 		if err != nil {
 			return err
 		}

@@ -66,7 +66,7 @@ func readers4Recover(t *testing.T, size int) error {
 	c.recoveryProcessIdentity = func(int) (string, bool, error) { return "identity-A", true, nil }
 	c.recoveryProcessStartedAt = func(int) (time.Time, error) { return time.Unix(1700000000-5, 0), nil }
 	var fence ProcessRecord
-	err := c.recoverPostgresRecord()
+	err := c.recoverPostgresRecord(t.Context())
 	if err == nil && (readJSON(t.Context(), c.path("run", "postgres.json"), &fence) != nil || fence != (ProcessRecord{PID: 4242, StartTime: "identity-A", Root: c.cfg.Root, Component: "postgres"})) {
 		err = errors.New("recovery fence lost")
 	}
@@ -98,7 +98,7 @@ var readers4Forbidden = []string{"os.ReadFile", "os.Open", "os.OpenFile", "local
 // readers4Contract type-checks the package sources as built here and returns
 // lifecycle.go's failed rules, sorted: types; each forbidden read referenced,
 // directly or through a package variable declared as one; and the re-read's
-// call, opener, bound (postmaster's own) and failure (one fixed cause).
+// call, opener, bound (postmaster's own), lease cut and ordinary failure cause.
 func readers4Contract(sources map[string]string) []string {
 	failed, admit, files := map[string]bool{}, map[string]bool{}, []*ast.File{}
 	fail := func(key string, bad bool) { failed[key] = failed[key] || bad }
@@ -164,25 +164,27 @@ func readers4Contract(sources map[string]string) []string {
 	})
 	reread, first := calls["recoverPostgresRecord"], calls["postmaster"]
 	fail("reread_call", len(reread) != 1 || len(first) != 1 || len(reread[0].Args) != 7 || len(first[0].Args) != 7 ||
-		types.ExprString(reread[0].Args[0]) != "context.Background()" || types.ExprString(first[0].Args[0]) != "ctx") // postmaster's own (LC-LEASE-2C2)
+		types.ExprString(reread[0].Args[0]) != "ctx" || types.ExprString(first[0].Args[0]) != "ctx")
 	if !failed["reread_call"] {
 		args, bound, body, valid := reread[0].Args[1:], named(reread[0].Args[2]), bodies["recoverPostgresRecord"], false
 		fail("reread_opener", declared(named(args[0])) != "localcell.openPostgresReader")
 		fail("reread_bound", declared(bound) == "" || bound != named(first[0].Args[2]))
-		// The cause is defined just before the read and returned just after it.
-		for index, cause := 1, named(args[3]); index+1 < len(body); index++ {
+		// The read uses one locally bound cause. Only the lease cut precedes its return.
+		for index, cause := 1, named(args[3]); index+2 < len(body); index++ {
 			define, _ := body[index-1].(*ast.AssignStmt)
 			read, _ := body[index].(*ast.AssignStmt)
-			check, _ := body[index+1].(*ast.IfStmt)
+			check, _ := body[index+2].(*ast.IfStmt)
 			if define == nil || read == nil || check == nil || read.Rhs[0] != reread[0] || len(read.Lhs) != 2 || len(check.Body.List) != 1 {
 				continue
 			}
 			identifier, _ := define.Lhs[0].(*ast.Ident)
 			result, _ := check.Body.List[0].(*ast.ReturnStmt)
-			valid = cause != nil && info.Defs[identifier] == cause && named(args[4]) == cause && named(args[5]) == cause &&
+			readErr := types.ExprString(read.Lhs[1])
+			valid = admissionNodeText(body[index+1]) == "if cut := (*leaseWaitCut)(nil); errors.As("+readErr+", &cut) {\n\treturn cut\n}" &&
+				cause != nil && info.Defs[identifier] == cause && named(args[4]) == cause && named(args[5]) == cause &&
 				types.ExprString(define.Rhs[0]) == `fixedCause("cannot read PostgreSQL recovery identity")` &&
 				declared(named(define.Rhs[0].(*ast.CallExpr).Fun)) == "localcell.fixedCause" && check.Init == nil && check.Else == nil &&
-				types.ExprString(check.Cond) == types.ExprString(read.Lhs[1])+" != nil" && result != nil && len(result.Results) == 1 && named(result.Results[0]) == cause
+				types.ExprString(check.Cond) == readErr+" != nil" && result != nil && len(result.Results) == 1 && named(result.Results[0]) == cause
 		}
 		fail("reread_failure", !valid)
 	}
@@ -204,7 +206,7 @@ func TestReaders4LifecycleSourceContract(t *testing.T) {
 		t.Fatal("lifecycle source contract refused the tree")
 	}
 	const anchor, path = "\tunreadable := fixedCause(", `c.path("pg", "postmaster.pid")`
-	const call = "readRegular(context.Background(), openPostgresReader, postmasterBounded, " + path + ", unreadable"
+	const call = "readRegular(ctx, openPostgresReader, postmasterBounded, " + path + ", unreadable"
 	insert := func(code string) func(string) string {
 		return func(source string) string { return strings.Replace(source, anchor, "\t"+code+"\n"+anchor, 1) }
 	}
@@ -230,6 +232,8 @@ func TestReaders4LifecycleSourceContract(t *testing.T) {
 		{"package_alias", "localcell.readPostgresFile", insert("_, _ = readers4Read(" + path + ")")},
 		{"shadowing_local", "", insert("readPostgresFile := func(string) ([]byte, error) { return nil, nil }\n\t_, _ = readPostgresFile(" + path + ")")},
 		{"reread_plain", "localcell.readPostgresFile reread_call", replace(call+", unreadable, unreadable)", "readPostgresFile("+path+")")},
+		{"reread_background", "reread_call", replace(call, strings.Replace(call, "(ctx,", "(context.Background(),", 1))},
+		{"reread_cut_refused", "reread_failure", replace("return cut\n\t}\n\tif err != nil {\n\t\treturn unreadable", "return unreadable\n\t}\n\tif err != nil {\n\t\treturn unreadable")},
 		{"reread_opener", "reread_opener", replace(call, strings.Replace(call, "openPostgresReader", "openPrivateReader", 1))},
 		{"reread_bound_dropped", "reread_bound", replace(call, strings.Replace(call, "postmasterBounded", "nil", 1))},
 		{"reread_text_changed", "reread_failure", replace("recovery identity\")", "recovery record\")")},

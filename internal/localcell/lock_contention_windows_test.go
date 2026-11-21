@@ -51,7 +51,7 @@ func TestWindowsOwnershipFailureBusyClassification(t *testing.T) {
 	if err := c.validateRoot(false); !errors.Is(err, windows.ERROR_SHARING_VIOLATION) {
 		t.Fatal("Windows ownership fixture did not refuse tree validation for sharing")
 	}
-	contender, err := c.own(false)
+	contender, err := c.own(context.Background(), false)
 	if contender != nil {
 		_ = contender.Close()
 		t.Fatal("Windows own returned a lock while owner held it")
@@ -62,7 +62,7 @@ func TestWindowsOwnershipFailureBusyClassification(t *testing.T) {
 	if !reflect.DeepEqual(before, windowsTreeSnapshot(t, root)) {
 		t.Fatal("Windows own busy refusal changed the private tree")
 	}
-	contender, err = c.ownExisting()
+	contender, err = c.ownExisting(context.Background())
 	if contender != nil {
 		_ = contender.Close()
 		t.Fatal("Windows ownExisting returned a lock while owner held it")
@@ -78,7 +78,7 @@ func TestWindowsOwnershipFailureBusyClassification(t *testing.T) {
 	}
 	owner = nil
 	before = windowsTreeSnapshot(t, root)
-	contender, err = c.own(false)
+	contender, err = c.own(context.Background(), false)
 	if contender != nil {
 		_ = contender.Close()
 		t.Fatal("Windows own returned a lock while validation remained blocked")
@@ -99,7 +99,7 @@ func TestWindowsOwnershipFailureBusyClassification(t *testing.T) {
 		t.Fatal("cannot release Windows ownership DELETE blocker")
 	}
 	blocker = windows.InvalidHandle
-	contender, err = c.own(false)
+	contender, err = c.own(context.Background(), false)
 	if err != nil || contender == nil {
 		if contender != nil {
 			_ = contender.Close()

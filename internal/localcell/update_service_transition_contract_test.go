@@ -23,13 +23,13 @@ return c.writeServiceDescriptor(d)`
 var maintenanceTransitionCallerPrefixes = map[string]string{
 	"SetServiceDesiredState": `if !validServiceDesiredState(state) { return ErrServiceDesiredState }
 if err := ctx.Err(); err != nil { return err }
-lock, err := c.own(false)
+lock, err := c.own(context.Background(), false)
 if err != nil { return err }
 defer func() { _ = lock.Close() }()
 return c.setServiceDesiredStateLocked(state)`,
 	"stopWithServiceFence": `ctx, cancel := c.serviceShutdownDeadline(ctx)
 defer cancel()
-lock, err := c.own(false)
+lock, err := c.own(context.Background(), false)
 if err != nil { return err }
 defer func() { _ = lock.Close() }()
 if fence {
@@ -38,7 +38,7 @@ if fence {
 	"Remove": `ctx, cancel := c.serviceShutdownDeadline(ctx)
 defer cancel()
 if err := c.exitServiceHostForRemoval(ctx); err != nil { return err }
-lock, err := c.ownExisting()
+lock, err := c.ownExisting(context.Background())
 if err != nil { return err }
 defer func() { _ = lock.Close() }()
 ` + maintenanceAdmissionStatement + `
@@ -323,7 +323,7 @@ func TestServiceMaintenanceTransitionContractFixtures(t *testing.T) {
 		{"W3WrongBranch", "service_descriptor.go", setter, setter + "_position", replace(`if state == "running" {`, `if state != "stopped" {`)},
 		{"W3Else", "service_descriptor.go", setter, setter + "_position", replace("\n\td.DesiredState, d.Revision =", " else { return nil }\n\td.DesiredState, d.Revision =")},
 		{"W3Own", "service_descriptor.go", setter, setter + "_inherited_hold", func(source string) string {
-			return serviceAdmissionInsert(source, 0, "lock, err := c.own(false); if err != nil { return err }; defer func() { _ = lock.Close() }()")
+			return serviceAdmissionInsert(source, 0, "lock, err := c.own(context.Background(), false); if err != nil { return err }; defer func() { _ = lock.Close() }()")
 		}},
 		{"W3LockIdentifier", "service_descriptor.go", setter, setter + "_inherited_hold", func(source string) string { return serviceAdmissionInsert(source, 0, "lock := 0; _ = lock") }},
 		{"W3Go", "service_descriptor.go", setter, setter + "_inherited_hold", func(source string) string { return serviceAdmissionInsert(source, 0, "go func() {}()") }},
@@ -347,7 +347,7 @@ func TestServiceMaintenanceTransitionContractFixtures(t *testing.T) {
 			return serviceAdmissionInsert(strings.Replace(source, gate, "", 1), 3, maintenanceAdmissionStatement)
 		}},
 		{"W8OuterOwn", "service_descriptor.go", "RepairService", "RepairService_continuous_hold", func(source string) string {
-			return serviceAdmissionInsert(source, 0, "outer, err := c.own(false); if err != nil { return err }; defer func() { _ = outer.Close() }()")
+			return serviceAdmissionInsert(source, 0, "outer, err := c.own(context.Background(), false); if err != nil { return err }; defer func() { _ = outer.Close() }()")
 		}},
 		{"W8AssignmentBeforeGate", "service_descriptor.go", "RepairService", "RepairService_position", func(source string) string {
 			return admissionEditStatements(source, func(statements []ast.Stmt) []ast.Stmt {

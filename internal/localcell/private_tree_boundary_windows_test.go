@@ -3,6 +3,7 @@
 package localcell
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -59,7 +60,7 @@ func countPrivateTreeValidations(t *testing.T, root string) int {
 
 func assertRecoveryOwnRefused(t *testing.T, c *Cell, path string) {
 	t.Helper()
-	lock, err := c.own(false)
+	lock, err := c.own(context.Background(), false)
 	if lock != nil {
 		_ = lock.Close()
 	}
@@ -101,7 +102,7 @@ func TestWindowsPrivateTreeRecoveryBoundary(t *testing.T) {
 				if err := validatePrivateTree(c.cfg.Root); err != nil {
 					t.Fatalf("an object below the recovery boundary refused the tree: %v", err)
 				}
-				lock, err := c.own(false)
+				lock, err := c.own(context.Background(), false)
 				if err != nil {
 					t.Fatalf("an object below the recovery boundary refused ownership: %v", err)
 				}

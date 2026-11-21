@@ -18,7 +18,7 @@ import (
 // Its direct launch uses the same restricted-user policy as PostgreSQL's own
 // Windows launcher without losing atomic job assignment or the actual PID fence.
 func (c *Cell) startPostgres(ctx context.Context, _ *Manifest) error {
-	if err := c.verifyAll(); err != nil {
+	if err := c.verifyAll(context.Background()); err != nil {
 		return err
 	}
 	state, err := c.processState(context.Background(), "postgres")

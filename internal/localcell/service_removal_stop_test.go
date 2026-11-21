@@ -127,7 +127,7 @@ func TestServiceRemovalRefusesStopOnce(t *testing.T) {
 	w := serviceWorkerStart(t, "", false)
 	w.ready(t)
 	// The host cannot persist stopped intent while another owner holds the lock.
-	lock, err := w.cell.own(false)
+	lock, err := w.cell.own(context.Background(), false)
 	if err != nil {
 		t.Fatal("cannot hold the removal stop's operation lock")
 	}

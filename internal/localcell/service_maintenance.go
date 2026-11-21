@@ -21,7 +21,7 @@ func (c *Cell) serviceMaintenanceObservation(ctx context.Context, observed *Serv
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	lock, err := c.own(false)
+	lock, err := c.own(context.Background(), false)
 	if err != nil {
 		return err
 	}

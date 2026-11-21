@@ -39,11 +39,16 @@ func leaseJournalPlant(c *Cell, m *Manifest, prepare string) (journalProgress, e
 	return progress, errors.Join(err, readErr)
 }
 
-// leaseRecordPlant prepares c for an LC-LEASE-2C2 R5 row: postmaster.pid of
-// an unallocated PID, a fence, or the owner lock without the run lock.
+// leaseRecordPlant sets up unleased record, fence and ownership inputs.
 func leaseRecordPlant(t *testing.T, c *Cell, prepare string) error {
 	switch prepare {
-	case "record":
+	case "record", "server_record", "postgres_record":
+		if prepare != "record" {
+			component := strings.TrimSuffix(prepare, "_record")
+			if err := writeAtomic(c.path("run", component+".json"), ProcessRecord{PID: checkpointUnallocatedPID, StartTime: "stale", Root: c.cfg.Root, Component: component}, nil); err != nil {
+				return err
+			}
+		}
 		record := strconv.Itoa(checkpointUnallocatedPID) + "\n" + c.path("pg") + "\n1\n"
 		return errors.Join(testMkdir(c.path("pg"), 0o700), testWriteFile(c.path("pg", "postmaster.pid"), []byte(record), 0o600))
 	case "fence":
@@ -54,7 +59,17 @@ func leaseRecordPlant(t *testing.T, c *Cell, prepare string) error {
 	if err != nil {
 		return err
 	}
-	return errors.Join(lock.Close(), os.Remove(c.path("run", "operation.lock")))
+	if err := lock.Close(); err != nil {
+		return err
+	}
+	switch prepare {
+	case "locks":
+		return nil
+	case "fallback":
+		return os.Remove(c.path(".owner.lock"))
+	default:
+		return os.Remove(c.path("run", "operation.lock"))
+	}
 }
 
 // LC-LEASE-2B R5: with its context already done, each threaded declaration
@@ -210,6 +225,66 @@ func TestLeaseWaitLayerUnleased(t *testing.T) {
 			}
 		})
 	}
+	for _, name := range []string{"own", "ownExisting"} {
+		t.Run(name, func(t *testing.T) {
+			c, _ := unitCell(t)
+			if leaseRecordPlant(t, c, "locks") != nil {
+				t.Fatal("cannot prepare both unleased ownership locks")
+			}
+			var lock *operationLock
+			var err error
+			if name == "own" {
+				lock, err = c.own(done, false)
+			} else {
+				lock, err = c.ownExisting(done)
+			}
+			if err != nil {
+				t.Fatal("a done context refused unleased ownership")
+			}
+			if lock == nil {
+				t.Fatal("unleased ownership returned no lock under a done context")
+			}
+			if len(lock.files) != 2 {
+				t.Fatal("unleased ownership did not hold both locks")
+			}
+			if lock.Close() != nil {
+				t.Fatal("cannot close unleased ownership under a done context")
+			}
+		})
+	}
+	t.Run("verifyAll", func(t *testing.T) {
+		c, _ := unitCell(t)
+		identity, alive, err := processIdentity(os.Getpid())
+		if err != nil || !alive {
+			t.Fatal("cannot identify the test process for ownership verification")
+		}
+		for _, component := range []string{"postgres", "server", "worker"} {
+			if writeAtomic(c.path("run", component+".json"), ProcessRecord{PID: os.Getpid(), StartTime: identity, Root: c.cfg.Root, Component: component}, nil) != nil {
+				t.Fatal("cannot plant the matching component identity")
+			}
+		}
+		if testMkdir(c.path("pg"), 0o700) != nil || testWriteFile(c.path("pg", "postmaster.pid"), []byte(strconv.Itoa(os.Getpid())+"\n"+c.path("pg")+"\n1\n"), 0o600) != nil {
+			t.Fatal("cannot plant the matching PostgreSQL identity")
+		}
+		if c.verifyAll(done) != nil {
+			t.Fatal("a done context refused matching unleased process identities")
+		}
+	})
+	t.Run("recoverPostgresRecord", func(t *testing.T) {
+		c, _ := unitCell(t)
+		if leaseRecordPlant(t, c, "record") != nil {
+			t.Fatal("cannot plant the dead postmaster identity")
+		}
+		if c.recoverPostgresRecord(done) != nil {
+			t.Fatal("a done context refused recovery of a proven-dead postmaster")
+		}
+		if lockDirectory(c.path("run")) != nil {
+			t.Fatal("the recovery record parent is not a real directory")
+		}
+		if _, err := os.Lstat(c.path("run", "postgres.json")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatal("recovery published signaling authority for a dead postmaster")
+		}
+	})
 	// LC-LEASE-2C2-F1 (G4): under a done context the active fence still refuses
 	// an ordinary caller (generation 0); nil there would admit past it.
 	t.Run("maintenanceFenceAllows_active", func(t *testing.T) {

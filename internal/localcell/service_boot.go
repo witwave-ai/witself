@@ -16,7 +16,7 @@ type serviceBootRecord struct {
 // records are validated before removing any stale identity, including PG's PID
 // file, which otherwise can mistake a reused PID for a live postmaster.
 func (c *Cell) reconcileServiceBoot() error {
-	lock, err := c.own(false)
+	lock, err := c.own(context.Background(), false)
 	if err != nil {
 		return err
 	}

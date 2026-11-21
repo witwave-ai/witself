@@ -157,7 +157,7 @@ func TestServiceFailureSiteSourceContract(t *testing.T) {
 	defer cancel()
 	site := serviceHealthStep(ctx, "health_lock")
 	defer func() { result = serviceFailureAt(result, site) }()
-	lock, err := c.own(false)`,
+	lock, err := c.own(context.Background(), false)`,
 			`site = serviceHealthStep(ctx, "health_tree")
 	d, err := c.ServiceDescriptor()`,
 			`site = serviceHealthStep(ctx, "health_database")

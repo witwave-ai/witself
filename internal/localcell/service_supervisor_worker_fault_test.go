@@ -196,7 +196,7 @@ func serviceWorkerRefusal(t *testing.T, stage string) {
 			t.Fatal("live stop refusal was not observable before cancellation")
 		}
 	case "persistence_pending":
-		lock, err := c.own(false)
+		lock, err := c.own(context.Background(), false)
 		if err != nil {
 			t.Fatal("could not hold the fixture operation lock")
 		}
