@@ -176,7 +176,7 @@ func nativeWindowsTaskManagerLifecycle(t *testing.T, started time.Time, pgbin st
 			if err == nil {
 				break
 			}
-			if !errors.Is(err, errServiceControlDeferred) || ctx.Err() != nil {
+			if !errors.Is(err, localcell.ErrServiceControlDeferredForTest) || ctx.Err() != nil {
 				t.Fatal("cannot durably stop native task children")
 			}
 		}
