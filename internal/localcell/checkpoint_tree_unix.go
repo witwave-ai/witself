@@ -9,6 +9,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 
 	"golang.org/x/sys/unix"
 )
@@ -17,23 +18,26 @@ import (
 // its slash name below recovery/. Tests replace it; production runs sync.
 var syncCheckpointTreeParent = func(_ string, sync func() error) error { return sync() }
 
-// checkpointTree reaches each name below one checkpoint directory from the held
-// recovery/ through the private beneath walk: never through a link or off the
-// held device, and through each directory the call made only while it is the one
-// recorded at its name; recovery/ must still name the held directory before each
-// operation. Names are slash paths below the checkpoint directory, "." itself.
+// checkpointTreeListed observes a snapshot directory after enumeration.
+var checkpointTreeListed func(name string)
+
+// checkpointTree reaches names from the held recovery/ through the private
+// beneath walk. A copy uses slash paths relative to its checkpoint; a reader
+// has an empty id and uses names relative to recovery/. made records directory
+// identities for the walk, including the directories typed by a reader.
 type checkpointTree struct {
 	c        *Cell
 	id       string
 	recovery *os.Root
 	made     map[string]privateBeneathID
+	listed   []int // keep listed checkpoints' inodes alive until the witness reads finish
 }
 
 func (c *Cell) checkpointTree(checkpointID string) *checkpointTree {
 	return &checkpointTree{c: c, id: checkpointID, made: map[string]privateBeneathID{}}
 }
 
-// hold opens recovery/ (once: the copy holds it) and binds it.
+// hold opens recovery/ and verifies that its name still identifies it.
 func (t *checkpointTree) hold() (err error) {
 	if t.recovery, err = t.c.holdRecovery(); err != nil {
 		return err
@@ -42,9 +46,168 @@ func (t *checkpointTree) hold() (err error) {
 }
 
 func (t *checkpointTree) close() {
+	for _, fd := range t.listed {
+		_ = unix.Close(fd)
+	}
+	t.listed = nil
 	if t.recovery != nil {
 		_ = t.recovery.Close()
 	}
+}
+
+func (t *checkpointTree) listing() ([]string, []bool, error) {
+	if t.recovery == nil {
+		if err := t.hold(); err != nil {
+			// Only this open of the boundary may return not-exist to the caller.
+			return nil, nil, err
+		}
+	} else if err := t.bound(); err != nil {
+		return nil, nil, err
+	}
+	dir, err := t.recovery.Open(".")
+	if err != nil {
+		return nil, nil, errPrivateLayout
+	}
+	defer func() { _ = dir.Close() }()
+	names, err := dir.Readdirnames(-1)
+	var root unix.Stat_t
+	if err != nil || unix.Fstat(int(dir.Fd()), &root) != nil {
+		return nil, nil, errPrivateLayout
+	}
+	slices.Sort(names)
+	directories := make([]bool, len(names))
+	for i, name := range names {
+		info, err := privateBeneathLstat(t.recovery, name, nil)
+		if err != nil {
+			return nil, nil, errPrivateLayout
+		}
+		stat := info.Sys().(*unix.Stat_t)
+		if stat.Dev != root.Dev {
+			return nil, nil, errCheckpointState
+		}
+		directories[i] = info.IsDir()
+		if directories[i] && checkpointIDPattern.MatchString(name) {
+			t.made[name] = privateBeneathIdentity(stat)
+			err = privateBeneathDirectory(t.recovery, name, t.want, func(fd int, _ privateBeneathID) error {
+				dup, err := unix.FcntlInt(uintptr(fd), unix.F_DUPFD_CLOEXEC, 0)
+				if err == nil {
+					t.listed = append(t.listed, dup)
+				}
+				return err
+			})
+			if err != nil {
+				return nil, nil, errPrivateLayout
+			}
+		}
+	}
+	return names, directories, nil
+}
+
+func (t *checkpointTree) witness(ctx context.Context, id string) (checkpointWitness, bool, error) {
+	f, err := t.open(ctx, path.Join(id, checkpointWitnessName))
+	if cut := (*leaseWaitCut)(nil); errors.As(err, &cut) {
+		return checkpointWitness{}, false, cut
+	}
+	if err != nil {
+		if t.bound() != nil {
+			return checkpointWitness{}, false, errCheckpointWitnessUnread
+		}
+		// Only the leaf lookup inside the listed directory can prove absence.
+		// A failed walk to its parent (including ENOENT) remains unreadable.
+		err = privateBeneathDirectory(t.recovery, id, t.want, func(fd int, parent privateBeneathID) error {
+			var stat unix.Stat_t
+			statErr := unix.Fstatat(fd, checkpointWitnessName, &stat, unix.AT_SYMLINK_NOFOLLOW)
+			if errors.Is(statErr, unix.ENOENT) || statErr == nil && uint64(stat.Dev) == parent.dev && stat.Mode&unix.S_IFMT != unix.S_IFREG {
+				return nil
+			}
+			return errCheckpointWitnessUnread
+		})
+		if err != nil {
+			return checkpointWitness{}, false, errCheckpointWitnessUnread
+		}
+		return checkpointWitness{}, false, nil
+	}
+	defer func() { _ = f.Close() }()
+	info, err := f.Stat()
+	if err != nil {
+		return checkpointWitness{}, false, errCheckpointWitnessUnread
+	}
+	if !info.Mode().IsRegular() {
+		return checkpointWitness{}, false, nil
+	}
+	return checkpointWitnessRead(f, id)
+}
+
+// snapshot retries the entire pass only when an entry disappears between
+// listing its parent and examining its name in that same open directory.
+func (t *checkpointTree) snapshot() error {
+	for range 3 {
+		directories := []string{"."}
+		vanished := false
+		for len(directories) != 0 && !vanished {
+			name := directories[0]
+			directories = directories[1:]
+			if t.bound() != nil {
+				return errPrivateLayout
+			}
+			scan := func(dir *os.File) error {
+				fd := int(dir.Fd())
+				var self, stat unix.Stat_t
+				if unix.Fstat(fd, &self) != nil {
+					return errPrivateLayout
+				}
+				uid := uint32(os.Geteuid())
+				if self.Uid != uid || self.Mode&0o777 != 0o700 {
+					return errCheckpointState
+				}
+				names, err := dir.Readdirnames(-1)
+				if err != nil {
+					return errPrivateLayout
+				}
+				if checkpointTreeListed != nil {
+					checkpointTreeListed(name)
+				}
+				for _, entry := range names {
+					if err := unix.Fstatat(fd, entry, &stat, unix.AT_SYMLINK_NOFOLLOW); errors.Is(err, unix.ENOENT) {
+						vanished = true
+						return nil
+					} else if err != nil || stat.Dev != self.Dev || stat.Uid != uid {
+						return errCheckpointState
+					}
+					if stat.Mode&unix.S_IFMT == unix.S_IFDIR && stat.Mode&0o777 == 0o700 {
+						child := path.Join(name, entry)
+						t.made[child] = privateBeneathIdentity(&stat)
+						directories = append(directories, child)
+					} else if stat.Mode != unix.S_IFREG|0o600 {
+						return errCheckpointState
+					}
+				}
+				return nil
+			}
+			if name == "." {
+				dir, err := t.recovery.Open(".")
+				if err != nil {
+					return errPrivateLayout
+				}
+				err = scan(dir)
+				_ = dir.Close()
+				if err != nil {
+					return err
+				}
+			} else if err := privateBeneathDirectory(t.recovery, name, t.want, func(fd int, _ privateBeneathID) error {
+				return privateBeneathDup(fd, scan)
+			}); err != nil {
+				if errors.Is(err, errCheckpointState) || errors.Is(err, unix.EXDEV) || errors.Is(err, errPrivateBeneathMoved) || errors.Is(err, unix.ENOTDIR) || errors.Is(err, unix.ELOOP) {
+					return errCheckpointState
+				}
+				return errPrivateLayout
+			}
+		}
+		if !vanished {
+			return nil
+		}
+	}
+	return errPrivateLayout
 }
 
 // bound refuses unless recovery/ was held and its name still names it.

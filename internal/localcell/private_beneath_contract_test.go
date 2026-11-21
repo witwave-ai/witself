@@ -37,7 +37,11 @@ var (
 		"checkpointTreeRemoveDirectory:privateBeneathIdentity": 1, "checkpointTreeRemoveDirectory:errPrivateBeneathMoved": 1,
 		"open:privateBeneathLstat": 1, "open:privateBeneathOpen": 1, "check:privateBeneathList": 1, "record:privateBeneathLstat": 1,
 		"record:privateBeneathRemove": 1, "record:privateBeneathReplace": 1, "record:privateBeneathDirectory": 1, "record:privateBeneathID": 1,
-		"record:privateBeneathSync": 1}
+		"record:privateBeneathSync":   1,
+		"listing:privateBeneathLstat": 1, "listing:privateBeneathIdentity": 1, "listing:privateBeneathDirectory": 1, "listing:privateBeneathID": 1,
+		"witness:privateBeneathDirectory": 1, "witness:privateBeneathID": 1,
+		"snapshot:privateBeneathIdentity": 1, "snapshot:privateBeneathDirectory": 1, "snapshot:privateBeneathID": 1,
+		"snapshot:privateBeneathDup": 1, "snapshot:errPrivateBeneathMoved": 1}
 )
 
 // privateBeneathContract returns the keys sources break, sorted: the walk file's build line, imports, calls, constants,

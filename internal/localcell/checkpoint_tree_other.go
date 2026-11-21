@@ -28,3 +28,8 @@ func (t *checkpointTree) open(context.Context, string) (*os.File, error) {
 }
 func (t *checkpointTree) check(map[string]bool) (int, error) { return 0, errCheckpointState }
 func (t *checkpointTree) record(string, []byte) error        { return errCheckpointState }
+func (t *checkpointTree) listing() ([]string, []bool, error) { return nil, nil, errCheckpointState }
+func (t *checkpointTree) witness(context.Context, string) (checkpointWitness, bool, error) {
+	return checkpointWitness{}, false, errCheckpointState
+}
+func (t *checkpointTree) snapshot() error { return errCheckpointState }

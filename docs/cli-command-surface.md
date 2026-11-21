@@ -6373,6 +6373,18 @@ too, a link put inside the database directory during
 the copy is followed, but only within it; one put at the manifest, a kept
 password file or a copy being inventoried is refused.
 
+On Linux and macOS, `inspect` and the check before `create` read `recovery/`
+through the directory held for them. If a same-user process replaces a listed
+checkpoint with a link, file or another directory before a witness read reaches
+it, the read refuses the replacement. The observation is `unavailable` with
+`local_checkpoint_operation_failed` and reports no entries. A read that already
+opened the witness can finish from that handle. These reads can recognize a
+complete or incomplete checkpoint even when a descendant's full pathname
+exceeds the system limit. `delete` validates `recovery/` the same way, but
+still examines the checkpoint it removes by pathname: a checkpoint whose own
+pathname reaches the system limit is listed and is refused by `delete` with
+`local_checkpoint_state_unsupported`.
+
 On Linux, another process can hold a lease on a file (`fcntl(2)`): a process
 running as the cell's user, or a privileged one such as a file server that
 exports the cell root. When `create`, `inspect` or `delete` opens a file under

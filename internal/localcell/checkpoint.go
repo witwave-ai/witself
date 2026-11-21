@@ -1078,26 +1078,41 @@ func checkpointWitnessRead(r io.Reader, checkpointID string) (checkpointWitness,
 	return witness, witness.Format == 1 && witness.CheckpointID == checkpointID, nil
 }
 
+// recoveryAbsent checks the boundary by name inside the open cell root. A
+// missing ancestor and a dangling recovery link cannot prove an empty listing.
+func (c *Cell) recoveryAbsent() bool {
+	root, err := os.OpenRoot(c.cfg.Root + checkpointRootHere)
+	if err != nil {
+		return false
+	}
+	defer func() { _ = root.Close() }()
+	_, err = root.Lstat(filepath.Base(c.recoveryDir()))
+	return errors.Is(err, fs.ErrNotExist)
+}
+
 // listCheckpoints classifies recovery/ after validateRecovery; entries that
 // are not id-shaped directories are counted unknown.
 func (c *Cell) listCheckpoints(ctx context.Context) ([]CheckpointSummary, int, error) {
-	entries, err := os.ReadDir(c.recoveryDir())
-	if errors.Is(err, fs.ErrNotExist) {
+	tree := c.checkpointTree("")
+	defer tree.close()
+	names, directories, err := tree.listing()
+	if errors.Is(err, fs.ErrNotExist) && c.recoveryAbsent() {
 		return nil, 0, nil
-	} else if err != nil {
+	}
+	if err != nil {
 		// Never report zero checkpoints for a recovery/ that could not be read.
 		return nil, 0, checkpointStateError{reason: "boundary_unreadable"}
 	}
+	c.checkpointStage("listed")
 	var summaries []CheckpointSummary
 	unknown := 0
-	for _, entry := range entries {
-		dir, err := c.checkpointDir(entry.Name())
-		if err != nil || !entry.IsDir() {
+	for i, name := range names {
+		if _, err := c.checkpointDir(name); err != nil || !directories[i] {
 			unknown++
 			continue
 		}
-		summary := CheckpointSummary{ID: entry.Name()}
-		witness, complete, err := checkpointComplete(ctx, dir, entry.Name())
+		summary := CheckpointSummary{ID: name}
+		witness, complete, err := tree.witness(ctx, name)
 		if err != nil {
 			// A witness that may exist and was not read is never listed.
 			return nil, 0, err
@@ -1145,7 +1160,7 @@ func (c *Cell) checkpointSummaries(ctx context.Context, lock *operationLock, ins
 // and below the canonically spelled directory must be private. It never
 // follows a link or skips a directory.
 func (c *Cell) validateRecovery() error {
-	if _, err := os.Lstat(c.recoveryDir()); errors.Is(err, fs.ErrNotExist) {
+	if _, err := os.Lstat(c.recoveryDir()); errors.Is(err, fs.ErrNotExist) && c.recoveryAbsent() {
 		return nil
 	} else if err != nil {
 		return checkpointStateError{reason: "boundary_unreadable"}
@@ -1164,7 +1179,12 @@ func (c *Cell) validateRecovery() error {
 	if privateDir(c.recoveryDir(), false) != nil {
 		return checkpointStateError{reason: "boundary_not_private"}
 	}
-	return recoveryTreeFailure(validatePrivateTreeSnapshot(c.recoveryDir(), filepath.WalkDir, validateRecoveryObject, os.Lstat))
+	tree := c.checkpointTree("")
+	defer tree.close()
+	if tree.hold() != nil {
+		return checkpointStateError{reason: "boundary_unreadable"}
+	}
+	return recoveryTreeFailure(tree.snapshot())
 }
 
 // recoveryTreeFailure consumes only identities already established by the one
