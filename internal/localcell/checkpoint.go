@@ -56,7 +56,8 @@ func (e checkpointStateError) Unwrap() error { return errCheckpointState }
 
 // CheckpointFailure is safe to render: Class and Reason contain only closed
 // constants. A nil failure has the zero value. CleanupIncomplete means that
-// the failed operation could not remove its own witness-less directory.
+// the failed create did not attempt cleanup of its own witness-less directory
+// or could not confirm its removal.
 type CheckpointFailure struct {
 	Class             string
 	Reason            string
