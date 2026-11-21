@@ -255,6 +255,14 @@ tests:
       - eval_time: 21h4m
         alertname: WitselfPostgresBackupFailed
         exp_alerts: *failed_alerts
+      # The hold is exactly ten minutes from the first evaluation that sees
+      # the 21:00 attempt running.
+      - eval_time: 21h9m30s
+        alertname: WitselfPostgresBackupFailed
+        exp_alerts: *failed_alerts
+      - eval_time: 21h10m
+        alertname: WitselfPostgresBackupFailed
+        exp_alerts: []
       - eval_time: 21h15m
         alertname: WitselfPostgresBackupFailed
         exp_alerts: []

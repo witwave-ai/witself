@@ -41,11 +41,13 @@ groups:
             and
             (time() - witself_postgres_backup_last_attempt_timestamp_seconds{namespace="witself",service="witself-postgresql-metrics"} > 7200)
           )
-        # The next attempt replaces the failed row while it runs (-1). Hold the
-        # warning for ten minutes from that moment so a failure that persists
-        # across attempts stays one warning instead of closing and reopening at
-        # each attempt. An attempt that runs longer than ten minutes and then
-        # fails does reopen it.
+        # The next attempt replaces the failed result while it runs (-1), which
+        # ends the match. Hold the warning for ten minutes from the first
+        # evaluation that no longer sees the failure: when that attempt's
+        # failure is seen before the hold ends, a failure that persists across
+        # attempts stays one warning instead of closing and reopening at each
+        # attempt. An attempt still unfinished when the hold ends clears the
+        # warning, and it fires again if the attempt then fails.
         keep_firing_for: 10m
         labels:
           severity: warning
