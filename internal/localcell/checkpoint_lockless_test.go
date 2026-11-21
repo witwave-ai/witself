@@ -409,9 +409,10 @@ var locklessCallees = map[string][]string{
 	"refuseBeforeLockNames": {"os.Lstat", "errors.Is", "errors.As", "convert leaseWaitCut", "localcell.acquireLock", "(*localcell.operationLock).Close", "(*localcell.Cell).path",
 		"(*localcell.Cell).validateRoot", "(*localcell.Cell).recoveryDir", "param admit"},
 	"admitCheckpointDry": {"errors.Is", "(*localcell.Cell).checkpointOps", "(*localcell.Cell).admitCheckpoint"},
-	"admitDeleteCheckpoint": {"os.Lstat", "os.ReadDir", "errors.Is", "localcell.privateDir", "localcell.checkpointLeftover",
-		"localcell.recoveryEntryCanonical", "(*localcell.Cell).readJournal", "(*localcell.Cell).checkpointCold", "(*localcell.Cell).validateRecovery",
-		"(*localcell.Cell).checkpointDir", "(*localcell.Cell).recoveryDir", "(*regexp.Regexp).MatchString", "(io/fs.DirEntry).Name", "append", "len", "make"},
+	// The target's reads moved onto the tree (LC-CKPT-WALK-1C3B), whose target method TestCheckpointSourceContract pins on every system.
+	"admitDeleteCheckpoint": {"context.Background", "localcell.checkpointLeftover", "(*localcell.Cell).readJournal", "(*localcell.Cell).checkpointCold",
+		"(*localcell.Cell).validateRecovery", "(*localcell.Cell).checkpointDir", "(*regexp.Regexp).MatchString", "(*localcell.Cell).checkpointTree",
+		"(*localcell.checkpointTree).target", "(*localcell.checkpointTree).close"},
 }
 
 // The dry create's one control boundary, exactly: it returns the sentinel.

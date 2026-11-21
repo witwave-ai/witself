@@ -214,8 +214,9 @@ func TestCheckpointTreePathLimit(t *testing.T) {
 		{"deep_directory", heldTarget, 0, answers{"complete", "", "", "", "copy"}, "deep private directory changed the checkpoint sequence"},
 		{"witness_absent", "", witnessed, answers{"incomplete", incomplete, "", "", ""}, "absent long witness changed the checkpoint sequence"},
 		{"witness_present", heldTarget, witnessed, answers{"complete", "", "", "", "copy"}, "present long witness changed the checkpoint sequence"},
-		{"checkpoint_absent_witness", "", named, answers{"incomplete", incomplete, state, "", "incomplete"}, "overlong checkpoint name with absent witness changed the sequence"},
-		{"checkpoint_present_witness", heldTarget, named, answers{"complete", failed, state, "", "complete"}, "overlong checkpoint name with present witness changed the sequence"},
+		// delete reaches the checkpoint through the held recovery/, so an overlong own name is deleted (LC-CKPT-WALK-1C3B).
+		{"checkpoint_absent_witness", "", named, answers{"incomplete", incomplete, "", "", ""}, "overlong checkpoint name with absent witness changed the sequence"},
+		{"checkpoint_present_witness", heldTarget, named, answers{"complete", failed, "", "", ""}, "overlong checkpoint name with present witness changed the sequence"},
 		{"maintenance_name", heldTarget, len("/journal/maintenance.json"), answers{failed, fence, fence, fence, failed}, "an overlong maintenance name changed the pre-admission refusal"},
 		{"operation_lock_name", heldTarget, len("/run/operation.lock"), answers{failed, failed, failed, failed, failed}, "an overlong operation lock changed the pre-admission refusal"},
 		{"empty_boundary_with_dot", "", len("/recovery") + 2, answers{failed, failed, failed, failed, failed}, "overlong directory-only boundary suffix changed the checkpoint sequence"},

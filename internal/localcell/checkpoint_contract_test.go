@@ -217,11 +217,13 @@ func checkpointTreeBypassRooted(values map[any][]ast.Expr, path ast.Expr, depth 
 }
 
 // checkpointTreeNilWants are the walk calls of checkpoint_tree_unix.go that pass no identity, by owner and count: the
-// listing of names directly in recovery/ and discard's single-component calls at the checkpoint's own name. Every other walk call with a want passes t.want.
-var checkpointTreeNilWants = map[string]int{"discard:privateBeneathLstat": 2, "checkpointTreeRemoveDirectory:privateBeneathAt": 1, "listing:privateBeneathLstat": 1}
+// listing of names directly in recovery/, discard's single-component calls at the checkpoint's own name, and delete's
+// admission and adoption of the directory at that name. Every other walk call with a want passes t.want.
+var checkpointTreeNilWants = map[string]int{"discard:privateBeneathLstat": 2, "checkpointTreeRemoveDirectory:privateBeneathAt": 1, "listing:privateBeneathLstat": 1,
+	"target:privateBeneathLstat": 1, "adopt:privateBeneathDirectory": 1}
 
 // checkpointTreeBinds are the t.bound() calls of checkpoint_tree_unix.go by owner: each operation binds recovery/ first.
-var checkpointTreeBinds = map[string]int{"hold": 1, "lstat": 1, "mkdir": 1, "createTemp": 1, "publish": 1, "sync": 1, "discard": 5,
+var checkpointTreeBinds = map[string]int{"hold": 1, "lstat": 1, "mkdir": 1, "createTemp": 1, "publish": 1, "sync": 1, "discard": 3, "unseal": 1, "sweep": 2,
 	"open": 1, "check": 1, "record": 3, "listing": 1, "witness": 1, "snapshot": 1}
 
 // checkpointTreeOrders are, for open, check and record (LC-CKPT-WALK-1C1), their binds, walk calls, temporary, file sync
@@ -231,7 +233,14 @@ var checkpointTreeOrders = map[string]string{"open": "t.bound waitOutLease priva
 	"record": "t.bound privateBeneathLstat t.createTemp privateBeneathRemove syncFile t.bound privateBeneathReplace t.bound privateBeneathDirectory privateBeneathSync",
 	"close":  "unix.Close", "listing": "t.hold t.bound t.recovery.Open dir.Close dir.Readdirnames unix.Fstat slices.Sort privateBeneathLstat privateBeneathIdentity privateBeneathDirectory unix.FcntlInt",
 	"witness":  "t.open t.bound privateBeneathDirectory unix.Fstatat f.Close f.Stat checkpointWitnessRead",
-	"snapshot": "t.bound unix.Fstat dir.Readdirnames checkpointTreeListed unix.Fstatat privateBeneathIdentity t.recovery.Open scan dir.Close privateBeneathDirectory privateBeneathDup"}
+	"snapshot": "t.bound unix.Fstat dir.Readdirnames checkpointTreeListed unix.Fstatat privateBeneathIdentity t.recovery.Open scan dir.Close privateBeneathDirectory privateBeneathDup",
+	// delete's admission, adoption, unseal and sweep, and the failed create's discard (LC-CKPT-WALK-1C3B): each binds
+	// recovery/ (t.hold binds) before the walk calls it guards; the directory is removed after its identity is checked.
+	"target":  "t.hold t.c.recoveryAbsent privateBeneathLstat os.Geteuid t.recovery.Open dir.Readdirnames dir.Close recoveryEntryCanonical",
+	"adopt":   "t.c.checkpointStage t.hold privateBeneathDirectory",
+	"unseal":  "t.c.checkpointStage t.bound privateBeneathRemove t.sync",
+	"sweep":   "t.c.checkpointStage t.bound privateBeneathDirectory privateBeneathRemoveBelow t.c.checkpointStage t.bound checkpointTreeRemoveDirectory syncCheckpointRoot",
+	"discard": "t.c.checkpointStage t.bound privateBeneathLstat syncCheckpointRoot privateBeneathIdentity privateBeneathLstat t.bound t.sweep privateBeneathLstat t.bound"}
 
 // checkpointTreeWindowsCheck are the Windows twin's check conditions and results by text and count: today's walk of the
 // inventory, an entry not planned or not of its planned kind (a directory, else a regular file) refused (N8 of 1C1R).
@@ -286,6 +295,41 @@ var checkpointTreeReaderPins = map[string]map[string]string{
 		"root":      `if name == "." { dir, err := t.recovery.Open(".") if err != nil { return errPrivateLayout } err = scan(dir) _ = dir.Close() if err != nil { return err }`,
 		"child":     "privateBeneathDirectory(t.recovery, name, t.want, func(fd int, _ privateBeneathID) error",
 		"walk":      "return privateBeneathDup(fd, scan) }); err != nil { if errors.Is(err, errCheckpointState) || errors.Is(err, unix.EXDEV) || errors.Is(err, errPrivateBeneathMoved) || errors.Is(err, unix.ENOTDIR) || errors.Is(err, unix.ELOOP) { return errCheckpointState } return errPrivateLayout }",
+	},
+	// delete through the tree (LC-CKPT-WALK-1C3B), and the failed create's discard.
+	"checkpoint.go:admitDeleteCheckpoint": {"tree": "tree := c.checkpointTree(options.CheckpointID) defer tree.close() if err := tree.target(); err != nil { return err } return nil }"},
+	"checkpoint.go:deleteCheckpointLocked": {
+		"adopt": "tree := c.checkpointTree(options.CheckpointID) defer tree.close() if tree.adopt() != nil { return errCheckpointState }",
+		"steps": `{{"unseal", tree.unseal}, {"remove", tree.sweep}}`,
+	},
+	"checkpoint_tree_unix.go:target": {
+		"boundary": "if err := t.hold(); errors.Is(err, fs.ErrNotExist) && t.c.recoveryAbsent() { return errCheckpointIdentity } else if err != nil { return errCheckpointState }",
+		"absent":   "info, err := privateBeneathLstat(t.recovery, t.id, nil) if errors.Is(err, fs.ErrNotExist) { return errCheckpointIdentity } else if err != nil { return errCheckpointState }",
+		"private":  "if stat := info.Sys().(*unix.Stat_t); stat.Mode&unix.S_IFMT != unix.S_IFDIR || stat.Uid != uint32(os.Geteuid()) || stat.Mode&0o777 != 0o700 { return errCheckpointState }",
+		"spelling": `dir, err := t.recovery.Open(".") if err != nil { return errCheckpointIdentity } names, err := dir.Readdirnames(-1) if closed := dir.Close(); err != nil || closed != nil || !recoveryEntryCanonical(names, t.id) { return errCheckpointIdentity } return nil }`,
+	},
+	"checkpoint_tree_unix.go:adopt":  {"record": "if err := t.hold(); err != nil { return err } return privateBeneathDirectory(t.recovery, t.id, nil, func(_ int, id privateBeneathID) error { t.made[t.id] = id return nil }) }"},
+	"checkpoint_tree_unix.go:unseal": {"remove": "else if err := privateBeneathRemove(t.recovery, t.name(checkpointWitnessName), t.want); err != nil { return err } return t.sync(\".\") }"},
+	"checkpoint_tree_unix.go:sweep": {
+		"below":     "else if err := privateBeneathDirectory(t.recovery, t.id, t.want, func(fd int, _ privateBeneathID) error { return privateBeneathRemoveBelow(fd) }); err != nil { return err }",
+		"directory": "else if err := checkpointTreeRemoveDirectory(t.recovery, t.id, t.made[t.id]); err != nil { return err } return syncCheckpointRoot(t.recovery) }",
+	},
+	"checkpoint_tree_unix.go:discard": {
+		"empty":   "case errors.Is(err, fs.ErrNotExist) && !made: return syncCheckpointRoot(t.recovery) case err != nil || !made ||",
+		"witness": "privateBeneathLstat(t.recovery, t.name(checkpointWitnessName), t.want); err == nil && witness.Mode().IsRegular() { if t.bound() != nil { return errCheckpointCopy } return nil } else if err != nil && !errors.Is(err, fs.ErrNotExist) { return errCheckpointCopy } if t.sweep() != nil { return errCheckpointCopy }",
+	},
+	"checkpoint_tree_other.go:target":   {"refuse": "return errCheckpointState"},
+	"checkpoint_tree_other.go:adopt":    {"refuse": "return errCheckpointState"},
+	"checkpoint_tree_other.go:unseal":   {"refuse": "return errCheckpointState"},
+	"checkpoint_tree_other.go:sweep":    {"refuse": "return errCheckpointState"},
+	"checkpoint_tree_windows.go:close":  {"roots": "closeCheckpointRoots(t.recovery, t.checkpoint)"},
+	"checkpoint_tree_windows.go:adopt":  {"held": "t.recovery, t.checkpoint, err = t.c.holdCheckpoint(t.id) return err"},
+	"checkpoint_tree_windows.go:unseal": {"held": "return t.c.unsealCheckpointHeld(t.recovery, t.checkpoint, t.id)"},
+	"checkpoint_tree_windows.go:sweep":  {"held": "return t.c.removeCheckpointHeld(t.recovery, t.checkpoint, t.id)"},
+	"checkpoint_tree_windows.go:target": {
+		"name":     "if _, err := os.Lstat(dir); errors.Is(err, fs.ErrNotExist) { return errCheckpointIdentity } else if err != nil || privateDir(dir, false) != nil { return errCheckpointState }",
+		"spelling": "entries, err := os.ReadDir(t.c.recoveryDir())",
+		"canon":    "if err != nil || !recoveryEntryCanonical(names, t.id) { return errCheckpointIdentity } return nil",
 	},
 	"checkpoint_tree_other.go:listing":  {"refuse": "return nil, nil, errCheckpointState"},
 	"checkpoint_tree_other.go:witness":  {"refuse": "return checkpointWitness{}, false, errCheckpointState"},
@@ -373,11 +417,12 @@ func checkpointInventoryReader(parsed map[string]*ast.File, failures map[string]
 // guarded pathname calls by design, so no source rule can show they never follow a link or leave the volume; this pins
 // which functions it calls and how often, so a new or different call (os.Stat for os.Lstat) fails until the count is
 // changed on purpose, and rule (b) roots each writer's path in a checkpointDir value. Arguments are not pinned.
-var checkpointTreeWindowsCalls = map[string]int{"path.Join": 2, "t.c.checkpointDir": 9, "os.Lstat": 1, "filepath.Join": 8, "filepath.FromSlash": 8, "privateDir": 1,
+var checkpointTreeWindowsCalls = map[string]int{"path.Join": 2, "t.c.checkpointDir": 10, "os.Lstat": 2, "filepath.Join": 8, "filepath.FromSlash": 8, "privateDir": 2,
 	"createPrivateTemp": 1, "filepath.Base": 1, "created.Name": 1, "publishPrivateFile": 1, "syncCheckpointTreeDirectory": 1, "t.name": 1, "syncDirectory": 1,
-	"t.c.discardOwnCheckpoint": 1, "openPrivateReader": 1, "filepath.WalkDir": 1, "filepath.Rel": 1, "errors.Join": 1, "filepath.ToSlash": 1, "entry.IsDir": 2, "entry.Name": 1, "len": 2, "make": 2, "os.ReadDir": 1,
-	"t.c.recoveryDir": 2, "checkpointComplete": 1, "validatePrivateTreeSnapshot": 1,
-	"entry.Type": 1, "entry.Type().IsRegular": 1, "writeAtomicBytes": 1}
+	"t.c.discardOwnCheckpoint": 1, "openPrivateReader": 1, "filepath.WalkDir": 1, "filepath.Rel": 1, "errors.Join": 1, "filepath.ToSlash": 1, "entry.IsDir": 2, "entry.Name": 2, "len": 3, "make": 3, "os.ReadDir": 2,
+	"t.c.recoveryDir": 3, "checkpointComplete": 1, "validatePrivateTreeSnapshot": 1,
+	"entry.Type": 1, "entry.Type().IsRegular": 1, "writeAtomicBytes": 1,
+	"errors.Is": 1, "append": 1, "recoveryEntryCanonical": 1, "closeCheckpointRoots": 1, "t.c.holdCheckpoint": 1, "t.c.unsealCheckpointHeld": 1, "t.c.removeCheckpointHeld": 1}
 
 // checkpointTreeContract: each walk call of the tree on Linux and macOS passes t.want but checkpointTreeNilWants, and
 // names no walk function with a want as a value; it binds as checkpointTreeBinds, open, check and record in the order of
@@ -537,16 +582,16 @@ var checkpointRootFiles = []string{"checkpoint_root.go", "checkpoint_root_window
 // writers the checkpoint tree replaces: checkpoint_tree_unix.go names none, and checkpoint.go calls none (privateDir
 // creating) on a path rooted in a checkpointDir value, or joining recovery/ with a name that is not a literal
 // (checkpointTreeBypassRooted), but checkpointTreeBypassKept, by exact count: the allocation refusal before recovery/ is
-// held, and delete's admission. A key is checkpoint_tree_bypass:<file>:<function>.
+// held (delete's admission reads through the tree). A key is checkpoint_tree_bypass:<file>:<function>.
 var checkpointReaderBypassed = []string{"os.ReadDir", "filepath.WalkDir", "openRegular", "checkpointComplete", "validatePrivateTreeSnapshot"}
 var checkpointTreeBypassed = slices.Concat(checkpointReaderBypassed, []string{"privateDir", "createPrivateTemp", "publishPrivateFile", "syncDirectory", "os.Lstat", "os.Stat", "os.Mkdir", "os.Rename", "os.Remove",
 	"openPrivateReader", "writeAtomic", "writeAtomicBytes"})
-var checkpointTreeBypassKept = map[string]int{"checkpointLocked:os.Lstat": 1, "admitDeleteCheckpoint:os.Lstat": 1}
+var checkpointTreeBypassKept = map[string]int{"checkpointLocked:os.Lstat": 1}
 var checkpointRootCallees = map[string]string{"c.checkpointStage": "receiver", "c.checkpointTest.beforeStep": "receiver", "c.recoveryDir": "receiver", "c.holdRecovery": "receiver",
 	"c.checkpointDir": "receiver", "c.holdCheckpoint": "receiver", "c.checkpointRootsBound": "receiver", "c.removeCheckpointHeld": "receiver",
 	"closeCheckpointRoots": "package", "syncCheckpointRoot": "package", "string": "universe", "handle.Sync": `held.Open(".")`,
 	"listing.Readdirnames": `checkpoint.Open(".")`, "left.Mode": "recovery.Lstat(checkpointID)"}
-var checkpointRootNames = []string{"Cell", "checkpointWitnessName", "errCheckpointCopy"}
+var checkpointRootNames = []string{"Cell", "checkpointWitnessName", "errCheckpointCopy", "checkpointRootHere", "errCheckpointRootMoved"}
 
 // checkpointRootReceivers are the declarations, besides an *os.Root field, of a
 // typed root call's receiver; "(ast: <nil>)" is a later name of a multi-value one.
@@ -854,8 +899,8 @@ func checkpointHeldContract(parsed map[string]*ast.File, failures map[string]boo
 			return true
 		})
 		for _, identifier := range []string{"recovery", "checkpoint"} {
-			failures["checkpoint_root_uses:"+name+":"+identifier] = !rootFile && uses[identifier] != map[string]int{"checkpoint.go:recovery": 4, "checkpoint.go:checkpoint": 4,
-				"checkpoint_tree_unix.go:recovery": 32}[name+":"+identifier] // (g)
+			failures["checkpoint_root_uses:"+name+":"+identifier] = !rootFile && uses[identifier] != map[string]int{"checkpoint_tree_unix.go:recovery": 36,
+				"checkpoint_tree_windows.go:recovery": 5, "checkpoint_tree_windows.go:checkpoint": 5}[name+":"+identifier] // (g)
 		}
 	}
 	for _, text := range slices.Concat(slices.Collect(maps.Keys(counted)), slices.Collect(maps.Keys(checkpointRootCalls))) {
@@ -1047,7 +1092,7 @@ func checkpointSourceContract(sources map[string]string) []string {
 	documentReferences, verifierNames, bypasses := map[string]int{}, map[string]int{}, map[string]int{}
 	wantedReferences := map[string]int{
 		"checkpointWitnessName:checkpoint.go:witnessCheckpoint": 1, "checkpointWitnessName:checkpoint_root_windows.go:discardOwnCheckpoint": 1, "checkpointWitnessName:checkpoint_tree_unix.go:discard": 1,
-		"checkpointWitnessName:checkpoint_root.go:unsealCheckpointHeld": 1, "checkpointWitnessName:checkpoint.go:checkpointComplete": 1, "checkpointWitnessName:checkpoint_tree_unix.go:witness": 2,
+		"checkpointWitnessName:checkpoint_root_windows.go:unsealCheckpointHeld": 1, "checkpointWitnessName:checkpoint_tree_unix.go:unseal": 1, "checkpointWitnessName:checkpoint.go:checkpointComplete": 1, "checkpointWitnessName:checkpoint_tree_unix.go:witness": 2,
 		"checkpointInventoryName:checkpoint.go:inventoryCheckpoint":            1,
 		"checkpointWitnessName:checkpoint_verify.go:verifyCheckpointDocuments": 1, "checkpointInventoryName:checkpoint_verify.go:verifyCheckpointDocuments": 1,
 		"checkpointWitnessName:checkpoint_verify.go:checkpointVerifyPath": 1, "checkpointInventoryName:checkpoint_verify.go:checkpointVerifyPath": 1,
@@ -1635,7 +1680,7 @@ func TestCheckpointSourceContract(t *testing.T) {
 		{"tree_lstat_unbound", "checkpoint_tree_unix.go", "func (t *checkpointTree) lstat(name string) (fs.FileInfo, error) {\n\tif err := t.bound(); err != nil {\n\t\treturn nil, err\n\t}\n", "func (t *checkpointTree) lstat(name string) (fs.FileInfo, error) {\n", "checkpoint_tree_bind:lstat"},
 		{"tree_parent_unsynced", "checkpoint_tree_unix.go", "return syncCheckpointTreeParent(t.name(name), func() error { return privateBeneathSync(fd) })", "return syncCheckpointTreeParent(t.name(name), func() error { return nil })", "checkpoint_tree_parent_sync"},
 		{"tree_windows_stat", "checkpoint_tree_windows.go", "return os.Lstat(filepath.Join(dir, filepath.FromSlash(name)))", "return os.Stat(filepath.Join(dir, filepath.FromSlash(name)))", "checkpoint_tree_windows_call:os.Stat"},
-		{"tree_windows_second_lstat", "checkpoint_tree_windows.go", "func (t *checkpointTree) close() {}", "func (t *checkpointTree) close() { _, _ = os.Lstat(t.id) }", "checkpoint_tree_windows_call:os.Lstat"},
+		{"tree_windows_second_lstat", "checkpoint_tree_windows.go", "func (t *checkpointTree) close() { closeCheckpointRoots(t.recovery, t.checkpoint) }", "func (t *checkpointTree) close() { closeCheckpointRoots(t.recovery, t.checkpoint); _, _ = os.Lstat(t.id) }", "checkpoint_tree_windows_call:os.Lstat"},
 		{"verifier_tree_discard", "checkpoint_verify.go", verifyTail, "func (c *Cell) checkpointProbe(id string) error { return c.checkpointTree(id).discard() }\n\n" + verifyTail, "verifier_remove"},
 		{"verifier_tree_sync", "checkpoint_verify.go", verifyTail, "func checkpointProbe(t *checkpointTree) error { return t.sync(\".\") }\n\n" + verifyTail, "verifier_write"},
 		// LC-CKPT-WALK-1C1-F1: open, check and record bind by count and in order, record's two syncs, the Windows twin's new
@@ -1710,9 +1755,9 @@ func TestCheckpointSourceContract(t *testing.T) {
 		{"root_method_value", "checkpoint_root.go", rootTail, "func checkpointRootProbe(r *os.Root) { remove := r.Remove; _ = remove }\n\n" + rootTail, "checkpoint_root_selector:r.Remove"},
 		{"root_alias", "checkpoint_root.go", rootTail, "func checkpointRootProbe(r *os.Root) { alias := r; _ = alias.RemoveAll(\"pg\") }\n\n" + rootTail, "checkpoint_root_call:alias.RemoveAll(\"pg\")"},
 		{"root_write", "checkpoint_root.go", rootTail, "func checkpointRootProbe(r *os.Root) { _ = r.WriteFile(\"late\", nil, 0o600) }\n\n" + rootTail, "checkpoint_root_call:r.WriteFile(\"late\", nil, 0o600)"},
-		{"final_remove_recursive", "checkpoint_root.go", "if err := recovery.Remove(checkpointID); err != nil {", "if err := recovery.RemoveAll(checkpointID); err != nil {", "checkpoint_root_call:recovery.RemoveAll(checkpointID)"},
+		{"final_remove_recursive", "checkpoint_root_windows.go", "if err := recovery.Remove(checkpointID); err != nil {", "if err := recovery.RemoveAll(checkpointID); err != nil {", "checkpoint_root_call:recovery.RemoveAll(checkpointID)"},
 		{"recovery_open_plain", "checkpoint_root.go", "os.OpenRoot(c.recoveryDir() + checkpointRootHere)", "os.OpenRoot(c.recoveryDir())", "checkpoint_root_call:os.OpenRoot(c.recoveryDir())"},
-		{"checkpoint_open_plain", "checkpoint_root.go", "recovery.OpenRoot(checkpointID + checkpointRootHere)", "recovery.OpenRoot(checkpointID)", "checkpoint_root_call:recovery.OpenRoot(checkpointID)"},
+		{"checkpoint_open_plain", "checkpoint_root_windows.go", "recovery.OpenRoot(checkpointID + checkpointRootHere)", "recovery.OpenRoot(checkpointID)", "checkpoint_root_call:recovery.OpenRoot(checkpointID)"},
 		{"held_identity_from_path", "checkpoint_root.go", "recoveryHeld, err := recovery.Stat(\".\")", "recoveryHeld, err := os.Lstat(c.recoveryDir())", "checkpoint_root_call:os.Lstat(c.recoveryDir())"},
 		{"current_identity_follows", "checkpoint_root.go", "checkpointNow, nowErr := recovery.Lstat(checkpointID)", "checkpointNow, nowErr := recovery.Stat(checkpointID)", "checkpoint_root_call:recovery.Stat(checkpointID)"},
 		{"third_root", "checkpoint_root.go", rootTail, "func checkpointRootProbe(c *Cell) { r, _ := os.OpenRoot(c.recoveryDir() + checkpointRootHere); _ = r }\n\n" + rootTail, "checkpoint_root_call:os.OpenRoot(c.recoveryDir() + checkpointRootHere)"},

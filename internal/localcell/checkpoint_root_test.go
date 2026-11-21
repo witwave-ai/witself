@@ -21,6 +21,10 @@ const heldTarget, heldOther = "ckpt_aaaaaaaaaaaaaaaa", "ckpt_bbbbbbbbbbbbbbbb"
 // held without delete sharing); their defaults skip.
 var heldPlatformRows = func(*testing.T) {}
 
+// heldIdentifierRow is the Windows held-root helpers' identifier row; Linux
+// and macOS remove through the tree instead.
+var heldIdentifierRow = func(*testing.T) {}
+
 type heldTrees = map[string]map[string]retainedEntry
 
 // heldFixture makes two real checkpoints, heldTarget first, then resets the
@@ -150,7 +154,12 @@ func TestDeleteCheckpointHeld(t *testing.T) {
 		outside, moved := heldOutside(t), c.path("moved")
 		kept := heldTrees{moved: heldTree(t, c.recoveryDir()), outside: heldTree(t, outside)}
 		heldAt(c, "hold", func() { heldMove(t, c.recoveryDir(), moved); drillRootLink(t, c.recoveryDir(), outside) })
-		heldFailed(t, f, heldDelete(t, c), "unseal")
+		// Linux and macOS refuse at the hold, nothing journaled; Windows' held roots at the unseal.
+		if err := heldDelete(t, c); runtime.GOOS == "windows" {
+			heldFailed(t, f, err, "unseal")
+		} else {
+			heldRefused(t, f, err, "local_checkpoint_state_unsupported", nil)
+		}
 		heldSame(t, kept)
 	})
 	// The held target moved aside and another tree renamed to its name.
@@ -357,18 +366,7 @@ func TestDeleteCheckpointHeld(t *testing.T) {
 			}
 		})
 	}
-	// An identifier that is not a checkpoint's opens and removes nothing.
-	t.Run("identifier", func(t *testing.T) {
-		_, c := heldFixture(t)
-		before := checkpointTreeState(t, c)
-		recovery, checkpoint, err := c.holdCheckpoint(".")
-		held, target, heldErr := c.holdCheckpoint(heldTarget)
-		defer closeCheckpointRoots(held, target)
-		if recovery != nil || checkpoint != nil || !errors.Is(err, errCheckpointIdentity) || heldErr != nil ||
-			!errors.Is(c.removeCheckpointHeld(held, target, "."), errCheckpointIdentity) || !reflect.DeepEqual(before, checkpointTreeState(t, c)) {
-			t.Fatal("a held root helper accepted an identifier that is not a checkpoint's")
-		}
-	})
+	heldIdentifierRow(t)
 	heldPlatformRows(t)
 }
 

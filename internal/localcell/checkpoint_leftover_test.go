@@ -354,15 +354,18 @@ func TestCheckpointLeftover(t *testing.T) {
 		var once sync.Once
 		var syncs atomic.Int32
 		unblock := func() { once.Do(func() { close(release) }) }
-		original := syncCheckpointRoot
-		t.Cleanup(func() { syncCheckpointRoot = original })
-		syncCheckpointRoot = func(held *os.Root) error {
+		// The unseal's directory sync is a delete's first: the tree's seam on
+		// Linux and macOS, the held root's on Windows.
+		barrier := func() {
 			if syncs.Add(1) == 1 {
 				close(entered)
 				<-release
 			}
-			return original(held)
 		}
+		original, originalRoot := syncCheckpointTreeDirectory, syncCheckpointRoot
+		t.Cleanup(func() { syncCheckpointTreeDirectory, syncCheckpointRoot = original, originalRoot })
+		syncCheckpointTreeDirectory = func(name string, sync func() error) error { barrier(); return original(name, sync) }
+		syncCheckpointRoot = func(held *os.Root) error { barrier(); return originalRoot(held) }
 		f.prefix = retainedRead(t, c, "journal/operations.jsonl")
 		result := StartJoinedTestRunForTest(t, unblock, reinstallContentionBound, func() error {
 			return c.DeleteCheckpoint(context.Background(), DeleteCheckpointOptions{CheckpointID: ids[0]})
@@ -434,14 +437,16 @@ func TestCheckpointLeftoverHelperProcess(t *testing.T) {
 		}
 		_ = c.Checkpoint(context.Background(), CheckpointOptions{InstallationID: argument})
 	case "delete":
-		original, syncs := syncCheckpointRoot, 0
-		t.Cleanup(func() { syncCheckpointRoot = original })
-		syncCheckpointRoot = func(held *os.Root) error {
+		// Blocked at the unseal's directory sync, as the still-running delete row.
+		original, originalRoot, syncs := syncCheckpointTreeDirectory, syncCheckpointRoot, 0
+		t.Cleanup(func() { syncCheckpointTreeDirectory, syncCheckpointRoot = original, originalRoot })
+		barrier := func() {
 			if syncs++; syncs == 1 {
 				block()
 			}
-			return original(held)
 		}
+		syncCheckpointTreeDirectory = func(name string, sync func() error) error { barrier(); return original(name, sync) }
+		syncCheckpointRoot = func(held *os.Root) error { barrier(); return originalRoot(held) }
 		_ = c.DeleteCheckpoint(context.Background(), DeleteCheckpointOptions{CheckpointID: argument})
 	default:
 		t.Fatal("the helper mode is neither create nor delete")

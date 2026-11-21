@@ -12,10 +12,12 @@ import (
 )
 
 // checkpointTree on Windows makes today's guarded pathname calls below the
-// checkpoint directory and holds nothing. Names are slash paths below it.
+// checkpoint directory; only delete holds recovery/ and the checkpoint, as
+// roots (checkpoint_root_windows.go). Names are slash paths below it.
 type checkpointTree struct {
-	c  *Cell
-	id string
+	c                    *Cell
+	id                   string
+	recovery, checkpoint *os.Root
 }
 
 func (c *Cell) checkpointTree(checkpointID string) *checkpointTree {
@@ -24,7 +26,46 @@ func (c *Cell) checkpointTree(checkpointID string) *checkpointTree {
 
 func (t *checkpointTree) hold() error { return nil }
 
-func (t *checkpointTree) close() {}
+func (t *checkpointTree) close() { closeCheckpointRoots(t.recovery, t.checkpoint) }
+
+// target is delete's admission of the checkpoint at its exact name, by
+// today's pathname calls.
+func (t *checkpointTree) target() error {
+	dir, err := t.c.checkpointDir(t.id)
+	if err != nil {
+		return err
+	}
+	if _, err := os.Lstat(dir); errors.Is(err, fs.ErrNotExist) {
+		return errCheckpointIdentity
+	} else if err != nil || privateDir(dir, false) != nil {
+		return errCheckpointState
+	}
+	// A case-insensitive volume also resolves another spelling: only the exact
+	// on-disk name is deleted.
+	entries, err := os.ReadDir(t.c.recoveryDir())
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		names = append(names, entry.Name())
+	}
+	if err != nil || !recoveryEntryCanonical(names, t.id) {
+		return errCheckpointIdentity
+	}
+	return nil
+}
+
+// adopt holds recovery/ and the checkpoint as roots.
+func (t *checkpointTree) adopt() (err error) {
+	t.recovery, t.checkpoint, err = t.c.holdCheckpoint(t.id)
+	return err
+}
+
+func (t *checkpointTree) unseal() error {
+	return t.c.unsealCheckpointHeld(t.recovery, t.checkpoint, t.id)
+}
+
+func (t *checkpointTree) sweep() error {
+	return t.c.removeCheckpointHeld(t.recovery, t.checkpoint, t.id)
+}
 
 func (t *checkpointTree) listing() ([]string, []bool, error) {
 	entries, err := os.ReadDir(t.c.recoveryDir())

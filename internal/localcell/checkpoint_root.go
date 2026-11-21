@@ -2,7 +2,6 @@ package localcell
 
 import (
 	"errors"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -45,36 +44,10 @@ func (c *Cell) checkpointStage(stage string) {
 	}
 }
 
-// holdCheckpoint opens recovery/ and then the checkpoint directory below it as
-// roots, each as a directory only; recovery is returned whenever it opened. An
-// identifier checkpointDir refuses opens nothing.
-func (c *Cell) holdCheckpoint(checkpointID string) (recovery, checkpoint *os.Root, err error) {
-	if _, err = c.checkpointDir(checkpointID); err != nil {
-		return nil, nil, err
-	}
-	c.checkpointStage("hold")
-	recovery, err = c.holdRecovery()
-	if err != nil {
-		return nil, nil, err
-	}
-	checkpoint, err = recovery.OpenRoot(checkpointID + checkpointRootHere)
-	return recovery, checkpoint, err
-}
-
 // holdRecovery opens recovery/ as a root, as a directory only: the one opener
 // of the held recovery/ for holdCheckpoint and the copy's tree.
 func (c *Cell) holdRecovery() (*os.Root, error) {
 	return os.OpenRoot(c.recoveryDir() + checkpointRootHere)
-}
-
-// closeCheckpointRoots closes each root holdCheckpoint opened.
-func closeCheckpointRoots(recovery, checkpoint *os.Root) {
-	if checkpoint != nil {
-		_ = checkpoint.Close()
-	}
-	if recovery != nil {
-		_ = recovery.Close()
-	}
 }
 
 // checkpointRootsBound reports whether recovery/ and the checkpoint's name
@@ -92,61 +65,4 @@ func (c *Cell) checkpointRootsBound(recovery, checkpoint *os.Root, checkpointID 
 	checkpointHeld, err := checkpoint.Stat(".")
 	checkpointNow, nowErr := recovery.Lstat(checkpointID)
 	return err == nil && nowErr == nil && os.SameFile(checkpointHeld, checkpointNow)
-}
-
-// unsealCheckpointHeld removes the witness through the held checkpoint
-// directory once both names are bound, then syncs that directory; an absent
-// witness is already removed. On Windows a witness that is an empty directory,
-// is read-only or changed after admission is now removed, not refused as before.
-func (c *Cell) unsealCheckpointHeld(recovery, checkpoint *os.Root, checkpointID string) error {
-	c.checkpointStage("unseal")
-	if !c.checkpointRootsBound(recovery, checkpoint, checkpointID) {
-		return errCheckpointRootMoved
-	}
-	if err := checkpoint.Remove(checkpointWitnessName); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return err
-	}
-	return syncCheckpointRoot(checkpoint)
-}
-
-// removeCheckpointHeld removes every entry of the held checkpoint directory
-// through it, then the directory itself, non-recursively, through the held
-// recovery/, and syncs recovery/; each batch first re-checks that both names
-// still name the held directories, and the first failure is returned. The last
-// re-check and the remove are two calls: an object another process puts at the
-// exact name between them is removed instead if it is a file, a link or an
-// empty directory; a directory with content is refused; nothing outside the
-// held recovery/ is reached. An identifier checkpointDir refuses removes nothing.
-func (c *Cell) removeCheckpointHeld(recovery, checkpoint *os.Root, checkpointID string) error {
-	if _, err := c.checkpointDir(checkpointID); err != nil {
-		return err
-	}
-	c.checkpointStage("sweep")
-	if !c.checkpointRootsBound(recovery, checkpoint, checkpointID) {
-		return errCheckpointRootMoved
-	}
-	listing, err := checkpoint.Open(".")
-	if err != nil {
-		return err
-	}
-	names, err := listing.Readdirnames(-1)
-	if closed := listing.Close(); err == nil {
-		err = closed
-	}
-	if err != nil {
-		return err
-	}
-	for index := range names {
-		if err := checkpoint.RemoveAll(names[index]); err != nil {
-			return err
-		}
-	}
-	c.checkpointStage("directory")
-	if !c.checkpointRootsBound(recovery, checkpoint, checkpointID) {
-		return errCheckpointRootMoved
-	}
-	if err := recovery.Remove(checkpointID); err != nil {
-		return err
-	}
-	return syncCheckpointRoot(recovery)
 }
