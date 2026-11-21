@@ -89,7 +89,7 @@ func TestWindowsReleaseBarrierHostCrash(t *testing.T) {
 		t.Fatal("host crash fence witness absent")
 	}
 	var record ProcessRecord
-	if readJSON(c.path("run", "server.json"), &record) != nil || record.LaunchKind != shutdownLaunchPipe || record.LaunchPending {
+	if readJSON(t.Context(), c.path("run", "server.json"), &record) != nil || record.LaunchKind != shutdownLaunchPipe || record.LaunchPending {
 		t.Fatal("host crash lost its accepted process record")
 	}
 	// This handle is a test cleanup witness only. It never enters production's

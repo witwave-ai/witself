@@ -116,7 +116,7 @@ func cleanupWindowsPostgresRecord(t *testing.T, c *Cell, marker string) {
 	t.Helper()
 	t.Cleanup(func() {
 		var record ProcessRecord
-		if err := readJSON(c.path("tmp", marker), &record); errors.Is(err, os.ErrNotExist) {
+		if err := readJSON(t.Context(), c.path("tmp", marker), &record); errors.Is(err, os.ErrNotExist) {
 			return
 		} else if err != nil {
 			t.Error("cannot read PostgreSQL fixture cleanup identity")
@@ -188,10 +188,10 @@ func TestWindowsPostgresLaunchUsesPublishedPostmasterIdentity(t *testing.T) {
 				t.Fatal("direct PostgreSQL fixture did not launch")
 			}
 			var launched, complete ProcessRecord
-			if readJSON(c.path("tmp", "postgres-fixture-record"), &launched) != nil || !launched.LaunchPending {
+			if readJSON(t.Context(), c.path("tmp", "postgres-fixture-record"), &launched) != nil || !launched.LaunchPending {
 				t.Fatal("PostgreSQL executed without a published pending identity")
 			}
-			if readJSON(c.path("run", "postgres.json"), &complete) != nil || complete.LaunchPending || complete.PID != launched.PID || complete.StartTime != launched.StartTime {
+			if readJSON(t.Context(), c.path("run", "postgres.json"), &complete) != nil || complete.LaunchPending || complete.PID != launched.PID || complete.StartTime != launched.StartTime {
 				t.Fatal("PostgreSQL launch replaced its suspended creation identity")
 			}
 			pid, err := c.postmaster(context.Background())
@@ -253,10 +253,10 @@ func TestWindowsPostgresLaunchRefusesForeignPIDAndUnreadyState(t *testing.T) {
 				t.Fatal("PostgreSQL launch accepted a different PID or unfinished startup")
 			}
 			var launched, retained ProcessRecord
-			if readJSON(c.path("run", "postgres.json"), &retained) != nil { // FLAKE-4
+			if readJSON(t.Context(), c.path("run", "postgres.json"), &retained) != nil { // FLAKE-4
 				t.Fatal("Ownership evidence was not retained after PostgreSQL launch refusal") // FLAKE-4
 			} // FLAKE-4
-			if readJSON(c.path("tmp", "postgres-fixture-record"), &launched) != nil { // FLAKE-4
+			if readJSON(t.Context(), c.path("tmp", "postgres-fixture-record"), &launched) != nil { // FLAKE-4
 				t.Fatal("Fixture record was not published before PostgreSQL launch refusal") // FLAKE-4
 			} // FLAKE-4
 			if mode == "foreign-pid" && err.Error() != "PostgreSQL process ownership is unproven" { // FLAKE-4
@@ -276,7 +276,7 @@ func TestWindowsPostgresLaunchRefusesForeignPIDAndUnreadyState(t *testing.T) {
 			}
 			if mode == "starting-descendant" {
 				var descendant ProcessRecord
-				if readJSON(c.path("tmp", "postgres-fixture-descendant"), &descendant) != nil {
+				if readJSON(t.Context(), c.path("tmp", "postgres-fixture-descendant"), &descendant) != nil {
 					t.Fatal("PostgreSQL fixture did not create its pre-readiness descendant")
 				}
 				handle, alive, err := openVerifiedWindowsProcess(descendant, 0)

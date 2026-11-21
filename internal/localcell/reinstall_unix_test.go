@@ -163,7 +163,7 @@ func TestReinstallInspectInterruptedPurgeSettledByRepair(t *testing.T) {
 	if c.Repair(t.Context()) != nil {
 		t.Fatal("Repair could not settle the failed purge")
 	}
-	if m, err := readManifest(c.cfg.Root); err != nil || m.Installed || !m.RemovalRetained {
+	if m, err := readManifest(t.Context(), c.cfg.Root); err != nil || m.Installed || !m.RemovalRetained {
 		t.Fatal("settled purge did not keep the marker on an uninstalled manifest")
 	}
 	before, calls := retainedSnapshot(t, c), len(r.calls)

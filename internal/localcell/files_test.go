@@ -42,7 +42,7 @@ func TestManifestAtomicPublishInterruptionPreservesOld(t *testing.T) {
 	called := false
 	err := writeAtomic(c.path("manifest.json"), &after, func() error {
 		called = true
-		observed, err := readManifest(c.cfg.Root)
+		observed, err := readManifest(t.Context(), c.cfg.Root)
 		if err != nil || !reflect.DeepEqual(observed, before) {
 			t.Fatal("old manifest changed before atomic rename")
 		}
@@ -55,14 +55,14 @@ func TestManifestAtomicPublishInterruptionPreservesOld(t *testing.T) {
 	if !called || !errors.Is(err, injected) {
 		t.Fatal("atomic publication interruption seam was not honored")
 	}
-	observed, err := readManifest(c.cfg.Root)
+	observed, err := readManifest(t.Context(), c.cfg.Root)
 	if err != nil || !reflect.DeepEqual(observed, before) {
 		t.Fatal("interrupted publication replaced the durable manifest")
 	}
 	if err := writeAtomic(c.path("manifest.json"), &after, nil); err != nil {
 		t.Fatal(err)
 	}
-	observed, err = readManifest(c.cfg.Root)
+	observed, err = readManifest(t.Context(), c.cfg.Root)
 	if err != nil || !reflect.DeepEqual(observed, &after) {
 		t.Fatal("successful atomic publication did not replace the manifest")
 	}
@@ -74,7 +74,7 @@ func TestManifestRejectsUnknownLayoutVersion(t *testing.T) {
 	if err := writeAtomic(c.path("manifest.json"), m, nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := readManifest(c.cfg.Root); err == nil {
+	if _, err := readManifest(t.Context(), c.cfg.Root); err == nil {
 		t.Fatal("unknown manifest layout version was accepted")
 	}
 }
@@ -88,7 +88,7 @@ func TestManifestRejectsUnknownFields(t *testing.T) {
 	if err := writeAtomic(c.path("manifest.json"), withExtra, nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := readManifest(c.cfg.Root); err == nil {
+	if _, err := readManifest(t.Context(), c.cfg.Root); err == nil {
 		t.Fatal("manifest with an unknown field was accepted")
 	}
 }
@@ -101,7 +101,7 @@ func TestManifestRejectsOtherDatabaseNames(t *testing.T) {
 			if err := writeAtomic(c.path("manifest.json"), m, nil); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := readManifest(c.cfg.Root); err == nil {
+			if _, err := readManifest(t.Context(), c.cfg.Root); err == nil {
 				t.Fatal("manifest with a different database name was accepted")
 			}
 		})

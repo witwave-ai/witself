@@ -136,7 +136,7 @@ func TestStopManifestPublicationSingleAttemptRefusal(t *testing.T) {
 				}
 				return
 			}
-			published, manifestErr := readManifest(c.cfg.Root)
+			published, manifestErr := readManifest(t.Context(), c.cfg.Root)
 			if err != nil || manifestErr != nil || published.LastOperation != "stop" || published.InstallationID != m.InstallationID {
 				t.Fatal("Stop did not publish its stopped manifest")
 			}

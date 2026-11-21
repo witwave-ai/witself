@@ -178,7 +178,7 @@ func assertAdmissionControl(t *testing.T, f admissionFixture, name string) {
 		}
 	case "RepairCleanup", "RemoveRetain":
 		// Ordinary removal keeps the journal; its effect is a settled retained manifest.
-		m, err := readManifest(f.cell.cfg.Root)
+		m, err := readManifest(t.Context(), f.cell.cfg.Root)
 		if _, statErr := os.Stat(f.cell.path("journal")); err != nil || statErr != nil || m.Cleanup != nil || !m.RemovalRetained {
 			t.Fatal("unfenced cleanup did not settle retained removal")
 		}
@@ -469,7 +469,7 @@ func TestMaintenanceFenceAdmissionLockLifetime(t *testing.T) {
 					t.Fatal("cannot occupy saved startup port")
 				}
 				defer func() { _ = thief.Close() }()
-				m, err := readManifest(f.cell.cfg.Root)
+				m, err := readManifest(t.Context(), f.cell.cfg.Root)
 				if err != nil {
 					t.Fatal("cannot read reallocation manifest")
 				}
@@ -617,7 +617,7 @@ func TestMaintenanceFenceAbsentSelectedParity(t *testing.T) {
 	for _, name := range []string{"StartSelected", "RepairSelectedResume"} {
 		t.Run(name, func(t *testing.T) {
 			f := newAdmissionFixture(t, name)
-			m, err := readManifest(f.cell.cfg.Root)
+			m, err := readManifest(t.Context(), f.cell.cfg.Root)
 			if err != nil {
 				t.Fatal("cannot read selected parity input")
 			}

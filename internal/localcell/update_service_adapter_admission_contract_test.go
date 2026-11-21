@@ -260,7 +260,7 @@ func (a *windowsLogonTaskAdapter) Remove(ctx context.Context, d ServiceIdentity)
  cell, unlock, err := a.mutationLock(d)
  if err != nil { return err }
  defer unlock()
- releaseHost, err := serviceAdapterRemovalHostLock(cell)
+ releaseHost, err := serviceAdapterRemovalHostLock(context.Background(), cell)
  if err != nil { return err }
  defer releaseHost()
  if err := cell.maintenanceFenceAllows(context.Background(), 0); err != nil { return err }

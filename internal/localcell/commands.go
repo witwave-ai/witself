@@ -298,7 +298,7 @@ func (c *Cell) startChildPrepared(ctx context.Context, m *Manifest, component st
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	state, err := c.processState(component)
+	state, err := c.processState(context.Background(), component)
 	if err != nil {
 		return err
 	}
@@ -393,7 +393,7 @@ func (c *Cell) waitReady(ctx context.Context, component string, port int) error 
 	ticker := time.NewTicker(50 * time.Millisecond)
 	defer ticker.Stop()
 	for {
-		state, record, err := c.processStateWithRecord(component)
+		state, record, err := c.processStateWithRecord(context.Background(), component)
 		if err != nil || !state.Alive || !state.Matches {
 			if err == nil && !state.Alive {
 				return c.childReadinessExit(ctx, component, record)
@@ -402,7 +402,7 @@ func (c *Cell) waitReady(ctx context.Context, component string, port int) error 
 		}
 		if ready(ctx, client, port) {
 			// A ready response must not outlive the process fence that owns it.
-			current, err := c.processState(component)
+			current, err := c.processState(context.Background(), component)
 			if err == nil && current.Alive && current.Matches && current.PID == state.PID {
 				return nil
 			}

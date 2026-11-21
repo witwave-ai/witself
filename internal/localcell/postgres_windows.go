@@ -21,7 +21,7 @@ func (c *Cell) startPostgres(ctx context.Context, _ *Manifest) error {
 	if err := c.verifyAll(); err != nil {
 		return err
 	}
-	state, err := c.processState("postgres")
+	state, err := c.processState(context.Background(), "postgres")
 	if err != nil || state.Alive {
 		return err
 	}
@@ -135,7 +135,7 @@ func (c *Cell) windowsStalePostmaster() ([]byte, error) {
 
 func (c *Cell) pendingPostgresWithoutPID(state ProcessState, pid int) bool {
 	var record ProcessRecord
-	return pid == 0 && readJSON(c.path("run", "postgres.json"), &record) == nil && record.LaunchPending && record.PID == state.PID && record.Root == c.cfg.Root && record.Component == "postgres"
+	return pid == 0 && readJSON(context.Background(), c.path("run", "postgres.json"), &record) == nil && record.LaunchPending && record.PID == state.PID && record.Root == c.cfg.Root && record.Component == "postgres"
 }
 
 func postmasterLines(data []byte) []string {
@@ -148,7 +148,7 @@ func postmasterLines(data []byte) []string {
 // if every pidfile byte published so far agrees with the recorded process/root.
 func (c *Cell) pendingPostmasterPID(data []byte) (int, bool, error) {
 	var record ProcessRecord
-	err := readJSON(c.path("run", "postgres.json"), &record)
+	err := readJSON(context.Background(), c.path("run", "postgres.json"), &record)
 	if errors.Is(err, os.ErrNotExist) {
 		return 0, false, nil
 	}

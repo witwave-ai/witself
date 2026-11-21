@@ -230,7 +230,7 @@ func TestDrillReservation(t *testing.T) {
 		drill, err := os.OpenRoot(filepath.Join(r.c.recoveryDir(), drillID))
 		drillAssert(t, err == nil, "cannot hold the reserved drill directory")
 		t.Cleanup(func() { _ = drill.Close() })
-		manifest, err := readManifest(r.c.cfg.Root)
+		manifest, err := readManifest(t.Context(), r.c.cfg.Root)
 		drillAssert(t, err == nil, "cannot read the reservation fixture's manifest")
 		kind, record := drillRootHeld(drill, drillID, manifest.InstallationID)
 		w := r.witness

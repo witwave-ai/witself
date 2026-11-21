@@ -101,7 +101,7 @@ func TestUpdateStepDurabilityOrder(t *testing.T) {
 					t.Fatal("action began before journal durability and record sync completed")
 				}
 				var current updateRecord
-				if readJSON(recordPath, &current) != nil || current.State != state {
+				if readJSON(t.Context(), recordPath, &current) != nil || current.State != state {
 					t.Fatal("action began before derived record publication")
 				}
 				events = append(events, "action")

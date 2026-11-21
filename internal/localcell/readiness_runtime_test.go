@@ -26,7 +26,7 @@ func TestReadinessTimeoutUsesPersistedRuntimeSettings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	stored, err := readManifest(c.cfg.Root)
+	stored, err := readManifest(t.Context(), c.cfg.Root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,7 +64,7 @@ func TestRuntimeSettingsValidationAndChildEnvironment(t *testing.T) {
 		if err := writeAtomic(c.path("manifest.json"), &candidate, nil); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := readManifest(c.cfg.Root); err == nil {
+		if _, err := readManifest(t.Context(), c.cfg.Root); err == nil {
 			t.Fatal("invalid persisted runtime settings were accepted")
 		}
 	}

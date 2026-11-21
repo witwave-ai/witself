@@ -418,7 +418,7 @@ func TestJournalWritersStillWrite(t *testing.T) {
 			return saved(f)
 		}
 		err := c.Repair(t.Context())
-		if m, manifestErr := readManifest(c.cfg.Root); err != nil || journalSyncs != 1 || manifestErr != nil || m.Cleanup != nil {
+		if m, manifestErr := readManifest(t.Context(), c.cfg.Root); err != nil || journalSyncs != 1 || manifestErr != nil || m.Cleanup != nil {
 			t.Fatal("repair did not sync the retained journal once and clear the cleanup checkpoint")
 		}
 	})
@@ -458,7 +458,7 @@ func TestJournalWritersStillWrite(t *testing.T) {
 			}
 			now, nowErr := os.ReadFile(name)
 			moved, movedErr := os.ReadFile(name + ".moved")
-			m, manifestErr := readManifest(c.cfg.Root)
+			m, manifestErr := readManifest(t.Context(), c.cfg.Root)
 			if err != nil || got == nil || got.Error() != want || nowErr != nil || !bytes.Equal(now, bystander) || movedErr != nil || !bytes.Equal(moved, before) ||
 				syncs != 0 || manifestErr != nil || site == "retained" && m.Cleanup == nil {
 				t.Fatal("a regular file put at the journal name after the read was not refused with nothing truncated or synced")

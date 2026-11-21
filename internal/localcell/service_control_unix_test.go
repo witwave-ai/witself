@@ -60,7 +60,7 @@ func TestServiceHostLeaseIndependentOfOperationLock(t *testing.T) {
 		t.Fatalf("public Stop blocked behind lifetime lease: %v", err)
 	}
 	var record serviceLeaseRecord
-	if err := readJSON(c.path("service", "lease.json"), &record); err != nil {
+	if err := readJSON(t.Context(), c.path("service", "lease.json"), &record); err != nil {
 		t.Fatal(err)
 	}
 	if record.PID != os.Getpid() || record.BootID == "" || record.StartIdentity == "" || record.Owner != d.UID || record.InstallationID != d.InstallationID {

@@ -536,7 +536,7 @@ func TestWindowsSymlinkStateFileRefused(t *testing.T) {
 		}
 		t.Fatal("cannot create state symlink fixture")
 	}
-	_, err = readManifest(c.cfg.Root)
+	_, err = readManifest(t.Context(), c.cfg.Root)
 	assertPrivateRefusal(t, err, path)
 	assertPrivateRefusal(t, writeAtomic(path, map[string]bool{"changed": true}, nil), path)
 	data, err := os.ReadFile(outside)

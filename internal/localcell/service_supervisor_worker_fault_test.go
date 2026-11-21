@@ -237,7 +237,7 @@ func serviceWorkerObserveDuringRefresh(ctx context.Context, t *testing.T, w *ser
 	defer poll.Stop()
 	for {
 		var d ServiceDescriptor
-		if readJSON(client.path("service", "descriptor.json"), &d) == nil && d.Faulted {
+		if readJSON(t.Context(), client.path("service", "descriptor.json"), &d) == nil && d.Faulted {
 			_, err := os.Lstat(client.path("service", "transition.json"))
 			if errors.Is(err, os.ErrNotExist) {
 				break

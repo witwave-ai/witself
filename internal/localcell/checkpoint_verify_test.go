@@ -257,7 +257,7 @@ func TestCheckpointVerify(t *testing.T) {
 			v.contentSeal("manifest.json")
 		}},
 		{"live_manifest_newer", "integrity_verified", func(v *checkpointVerifyCase) {
-			m, err := readManifest(v.c.cfg.Root)
+			m, err := readManifest(t.Context(), v.c.cfg.Root)
 			if err != nil {
 				v.t.Fatal("fixture live manifest reading failed")
 			}

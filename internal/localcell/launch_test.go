@@ -53,7 +53,7 @@ func gatedLaunchFixture(t *testing.T) (*Cell, io.WriteCloser, string, <-chan err
 	tick := time.NewTicker(5 * time.Millisecond)
 	defer tick.Stop()
 	for {
-		state, err := c.processState("server")
+		state, err := c.processState(t.Context(), "server")
 		if err == nil && state.PID == cmd.Process.Pid && state.Alive && state.Matches {
 			break
 		}
@@ -110,7 +110,7 @@ func TestChildLaunchParentEOFPreventsExec(t *testing.T) {
 	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("component executed after its parent disappeared")
 	}
-	state, err := c.processState("server")
+	state, err := c.processState(t.Context(), "server")
 	if err != nil || state.Alive {
 		t.Fatal("aborted helper retained a live process identity")
 	}

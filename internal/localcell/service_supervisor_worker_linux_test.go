@@ -112,7 +112,7 @@ func TestServiceWorkerLease(t *testing.T) {
 				t.Fatal("the worker lease host did not shut down cleanly")
 			}
 			var record supervisorRecord
-			if _, err := c.ServiceDescriptor(); err != nil || readJSON(c.path("service", "supervisor.json"), &record) != nil {
+			if _, err := c.ServiceDescriptor(); err != nil || readJSON(t.Context(), c.path("service", "supervisor.json"), &record) != nil {
 				t.Fatal("the worker lease host did not shut down to readable records")
 			}
 			if d, _ := c.ServiceDescriptor(); d.Faulted != row.faulted {

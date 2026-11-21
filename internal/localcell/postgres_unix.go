@@ -13,7 +13,7 @@ func (c *Cell) startPostgres(ctx context.Context, _ *Manifest) error {
 	if err := c.verifyAll(); err != nil {
 		return err
 	}
-	state, err := c.processState("postgres")
+	state, err := c.processState(context.Background(), "postgres")
 	if err != nil || state.Alive {
 		return err
 	}

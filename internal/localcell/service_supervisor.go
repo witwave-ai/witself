@@ -422,7 +422,7 @@ func (s *supervisor) load(d ServiceDescriptor) (result error) {
 	if err := servicePrivateRecord(s.cell.path("service", "supervisor.json")); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	if err := readJSON(s.cell.path("service", "supervisor.json"), &s.record); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := readJSON(context.Background(), s.cell.path("service", "supervisor.json"), &s.record); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	if s.record.Version != 0 && s.record.Version != 1 {
@@ -755,12 +755,12 @@ func (s *supervisor) rememberProcesses(d ServiceDescriptor) {
 	s.status.Processes = nil
 	for _, component := range []string{"postgres", "server", "worker"} {
 		var record ProcessRecord
-		if readJSON(s.cell.path("run", component+".json"), &record) == nil && record.PID > 1 && record.StartTime != "" && record.Root == d.Root && record.Component == component {
+		if readJSON(context.Background(), s.cell.path("run", component+".json"), &record) == nil && record.PID > 1 && record.StartTime != "" && record.Root == d.Root && record.Component == component {
 			s.status.Processes = append(s.status.Processes, ServiceProcessIdentity{Component: component, PID: record.PID, StartTime: record.StartTime})
 		}
 	}
 	var lease serviceLeaseRecord
-	if readJSON(s.cell.path("service", "lease.json"), &lease) == nil && lease.PID > 1 && lease.StartIdentity != "" && lease.InstallationID == d.InstallationID && lease.Owner == d.UID {
+	if readJSON(context.Background(), s.cell.path("service", "lease.json"), &lease) == nil && lease.PID > 1 && lease.StartIdentity != "" && lease.InstallationID == d.InstallationID && lease.Owner == d.UID {
 		s.status.Processes = append(s.status.Processes, ServiceProcessIdentity{Component: "service-host", PID: lease.PID, StartTime: lease.StartIdentity})
 	}
 }

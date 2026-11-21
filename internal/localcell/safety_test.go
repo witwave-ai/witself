@@ -150,7 +150,7 @@ func TestPostgresRecoveryRequiresNativeStartEpoch(t *testing.T) {
 	if err := c.recoverPostgresRecord(); err != nil {
 		t.Fatal(err)
 	}
-	state, err = c.processState("postgres")
+	state, err = c.processState(t.Context(), "postgres")
 	if err != nil || !state.Alive || !state.Matches || state.PID != child.PID {
 		t.Fatal("matching native PostgreSQL start identity was not recovered")
 	}

@@ -93,7 +93,7 @@ func TestServiceProcessBootBindingExplicitLocalOnly(t *testing.T) {
 				t.Fatal("explicit binding failed")
 			}
 			var got ProcessRecord
-			if readJSON(c.path("run", "server.json"), &got) != nil {
+			if readJSON(t.Context(), c.path("run", "server.json"), &got) != nil {
 				t.Fatal("bound record unavailable")
 			}
 			if selection == "local" {
@@ -150,7 +150,7 @@ func TestServiceProcessBootBindingRefusesUnprovenRecord(t *testing.T) {
 				t.Fatal("unproven launch acquired boot authority")
 			}
 			var got ProcessRecord
-			if readJSON(c.path("run", "server.json"), &got) != nil || got != r {
+			if readJSON(t.Context(), c.path("run", "server.json"), &got) != nil || got != r {
 				t.Fatal("refused binding mutated process ownership")
 			}
 		})

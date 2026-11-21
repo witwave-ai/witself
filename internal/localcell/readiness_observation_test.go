@@ -131,7 +131,7 @@ func TestReadinessObservationRetainsClassifiedRecord(t *testing.T) {
 	if err := writeAtomic(c.path("run", "server.json"), &record, nil); err != nil {
 		t.Fatal("cannot persist original readiness record")
 	}
-	_, classified, err := c.processStateWithRecord("server")
+	_, classified, err := c.processStateWithRecord(t.Context(), "server")
 	if err != nil {
 		t.Fatal("cannot capture original readiness record")
 	}

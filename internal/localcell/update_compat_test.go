@@ -291,7 +291,7 @@ func TestUpdateHEADManifestByteIdentity(t *testing.T) {
 	if err := testWriteFile(c.path("manifest.json"), []byte(updateHEADManifestFixture), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	m, err := readManifest(c.cfg.Root)
+	m, err := readManifest(t.Context(), c.cfg.Root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -587,11 +587,11 @@ func TestUpdateHEADOptionalFieldsDowngrade(t *testing.T) {
 				if err := testWriteFile(c.path("manifest.json"), []byte(data), 0o600); err != nil {
 					t.Fatal(err)
 				}
-				if _, err := readManifest(c.cfg.Root); err == nil || err.Error() != "invalid local cell record" {
+				if _, err := readManifest(t.Context(), c.cfg.Root); err == nil || err.Error() != "invalid local cell record" {
 					t.Fatalf("shipped reader did not refuse generation member: %v", err)
 				}
 				var old updateHEADManifest
-				if err := readJSON(c.path("manifest.json"), &old); err == nil || err.Error() != "invalid local cell record" {
+				if err := readJSON(t.Context(), c.path("manifest.json"), &old); err == nil || err.Error() != "invalid local cell record" {
 					t.Fatal("HEAD wire schema accepted a new generation field")
 				}
 			})
@@ -662,7 +662,7 @@ func TestUpdateOrdinaryReadersRejectOptionalJournalField(t *testing.T) {
 		if err := writeAtomic(c.path("manifest.json"), wire, nil); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := readManifest(c.cfg.Root); err == nil || err.Error() != "invalid local cell record" {
+		if _, err := readManifest(t.Context(), c.cfg.Root); err == nil || err.Error() != "invalid local cell record" {
 			t.Fatal("legacy manifest cleanup accepted an optional update field")
 		}
 	}

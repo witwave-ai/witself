@@ -424,7 +424,7 @@ func TestServiceSupervisorClockRollbackCapsPersistedRetry(t *testing.T) {
 		t.Fatal("wall-clock rollback made persisted retry exceed the cap")
 	}
 	var persisted supervisorRecord
-	if err := readJSON(c.path("service", "supervisor.json"), &persisted); err != nil {
+	if err := readJSON(t.Context(), c.path("service", "supervisor.json"), &persisted); err != nil {
 		t.Fatal(err)
 	}
 	if !persisted.NextStart.Equal(s.record.NextStart) {

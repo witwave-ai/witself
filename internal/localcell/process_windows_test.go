@@ -80,7 +80,7 @@ func TestWindowsConsoleControlHelperProcess(t *testing.T) {
 			}
 			for _, component := range []string{"server", "worker"} {
 				var record ProcessRecord
-				if readJSON(c.path("run", component+".json"), &record) != nil {
+				if readJSON(t.Context(), c.path("run", component+".json"), &record) != nil {
 					continue
 				}
 				handle, alive, err := openVerifiedWindowsProcess(record, windows.PROCESS_TERMINATE)
@@ -110,7 +110,7 @@ func TestWindowsConsoleControlHelperProcess(t *testing.T) {
 		}
 		complete = true
 	case "stop":
-		state, err := c.processState("server")
+		state, err := c.processState(t.Context(), "server")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -185,7 +185,7 @@ func windowsControlFixtureMode(t *testing.T, detached bool, launchMode string) (
 		}
 	}
 	var record ProcessRecord
-	if err := readJSON(c.path("run", "server.json"), &record); err != nil {
+	if err := readJSON(t.Context(), c.path("run", "server.json"), &record); err != nil {
 		t.Fatal(err)
 	}
 	handle, alive, err := openVerifiedWindowsProcess(record, windows.PROCESS_TERMINATE)
@@ -205,7 +205,7 @@ func TestWindowsStopGracefulAcrossConsoleAndInvocation(t *testing.T) {
 		t.Run(map[bool]string{false: "different-console", true: "later-invocation"}[laterInvocation], func(t *testing.T) {
 			c, record, handle := windowsControlFixtureMode(t, false, "launch-with-bystander")
 			var bystander ProcessRecord
-			if err := readJSON(c.path("run", "worker.json"), &bystander); err != nil {
+			if err := readJSON(t.Context(), c.path("run", "worker.json"), &bystander); err != nil {
 				t.Fatal(err)
 			}
 			bystanderHandle, alive, err := openVerifiedWindowsProcess(bystander, windows.PROCESS_TERMINATE)

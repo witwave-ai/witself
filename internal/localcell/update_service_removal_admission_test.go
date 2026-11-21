@@ -95,14 +95,14 @@ func newServiceRemovalFixture(t *testing.T, family string) *serviceRemovalFixtur
 		// descriptor seam reads durable bytes from the real fixture root.
 		f.win.a.readDescriptor = func(ServiceDescriptor) (ServiceDescriptor, error) {
 			var d ServiceDescriptor
-			err := readJSON(f.cell.path("service", "descriptor.json"), &d)
+			err := readJSON(t.Context(), f.cell.path("service", "descriptor.json"), &d)
 			return d, err
 		}
 	}
 	serviceRemovalStopped(t, f.cell, f.d)
 	f.setDrain(func(context.Context, ServiceDescriptor) error {
 		var d ServiceDescriptor
-		if readJSON(f.cell.path("service", "descriptor.json"), &d) != nil {
+		if readJSON(t.Context(), f.cell.path("service", "descriptor.json"), &d) != nil {
 			t.Fatal("Removal drain descriptor read failed")
 		}
 		serviceRemovalStopped(t, f.cell, d)
@@ -286,7 +286,7 @@ func TestServiceAdapterRemovalFreshIdentity(t *testing.T) {
 						switch change {
 						case "installation":
 							fresh.InstallationID += "other"
-							manifest, err := readManifest(f.cell.cfg.Root)
+							manifest, err := readManifest(t.Context(), f.cell.cfg.Root)
 							if err != nil {
 								t.Fatal("Removal identity manifest read failed")
 							}
@@ -601,7 +601,7 @@ func TestServiceAdapterRemovalThenApply(t *testing.T) {
 				t.Fatal("Removal before reinstall failed")
 			}
 			var fresh ServiceDescriptor
-			if readJSON(f.cell.path("service", "descriptor.json"), &fresh) != nil {
+			if readJSON(t.Context(), f.cell.path("service", "descriptor.json"), &fresh) != nil {
 				t.Fatal("Removal reinstall descriptor read failed")
 			}
 			if fresh.DesiredState != "stopped" {

@@ -123,7 +123,7 @@ func (c *Cell) drillRootList() (drillRootListing, error) {
 	if err != nil {
 		return listing, drillRootError{reason: "boundary_refused"}
 	}
-	manifest, err := readManifest(c.cfg.Root)
+	manifest, err := readManifest(context.Background(), c.cfg.Root)
 	if err != nil {
 		return listing, drillRootError{reason: "boundary_refused"}
 	}
@@ -247,7 +247,7 @@ func (c *Cell) deleteDrillLocked(drillID string) error {
 	if c.validateRecovery() != nil {
 		return drillRootError{reason: "boundary_refused"}
 	}
-	manifest, err := readManifest(c.cfg.Root)
+	manifest, err := readManifest(context.Background(), c.cfg.Root)
 	if err != nil {
 		return drillRootError{reason: "boundary_refused"}
 	}

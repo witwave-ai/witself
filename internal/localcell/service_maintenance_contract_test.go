@@ -32,7 +32,7 @@ d, err := c.ServiceDescriptor()
 if err != nil || d.DesiredState != "running" || d.Faulted { return errServiceHealth }
 if err := c.serviceStartFence(); err != nil { return errServiceHealth }
 if err := c.serviceLiveTree(); err != nil { return errServiceHealth }
-m, err := readManifest(c.cfg.Root)
+m, err := readManifest(context.Background(), c.cfg.Root)
 if err != nil || m.AccountID == "" { return errServiceHealth }
 ` + maintenanceAdmissionStatement + `
 role, password, err := c.healthPrincipal(m)`,
@@ -1200,7 +1200,7 @@ var maintenanceHostSupervisorPins = map[string]string{
 	if err := servicePrivateRecord(s.cell.path("service", "supervisor.json")); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	if err := readJSON(s.cell.path("service", "supervisor.json"), &s.record); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := readJSON(context.Background(), s.cell.path("service", "supervisor.json"), &s.record); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	if s.record.Version != 0 && s.record.Version != 1 {

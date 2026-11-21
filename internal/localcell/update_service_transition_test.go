@@ -135,7 +135,7 @@ func TestServiceMaintenanceRepairTransitions(t *testing.T) {
 					serviceMaintenanceReleased(t, c)
 					if timing == "late" || kind == "Absent" {
 						serviceMaintenanceStopJournal(t, c)
-						m, readErr := readManifest(c.cfg.Root)
+						m, readErr := readManifest(t.Context(), c.cfg.Root)
 						if readErr != nil || m.LastOperation != "stop" {
 							t.Fatal("repair lost the completed stop effect")
 						}
@@ -275,7 +275,7 @@ func TestServiceMaintenanceTransitionAbsentParity(t *testing.T) {
 					d.Faulted = true
 				}
 				serviceTransitionSeed(t, c, d)
-				m, err := readManifest(c.cfg.Root)
+				m, err := readManifest(t.Context(), c.cfg.Root)
 				if err != nil {
 					t.Fatal("cannot read parity manifest")
 				}

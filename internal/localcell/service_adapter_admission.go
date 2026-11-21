@@ -99,11 +99,11 @@ func serviceAdapterCanonicalPath(path string) (string, error) {
 
 // The caller holds the operation lock. Keep the stable host lock until all
 // registration effects and absence proofs finish; never publish a host lease.
-func serviceAdapterRemovalHostLock(c *Cell) (func(), error) {
+func serviceAdapterRemovalHostLock(ctx context.Context, c *Cell) (func(), error) {
 	if err := servicePrivateRecord(c.path(".service-host.lock")); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
-	file, err := openLockFile(context.Background(), c.path(".service-host.lock"), true)
+	file, err := openLockFile(ctx, c.path(".service-host.lock"), true)
 	if err != nil {
 		return nil, err
 	}

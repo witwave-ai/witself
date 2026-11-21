@@ -18,7 +18,7 @@ func SeedVerifiedSchemaForTest(c *Cell, schema int) error {
 		return err
 	}
 	defer func() { _ = lock.Close() }()
-	m, err := readManifest(c.cfg.Root)
+	m, err := readManifest(context.Background(), c.cfg.Root)
 	if err != nil {
 		return err
 	}

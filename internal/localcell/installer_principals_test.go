@@ -83,7 +83,7 @@ func TestInstallerPrincipalsSelection(t *testing.T) {
 			t.Fatal("invalid selection fixture failed")
 		}
 		invalidBytes, _ := os.ReadFile(c.path("manifest.json"))
-		if _, err := readManifest(c.cfg.Root); err == nil || c.Start(t.Context()) == nil || c.Repair(t.Context()) == nil || calls != 0 {
+		if _, err := readManifest(t.Context(), c.cfg.Root); err == nil || c.Start(t.Context()) == nil || c.Repair(t.Context()) == nil || calls != 0 {
 			t.Fatal("invalid selected marker reached a lifecycle operation")
 		}
 		current, _ := os.ReadFile(c.path("manifest.json"))
@@ -100,7 +100,7 @@ func TestInstallerPrincipalsSelection(t *testing.T) {
 	if err := writeAtomic(c.path("manifest.json"), m, nil); err != nil {
 		t.Fatal("supported selected fixture failed")
 	}
-	got, err := readManifest(c.cfg.Root)
+	got, err := readManifest(t.Context(), c.cfg.Root)
 	if err != nil || !reflect.DeepEqual(got, m) {
 		t.Fatal("supported selected marker failed round trip")
 	}
@@ -293,7 +293,7 @@ func TestInstallerPrincipalsMigrationOrder(t *testing.T) {
 		if !slices.Equal(observed, want) || (err != nil) != (fail >= 0) {
 			t.Fatal("selected install crossed an unsuccessful phase")
 		}
-		read, readErr := readManifest(c.cfg.Root)
+		read, readErr := readManifest(t.Context(), c.cfg.Root)
 		if readErr != nil || read.Installed {
 			t.Fatal("selected phase prematurely marked installation complete")
 		}
@@ -356,7 +356,7 @@ func TestInstallerPrincipalsRepairFence(t *testing.T) {
 		if c.Repair(t.Context()) == nil {
 			t.Fatal("failed selected verification allowed repair success")
 		}
-		read, _ := readManifest(c.cfg.Root)
+		read, _ := readManifest(t.Context(), c.cfg.Root)
 		if read == nil || read.Installed {
 			t.Fatal("old journal phases incorrectly completed selected install")
 		}
@@ -364,7 +364,7 @@ func TestInstallerPrincipalsRepairFence(t *testing.T) {
 		if err := c.Repair(t.Context()); err != nil {
 			t.Fatalf("unambiguous selected repair failed%s", installerPrincipalFailureSuffix(err))
 		}
-		read, _ = readManifest(c.cfg.Root)
+		read, _ = readManifest(t.Context(), c.cfg.Root)
 		if read == nil || !read.Installed || read.InstallationID != m.InstallationID {
 			t.Fatal("selected repair did not finish exact installation")
 		}

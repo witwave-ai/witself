@@ -214,7 +214,7 @@ func (s windowsBootPublishSnapshot) unchanged(t *testing.T, path string) {
 		t.Fatal("refused boot publication changed the published boot record")
 	}
 	var record serviceBootRecord
-	if readJSON(path, &record) != nil {
+	if readJSON(t.Context(), path, &record) != nil {
 		t.Fatal("refused boot publication left an unreadable boot record")
 	}
 }

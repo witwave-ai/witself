@@ -197,7 +197,7 @@ func TestUnixServiceMaintenanceApplyPrecedenceLaunchd(t *testing.T) {
 				fresh := d
 				fresh.InstallationID += "-other"
 				unixServicePersistDescriptor(t, m.cell, fresh)
-				manifest, err := readManifest(m.cell.cfg.Root)
+				manifest, err := readManifest(t.Context(), m.cell.cfg.Root)
 				if err != nil {
 					t.Fatal("Launchd manifest read failed")
 				}
@@ -522,7 +522,7 @@ func TestServiceAdapterDescriptorOwnerContract(t *testing.T) {
 				d.Revision = 0
 				unixServicePersistDescriptor(t, m.cell, d)
 			case "manifest_id", "not_installed":
-				manifest, err := readManifest(m.cell.cfg.Root)
+				manifest, err := readManifest(t.Context(), m.cell.cfg.Root)
 				if err != nil {
 					t.Fatal("Owner reader manifest read failed")
 				}

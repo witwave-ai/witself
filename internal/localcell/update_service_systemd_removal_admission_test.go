@@ -117,7 +117,7 @@ func TestServiceAdapterRemovalFreshIdentitySystemd(t *testing.T) {
 				switch change {
 				case "installation":
 					fresh.InstallationID += "-new"
-					manifest, err := readManifest(d.Root)
+					manifest, err := readManifest(t.Context(), d.Root)
 					if err != nil {
 						t.Fatal("Systemd changed installation manifest read failed")
 					}

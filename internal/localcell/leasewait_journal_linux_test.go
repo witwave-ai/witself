@@ -85,14 +85,14 @@ func leaseJournalRows() []leaseJournalRow {
 		{"finish_after_manifest", "stop", journal, opened, unix.F_RDLCK, false, true, plain(func(ctx context.Context, c *Cell, m *Manifest, _ journalProgress, _ *writerLease) error {
 			return c.finish(ctx, m, "stop")
 		}), func(c *Cell, before []byte, err error) bool {
-			m, manifestErr := readManifest(c.cfg.Root)
+			m, manifestErr := readManifest(context.Background(), c.cfg.Root)
 			progress, readErr := c.readJournal(context.Background())
 			return same(c, before, err) && manifestErr == nil && m.LastOperation == "stop" && readErr == nil && progress.pending != nil && progress.pending.Operation == "stop"
 		}},
 		{"retained_removal_after_checkpoint", "remove", journal, opened, unix.F_RDLCK, false, true, plain(func(ctx context.Context, c *Cell, m *Manifest, _ journalProgress, _ *writerLease) error {
 			return c.finishRetainedRemoval(ctx, m)
 		}), func(c *Cell, before []byte, err error) bool {
-			m, manifestErr := readManifest(c.cfg.Root)
+			m, manifestErr := readManifest(context.Background(), c.cfg.Root)
 			return same(c, before, err) && manifestErr == nil && m.Cleanup != nil && m.Cleanup.Operation == "remove" && m.Cleanup.Step == "runtime_cleanup"
 		}},
 	}

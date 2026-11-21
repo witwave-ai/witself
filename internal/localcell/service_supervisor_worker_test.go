@@ -366,7 +366,7 @@ func serviceWorkerCold(t *testing.T, plant string, faulted bool) {
 	})
 	w.within(t, w.entered, nil, "first reconcile did not enter")
 	var lease serviceLeaseRecord
-	if readJSON(w.cell.path("service", "lease.json"), &lease) != nil || lease.PID <= 1 || lease.StartIdentity == "" {
+	if readJSON(t.Context(), w.cell.path("service", "lease.json"), &lease) != nil || lease.PID <= 1 || lease.StartIdentity == "" {
 		t.Fatal("cold fixture did not publish its lease identity")
 	}
 	want.Processes = []ServiceProcessIdentity{{Component: "service-host", PID: lease.PID, StartTime: lease.StartIdentity}}

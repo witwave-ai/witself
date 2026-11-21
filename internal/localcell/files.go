@@ -258,8 +258,8 @@ func readRegular(ctx context.Context, openReader func(context.Context, string) (
 	return data, nil
 }
 
-func readJSON(path string, dst any) error {
-	f, err := openRegular(context.Background(), path, errors.New("cannot inspect local cell record"),
+func readJSON(ctx context.Context, path string, dst any) error {
+	f, err := openRegular(ctx, path, errors.New("cannot inspect local cell record"),
 		errors.New("local cell record must be a regular file"), errors.New("cannot open local cell record"))
 	if err != nil {
 		return err
@@ -276,9 +276,9 @@ func readJSON(path string, dst any) error {
 	return nil
 }
 
-func readManifest(root string) (*Manifest, error) {
+func readManifest(ctx context.Context, root string) (*Manifest, error) {
 	var m Manifest
-	if err := readJSON(filepath.Join(root, "manifest.json"), &m); err != nil {
+	if err := readJSON(ctx, filepath.Join(root, "manifest.json"), &m); err != nil {
 		return nil, err
 	}
 	if m.LayoutVersion != LayoutVersion {
@@ -500,7 +500,7 @@ func (c *Cell) readJournal(ctx context.Context) (journalProgress, error) {
 	invalid := errors.New("invalid local cell journal")
 	f, err := openRegular(ctx, c.path("journal", "operations.jsonl"), invalid, invalid, errors.New("cannot read local cell journal"))
 	if errors.Is(err, os.ErrNotExist) {
-		progress.pending, err = c.cleanupInterruption()
+		progress.pending, err = c.cleanupInterruption(ctx)
 		progress.cleanupOnly = progress.pending != nil
 		return progress, err
 	}
@@ -570,7 +570,7 @@ func (c *Cell) readJournal(ctx context.Context) (journalProgress, error) {
 		progress.durableBytes += int64(len(line))
 	}
 	if progress.pending == nil {
-		progress.pending, err = c.cleanupInterruption()
+		progress.pending, err = c.cleanupInterruption(ctx)
 		progress.cleanupOnly = progress.pending != nil
 	}
 	return progress, err
@@ -603,8 +603,8 @@ func (c *Cell) discardJournalTail(ctx context.Context, progress journalProgress)
 	return nil
 }
 
-func (c *Cell) cleanupInterruption() (*Interruption, error) {
-	m, err := readManifest(c.cfg.Root)
+func (c *Cell) cleanupInterruption(ctx context.Context) (*Interruption, error) {
+	m, err := readManifest(ctx, c.cfg.Root)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
@@ -690,7 +690,7 @@ func (c *Cell) readUpdateJournal() (journalProgress, error) {
 	invalid := errors.New("invalid local cell journal")
 	f, err := openRegular(context.Background(), c.path("journal", "operations.jsonl"), invalid, invalid, errors.New("cannot read local cell journal"))
 	if errors.Is(err, os.ErrNotExist) {
-		progress.pending, err = c.cleanupInterruption()
+		progress.pending, err = c.cleanupInterruption(context.Background())
 		return progress, err
 	}
 	if err != nil {
@@ -781,7 +781,7 @@ func (c *Cell) readUpdateJournal() (journalProgress, error) {
 		progress.durableBytes += int64(len(line))
 	}
 	if progress.pending == nil {
-		progress.pending, err = c.cleanupInterruption()
+		progress.pending, err = c.cleanupInterruption(context.Background())
 	}
 	return progress, err
 }

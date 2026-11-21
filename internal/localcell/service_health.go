@@ -78,7 +78,7 @@ func (c *Cell) ServiceHealth(ctx context.Context) (result error) {
 	if err := c.serviceLiveTree(); err != nil {
 		return errServiceHealth
 	}
-	m, err := readManifest(c.cfg.Root)
+	m, err := readManifest(context.Background(), c.cfg.Root)
 	if err != nil || m.AccountID == "" {
 		return errServiceHealth
 	}
@@ -164,7 +164,7 @@ func (c *Cell) serviceLiveTree() error {
 		return errServiceHealth
 	}
 	for _, component := range []string{"postgres", "server", "worker"} {
-		s, err := c.processState(component)
+		s, err := c.processState(context.Background(), component)
 		if err != nil || !s.Alive || !s.Matches {
 			return errServiceHealth
 		}
@@ -186,7 +186,7 @@ func (c *Cell) serviceAPICredential(ctx context.Context, st serviceHealthCredent
 	path := c.path("service", "api.secret")
 	err := servicePrivateRecord(path)
 	if err == nil {
-		if err := readJSON(path, &credential); err != nil {
+		if err := readJSON(context.Background(), path, &credential); err != nil {
 			return credential, errServiceHealth
 		}
 		if credential.InstallationID != m.InstallationID || credential.AccountID != m.AccountID || credential.OperatorID == "" || credential.Bearer == "" {

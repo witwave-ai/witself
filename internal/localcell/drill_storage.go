@@ -121,7 +121,7 @@ func (c *Cell) admitDrillStorageLocked(ctx context.Context, checkpointID string,
 	if c.validateRecovery() != nil {
 		return drillStorageEstimate{}, drillStorageError{reason: "boundary_refused"}
 	}
-	manifest, err := readManifest(c.cfg.Root)
+	manifest, err := readManifest(context.Background(), c.cfg.Root)
 	if err != nil {
 		return drillStorageEstimate{}, drillStorageError{reason: "boundary_refused"}
 	}

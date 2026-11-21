@@ -162,7 +162,7 @@ func retainedAssertMaterial(t *testing.T, f *retainedFixture) {
 	if f.cell.validateRoot(false) != nil {
 		t.Fatal("retained tree lost private ownership or ACL validity")
 	}
-	m, err := readManifest(f.cell.cfg.Root)
+	m, err := readManifest(t.Context(), f.cell.cfg.Root)
 	if err != nil || !m.RemovalRetained {
 		t.Fatal("retained marker missing")
 	}
@@ -172,7 +172,7 @@ func retainedAssertMaterial(t *testing.T, f *retainedFixture) {
 		t.Fatal("removal changed initialized installation or principal identity")
 	}
 	for _, component := range []string{"postgres", "server", "worker"} {
-		state, err := f.cell.processState(component)
+		state, err := f.cell.processState(t.Context(), component)
 		if err != nil || state.Alive {
 			t.Fatal("retained cell has a running process")
 		}
@@ -185,7 +185,7 @@ func retainedAssertMaterial(t *testing.T, f *retainedFixture) {
 func retainedAssertSettled(t *testing.T, c *Cell) {
 	t.Helper()
 	p, err := c.readJournal(context.Background())
-	m, manifestErr := readManifest(c.cfg.Root)
+	m, manifestErr := readManifest(t.Context(), c.cfg.Root)
 	if err != nil || manifestErr != nil || p.pending != nil || p.tornTail || m.Cleanup != nil || !m.RemovalRetained {
 		t.Fatal("retained cleanup falsely settled or left unresolved operation")
 	}
@@ -302,7 +302,7 @@ func TestRetainedRemovalDisablesLaunch(t *testing.T) {
 				start = newSupervisor(c, SupervisorPolicy{}).hooks.start
 			case "postgres_helper":
 				c.cfg.Binaries.PostgresDir = t.TempDir() // Absent executable: no native PostgreSQL can run.
-				m, err := readManifest(c.cfg.Root)
+				m, err := readManifest(t.Context(), c.cfg.Root)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -379,7 +379,7 @@ func TestRetainedRemovalCrashRepair(t *testing.T) {
 				if op == "remove" && step == cut {
 					fired = true
 					if cut == "before_cleanup_clear" {
-						m, err := readManifest(c.cfg.Root)
+						m, err := readManifest(t.Context(), c.cfg.Root)
 						if err != nil || m.Cleanup == nil {
 							t.Fatal("Cleanup cleared before recorded completion boundary")
 						}
@@ -440,7 +440,7 @@ func TestRetainedRemovalCrashRepair(t *testing.T) {
 				if err := c.Repair(t.Context()); !fired || err == nil || err.Error() != "cannot sync local cell journal" {
 					t.Fatal("completion retry ignored journal sync failure")
 				}
-				m, err := readManifest(c.cfg.Root)
+				m, err := readManifest(t.Context(), c.cfg.Root)
 				if err != nil || m.Cleanup == nil || !reflect.DeepEqual(before, retainedSnapshot(t, c)) {
 					t.Fatal("completion sync failure lost checkpoint or duplicated history")
 				}
@@ -472,7 +472,7 @@ func TestRetainedRemovalInterruptedRepairKeepsLaunchRefusal(t *testing.T) {
 				if !errors.Is(c.Remove(t.Context(), RemoveOptions{}), errInterrupted) {
 					t.Fatal("removal stop boundary was not exercised")
 				}
-				if m, err := readManifest(c.cfg.Root); err != nil || m.RemovalRetained {
+				if m, err := readManifest(t.Context(), c.cfg.Root); err != nil || m.RemovalRetained {
 					t.Fatal("removal cut inside its stop already carried the retained marker")
 				}
 				fired := false
@@ -481,7 +481,7 @@ func TestRetainedRemovalInterruptedRepairKeepsLaunchRefusal(t *testing.T) {
 					t.Fatal("Repair crash boundary was not exercised")
 				}
 				c.cfg.Failpoint = nil
-				if m, err := readManifest(c.cfg.Root); err != nil || !m.RemovalRetained {
+				if m, err := readManifest(t.Context(), c.cfg.Root); err != nil || !m.RemovalRetained {
 					t.Fatal("interrupted Repair left no durable retained marker")
 				}
 				retainedAssertStartRefused(t, f)
@@ -523,7 +523,7 @@ func TestRetainedRemovalRepairRollsFailedRemovalForward(t *testing.T) {
 	if !injected || injectErr != nil || err == nil || err.Error() != "local cell remove: stop failed" {
 		t.Fatal("removal did not fail at its stop step")
 	}
-	if m, err := readManifest(c.cfg.Root); err != nil || m.RemovalRetained || m.Cleanup != nil {
+	if m, err := readManifest(t.Context(), c.cfg.Root); err != nil || m.RemovalRetained || m.Cleanup != nil {
 		t.Fatal("failed removal published the marker or the cleanup checkpoint")
 	}
 	failed := []string{"remove/operation/started", "remove/stop/started", "remove/stop/failed"}
@@ -674,7 +674,7 @@ func retainedServiceAdapter(t *testing.T, family, owner string) (*serviceRemoval
 	// the Windows validators accept, and the fake's lock seam already guards it.
 	win := newWindowsTaskFake(t)
 	c := win.cell
-	m, err := readManifest(c.cfg.Root)
+	m, err := readManifest(t.Context(), c.cfg.Root)
 	if err != nil {
 		t.Fatal("cannot read Windows task fixture manifest")
 	}
@@ -692,7 +692,7 @@ func retainedServiceAdapter(t *testing.T, family, owner string) (*serviceRemoval
 	// this cell's durable descriptor, never the fake's in-memory copy.
 	win.a.readDescriptor = func(ServiceDescriptor) (ServiceDescriptor, error) {
 		var fresh ServiceDescriptor
-		err := readJSON(c.path("service", "descriptor.json"), &fresh)
+		err := readJSON(t.Context(), c.path("service", "descriptor.json"), &fresh)
 		return fresh, err
 	}
 	return &serviceRemovalFixture{t: t, cell: c, d: d, win: win}, win.apply
@@ -729,7 +729,7 @@ func TestRetainedRemovalServiceRetryAndPurge(t *testing.T) {
 	release()
 	c := adapter.cell
 	phase("manifest")
-	m, err := readManifest(c.cfg.Root)
+	m, err := readManifest(t.Context(), c.cfg.Root)
 	if err != nil {
 		t.Fatal("cannot read retained service manifest")
 	}
@@ -900,7 +900,7 @@ func TestRetainedRemovalManifestCompatibility(t *testing.T) {
 		if writeAtomic(f.cell.path("manifest.json"), &m, nil) != nil {
 			t.Fatal("cannot publish marked compatibility fixture")
 		}
-		got, err := readManifest(f.cell.cfg.Root)
+		got, err := readManifest(t.Context(), f.cell.cfg.Root)
 		if err != nil || !reflect.DeepEqual(got, &m) {
 			t.Fatal("current reader rejected marked/interrupted-purge manifest")
 		}

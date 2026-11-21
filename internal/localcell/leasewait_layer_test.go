@@ -219,7 +219,7 @@ func TestLeaseWaitLayerUnleased(t *testing.T) {
 		if m.Ports.Postgres == original {
 			t.Fatal("postgres reallocation retained the original port")
 		}
-		saved, err := readManifest(c.cfg.Root)
+		saved, err := readManifest(t.Context(), c.cfg.Root)
 		if err != nil {
 			t.Fatal("cannot read the manifest after postgres reallocation")
 		}
@@ -362,7 +362,7 @@ func leaseCommandPlant(t *testing.T, prepare string) (*Cell, *Manifest) {
 	case "retained":
 		f, _ := reinstallFixture(t, "legacy", false)
 		c = f.cell
-		m, err = readManifest(c.cfg.Root)
+		m, err = readManifest(t.Context(), c.cfg.Root)
 	default:
 		c, m = unitCell(t)
 		checkpointPlant(t, c, leaseLayerID, leaseLayerID)

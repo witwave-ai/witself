@@ -773,7 +773,7 @@ func TestWindowsPrivatePipeDecoyServer(t *testing.T) {
 	}
 	defer func() { _ = lease.Close() }()
 	var originalLease serviceLeaseRecord
-	if readJSON(c.path("service", "lease.json"), &originalLease) != nil {
+	if readJSON(t.Context(), c.path("service", "lease.json"), &originalLease) != nil {
 		t.Fatal("cannot read fixture lease")
 	}
 	for _, mismatch := range []string{"pid", "start"} {

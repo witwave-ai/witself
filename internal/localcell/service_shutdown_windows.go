@@ -273,7 +273,7 @@ func (c *Cell) stopChildOutcomeWithBudget(ctx context.Context, component string,
 			return
 		}
 		var current ProcessRecord
-		if readJSON(c.path("run", component+".json"), &current) != nil || current != record || removePrivateFile(c.path("run", component+".json")) != nil {
+		if readJSON(context.Background(), c.path("run", component+".json"), &current) != nil || current != record || removePrivateFile(c.path("run", component+".json")) != nil {
 			outcome = result(serviceStopRefused, "shutdown:incarnation")
 		}
 	}()
@@ -400,7 +400,7 @@ func (c *Cell) prepareShutdownLaunch(component string) (serviceShutdownDescripto
 func waitShutdownReady(ctx context.Context, path string, d serviceShutdownDescriptor, handle windows.Handle) error {
 	for {
 		var ready serviceShutdownReady
-		if servicePrivateRecord(path+".ready") == nil && readJSON(path+".ready", &ready) == nil {
+		if servicePrivateRecord(path+".ready") == nil && readJSON(context.Background(), path+".ready", &ready) == nil {
 			if ready.PID != d.PID || ready.StartIdentity != d.StartIdentity || ready.BootID != d.BootID {
 				return shutdownRefused("shutdown:descriptor")
 			}

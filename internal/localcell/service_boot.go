@@ -30,7 +30,7 @@ func (c *Cell) reconcileServiceBoot() error {
 		return err
 	}
 	var previous serviceBootRecord
-	err = readJSON(c.path("service", "boot.json"), &previous)
+	err = readJSON(context.Background(), c.path("service", "boot.json"), &previous)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
@@ -58,7 +58,7 @@ func (c *Cell) reconcileOldBoot(oldBoot, currentBoot string) error {
 	var pg ProcessRecord
 	for _, component := range []string{"postgres", "server", "worker"} {
 		var record ProcessRecord
-		err := readJSON(c.path("run", component+".json"), &record)
+		err := readJSON(context.Background(), c.path("run", component+".json"), &record)
 		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}
@@ -135,7 +135,7 @@ func (c *Cell) bindServiceProcessBootWithReader(component string, readBoot func(
 		return err
 	}
 	var record ProcessRecord
-	if err := readJSON(c.path("run", component+".json"), &record); err != nil {
+	if err := readJSON(context.Background(), c.path("run", component+".json"), &record); err != nil {
 		return err
 	}
 	if record.Root != c.cfg.Root || record.Component != component || record.LaunchPending || (record.BootID != "" && record.BootID != boot) {

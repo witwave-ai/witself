@@ -41,7 +41,7 @@ type reinstallRecorder struct {
 
 func (r *reinstallRecorder) record(name string) error {
 	state := ":unreadable"
-	if m, err := readManifest(r.cell.cfg.Root); err == nil {
+	if m, err := readManifest(context.Background(), r.cell.cfg.Root); err == nil {
 		state = map[bool]string{true: ":marked", false: ":clear"}[m.RemovalRetained]
 	}
 	r.calls = append(r.calls, name+state)
@@ -144,7 +144,7 @@ func reinstallChanged(before, after map[string]retainedEntry) []string {
 func reinstallAssertRemoved(t *testing.T, f *retainedFixture) {
 	t.Helper()
 	p, err := f.cell.readJournal(context.Background())
-	m, manifestErr := readManifest(f.cell.cfg.Root)
+	m, manifestErr := readManifest(t.Context(), f.cell.cfg.Root)
 	if err != nil || manifestErr != nil || p.pending != nil || p.tornTail || !m.RemovalRetained {
 		t.Fatal("reinstall left an open operation or cleared the retained marker")
 	}
@@ -172,7 +172,7 @@ func TestReinstallAdmissionRefusals(t *testing.T) {
 	type setup func(*testing.T, *Cell, *ReinstallOptions)
 	manifest := func(edit func(*Manifest)) setup {
 		return func(t *testing.T, c *Cell, _ *ReinstallOptions) {
-			m, err := readManifest(c.cfg.Root)
+			m, err := readManifest(t.Context(), c.cfg.Root)
 			if err != nil {
 				t.Fatal("cannot read reinstall fixture manifest")
 			}
@@ -206,7 +206,7 @@ func TestReinstallAdmissionRefusals(t *testing.T) {
 	// A live postmaster record passes verifyAll only with this PGDATA's pidfile.
 	livePostgres := func(t *testing.T, c *Cell, o *ReinstallOptions) {
 		record("postgres", own)(t, c, o)
-		m, err := readManifest(c.cfg.Root)
+		m, err := readManifest(t.Context(), c.cfg.Root)
 		if err != nil {
 			t.Fatal("cannot read reinstall fixture manifest")
 		}
@@ -272,7 +272,7 @@ func TestReinstallAdmissionRefusals(t *testing.T) {
 				row.setup(t, f.cell, &options)
 				// The synthetic cluster reports the schema its manifest records, so a
 				// root that slips past a weakened offline check is not stopped by the proof.
-				if m, err := readManifest(f.cell.cfg.Root); err == nil {
+				if m, err := readManifest(t.Context(), f.cell.cfg.Root); err == nil {
 					r.schema = strconv.Itoa(m.LastVerifiedSchemaVersion)
 				}
 				before := retainedSnapshot(t, f.cell)
@@ -386,7 +386,7 @@ func TestReinstallSequence(t *testing.T) {
 		t.Run(layout, func(t *testing.T) {
 			f, r := reinstallFixture(t, layout, false)
 			c := f.cell
-			removed, err := readManifest(c.cfg.Root)
+			removed, err := readManifest(t.Context(), c.cfg.Root)
 			if err != nil {
 				t.Fatal("cannot read retained manifest")
 			}
@@ -401,7 +401,7 @@ func TestReinstallSequence(t *testing.T) {
 				t.Fatal("boundary order or observed retained marker differs")
 			}
 			retainedAssertRecords(t, f, reinstallRecords)
-			m, err := readManifest(c.cfg.Root)
+			m, err := readManifest(t.Context(), c.cfg.Root)
 			removed.RemovalRetained, removed.LastOperation = false, "reinstall"
 			if err != nil || !reflect.DeepEqual(m, removed) || bytes.Contains(retainedRead(t, c, "manifest.json"), []byte("removal_retained")) {
 				t.Fatal("readmission changed more than the marker and last operation")
@@ -543,7 +543,7 @@ func TestReinstallCrashRepair(t *testing.T) {
 					}
 				}
 				p, err := c.readJournal(context.Background())
-				m, manifestErr := readManifest(c.cfg.Root)
+				m, manifestErr := readManifest(t.Context(), c.cfg.Root)
 				marked := index < 4 // The readmitted publication is durable from C4 on.
 				if err != nil || manifestErr != nil || p.pending != nil || m.RemovalRetained != marked || !slices.Equal(reverts, []string{"reinstall/started", "reinstall/done"}) {
 					t.Fatal("Repair left the operation open, repeated its stop or changed the marker")
@@ -577,7 +577,7 @@ func TestReinstallPortReallocation(t *testing.T) {
 	if err := c.Reinstall(t.Context(), reinstallOptions(f)); err != nil {
 		t.Fatal(err)
 	}
-	m, err := readManifest(c.cfg.Root)
+	m, err := readManifest(t.Context(), c.cfg.Root)
 	config := string(retainedRead(t, c, "pg/postgresql.conf"))
 	if err != nil || m.Ports.Postgres == f.manifest.Ports.Postgres || !strings.Contains(config, fmt.Sprintf("\nport = %d\n", m.Ports.Postgres)) {
 		t.Fatal("reinstall did not move PostgreSQL to a reallocated port")
@@ -822,7 +822,7 @@ func TestReinstallInspectState(t *testing.T) {
 	available, unsupported := "removed; data retained; explicit reinstall available", "removed; data retained; reinstall unsupported"
 	edit := func(change func(*Manifest)) func(*testing.T, *retainedFixture) {
 		return func(t *testing.T, f *retainedFixture) {
-			m, err := readManifest(f.cell.cfg.Root)
+			m, err := readManifest(t.Context(), f.cell.cfg.Root)
 			if err != nil {
 				t.Fatal("cannot read reinstall fixture manifest")
 			}
