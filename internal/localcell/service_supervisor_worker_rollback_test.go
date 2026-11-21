@@ -9,13 +9,28 @@ import (
 	"time"
 )
 
+func serviceWorkerCheckControl(t *testing.T, err error, message string) {
+	t.Helper()
+	if err == nil {
+		return
+	}
+	step, site := "none", "none"
+	var refusal *serviceControlRefusal
+	if errors.As(err, &refusal) {
+		step = refusal.step
+	}
+	var located *serviceFailure
+	if errors.As(err, &located) {
+		site = serviceFailureSite(located.site)
+	}
+	t.Fatalf("%s (type=%T step=%s site=%s)", message, err, step, site)
+}
+
 func serviceWorkerSettled(ctx context.Context, t *testing.T, c *Cell) ServiceStatus {
 	t.Helper()
 	for {
 		v, err := c.Control(ctx, "observe")
-		if err != nil {
-			t.Fatal("could not obtain a settled control observation")
-		}
+		serviceWorkerCheckControl(t, err, "could not obtain a settled control observation")
 		if !v.WorkInFlight {
 			return v
 		}

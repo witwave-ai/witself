@@ -3,6 +3,8 @@ package localcell
 import (
 	"context"
 	"errors"
+	"os"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -61,7 +63,7 @@ func TestServiceWorkerFaultCancellation(t *testing.T) {
 }
 
 func TestServiceWorkerLatchedFault(t *testing.T) {
-	for _, stage := range []string{"refusal_write", "refusal_write_observed", "after_write_observed", "blocked_tick", "after_repair", "refused_parked_exit"} {
+	for _, stage := range []string{"refusal_write", "refusal_write_observed", "after_write_observed", "blocked_tick", "after_repair", "refused_parked_exit", "endpoint_refresh"} {
 		t.Run(stage, func(t *testing.T) { serviceWorkerRefusal(t, stage) })
 	}
 }
@@ -98,7 +100,7 @@ func serviceWorkerRefusal(t *testing.T, stage string) {
 		return nil
 	}
 	switch stage {
-	case "blocked_tick":
+	case "blocked_tick", "after_repair":
 		h.beforeFaultWrite = func() { gate.awaitingIdle.Store(true) }
 	case "after_write_observed":
 		h.beforeFaultWrite = func() { gate.arm.Store(true) }
@@ -111,14 +113,26 @@ func serviceWorkerRefusal(t *testing.T, stage string) {
 	defer cancel()
 	defer free()
 	w.ready(t)
+	if stage == "endpoint_refresh" {
+		// Pause the actual writer between descriptor publication and endpoint refresh.
+		c.serviceControlMu.Lock()
+		defer c.serviceControlMu.Unlock()
+	}
 	unhealthy.Store(true)
 	w.within(t, nil, w.ticks, "unhealthy tick was not admitted")
 	ctx, end := context.WithTimeout(t.Context(), c.cfg.Timeout)
 	defer end()
+	if stage == "endpoint_refresh" {
+		serviceWorkerObserveDuringRefresh(ctx, t, &w)
+		return
+	}
 	if stage == "blocked_tick" || stage == "after_repair" {
 		if stage == "blocked_tick" {
 			w.within(t, gate.idle, nil, "faulted worker did not return to idle")
 		} else {
+			// This row is about the tick after the repair. It asks only once the refused stop's two
+			// publications are complete; the endpoint_refresh row covers a request made between them.
+			w.within(t, gate.idle, nil, "refused stop did not return to idle before the repair")
 			if v := serviceWorkerSettled(ctx, t, c); v.Reason != "service_stop_refused" {
 				t.Fatal("completed tick did not publish its stop refusal")
 			}
@@ -137,8 +151,15 @@ func serviceWorkerRefusal(t *testing.T, stage string) {
 	switch stage {
 	case "after_repair":
 		v, err := c.Control(ctx, "observe")
-		if err != nil || !v.WorkInFlight || v.State != "running" || !v.Healthy {
-			t.Fatal("later tick republished the repaired refusal")
+		serviceWorkerCheckControl(t, err, "could not observe the tick after repair")
+		if !v.WorkInFlight {
+			t.Fatal("tick after repair was not in flight")
+		}
+		if v.State != "running" {
+			t.Fatal("tick after repair did not publish running")
+		}
+		if !v.Healthy {
+			t.Fatal("tick after repair lost its healthy observation")
 		}
 		return
 	case "refused_parked_exit":
@@ -201,5 +222,69 @@ func serviceWorkerRefusal(t *testing.T, stage string) {
 	}
 	if refusals.Load() != 1 {
 		t.Fatal("shutdown retried the refused protective stop")
+	}
+}
+
+func serviceWorkerObserveDuringRefresh(ctx context.Context, t *testing.T, w *serviceWorkerHost) {
+	t.Helper()
+	client, err := New(w.cell.cfg)
+	if err != nil {
+		t.Fatal("could not prepare an independent control client")
+	}
+	// The faulted descriptor is visible and its journal has been removed.
+	// The host cannot advance the endpoint until the caller releases the mutex.
+	poll := time.NewTicker(5 * time.Millisecond)
+	defer poll.Stop()
+	for {
+		var d ServiceDescriptor
+		if readJSON(client.path("service", "descriptor.json"), &d) == nil && d.Faulted {
+			_, err := os.Lstat(client.path("service", "transition.json"))
+			if errors.Is(err, os.ErrNotExist) {
+				break
+			}
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal("fault publication did not reach endpoint refresh")
+		case <-poll.C:
+		}
+	}
+	reply := w.boundaryCommand(t, "observe")
+	select {
+	case r := <-reply:
+		serviceWorkerCheckControl(t, r.err, "scheduler refused observation during endpoint refresh")
+		if r.status.Reason != "service_stop_refused" {
+			t.Fatal("scheduler did not publish the stop refusal during endpoint refresh")
+		}
+	case <-ctx.Done():
+		t.Fatal("scheduler did not answer during endpoint refresh")
+	}
+	v, err := client.Control(ctx, "observe")
+	if runtime.GOOS == "windows" {
+		// Known gap, the same on main and pinned here until the service host's descriptor and endpoint are
+		// published as one (follow-up LC-HOST-ENDPOINT-1): a Windows client compares the two records'
+		// revisions before it opens the pipe, so between the two publications it is refused although the
+		// host, as shown above, would answer. The slice that closes the gap replaces this expectation.
+		var refusal *serviceControlRefusal
+		if err == nil {
+			t.Fatal("independent Windows client was answered during endpoint refresh; the pinned gap has closed")
+		}
+		if !errors.As(err, &refusal) || refusal.step != "endpoint:record" {
+			serviceWorkerCheckControl(t, err, "independent Windows client failed outside the endpoint record during endpoint refresh")
+		}
+		return
+	}
+	serviceWorkerCheckControl(t, err, "independent client could not observe during endpoint refresh")
+	if !v.WorkInFlight {
+		t.Fatal("independent client missed work in flight during endpoint refresh")
+	}
+	if v.State != "faulted" {
+		t.Fatal("independent client missed the faulted state during endpoint refresh")
+	}
+	if v.Reason != "service_stop_refused" {
+		t.Fatal("independent client missed the stop refusal during endpoint refresh")
+	}
+	if v.Healthy {
+		t.Fatal("independent client saw a healthy fault during endpoint refresh")
 	}
 }
