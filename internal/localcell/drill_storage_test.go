@@ -244,7 +244,7 @@ var drillStorageCallees = []string{"(context.Context).Err", "context.Background"
 var drillReserveCallees = []string{"errors.As", "errors.Is", "(*os.Root).Open", "(*os.File).Close", "(*os.File).Fd", "(*os.File).Stat",
 	"(io/fs.FileInfo).Size", "os.NewFile", "strings.Contains", "strings.Split", "localcell.drillStorageAdd", "path/filepath.FromSlash", "path/filepath.Join",
 	"strings.Repeat", "localcell.checkpointPathFits", "os.SameFile", "(*os.Root).OpenRoot", "(*os.Root).Stat", "(*os.Root).Close",
-	"(context.Context).Err", "encoding/json.Marshal", "errors.Join", "os.OpenRoot", "os.Lstat", "path.Join", "(*os.File).Sync", "(*os.File).Write",
+	"(context.Context).Err", "context.Background", "encoding/json.Marshal", "errors.Join", "os.OpenRoot", "os.Lstat", "path.Join", "(*os.File).Sync", "(*os.File).Write",
 	"(*os.Root).Lstat", "(*os.Root).Remove", "(*os.Root).Rename", "localcell.drillPlatformVolume", "(*localcell.Cell).admitDrillStorageLocked",
 	"(*localcell.Cell).checkpointDir", "(*localcell.Cell).checkpointOps", "(*localcell.Cell).recoveryDir", "localcell.readManifest",
 	"localcell.verifyCheckpointDocuments", "localcell.checkpointVerifyShape", "localcell.drillCloneBytes", "localcell.drillStorageAdmits",
