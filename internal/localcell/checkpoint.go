@@ -783,7 +783,7 @@ func (c *Cell) inventoryCheckpoint(ctx context.Context, checkpointID string, pla
 				if opened {
 					copied, err = ops.open(filepath.Join(dir, filepath.FromSlash(entry.path)))
 				} else {
-					copied, err = tree.open(context.Background(), entry.path)
+					copied, err = tree.open(ctx, entry.path)
 				}
 				return err
 			})
