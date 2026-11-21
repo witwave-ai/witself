@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"runtime"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -26,16 +27,31 @@ func serviceWorkerCheckControl(t *testing.T, err error, message string) {
 	t.Fatalf("%s (type=%T step=%s site=%s)", message, err, step, site)
 }
 
+// On Windows a client that asks while the host publishes its descriptor and its endpoint record is refused at the
+// endpoint record before it reaches the host. That is the same on main, is pinned by the endpoint_refresh row and is
+// recorded as the follow-up LC-HOST-ENDPOINT-1. On other systems the refusal cannot occur here and stays fatal.
+func serviceWorkerEndpointGap(err error) bool {
+	var refusal *serviceControlRefusal
+	return runtime.GOOS == "windows" && errors.As(err, &refusal) && refusal.step == "endpoint:record"
+}
+
+// A client that waits for the host to settle asks again after the Windows publication gap, as this helper does.
 func serviceWorkerSettled(ctx context.Context, t *testing.T, c *Cell) ServiceStatus {
 	t.Helper()
 	for {
 		v, err := c.Control(ctx, "observe")
-		serviceWorkerCheckControl(t, err, "could not obtain a settled control observation")
-		if !v.WorkInFlight {
-			return v
+		gap := serviceWorkerEndpointGap(err)
+		if !gap {
+			serviceWorkerCheckControl(t, err, "could not obtain a settled control observation")
+			if !v.WorkInFlight {
+				return v
+			}
 		}
 		select {
 		case <-ctx.Done():
+			if gap {
+				t.Fatal("host stayed refused at the endpoint record until the deadline")
+			}
 			t.Fatal("worker did not settle before its deadline")
 		case <-time.After(time.Millisecond):
 		}
