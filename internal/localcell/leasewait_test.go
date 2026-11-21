@@ -20,8 +20,10 @@ import (
 )
 
 // leaseWaitSites reach the system only through waitOutLease (R3, R4); the dark
-// drill record open is excluded (OQ9).
-var leaseWaitSites = []string{"files_other.go:openPrivateReader", "files_other.go:openPrivateWriter", "checkpoint_unix.go:openCheckpointSource", "lock_unix.go:openLockFile"}
+// drill record open is excluded (OQ9). The checkpoint tree's open reaches it
+// through the private beneath walk (LC-CKPT-WALK-1C1).
+var leaseWaitSites = []string{"files_other.go:openPrivateReader", "files_other.go:openPrivateWriter", "checkpoint_unix.go:openCheckpointSource", "lock_unix.go:openLockFile",
+	"checkpoint_tree_unix.go:open"}
 
 // leaseWaitExcluded: the dark drill record open (OQ9); leaseWaitPlain: the one
 // plain open in a file holding a site, pinned to pass its caller's flags only.
@@ -108,6 +110,27 @@ func leaseWaitThrough(function *ast.FuncDecl, calls []*ast.CallExpr, open *ast.C
 	})
 }
 
+// leaseWaitBeneath: open, privateBeneathOpen(t.recovery, X, t.want, label), is
+// the one return of the second function literal passed to a waitOutLease call
+// among calls, with function's own context and label, whose first function
+// literal's one return is privateBeneathLstat(t.recovery, X, t.want): the
+// walk's no-follow stat of the same name and identity.
+func leaseWaitBeneath(function *ast.FuncDecl, calls []*ast.CallExpr, open *ast.CallExpr) bool {
+	if len(open.Args) != 4 || types.ExprString(open.Args[0]) != "t.recovery" || types.ExprString(open.Args[2]) != "t.want" {
+		return false
+	}
+	return slices.ContainsFunc(calls, func(wait *ast.CallExpr) bool {
+		if len(wait.Args) != 4 || types.ExprString(wait.Fun) != "waitOutLease" || !leaseWaitOwnContext(function, wait.Args[0]) ||
+			types.ExprString(wait.Args[1]) != types.ExprString(open.Args[3]) {
+			return false
+		}
+		lstat, isLstat := wait.Args[2].(*ast.FuncLit)
+		opener, isOpener := wait.Args[3].(*ast.FuncLit)
+		return isLstat && isOpener && opener.Pos() < open.Pos() && open.End() < opener.End() && writerOneReturn(opener.Body) == "return "+types.ExprString(open) &&
+			writerOneReturn(lstat.Body) == "return privateBeneathLstat(t.recovery, "+types.ExprString(open.Args[1])+", t.want)"
+	})
+}
+
 // leaseWaitOwnContext: argument is the identifier the parser resolved to a
 // context.Context parameter of function itself.
 func leaseWaitOwnContext(function *ast.FuncDecl, argument ast.Expr) bool {
@@ -128,7 +151,7 @@ var leaseWaitOpeners = []string{"waitOutLease", "openPrivateReader", "openPrivat
 	"(*Cell).openCheckpointSource", "openRegularBy", "readRegular", "openRegular", "openRegularWriter", "openServiceRecord", "checkpointComplete",
 	"readMaintenanceFenceJSON", "(*Cell).readMaintenanceFence", "acquireLock", "(*Cell).readJournal", "(*Cell).journal", "(*Cell).journalCause",
 	"(*Cell).step", "(*Cell).begin", "(*Cell).finish", "(*Cell).discardJournalTail", "(*Cell).finishRemoval", "(*Cell).finishRetainedRemoval",
-	"(*Cell).postmaster", "(*Cell).maintenanceFenceAllows", "(*Cell).refuseBeforeLockNames"}
+	"(*Cell).postmaster", "(*Cell).maintenanceFenceAllows", "(*Cell).refuseBeforeLockNames", "(*checkpointTree).open"}
 
 // leaseWaitPlaceholders are the non-test calls into leaseWaitOpeners that pass
 // context.Background() instead of their declaration's own context, by file and
@@ -462,6 +485,9 @@ func leaseWaitContract(sources map[string]string) (result []string) {
 				if selector, ok := call.Fun.(*ast.SelectorExpr); ok && (slices.Contains([]string{"os.Open", "os.OpenFile", "syscall.Open", "unix.Open"}, types.ExprString(selector)) || selector.Sel.Name == "OpenFile") {
 					failures["lease_wait_caller:"+site] = failures["lease_wait_caller:"+site] || !leaseWaitThrough(function, calls, call)
 					found[site+":open"] = true
+				} else if types.ExprString(call.Fun) == "privateBeneathOpen" {
+					failures["lease_wait_caller:"+site] = failures["lease_wait_caller:"+site] || !leaseWaitBeneath(function, calls, call)
+					found[site+":open"] = true
 				}
 			}
 		}
@@ -582,6 +608,8 @@ func TestLeaseWaitSourceContract(t *testing.T) {
 	}
 	sources = ended(sources, "\n")
 	const reader, writer = "os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, 0)", "os.OpenFile(path, flags|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, mode)"
+	const tree = "\treturn waitOutLease(ctx, label, func(string) (fs.FileInfo, error) { return privateBeneathLstat(t.recovery, t.name(name), t.want) },\n" +
+		"\t\tfunc() (*os.File, error) { return privateBeneathOpen(t.recovery, t.name(name), t.want, label) })"
 	waited := func(open string) string {
 		return "return waitOutLease(ctx, path, os.Lstat, func() (*os.File, error) {\n\t\treturn " + open + "\n\t})"
 	}
@@ -601,6 +629,7 @@ func TestLeaseWaitSourceContract(t *testing.T) {
 		{"checkpoint_other_lstat", "checkpoint_unix.go", "waitOutLease(ctx, name, root.Lstat,", "waitOutLease(ctx, name, os.Lstat,", "lease_wait_caller:checkpoint_unix.go:openCheckpointSource"},
 		{"lock_direct", "lock_unix.go", "waitOutLease(ctx, path, os.Lstat, func() (int, error) { return syscall.Open(path, flags, 0o600) })", "syscall.Open(path, flags, 0o600)",
 			"lease_wait_caller:lock_unix.go:openLockFile"},
+		{"tree_open_direct", "checkpoint_tree_unix.go", tree, "\t_ = ctx\n\treturn privateBeneathOpen(t.recovery, t.name(name), t.want, label)", "lease_wait_caller:checkpoint_tree_unix.go:open"},
 		{"new_never_waiting_open", "files.go", "func regularFile(", "func readLeased(path string) (*os.File, error) { return os.OpenFile(path, syscall.O_NONBLOCK, 0) }\nfunc regularFile(",
 			"lease_wait_caller:files.go:readLeased"},
 		{"windows_wait", "files_windows.go", "\treturn openPrivateFile(path, os.O_RDONLY, 0)\n",

@@ -395,8 +395,8 @@ func (c *Cell) checkpointLocked(ctx context.Context, options CheckpointOptions) 
 		run  func() error
 	}{
 		{"copy", func() error { return c.copyCheckpoint(ctx, checkpointID, plan, tree, &created, discard, ops, &budget) }},
-		{"inventory", func() error { return c.inventoryCheckpoint(ctx, checkpointID, plan, discard, ops, &budget) }},
-		{"witness", func() error { return c.witnessCheckpoint(ctx, checkpointID, plan, ops) }},
+		{"inventory", func() error { return c.inventoryCheckpoint(ctx, checkpointID, plan, tree, discard, ops, &budget) }},
+		{"witness", func() error { return c.witnessCheckpoint(ctx, checkpointID, plan, tree, ops) }},
 	} {
 		// A crash leaves the operation open and discards nothing; Repair or the next
 		// admitted Checkpoint or DeleteCheckpoint closes it.
@@ -754,8 +754,9 @@ type checkpointInventory struct {
 }
 
 // inventoryCheckpoint proves the tree is exactly the plan and every copy has
-// its copy-time size and digest, then publishes the sorted inventory.
-func (c *Cell) inventoryCheckpoint(ctx context.Context, checkpointID string, plan *checkpointPlan, discard func() error, ops checkpointOperations, budget *checkpointRetryBudget) error {
+// its copy-time size and digest, then publishes the sorted inventory, each
+// through the tree; a test that set ops.open reads the copies by pathname.
+func (c *Cell) inventoryCheckpoint(ctx context.Context, checkpointID string, plan *checkpointPlan, tree *checkpointTree, discard func() error, ops checkpointOperations, budget *checkpointRetryBudget) error {
 	dir, err := c.checkpointDir(checkpointID)
 	if err != nil {
 		return err
@@ -765,22 +766,10 @@ func (c *Cell) inventoryCheckpoint(ctx context.Context, checkpointID string, pla
 	for _, entry := range plan.entries {
 		planned[entry.path] = entry.directory
 	}
-	seen := 0
-	err = filepath.WalkDir(dir, func(name string, entry fs.DirEntry, err error) error {
-		rel, relErr := filepath.Rel(dir, name)
-		if err != nil || relErr != nil || rel == "." {
-			return errors.Join(err, relErr)
-		}
-		directory, known := planned[filepath.ToSlash(rel)]
-		if !known || directory != entry.IsDir() || (!directory && !entry.Type().IsRegular()) {
-			return errCheckpointWitness
-		}
-		seen++
-		return nil
-	})
-	if err != nil || seen != len(plan.entries) {
+	if seen, err := tree.check(planned); err != nil || seen != len(plan.entries) {
 		return fail(errCheckpointWitness)
 	}
+	opened := c.checkpointTest != nil && c.checkpointTest.open != nil
 	inventory := checkpointInventory{Format: 1, CheckpointID: checkpointID}
 	for _, entry := range plan.entries {
 		item := checkpointInventoryEntry{Path: entry.path, Type: "dir"}
@@ -791,7 +780,11 @@ func (c *Cell) inventoryCheckpoint(ctx context.Context, checkpointID string, pla
 					ops.beforeStep("open", filepath.Join(dir, filepath.FromSlash(entry.path)))
 				}
 				var err error
-				copied, err = ops.open(filepath.Join(dir, filepath.FromSlash(entry.path)))
+				if opened {
+					copied, err = ops.open(filepath.Join(dir, filepath.FromSlash(entry.path)))
+				} else {
+					copied, err = tree.open(ctx, entry.path)
+				}
 				return err
 			})
 			// The copy's handle is decided before a byte is read: a FIFO with a
@@ -826,7 +819,7 @@ func (c *Cell) inventoryCheckpoint(ctx context.Context, checkpointID string, pla
 		return fail(errCheckpointCopy)
 	}
 	data = append(data, '\n')
-	if err := writeAtomicBytes(filepath.Join(dir, checkpointInventoryName), data, nil); err != nil {
+	if err := tree.record(checkpointInventoryName, data); err != nil {
 		return fail(errCheckpointCopy)
 	}
 	plan.inventory = sha256.Sum256(data)
@@ -853,10 +846,10 @@ type checkpointWitness struct {
 }
 
 // witnessCheckpoint re-proves the cold state (an equal control reading, no
-// postmaster.pid, an unchanged pg_control), then publishes the witness.
-func (c *Cell) witnessCheckpoint(ctx context.Context, checkpointID string, plan *checkpointPlan, ops checkpointOperations) error {
-	dir, err := c.checkpointDir(checkpointID)
-	if err != nil {
+// postmaster.pid, an unchanged pg_control), then publishes the witness through
+// the tree.
+func (c *Cell) witnessCheckpoint(ctx context.Context, checkpointID string, plan *checkpointPlan, tree *checkpointTree, ops checkpointOperations) error {
+	if _, err := c.checkpointDir(checkpointID); err != nil {
 		return err
 	}
 	controlCtx, cancel := c.deadline(ctx)
@@ -906,7 +899,7 @@ func (c *Cell) witnessCheckpoint(ctx context.Context, checkpointID string, plan 
 			witness.Files, witness.Bytes = witness.Files+1, witness.Bytes+entry.size
 		}
 	}
-	if err := writeAtomic(filepath.Join(dir, checkpointWitnessName), witness, nil); err != nil {
+	if data, err := json.MarshalIndent(witness, "", "  "); err != nil || tree.record(checkpointWitnessName, append(data, '\n')) != nil {
 		return errCheckpointCopy
 	}
 	return nil

@@ -3,6 +3,7 @@
 package localcell
 
 import (
+	"context"
 	"errors"
 	"io/fs"
 	"os"
@@ -115,6 +116,92 @@ func (t *checkpointTree) sync(name string) error {
 		}
 		return privateBeneathDirectory(t.recovery, t.name(name), t.want, func(fd int, _ privateBeneathID) error { return privateBeneathSync(fd) })
 	})
+}
+
+// open opens name read-only through the walk, a Linux lease waited out as
+// openPrivateReader waits (its lstat a no-follow stat through the walk); it
+// never follows a link, leaves the device or waits on what stands there, and
+// returns any type: the caller decides by Stat before a read. label is the
+// logical pathname, never resolved.
+func (t *checkpointTree) open(ctx context.Context, name string) (*os.File, error) {
+	if err := t.bound(); err != nil {
+		return nil, err
+	}
+	label := filepath.Join(t.c.recoveryDir(), filepath.FromSlash(t.name(name)))
+	return waitOutLease(ctx, label, func(string) (fs.FileInfo, error) { return privateBeneathLstat(t.recovery, t.name(name), t.want) },
+		func() (*os.File, error) { return privateBeneathOpen(t.recovery, t.name(name), t.want, label) })
+}
+
+// check lists the checkpoint directory and each planned directory below it
+// through the walk, every directory this call made reached as the one it
+// recorded, and counts their entries; one not planned, or not of its planned
+// kind (a directory, else a regular file), is errCheckpointWitness, and a
+// listing that fails (an entry gone before its stat too) refuses.
+func (t *checkpointTree) check(planned map[string]bool) (int, error) {
+	seen, directories := 0, []string{"."}
+	for len(directories) > 0 {
+		directory := directories[0]
+		directories = directories[1:]
+		if err := t.bound(); err != nil {
+			return 0, err
+		}
+		entries, err := privateBeneathList(t.recovery, t.name(directory), t.want)
+		if err != nil {
+			return 0, err
+		}
+		for _, entry := range entries {
+			name := path.Join(directory, entry.name)
+			if kind, known := planned[name]; !known || kind != entry.directory || !kind && !entry.regular {
+				return 0, errCheckpointWitness
+			} else if seen++; kind {
+				directories = append(directories, name)
+			}
+		}
+	}
+	return seen, nil
+}
+
+// record publishes data at name, a regular file or nothing there, in the
+// directory the walk reaches: a private temporary made there, written, synced
+// and closed, renamed over name in that one directory (a link put at name is
+// replaced, never followed), then the directory synced. A temporary a failure
+// left is removed through the walk. It binds first, before the rename and after
+// it: the walk starts from the held descriptor and never re-proves that
+// recovery/'s name still names it, so only that last bind refuses a recovery/
+// moved in the instant after the rename.
+func (t *checkpointTree) record(name string, data []byte) error {
+	if err := t.bound(); err != nil {
+		return err
+	} else if info, err := privateBeneathLstat(t.recovery, t.name(name), t.want); err == nil && !info.Mode().IsRegular() {
+		return errors.New("local cell record must be a regular file")
+	}
+	// Not-exist is the no-follow fstatat of name in the reached directory: nothing there. A walk refusal recurs below.
+	temporary, pending, err := t.createTemp(path.Dir(name))
+	if err != nil {
+		return err
+	}
+	published := false
+	defer func() {
+		if !published {
+			_ = privateBeneathRemove(t.recovery, t.name(pending), t.want)
+		}
+	}()
+	if _, err = temporary.Write(data); err == nil {
+		err = syncFile(temporary)
+	}
+	if closeErr := temporary.Close(); err != nil || closeErr != nil {
+		return errors.New("cannot persist local cell record")
+	}
+	if err := t.bound(); err != nil {
+		return err
+	} else if err := privateBeneathReplace(t.recovery, t.name(path.Dir(name)), path.Base(pending), path.Base(name), t.want); err != nil {
+		return err
+	}
+	published = true
+	if err := t.bound(); err != nil {
+		return err
+	}
+	return privateBeneathDirectory(t.recovery, t.name(path.Dir(name)), t.want, func(fd int, _ privateBeneathID) error { return privateBeneathSync(fd) })
 }
 
 // discard removes this call's directory only while it has no witness, only as

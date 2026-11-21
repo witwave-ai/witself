@@ -139,6 +139,44 @@ func TestCheckpointRetrySteps(t *testing.T) {
 	}
 }
 
+// The production reader (the tree's open: no checkpointTest.open is set) is retried by the same step as the pathname
+// reader the rows above inject: a copy moved aside at its first open attempt and back before the next, its refusal
+// taken as transient, is opened again after the engine's first backoff and inventoried as a fault-free run's (N7 of
+// LC-CKPT-WALK-1C1R).
+func TestCheckpointRetryTreeOpen(t *testing.T) {
+	f, r := checkpointFixture(t, "legacy", false)
+	c, attempts := f.cell, 0
+	r.nextID = func() (string, error) { return heldTarget, nil }
+	clock, inventory := checkpointRetrySetup(c), filepath.Join(c.recoveryDir(), heldTarget, checkpointInventoryName)
+	c.checkpointTest.transient = func(err error) bool { return errors.Is(err, fs.ErrNotExist) }
+	if c.Checkpoint(t.Context(), checkpointOptions(f)) != nil {
+		t.Fatal("the tree open retry row could not create its fault-free checkpoint")
+	}
+	baseline, err := os.ReadFile(inventory)
+	if err != nil || c.DeleteCheckpoint(t.Context(), DeleteCheckpointOptions{CheckpointID: heldTarget}) != nil {
+		t.Fatal("the tree open retry row could not reset its fault-free checkpoint")
+	}
+	copied := filepath.Join(c.recoveryDir(), heldTarget, "pg", "base", "1", "1259")
+	c.checkpointTest.beforeStep = func(step, name string) {
+		if step == "open" && name == copied {
+			if attempts++; attempts == 1 {
+				heldMove(t, copied, copied+".aside")
+			} else if attempts == 2 {
+				heldMove(t, copied+".aside", copied)
+			}
+		}
+	}
+	if c.Checkpoint(t.Context(), checkpointOptions(f)) != nil {
+		t.Fatal("the tree open retry row did not succeed after its retry")
+	}
+	if attempts != 2 || !slices.Equal(clock.waits, []time.Duration{25 * time.Millisecond}) {
+		t.Fatal("the tree open retry row did not open again after the first backoff")
+	}
+	if data, err := os.ReadFile(inventory); err != nil || !bytes.Equal(data, baseline) {
+		t.Fatal("the tree open retry row changed the inventory bytes")
+	}
+}
+
 // T7: both individual phases and their shared budget, including just below it.
 func TestCheckpointRetryCumulative(t *testing.T) {
 	for _, step := range []string{"publish", "open", "shared"} {

@@ -99,13 +99,13 @@ checkpoint.go
 	(*Cell).closeCheckpointLeftover (*Cell).journal
 	(*Cell).copyCheckpoint (*Cell).openCheckpointSource (*os.File).Write privateDir
 	(*Cell).deleteCheckpointLocked (*Cell).holdCheckpoint (*Cell).journal (*Cell).removeCheckpointHeld (*Cell).unsealCheckpointHeld privateDir
-	(*Cell).inventoryCheckpoint openPrivateReader path/filepath.WalkDir writeAtomicBytes
+	(*Cell).inventoryCheckpoint openPrivateReader x2
 	(*Cell).listCheckpoints os.ReadDir
 	(*Cell).openCheckpointEntry openPrivateReader x2
 	(*Cell).planCheckpoint path/filepath.WalkDir
 	(*Cell).refuseBeforeLockNames acquireLock
 	(*Cell).validateRecovery os.ReadDir path/filepath.WalkDir privateDir
-	(*Cell).witnessCheckpoint (*Cell).openCheckpointSource writeAtomic
+	(*Cell).witnessCheckpoint (*Cell).openCheckpointSource
 	checkpointComplete openRegular
 checkpoint_other.go
 	import context os
@@ -120,17 +120,21 @@ checkpoint_root_windows.go
 	import errors io/fs
 	(*Cell).discardOwnCheckpoint (*Cell).holdCheckpoint (*Cell).removeCheckpointHeld (*os.Root).Remove
 checkpoint_tree_other.go
-	import io/fs os
+	import context io/fs os
 checkpoint_tree_unix.go
-	import errors golang.org/x/sys/unix io/fs os path path/filepath
+	import context errors golang.org/x/sys/unix io/fs os path path/filepath
 	(*checkpointTree).hold (*Cell).holdRecovery
+	(*checkpointTree).record (*os.File).Write
 	checkpointTreeRemoveDirectory golang.org/x/sys/unix.Unlinkat
 checkpoint_tree_windows.go
-	import io/fs os path path/filepath
+	import context errors io/fs os path path/filepath
+	(*checkpointTree).check path/filepath.WalkDir
 	(*checkpointTree).createTemp createPrivateTemp
 	(*checkpointTree).discard (*Cell).discardOwnCheckpoint
 	(*checkpointTree).mkdir privateDir
+	(*checkpointTree).open openPrivateReader
 	(*checkpointTree).publish publishPrivateFile
+	(*checkpointTree).record writeAtomicBytes
 	(*checkpointTree).sync syncDirectory
 checkpoint_unix.go
 	import context errors io/fs os path/filepath reflect syscall

@@ -220,21 +220,90 @@ func checkpointTreeBypassRooted(values map[any][]ast.Expr, path ast.Expr, depth 
 var checkpointTreeNilWants = map[string]int{"discard:privateBeneathLstat": 2, "checkpointTreeRemoveDirectory:privateBeneathAt": 1}
 
 // checkpointTreeBinds are the t.bound() calls of checkpoint_tree_unix.go by owner: each operation binds recovery/ first.
-var checkpointTreeBinds = map[string]int{"hold": 1, "lstat": 1, "mkdir": 1, "createTemp": 1, "publish": 1, "sync": 1, "discard": 5}
+var checkpointTreeBinds = map[string]int{"hold": 1, "lstat": 1, "mkdir": 1, "createTemp": 1, "publish": 1, "sync": 1, "discard": 5,
+	"open": 1, "check": 1, "record": 3}
+
+// checkpointTreeOrders are, for open, check and record (LC-CKPT-WALK-1C1), their binds, walk calls, temporary, file sync
+// and lease wait in source order: each bind stands before the walk calls it guards, record's before its no-follow stat,
+// its rename and its directory sync.
+var checkpointTreeOrders = map[string]string{"open": "t.bound waitOutLease privateBeneathLstat privateBeneathOpen", "check": "t.bound privateBeneathList",
+	"record": "t.bound privateBeneathLstat t.createTemp privateBeneathRemove syncFile t.bound privateBeneathReplace t.bound privateBeneathDirectory privateBeneathSync"}
+
+// checkpointTreeWindowsCheck are the Windows twin's check conditions and results by text and count: today's walk of the
+// inventory, an entry not planned or not of its planned kind (a directory, else a regular file) refused (N8 of 1C1R).
+var checkpointTreeWindowsCheck = map[string]int{"if:err != nil": 1, `if:err != nil || relErr != nil || rel == "."`: 1,
+	"if:!known || directory != entry.IsDir() || (!directory && !entry.Type().IsRegular())": 1, "return:0, err": 1,
+	"return:errors.Join(err, relErr)": 1, "return:errCheckpointWitness": 1, "return:nil": 1, "return:seen, err": 1}
+
+// checkpointTreeSyncs reports whether expression is a function literal whose descriptor parameter fd is its first and
+// whose one statement returns privateBeneathSync(fd).
+func checkpointTreeSyncs(expression ast.Expr) bool {
+	body, ok := expression.(*ast.FuncLit)
+	if !ok || len(body.Type.Params.List) == 0 || len(body.Type.Params.List[0].Names) == 0 || body.Type.Params.List[0].Names[0].Name != "fd" || len(body.Body.List) != 1 {
+		return false
+	}
+	result, ok := body.Body.List[0].(*ast.ReturnStmt)
+	return ok && len(result.Results) == 1 && types.ExprString(result.Results[0]) == "privateBeneathSync(fd)"
+}
+
+// checkpointInventoryReader: inventoryCheckpoint reads by pathname (ops.open) only when a test set checkpointTest.open,
+// and through its tree otherwise. opened is defined once, as exactly that condition, and never assigned again; the one
+// if on opened holds the one ops.open in its body and the one tree.open in its else (O10b of 1C1R).
+func checkpointInventoryReader(parsed map[string]*ast.File, failures map[string]bool) {
+	held := false
+	for _, declaration := range checkpointTreeDecls(parsed, "checkpoint.go", failures) {
+		fn, ok := declaration.(*ast.FuncDecl)
+		if !ok || fn.Name.Name != "inventoryCheckpoint" || fn.Body == nil {
+			continue
+		}
+		readers := func(node ast.Node) (pathname, tree int) {
+			for inner := range ast.Preorder(node) {
+				if selector, ok := inner.(*ast.SelectorExpr); ok {
+					pathname, tree = pathname+map[bool]int{true: 1}[types.ExprString(selector) == "ops.open"], tree+map[bool]int{true: 1}[types.ExprString(selector) == "tree.open"]
+				}
+			}
+			return pathname, tree
+		}
+		defined, assigned, branches := 0, 0, 0
+		for node := range ast.Preorder(fn.Body) {
+			if assign, ok := node.(*ast.AssignStmt); ok && slices.ContainsFunc(assign.Lhs, func(target ast.Expr) bool { return types.ExprString(target) == "opened" }) {
+				assigned++
+				if assign.Tok == token.DEFINE && len(assign.Lhs) == 1 && len(assign.Rhs) == 1 && types.ExprString(assign.Rhs[0]) == "c.checkpointTest != nil && c.checkpointTest.open != nil" {
+					defined++
+				}
+			} else if branch, ok := node.(*ast.IfStmt); ok && types.ExprString(branch.Cond) == "opened" && branch.Init == nil {
+				pathname, tree := readers(branch.Body)
+				otherwise, isBlock := branch.Else.(*ast.BlockStmt)
+				if isBlock && pathname == 1 && tree == 0 {
+					if pathname, tree = readers(otherwise); pathname == 0 && tree == 1 {
+						branches++
+					}
+				}
+			}
+		}
+		pathname, tree := readers(fn.Body)
+		held = defined == 1 && assigned == 1 && branches == 1 && pathname == 1 && tree == 1
+	}
+	failures["checkpoint_inventory_reader"] = !held
+}
 
 // checkpointTreeWindowsCalls is every call of checkpoint_tree_windows.go by function and count. The twin keeps today's
 // guarded pathname calls by design, so no source rule can show they never follow a link or leave the volume; this pins
 // which functions it calls and how often, so a new or different call (os.Stat for os.Lstat) fails until the count is
 // changed on purpose, and rule (b) roots each writer's path in a checkpointDir value. Arguments are not pinned.
-var checkpointTreeWindowsCalls = map[string]int{"path.Join": 2, "t.c.checkpointDir": 5, "os.Lstat": 1, "filepath.Join": 6, "filepath.FromSlash": 6, "privateDir": 1,
+var checkpointTreeWindowsCalls = map[string]int{"path.Join": 2, "t.c.checkpointDir": 8, "os.Lstat": 1, "filepath.Join": 8, "filepath.FromSlash": 8, "privateDir": 1,
 	"createPrivateTemp": 1, "filepath.Base": 1, "created.Name": 1, "publishPrivateFile": 1, "syncCheckpointTreeDirectory": 1, "t.name": 1, "syncDirectory": 1,
-	"t.c.discardOwnCheckpoint": 1}
+	"t.c.discardOwnCheckpoint": 1, "openPrivateReader": 1, "filepath.WalkDir": 1, "filepath.Rel": 1, "errors.Join": 1, "filepath.ToSlash": 1, "entry.IsDir": 1,
+	"entry.Type": 1, "entry.Type().IsRegular": 1, "writeAtomicBytes": 1}
 
 // checkpointTreeContract: each walk call of the tree on Linux and macOS passes t.want but checkpointTreeNilWants, and
-// names no walk function with a want as a value; it binds as checkpointTreeBinds; the tree's mkdir hands its parent sync
-// to the seam exactly once; the Windows twin calls exactly checkpointTreeWindowsCalls.
+// names no walk function with a want as a value; it binds as checkpointTreeBinds, open, check and record in the order of
+// checkpointTreeOrders; the tree's mkdir hands its parent sync to the seam exactly once; record syncs its temporary and
+// the directory it reached once each; the Windows twin calls exactly checkpointTreeWindowsCalls and its check decides as
+// checkpointTreeWindowsCheck.
 func checkpointTreeContract(parsed map[string]*ast.File, failures map[string]bool) {
 	wants, nils, calls, binds, parentSyncs := map[string]int{}, map[string]int{}, map[string]int{}, map[string]int{}, 0
+	orders, recordSyncs, windowsCheck := map[string][]string{}, map[string]int{}, map[string]int{}
 	for _, declaration := range checkpointTreeDecls(parsed, "private_beneath_unix.go", failures) {
 		if fn, ok := declaration.(*ast.FuncDecl); ok && fn.Recv == nil {
 			index := 0
@@ -260,11 +329,31 @@ func checkpointTreeContract(parsed map[string]*ast.File, failures map[string]boo
 					_, walks := wants[identifier.Name]
 					failures["checkpoint_tree_want_value:"+owner+":"+identifier.Name] = failures["checkpoint_tree_want_value:"+owner+":"+identifier.Name] || walks
 				}
+				if branch, decides := node.(*ast.IfStmt); decides && name == "checkpoint_tree_windows.go" && owner == "check" {
+					windowsCheck["if:"+types.ExprString(branch.Cond)]++
+				} else if result, returns := node.(*ast.ReturnStmt); returns && name == "checkpoint_tree_windows.go" && owner == "check" {
+					results := []string{}
+					for _, value := range result.Results {
+						results = append(results, types.ExprString(value))
+					}
+					windowsCheck["return:"+strings.Join(results, ", ")]++
+				}
 				if !ok {
 					continue
 				}
 				function := types.ExprString(call.Fun)
 				functions[call.Fun] = true
+				if _, ordered := checkpointTreeOrders[owner]; ordered && name == "checkpoint_tree_unix.go" && (strings.HasPrefix(function, "privateBeneath") ||
+					slices.Contains([]string{"t.bound", "t.createTemp", "syncFile", "waitOutLease"}, function)) {
+					orders[owner] = append(orders[owner], function)
+				}
+				if owner == "record" && name == "checkpoint_tree_unix.go" && function == "syncFile" && len(call.Args) == 1 && types.ExprString(call.Args[0]) == "temporary" {
+					recordSyncs["file"]++
+				} else if owner == "record" && name == "checkpoint_tree_unix.go" && function == "privateBeneathDirectory" && len(call.Args) == 4 &&
+					types.ExprString(call.Args[0]) == "t.recovery" && types.ExprString(call.Args[1]) == "t.name(path.Dir(name))" && types.ExprString(call.Args[2]) == "t.want" &&
+					checkpointTreeSyncs(call.Args[3]) {
+					recordSyncs["directory"]++
+				}
 				if name == "checkpoint_tree_windows.go" {
 					calls[function]++
 				} else if function == "t.bound" {
@@ -295,6 +384,14 @@ func checkpointTreeContract(parsed map[string]*ast.File, failures map[string]boo
 		failures["checkpoint_tree_bind:"+owner] = binds[owner] != checkpointTreeBinds[owner]
 	}
 	failures["checkpoint_tree_parent_sync"] = parentSyncs != 1
+	for owner, order := range checkpointTreeOrders {
+		failures["checkpoint_tree_order:"+owner] = strings.Join(orders[owner], " ") != order
+	}
+	failures["checkpoint_tree_record_sync:file"], failures["checkpoint_tree_record_sync:directory"] = recordSyncs["file"] != 1, recordSyncs["directory"] != 1
+	for _, text := range slices.Concat(slices.Collect(maps.Keys(windowsCheck)), slices.Collect(maps.Keys(checkpointTreeWindowsCheck))) {
+		failures["checkpoint_tree_windows_check:"+text] = windowsCheck[text] != checkpointTreeWindowsCheck[text]
+	}
+	checkpointInventoryReader(parsed, failures)
 }
 
 // checkpointTreeDecls are the declarations of the parsed file name; a missing file is a key.
@@ -352,12 +449,13 @@ var checkpointRootMembers = map[string][]string{"errors": {"Is", "New"}, "fs": {
 	"os": {"Lstat", "OpenRoot", "Root", "SameFile"}, "runtime": {"GOOS"}}
 var checkpointRootFiles = []string{"checkpoint_root.go", "checkpoint_root_windows.go"}
 
-// checkpointTreeBypassed are the pathname creators, publishers, syncs, stats and removers the copy's tree replaces:
-// checkpoint_tree_unix.go names none, and checkpoint.go calls none (privateDir creating) on a path rooted in a
-// checkpointDir value, or joining recovery/ with a name that is not a literal (checkpointTreeBypassRooted), but
-// checkpointTreeBypassKept, by exact count: the allocation refusal before recovery/ is held, and delete's admission. A
-// key is checkpoint_tree_bypass:<file>:<function>.
-var checkpointTreeBypassed = []string{"privateDir", "createPrivateTemp", "publishPrivateFile", "syncDirectory", "os.Lstat", "os.Stat", "os.Mkdir", "os.Rename", "os.Remove"}
+// checkpointTreeBypassed are the pathname creators, publishers, syncs, stats, removers, walks, readers and record
+// writers the checkpoint tree replaces: checkpoint_tree_unix.go names none, and checkpoint.go calls none (privateDir
+// creating) on a path rooted in a checkpointDir value, or joining recovery/ with a name that is not a literal
+// (checkpointTreeBypassRooted), but checkpointTreeBypassKept, by exact count: the allocation refusal before recovery/ is
+// held, and delete's admission. A key is checkpoint_tree_bypass:<file>:<function>.
+var checkpointTreeBypassed = []string{"privateDir", "createPrivateTemp", "publishPrivateFile", "syncDirectory", "os.Lstat", "os.Stat", "os.Mkdir", "os.Rename", "os.Remove",
+	"filepath.WalkDir", "openPrivateReader", "writeAtomic", "writeAtomicBytes"}
 var checkpointTreeBypassKept = map[string]int{"checkpointLocked:os.Lstat": 1, "admitDeleteCheckpoint:os.Lstat": 1}
 var checkpointRootCallees = map[string]string{"c.checkpointStage": "receiver", "c.checkpointTest.beforeStep": "receiver", "c.recoveryDir": "receiver", "c.holdRecovery": "receiver",
 	"c.checkpointDir": "receiver", "c.holdCheckpoint": "receiver", "c.checkpointRootsBound": "receiver", "c.removeCheckpointHeld": "receiver",
@@ -556,6 +654,34 @@ func checkpointNamesRemoval(node ast.Node) (found bool) {
 	return found
 }
 
+// checkpointTreeRecordWrite is the one write rule (h) admits: in checkpoint_tree_unix.go, (*checkpointTree).record's
+// temporary.Write, temporary defined once there as the file t.createTemp made and never assigned again; nil otherwise.
+func checkpointTreeRecordWrite(name string, file *ast.File) (written *ast.SelectorExpr) {
+	for _, declaration := range file.Decls {
+		function, ok := declaration.(*ast.FuncDecl)
+		if name != "checkpoint_tree_unix.go" || !ok || function.Name.Name != "record" || updateReceiverName(function) != "checkpointTree" || function.Body == nil {
+			continue
+		}
+		writes, assigned, made := []*ast.SelectorExpr(nil), 0, (*ast.AssignStmt)(nil)
+		ast.Inspect(function.Body, func(node ast.Node) bool {
+			if selector, ok := node.(*ast.SelectorExpr); ok && types.ExprString(selector) == "temporary.Write" {
+				writes = append(writes, selector)
+			} else if assign, ok := node.(*ast.AssignStmt); ok && slices.ContainsFunc(assign.Lhs, func(target ast.Expr) bool { return types.ExprString(target) == "temporary" }) {
+				assigned, made = assigned+1, assign
+			}
+			return true
+		})
+		if len(writes) != 1 || assigned != 1 || made.Tok != token.DEFINE || len(made.Rhs) != 1 || types.ExprString(made.Lhs[0]) != "temporary" {
+			return nil
+		}
+		identifier, ok := writes[0].X.(*ast.Ident)
+		if call, isCall := made.Rhs[0].(*ast.CallExpr); ok && isCall && types.ExprString(call.Fun) == "t.createTemp" && identifier.Obj != nil && identifier.Obj.Decl == made {
+			written = writes[0]
+		}
+	}
+	return written
+}
+
 // checkpointHeldContract applies the held-root rules (b)-(h) to every
 // checkpoint file but drill_root.go, whose own rules stand.
 func checkpointHeldContract(parsed map[string]*ast.File, failures map[string]bool) {
@@ -588,7 +714,7 @@ func checkpointHeldContract(parsed map[string]*ast.File, failures map[string]boo
 				failures["system_import:"+name+":"+path] = true // (d)
 			}
 		}
-		rootFile, uses := slices.Contains(checkpointRootFiles, name), map[string]int{}
+		rootFile, uses, written := slices.Contains(checkpointRootFiles, name), map[string]int{}, checkpointTreeRecordWrite(name, file)
 		selected, inventoried, opens, reserved := map[*ast.Ident]bool{}, map[ast.Node]bool{}, map[ast.Node]bool{}, map[ast.Node]bool{}
 		ast.Inspect(file, func(node ast.Node) bool {
 			switch node := node.(type) {
@@ -619,7 +745,7 @@ func checkpointHeldContract(parsed map[string]*ast.File, failures map[string]boo
 					failures["checkpoint_root_selector:"+text] = true // (f)
 				}
 				if !rootFile && receiver != "os" && slices.Contains([]string{"Remove", "RemoveAll", "Rename", "Link", "Symlink", "Mkdir", "MkdirAll", "Create",
-					"WriteFile", "Chmod", "Chown", "Lchown", "Chtimes", "Truncate", "Write", "WriteAt", "WriteString"}, node.Sel.Name) && !reserved[node] {
+					"WriteFile", "Chmod", "Chown", "Lchown", "Chtimes", "Truncate", "Write", "WriteAt", "WriteString"}, node.Sel.Name) && !reserved[node] && node != written {
 					failures["checkpoint_mutating_method:"+name+":"+text] = true // (h)
 				}
 			case *ast.Ident:
@@ -634,7 +760,7 @@ func checkpointHeldContract(parsed map[string]*ast.File, failures map[string]boo
 		})
 		for _, identifier := range []string{"recovery", "checkpoint"} {
 			failures["checkpoint_root_uses:"+name+":"+identifier] = !rootFile && uses[identifier] != map[string]int{"checkpoint.go:recovery": 4, "checkpoint.go:checkpoint": 4,
-				"checkpoint_tree_unix.go:recovery": 18}[name+":"+identifier] // (g)
+				"checkpoint_tree_unix.go:recovery": 25}[name+":"+identifier] // (g)
 		}
 	}
 	for _, text := range slices.Concat(slices.Collect(maps.Keys(counted)), slices.Collect(maps.Keys(checkpointRootCalls))) {
@@ -971,7 +1097,7 @@ func checkpointSourceContract(sources map[string]string) []string {
 					case slices.Contains([]string{"Remove", "RemoveAll", "removePrivateFile", "discardOwnCheckpoint", "discard", "deleteCheckpointLocked", "DeleteCheckpoint"}, member):
 						failures["verifier_remove"] = true
 					case slices.Contains([]string{"Write", "WriteAt", "WriteString", "WriteFile", "Create", "CreateTemp", "Mkdir", "MkdirAll", "Rename", "Chmod", "Chown", "Chtimes", "Truncate", "Sync",
-						"writeAtomic", "writeAtomicBytes", "createPrivateTemp", "publishPrivateFile", "publish", "syncDirectory", "syncCheckpointTreeDirectory", "syncFile", "privateDir", "mkdir", "createTemp", "sync", "checkpointTree", "failCheckpoint", "Checkpoint", "copyCheckpoint", "inventoryCheckpoint", "witnessCheckpoint"}, member):
+						"writeAtomic", "writeAtomicBytes", "createPrivateTemp", "publishPrivateFile", "publish", "syncDirectory", "syncCheckpointTreeDirectory", "syncFile", "privateDir", "mkdir", "createTemp", "sync", "record", "checkpointTree", "failCheckpoint", "Checkpoint", "copyCheckpoint", "inventoryCheckpoint", "witnessCheckpoint"}, member):
 						failures["verifier_write"] = true
 					}
 					if member == "openPrivateFile" && !readOnlyOpens[node] {
@@ -1368,11 +1494,11 @@ func TestCheckpointSourceContract(t *testing.T) {
 		{"third_removeall", "checkpoint.go", tail, "func checkpointSweep(c *Cell) error { dir, _ := c.checkpointDir(\"x\"); return os.RemoveAll(dir) }\n\n" + tail, "removeall_count:checkpoint.go"},
 		{"lifecycle_removeall_dropped", "lifecycle.go", "if err := os.RemoveAll(c.path(name)); err != nil {", "if err := removePrivateFile(c.path(name)); err != nil {", "removeall_count:lifecycle.go"},
 		{"publish_into_pgdata", "checkpoint.go", "filepath.Join(dir, filepath.FromSlash(entry.path)), false", "filepath.Join(c.path(\"pg\"), filepath.FromSlash(entry.path)), false", "writer_root:checkpoint.go:ops.publish"},
-		{"escape_by_literal", "checkpoint.go", "writeAtomic(filepath.Join(dir, checkpointWitnessName), witness, nil)", "writeAtomic(filepath.Join(dir, \"..\", \"..\", \"manifest.json\"), witness, nil)", "writer_root:checkpoint.go:writeAtomic"},
+		{"escape_by_literal", "checkpoint.go", tail, "func checkpointProbe(c *Cell, witness checkpointWitness) error { dir, _ := c.checkpointDir(\"\"); return writeAtomic(filepath.Join(dir, \"..\", \"..\", \"manifest.json\"), witness, nil) }\n\n" + tail, "writer_root:checkpoint.go:writeAtomic"},
 		{"temporary_in_run", "checkpoint.go", "tree.createTemp(path.Dir(entry.path))", "tree.createTemp(path.Dir(entry.path)); _, _ = createPrivateTemp(c.path(\"run\"))", "live_path_not_read:checkpoint.go:run"},
 		// The copy reaches every name below recovery/ through its tree (LC-CKPT-WALK-1B).
 		{"copy_pathname_mkdir", "checkpoint.go", "} else if tree.mkdir(entry.path) != nil {", "} else if privateDir(filepath.Join(dir, filepath.FromSlash(entry.path)), true) != nil {", "checkpoint_tree_bypass:checkpoint.go:privateDir"},
-		{"tree_pathname_lstat", "checkpoint_tree_unix.go", "return privateBeneathLstat(t.recovery, t.name(name), t.want)", "return os.Lstat(filepath.Join(t.c.recoveryDir(), filepath.FromSlash(t.name(name))))", "checkpoint_tree_bypass:checkpoint_tree_unix.go:os.Lstat"},
+		{"tree_pathname_lstat", "checkpoint_tree_unix.go", "\n\treturn privateBeneathLstat(t.recovery, t.name(name), t.want)\n", "\n\treturn os.Lstat(filepath.Join(t.c.recoveryDir(), filepath.FromSlash(t.name(name))))\n", "checkpoint_tree_bypass:checkpoint_tree_unix.go:os.Lstat"},
 		{"recovery_joined_sync", "checkpoint.go", tail, "func checkpointProbe(c *Cell, checkpointID string) error { return syncCheckpointTreeDirectory(filepath.Join(c.recoveryDir(), checkpointID), nil) }\n\n" + tail, "writer_root:checkpoint.go:syncCheckpointTreeDirectory"},
 		// LC-CKPT-WALK-1B-F1: the bypass rule's missed spellings (P_C5, B23, P_C18), each walk call's identity (B6, B8) and
 		// no walk function as a value, each operation's bind (B4), the parent sync in the tree's mkdir (B10), the Windows
@@ -1389,6 +1515,26 @@ func TestCheckpointSourceContract(t *testing.T) {
 		{"tree_windows_second_lstat", "checkpoint_tree_windows.go", "func (t *checkpointTree) close() {}", "func (t *checkpointTree) close() { _, _ = os.Lstat(t.id) }", "checkpoint_tree_windows_call:os.Lstat"},
 		{"verifier_tree_discard", "checkpoint_verify.go", verifyTail, "func (c *Cell) checkpointProbe(id string) error { return c.checkpointTree(id).discard() }\n\n" + verifyTail, "verifier_remove"},
 		{"verifier_tree_sync", "checkpoint_verify.go", verifyTail, "func checkpointProbe(t *checkpointTree) error { return t.sync(\".\") }\n\n" + verifyTail, "verifier_write"},
+		// LC-CKPT-WALK-1C1-F1: open, check and record bind by count and in order, record's two syncs, the Windows twin's new
+		// calls and its check's decisions, the production read path (O10, O10b), and the verifier's record.
+		{"tree_open_unbound", "checkpoint_tree_unix.go", "\tif err := t.bound(); err != nil {\n\t\treturn nil, err\n\t}\n\tlabel := filepath.Join(", "\tlabel := filepath.Join(", "checkpoint_tree_bind:open"},
+		{"tree_check_unbound", "checkpoint_tree_unix.go", "\t\tdirectories = directories[1:]\n\t\tif err := t.bound(); err != nil {\n\t\t\treturn 0, err\n\t\t}\n", "\t\tdirectories = directories[1:]\n", "checkpoint_tree_bind:check"},
+		{"tree_record_unbound_after_rename", "checkpoint_tree_unix.go", "\tpublished = true\n\tif err := t.bound(); err != nil {\n\t\treturn err\n\t}\n", "\tpublished = true\n", "checkpoint_tree_bind:record"},
+		{"tree_open_unwaited", "checkpoint_tree_unix.go", "\treturn waitOutLease(ctx, label, func(string) (fs.FileInfo, error) { return privateBeneathLstat(t.recovery, t.name(name), t.want) },\n\t\tfunc() (*os.File, error) { return privateBeneathOpen(t.recovery, t.name(name), t.want, label) })", "\t_ = ctx\n\treturn privateBeneathOpen(t.recovery, t.name(name), t.want, label)", "checkpoint_tree_order:open"},
+		{"tree_check_bound_late", "checkpoint_tree_unix.go", "\t\tif err := t.bound(); err != nil {\n\t\t\treturn 0, err\n\t\t}\n\t\tentries, err := privateBeneathList(t.recovery, t.name(directory), t.want)\n", "\t\tentries, err := privateBeneathList(t.recovery, t.name(directory), t.want)\n\t\tif err := t.bound(); err != nil {\n\t\t\treturn 0, err\n\t\t}\n", "checkpoint_tree_order:check"},
+		{"tree_record_bound_after_rename", "checkpoint_tree_unix.go", "\tif err := t.bound(); err != nil {\n\t\treturn err\n\t} else if err := privateBeneathReplace(t.recovery, t.name(path.Dir(name)), path.Base(pending), path.Base(name), t.want); err != nil {\n\t\treturn err\n\t}\n", "\tif err := privateBeneathReplace(t.recovery, t.name(path.Dir(name)), path.Base(pending), path.Base(name), t.want); err != nil {\n\t\treturn err\n\t} else if err := t.bound(); err != nil {\n\t\treturn err\n\t}\n", "checkpoint_tree_order:record"},
+		{"tree_record_file_unsynced", "checkpoint_tree_unix.go", "\tif _, err = temporary.Write(data); err == nil {\n\t\terr = syncFile(temporary)\n\t}\n", "\t_, err = temporary.Write(data)\n", "checkpoint_tree_record_sync:file"},
+		{"tree_record_sync_elsewhere", "checkpoint_tree_unix.go", "\treturn privateBeneathDirectory(t.recovery, t.name(path.Dir(name)), t.want, func(fd int, _ privateBeneathID) error { return privateBeneathSync(fd) })\n}", "\treturn privateBeneathDirectory(t.recovery, t.name(\"pg\"), t.want, func(fd int, _ privateBeneathID) error { return privateBeneathSync(fd) })\n}", "checkpoint_tree_record_sync:directory"},
+		{"tree_record_sync_noop", "checkpoint_tree_unix.go", "\treturn privateBeneathDirectory(t.recovery, t.name(path.Dir(name)), t.want, func(fd int, _ privateBeneathID) error { return privateBeneathSync(fd) })\n}", "\treturn privateBeneathDirectory(t.recovery, t.name(path.Dir(name)), t.want, func(fd int, _ privateBeneathID) error { return nil })\n}", "checkpoint_tree_record_sync:directory"},
+		{"tree_windows_open_plain", "checkpoint_tree_windows.go", "\treturn openPrivateReader(ctx, filepath.Join(dir, filepath.FromSlash(name)))\n", "\treturn openPlainReader(ctx, filepath.Join(dir, filepath.FromSlash(name)))\n", "checkpoint_tree_windows_call:openPrivateReader"},
+		{"tree_windows_record_once", "checkpoint_tree_windows.go", "\treturn writeAtomicBytes(filepath.Join(dir, filepath.FromSlash(name)), data, nil)\n", "\treturn writeAtomicBytesOnce(filepath.Join(dir, filepath.FromSlash(name)), data, nil)\n", "checkpoint_tree_windows_call:writeAtomicBytes"},
+		{"tree_windows_record_unslashed", "checkpoint_tree_windows.go", "\treturn writeAtomicBytes(filepath.Join(dir, filepath.FromSlash(name)), data, nil)\n", "\treturn writeAtomicBytes(filepath.Join(dir, name), data, nil)\n", "checkpoint_tree_windows_call:filepath.FromSlash"},
+		{"tree_windows_check_kind", "checkpoint_tree_windows.go", "if !known || directory != entry.IsDir() || (!directory && !entry.Type().IsRegular()) {", "if !known || directory != entry.IsDir() {", "checkpoint_tree_windows_check:if:!known || directory != entry.IsDir() || (!directory && !entry.Type().IsRegular())"},
+		{"tree_windows_check_admits", "checkpoint_tree_windows.go", "\t\t\treturn errCheckpointWitness\n", "\t\t\treturn nil\n", "checkpoint_tree_windows_check:return:errCheckpointWitness"},
+		{"inventory_pathname_always", "checkpoint.go", "\topened := c.checkpointTest != nil && c.checkpointTest.open != nil\n", "\topened := true\n", "checkpoint_inventory_reader"},
+		{"inventory_pathname_in_production", "checkpoint.go", "\topened := c.checkpointTest != nil && c.checkpointTest.open != nil\n", "\topened := c.checkpointTest == nil || c.checkpointTest.open != nil\n", "checkpoint_inventory_reader"},
+		{"inventory_arms_swapped", "checkpoint.go", "\t\t\t\tif opened {\n", "\t\t\t\tif !opened {\n", "checkpoint_inventory_reader"},
+		{"verifier_tree_record", "checkpoint_verify.go", verifyTail, "func checkpointProbe(t *checkpointTree) error { return t.record(\"probe\", nil) }\n\n" + verifyTail, "verifier_write"},
 		{"second_journal_create", "checkpoint.go", "\tif err := c.begin(ctx, \"checkpoint\"); err != nil {", "\t_ = privateDir(c.path(\"journal\"), true)\n\tif err := c.begin(ctx, \"checkpoint\"); err != nil {", "writer_root:checkpoint.go:privateDir"},
 		{"manifest_opened_for_write", "checkpoint.go", "openPrivateReader(context.Background(), c.path(\"manifest.json\"))", "openPrivateFile(c.path(\"manifest.json\"), os.O_RDWR, 0)", "live_path_not_read:checkpoint.go:manifest.json"},
 		{"root_open_for_write", "checkpoint_unix.go", "root.OpenFile(name, os.O_RDONLY|syscall.O_NONBLOCK, 0)", "root.OpenFile(name, os.O_RDWR|syscall.O_NONBLOCK, 0)", "root_open_not_read_only:checkpoint_unix.go"},

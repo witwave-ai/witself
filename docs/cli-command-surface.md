@@ -6350,12 +6350,19 @@ directory moved onto a name in the instant the copy makes it is taken for the
 copy's own, so a failed `create` removes it with its content. Below
 `recovery/`, a mount of the same file system is not detected (only a different
 device is), and making one needs privileges the cell's user does not have; a
-mount at `recovery/` itself is not detected, whatever its device. It still
-writes its inventory and witness by pathname: a same-user process renaming
-`recovery/` or the checkpoint directory out of the cell after the copy can make
-the private copy, password files included, end up outside the cell while
-`create` reports success. Such a process can already read those files.
-There, a FIFO or a link put at
+mount at `recovery/` itself is not detected, whatever its device. A same-user
+process renaming `recovery/` after `create` holds it for the copy, or renaming
+the checkpoint directory, before the witness is published fails `create`
+(`local_checkpoint_copy_failed`, or `local_checkpoint_witness_mismatch` at the
+inventory). Renaming a directory the copy made below the checkpoint directory
+fails it too, but only until the inventory has checked the copy and opened
+again every file below that directory: renamed after that, it does not fail
+`create`, and the checkpoint is reported complete. Nothing is written into what
+was moved, though the entry being written at that instant can still land in the
+moved directory. The failed `create` leaves the moved directory where it was
+moved, and reports `cleanup_incomplete: true` when `recovery/` was moved or
+another object now stands at the checkpoint's name. Such a process can already
+read the copied files, password files included. There, a FIFO or a link put at
 `journal/operations.jsonl` after the command's checks is refused at once, with
 nothing written to it. A FIFO
 put at the database directory `pg/`, or at a directory the command syncs after
