@@ -6324,7 +6324,10 @@ A failure to write standard output can leave a truncated receipt line; the
 command then prints only `local_checkpoint_operation_failed` on standard error
 and exits 1. `cleanup_incomplete: true` means a failed `create` could not remove
 its own partial directory (it removes nothing it cannot prove its own): delete
-that entry by its identifier.
+that entry by its identifier. On Linux and macOS the same value is also
+reported when that directory is no longer at its name (see Same-user limits);
+then no entry has that identifier, and the partial copy is wherever it was
+moved.
 
 ### Same-user limits
 
