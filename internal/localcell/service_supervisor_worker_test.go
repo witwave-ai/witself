@@ -41,6 +41,11 @@ func serviceWorkerConfigured(t *testing.T, block string, armed bool, prepare fun
 	if prepare != nil {
 		prepare(cell, d)
 	}
+	return serviceWorkerOnCell(t, cell, block, armed)
+}
+
+func serviceWorkerOnCell(t *testing.T, cell *Cell, block string, armed bool) *serviceWorkerHost {
+	t.Helper()
 	w := &serviceWorkerHost{cell: cell, ticks: make(chan time.Time), commands: make(chan serviceCommand), block: block}
 	if armed {
 		w.arm()
