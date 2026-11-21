@@ -75,7 +75,10 @@ func leaseReleasedDetached(t *testing.T) {
 		lease                   int
 		ceiling, cancel         time.Duration
 	}{
-		{"inspect_owner_lock", ".owner.lock", "localcell: open owner lock: resource temporarily unavailable", "local_checkpoint_operation_failed", unix.F_RDLCK, 500 * time.Millisecond, 100 * time.Millisecond},
+		// Inspect probes through acquireLock directly. The released mutators go through own.
+		{"inspect_lock_probe", ".owner.lock", "localcell: open owner lock: resource temporarily unavailable", "local_checkpoint_operation_failed", unix.F_RDLCK, 500 * time.Millisecond, 100 * time.Millisecond},
+		{"create_owner_lock", ".owner.lock", "localcell: open owner lock: resource temporarily unavailable", "local_checkpoint_operation_failed", unix.F_RDLCK, 500 * time.Millisecond, 0},
+		{"delete_operation_lock", "run/operation.lock", "localcell: open operation lock: resource temporarily unavailable", "local_checkpoint_operation_failed", unix.F_RDLCK, 500 * time.Millisecond, 0},
 		{"create_fence", "journal/maintenance.json", "local_maintenance_fence_active", "local_maintenance_fence_active", unix.F_WRLCK, 2 * time.Second, 200 * time.Millisecond},
 		{"create_pg_version", "pg/PG_VERSION", "local_checkpoint_source_unsupported", "local_checkpoint_source_unsupported", unix.F_WRLCK, 2 * time.Second, 200 * time.Millisecond},
 		{"inspect_witness", "", "cannot read local cell checkpoint witness", "local_checkpoint_operation_failed", unix.F_WRLCK, 2 * time.Second, 200 * time.Millisecond},
@@ -86,10 +89,18 @@ func leaseReleasedDetached(t *testing.T) {
 			f, _ := checkpointFixture(t, "legacy", false)
 			c, saved, leased := f.cell, leaseWait, f.cell.path(filepath.FromSlash(row.file))
 			t.Cleanup(func() { leaseWait = saved })
-			if row.file == "" && (c.Checkpoint(t.Context(), checkpointOptions(f)) != nil || len(checkpointIDs(t, c)) != 1) {
-				t.Fatal("cannot prepare the checkpoint the witness row lists")
-			} else if row.file == "" {
+			if row.file == "" || row.name == "delete_operation_lock" {
+				if c.Checkpoint(t.Context(), checkpointOptions(f)) != nil || len(checkpointIDs(t, c)) != 1 {
+					t.Fatal("cannot prepare the released row's checkpoint")
+				}
+			}
+			if row.file == "" {
 				leased = filepath.Join(c.recoveryDir(), checkpointIDs(t, c)[0], checkpointWitnessName)
+			} else if row.name == "create_owner_lock" {
+				// With both names present the pre-admission probe defers to own.
+				if leaseRecordPlant(t, c, "locks") != nil {
+					t.Fatal("cannot prepare both lock files for checkpoint creation")
+				}
 			} else if row.name == "create_fence" {
 				updateTestFence(t, c)
 			}
@@ -113,6 +124,9 @@ func leaseReleasedDetached(t *testing.T) {
 				if strings.HasPrefix(row.name, "inspect") {
 					inspection, err = c.Inspect(ctx)
 					return err
+				}
+				if row.name == "delete_operation_lock" {
+					return c.DeleteCheckpoint(ctx, DeleteCheckpointOptions{CheckpointID: kept[0]})
 				}
 				return c.Checkpoint(ctx, checkpointOptions(f))
 			}, l.release)
@@ -226,6 +240,9 @@ func TestLeaseWaitFence(t *testing.T) {
 		{"existing_operation", "locks", "run/operation.lock", operationStage + syscall.EWOULDBLOCK.Error(), unix.F_RDLCK, existing},
 		{"existing_fallback", "fallback", "run/operation.lock", operationStage + syscall.EWOULDBLOCK.Error(), unix.F_RDLCK, existing},
 		{"verify_first_read", "record", "pg/postmaster.pid", "cannot read PostgreSQL process record", unix.F_WRLCK, verify},
+		{"cold_first_read", "record", "pg/postmaster.pid", "cannot read PostgreSQL process record", unix.F_WRLCK, func(ctx context.Context, c *Cell) (bool, error) {
+			return true, c.checkpointCold(ctx)
+		}},
 		{"recover_first_read", "record", "pg/postmaster.pid", "cannot read PostgreSQL process record", unix.F_WRLCK, recoverRecord},
 		{"verify_state", "server_record", "run/server.json", "cannot open local cell record", unix.F_WRLCK, verify},
 		{"recover_state", "postgres_record", "run/postgres.json", "cannot open local cell record", unix.F_WRLCK, recoverRecord},

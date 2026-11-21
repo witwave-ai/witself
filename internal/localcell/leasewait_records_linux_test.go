@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/signal"
 	"reflect"
 	"testing"
 	"time"
@@ -176,5 +177,86 @@ func TestLeaseWaitCheckpointColdSecondRead(t *testing.T) {
 	var cut *leaseWaitCut
 	if !errors.As(result, &cut) || errors.Unwrap(cut) != context.Canceled {
 		t.Fatal("the second cold read lost its cancellation cut")
+	}
+}
+
+func TestLeaseWaitRecoverPostgresSecondRead(t *testing.T) {
+	c, _ := unitCell(t)
+	pidfile := c.path("pg", "postmaster.pid")
+	staged := pidfile + ".next"
+	if leaseRecordPlant(t, c, "postgres_record") != nil {
+		t.Fatal("cannot plant stale postgres ownership records")
+	}
+	data, err := os.ReadFile(pidfile)
+	if err != nil || os.WriteFile(staged, data, 0o600) != nil {
+		t.Fatal("cannot stage the replacement pidfile")
+	}
+	recordPath := c.path("run", "postgres.json")
+	before, err := os.Lstat(recordPath)
+	if err != nil {
+		t.Fatal("cannot inspect the original postgres record")
+	}
+	recordBytes := retainedRead(t, c, "run/postgres.json")
+	record := leaseTaken(t, leaseHolder(t, "kept", unix.F_WRLCK), recordPath)
+	replacement := leaseTaken(t, leaseHolder(t, "kept", unix.F_WRLCK), staged)
+	leaseWait.ceiling = 2 * time.Second
+
+	// SIGIO wakes the barrier. F_GETLEASE identifies the inode whose open
+	// caused the break, even if signals coalesce or arrive from another file.
+	breaks := make(chan os.Signal, 1)
+	signal.Notify(breaks, unix.SIGIO)
+	defer signal.Stop(breaks)
+	waitBreak := func(l *writerLease, missing string) {
+		t.Helper()
+		deadline := time.NewTimer(5 * time.Second)
+		defer deadline.Stop()
+		for {
+			var held int
+			var err error
+			if !l.do(func(fd uintptr) { held, err = unix.FcntlInt(fd, unix.F_GETLEASE, 0) }) || err != nil {
+				t.Fatal("cannot inspect the held lease")
+			}
+			if held != unix.F_WRLCK {
+				return
+			}
+			select {
+			case <-breaks:
+			case <-deadline.C:
+				t.Fatal(missing)
+			}
+		}
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	var result error
+	go func() {
+		result = c.recoverPostgresRecord(ctx)
+		close(done)
+	}()
+	defer func() {
+		cancel()
+		record.release()
+		replacement.release()
+		<-done
+	}()
+
+	// The postgres record is opened after the first pidfile read. Keep it
+	// blocked until the replacement is in place, then await the second open.
+	waitBreak(record, "recovery did not reach the postgres record after the first pidfile read")
+	if os.Rename(staged, pidfile) != nil {
+		t.Fatal("cannot replace the pidfile between recovery reads")
+	}
+	record.release()
+	waitBreak(replacement, "recovery did not re-read the replacement pidfile")
+	cancel()
+	<-done
+	var cut *leaseWaitCut
+	if !errors.As(result, &cut) || errors.Unwrap(cut) != context.Canceled {
+		t.Fatal("the recovery pidfile re-read lost its cancellation cut")
+	}
+	after, err := os.Lstat(recordPath)
+	if err != nil || !os.SameFile(before, after) || !bytes.Equal(recordBytes, retainedRead(t, c, "run/postgres.json")) {
+		t.Fatal("the interrupted re-read changed the postgres record")
 	}
 }

@@ -252,6 +252,33 @@ func TestLeaseWaitLayerUnleased(t *testing.T) {
 			}
 		})
 	}
+	t.Run("ownExisting_fallback", func(t *testing.T) {
+		c, _ := unitCell(t)
+		if leaseRecordPlant(t, c, "fallback") != nil {
+			t.Fatal("cannot prepare the unleased ownership fallback")
+		}
+		if lockDirectory(c.cfg.Root) != nil || lockDirectory(c.path("run")) != nil {
+			t.Fatal("the unleased ownership fallback requires real lock directories")
+		}
+		if _, err := os.Lstat(c.path(".owner.lock")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatal("the unleased ownership fallback requires an absent owner lock")
+		}
+		lock, err := c.ownExisting(done)
+		if err != nil {
+			t.Fatal("a done context refused the unleased ownership fallback")
+		}
+		if lock == nil {
+			t.Fatal("the unleased ownership fallback returned no lock")
+		}
+		defer func() {
+			if lock.Close() != nil {
+				t.Error("cannot close the unleased ownership fallback locks")
+			}
+		}()
+		if len(lock.files) != 2 {
+			t.Fatal("the unleased ownership fallback did not hold both locks")
+		}
+	})
 	t.Run("verifyAll", func(t *testing.T) {
 		c, _ := unitCell(t)
 		identity, alive, err := processIdentity(os.Getpid())
