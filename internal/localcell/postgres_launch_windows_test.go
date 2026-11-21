@@ -116,7 +116,7 @@ func cleanupWindowsPostgresRecord(t *testing.T, c *Cell, marker string) {
 	t.Helper()
 	t.Cleanup(func() {
 		var record ProcessRecord
-		if err := readJSON(t.Context(), c.path("tmp", marker), &record); errors.Is(err, os.ErrNotExist) {
+		if err := readJSON(context.Background(), c.path("tmp", marker), &record); errors.Is(err, os.ErrNotExist) {
 			return
 		} else if err != nil {
 			t.Error("cannot read PostgreSQL fixture cleanup identity")

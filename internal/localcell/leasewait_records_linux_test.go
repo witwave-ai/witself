@@ -129,3 +129,52 @@ func TestLeaseWaitRecords(t *testing.T) {
 		})
 	}
 }
+
+func TestLeaseWaitCheckpointColdSecondRead(t *testing.T) {
+	c, _ := unitCell(t)
+	workerPath, serverPath := c.path("run", "worker.json"), c.path("run", "server.json")
+	staged := serverPath + ".next"
+	for _, path := range []string{workerPath, serverPath, staged} {
+		if writeAtomic(path, ProcessRecord{PID: checkpointUnallocatedPID, StartTime: "stale"}, nil) != nil {
+			t.Fatal("cannot plant stale process records for the cold check")
+		}
+	}
+	worker := leaseHolder(t, "kept", unix.F_WRLCK)
+	server := leaseHolder(t, "kept", unix.F_WRLCK)
+	leaseWait.ceiling = 2 * time.Second
+	leaseTaken(t, worker, workerPath)
+	leaseTaken(t, server, staged)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan struct{})
+	var result error
+	go func() {
+		result = c.checkpointCold(ctx)
+		close(done)
+	}()
+	defer func() {
+		worker.release()
+		server.release()
+		<-done
+	}()
+
+	// verifyAll reads server before worker. Keep it at worker until the
+	// replacement is in place, then cancel only at the server re-read.
+	if _, broken := leaseContextBroken(worker); !broken {
+		t.Fatal("the first cold scan did not reach the worker record")
+	}
+	if os.Rename(staged, serverPath) != nil {
+		t.Fatal("cannot replace the server record during the first cold scan")
+	}
+	worker.release()
+	if _, broken := leaseContextBroken(server); !broken {
+		t.Fatal("the cold check did not re-read the replacement server record")
+	}
+	cancel()
+	<-done
+	var cut *leaseWaitCut
+	if !errors.As(result, &cut) || errors.Unwrap(cut) != context.Canceled {
+		t.Fatal("the second cold read lost its cancellation cut")
+	}
+}
