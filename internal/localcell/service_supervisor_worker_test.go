@@ -20,6 +20,7 @@ import (
 type serviceWorkerHost struct {
 	cell                   *Cell
 	ticks                  chan time.Time
+	commands               chan serviceCommand
 	done                   <-chan error
 	cancel                 context.CancelFunc
 	mu                     sync.Mutex
@@ -40,12 +41,13 @@ func serviceWorkerConfigured(t *testing.T, block string, armed bool, prepare fun
 	if prepare != nil {
 		prepare(cell, d)
 	}
-	w := &serviceWorkerHost{cell: cell, ticks: make(chan time.Time), block: block}
+	w := &serviceWorkerHost{cell: cell, ticks: make(chan time.Time), commands: make(chan serviceCommand), block: block}
 	if armed {
 		w.arm()
 	}
 	hooks, _, _, _, _ := supervisorTestHooks()
 	hooks.ticks = w.ticks
+	hooks.commands = w.commands
 	hook := func(name string) func(context.Context) error {
 		return func(ctx context.Context) error {
 			w.mu.Lock()
@@ -281,26 +283,43 @@ func TestServiceWorkerShutdownJoins(t *testing.T) {
 	}
 }
 
-// A command in flight at shutdown still gets its reply, published by the loop
-// after the join; the shutdown's repair waits for the receipt, so closing the
-// endpoint cannot race the response.
+// The handler seam distinguishes an actual reply from its HTTP deadline fallback.
 func TestServiceWorkerCommandReplyOnShutdown(t *testing.T) {
 	w := serviceWorkerStart(t, "health", false)
 	w.ready(t)
-	received := make(chan struct{})
-	w.mu.Lock()
-	w.gated, w.gate = "repair", received
-	w.mu.Unlock()
 	w.arm()
-	replies := make(chan error, 1)
-	go func() { _, err := w.cell.Control(t.Context(), "status"); replies <- err; close(received) }()
-	w.within(t, w.entered, nil, "the armed hook was not reached within the row bound")
+	reply := w.boundaryCommand(t, "status")
+	w.within(t, w.entered, nil, "shutdown command did not reach its hook")
+	parked := w.boundaryCommand(t, "exit-host")
+	// The next receive proves the loop finished admitting the parked exit
+	// before cancellation. A send to the unbuffered queue alone cannot.
+	_ = w.boundaryCommand(t, "observe")
 	w.cancel()
+	// Two consecutive receives prove the first post-cancel request did not
+	// return from Run while the hook was still held.
+	for range 2 {
+		select {
+		case w.commands <- serviceCommand{ctx: t.Context(), action: "observe", reply: make(chan serviceReply, 1)}:
+		case <-w.done:
+			t.Fatal("request after cancellation ended the blocked host")
+		case <-time.After(w.cell.cfg.Timeout):
+			t.Fatal("cancelled host did not receive the join probe")
+		}
+	}
 	w.free()
-	// Freed before or after the host's cancellation reaches the command, it
-	// completes or is deferred; a lost reply is a closed transport instead.
-	if err := <-replies; err != nil && !errors.Is(err, errServiceControlDeferred) {
+	_ = serviceWorkerReceive(t, w, w.done, "released shutdown command did not finish")
+	select {
+	case got := <-reply:
+		if got.err != nil && !errors.Is(got.err, context.Canceled) {
+			t.Fatal("shutdown command returned an unrelated failure")
+		}
+	default:
 		t.Fatal("the command in flight at shutdown lost its reply")
+	}
+	select {
+	case <-parked:
+		t.Fatal("host cancellation promoted a waiting exit")
+	default:
 	}
 }
 
@@ -491,7 +510,7 @@ func TestServiceWorkerPairedExit(t *testing.T) {
 	first := <-acks
 	var refused *serviceControlRefusal
 	if first.session != nil || !errors.As(first.err, &refused) || refused.step != "host_exit:drain" || errors.Is(first.err, context.DeadlineExceeded) {
-		t.Fatal(fail)
+		t.Fatal("live parked exit failed to refuse another exit")
 	}
 	w.free()
 	if err := <-status; err != nil {
@@ -514,5 +533,104 @@ func TestServiceWorkerPairedExit(t *testing.T) {
 	}
 	if err := <-w.done; err != nil {
 		t.Fatal(fail)
+	}
+}
+
+func TestServiceWorkerIdleObservers(t *testing.T) {
+	for stage, count := range map[string]int{"ticks": 8, "health": 4} {
+		t.Run(stage, func(t *testing.T) {
+			w := serviceWorkerStart(t, "", false)
+			w.ready(t)
+			ctx, cancel := context.WithCancel(t.Context())
+			var readers sync.WaitGroup
+			started := make(chan struct{}, count)
+			defer func() { cancel(); readers.Wait() }()
+			for range count {
+				readers.Go(func() {
+					_, err := w.cell.Control(ctx, "observe")
+					started <- struct{}{}
+					for err == nil && ctx.Err() == nil {
+						_, err = w.cell.Control(ctx, "observe")
+					}
+					if err != nil && ctx.Err() == nil {
+						t.Error("concurrent observer lost its control reply")
+					}
+				})
+			}
+			for range count {
+				w.within(t, started, nil, "observer did not complete its first request")
+			}
+			if stage == "health" {
+				completed := 0
+				for range 200 {
+					if _, err := w.cell.Control(t.Context(), "health"); err == nil {
+						completed++
+					}
+				}
+				if completed != 200 {
+					t.Fatal("idle observers prevented a health decision")
+				}
+				return
+			}
+			before := len(w.recorded())
+			const ticks = 12
+			for range ticks {
+				w.within(t, nil, w.ticks, "reader traffic blocked delivery of a tick")
+				w.ready(t) // Later ticks cannot overlap earlier tick work.
+			}
+			if !slices.Equal(w.recorded()[before:], slices.Repeat([]string{"health"}, ticks)) {
+				t.Fatal("idle observers displaced a supervision tick")
+			}
+		})
+	}
+}
+
+func serviceWorkerReceive[T any](t *testing.T, w *serviceWorkerHost, ch <-chan T, text string) (value T) {
+	t.Helper()
+	select {
+	case value = <-ch:
+	case <-time.After(w.cell.cfg.Timeout):
+		t.Fatal(text)
+	}
+	return value
+}
+
+func TestServiceWorkerExitWhileBusy(t *testing.T) {
+	for _, stage := range []string{"abandoned_retry", "abandoned_promotion"} {
+		t.Run(stage, func(t *testing.T) {
+			w := serviceWorkerStart(t, "health", false)
+			w.ready(t)
+			w.blockTick(t)
+			ctx, abandon := context.WithCancel(t.Context())
+			defer abandon()
+			stale := serviceCommand{ctx: ctx, action: "exit-host", reply: make(chan serviceReply, 1)}
+			w.commands <- stale
+			_ = w.boundaryCommand(t, "observe") // The first exit has been parked.
+			abandon()
+			if stage == "abandoned_retry" {
+				envelope, _, err := w.cell.newHostExitEnvelope()
+				if err != nil {
+					t.Fatal("could not prepare the retry envelope")
+				}
+				done := make(chan string, 1)
+				ack := make(chan serviceReply, 1)
+				delivered := make(chan struct{})
+				w.commands <- serviceCommand{ctx: t.Context(), action: "exit-host", exit: &envelope, reply: ack, delivered: delivered, completed: done, finalized: delivered}
+				w.free()
+				if response := serviceWorkerReceive(t, w, ack, "parked retry did not receive a decision"); response.err != nil || response.status.HostExit != "accepted" {
+					t.Fatal("abandoned parked exit denied the retry")
+				}
+				close(delivered)
+				if serviceWorkerReceive(t, w, done, "accepted retry missed its terminal reply") != "drained" {
+					t.Fatal("replacement exit did not complete its drain")
+				}
+			} else {
+				w.free()
+				w.ready(t)
+			}
+			if len(stale.reply) != 0 {
+				t.Fatal("abandoned exit was promoted after its handler returned")
+			}
+		})
 	}
 }

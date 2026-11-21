@@ -1042,7 +1042,10 @@ var maintenanceHostSupervisorPins = map[string]string{
 		return err
 	}
 	defer func() { _ = lease.Close() }()
-	commands := make(chan serviceCommand)
+	commands := s.hooks.commands
+	if commands == nil {
+		commands = make(chan serviceCommand)
+	}
 	closeControl, err := c.serveServiceControl(commands)
 	if err != nil {
 		return serviceFailureFallback(err, "control_transport")
@@ -1140,7 +1143,7 @@ var maintenanceHostSupervisorPins = map[string]string{
 			if ctx.Err() != nil {
 				continue
 			}
-			if inFlight && command.action == "exit-host" && pendingExit == nil {
+			if inFlight && command.action == "exit-host" && (pendingExit == nil || pendingExit.ctx.Err() != nil) {
 				pendingExit = &command
 				continue
 			}
@@ -1153,14 +1156,19 @@ var maintenanceHostSupervisorPins = map[string]string{
 				continue
 			}
 			s.phase = "control"
+			if command.action == "observe" {
+				observed := s.serveCommand(ctx, command)
+				if ctx.Err() == nil {
+					s.phase, s.operation = "idle", "none"
+				}
+				command.reply <- serviceReply{status: observed.status, err: observed.err}
+				continue
+			}
 			launch(func() supervisorWork { return s.serveCommand(ctx, command) })
 		case done := <-work:
 			inFlight = false
 			if done.reply == nil && done.err != nil {
-				if s.shutdownBlocked && !s.shutdownFaultPending && (wasBlocked || refusedWhileLive.Load()) && serviceWorkCanceledOnly(done.err, ctx.Err()) {
-					return nil
-				}
-				return done.err
+				return s.workerExitError(done.err, ctx.Err(), wasBlocked || refusedWhileLive.Load())
 			}
 			if done.exited {
 				return s.exitDrainResult
@@ -1178,6 +1186,9 @@ var maintenanceHostSupervisorPins = map[string]string{
 			if pendingExit != nil && ctx.Err() == nil {
 				command := *pendingExit
 				pendingExit = nil
+				if command.ctx.Err() != nil {
+					continue
+				}
 				s.phase = "control"
 				launch(func() supervisorWork { return s.serveCommand(ctx, command) })
 			}

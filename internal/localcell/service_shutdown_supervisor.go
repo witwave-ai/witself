@@ -23,6 +23,9 @@ func (s *supervisor) latchServiceShutdownRefusal(ctx context.Context, operation 
 }
 
 func (s *supervisor) persistServiceShutdownFault(ctx context.Context) {
+	if s.shutdownFaultPending && s.hooks.beforeFaultWrite != nil {
+		s.hooks.beforeFaultWrite()
+	}
 	if s.shutdownFaultPending && s.cell.setServiceFaulted(ctx, true) == nil {
 		s.shutdownFaultPending = false
 	}

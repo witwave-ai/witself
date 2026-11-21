@@ -68,7 +68,7 @@ func TestSupervisorCommandReplyOrder(t *testing.T) {
 			}
 			return true
 		})
-		if ordered != 2 || !maps.Equal(sends(run.Body), map[string]int{publish: 1, "command.reply <- deferServiceCommand(command.action, snapshot)": 1, "work <- run()": 1}) {
+		if ordered != 2 || !maps.Equal(sends(run.Body), map[string]int{publish: 1, "command.reply <- deferServiceCommand(command.action, snapshot)": 1, "command.reply <- serviceReply{status: observed.status, err: observed.err}": 1, "work <- run()": 1}) {
 			t.Fatal("supervisor reply ordering lost its single command publication boundary")
 		}
 		body := texts(serve.Body.List)

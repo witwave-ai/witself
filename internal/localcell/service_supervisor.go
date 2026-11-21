@@ -54,6 +54,8 @@ type supervisorHooks struct {
 	now                                       func() time.Time
 	shutdownContext                           func(context.Context, time.Duration) (context.Context, context.CancelFunc)
 	ticks                                     <-chan time.Time
+	commands                                  chan serviceCommand
+	beforeFaultWrite                          func()
 	initialBackoff, maxBackoff, failureWindow time.Duration
 	windowsShutdownPolicy                     bool
 }
@@ -132,7 +134,10 @@ func (c *Cell) Run(ctx context.Context, policy SupervisorPolicy) (result error) 
 		return err
 	}
 	defer func() { _ = lease.Close() }()
-	commands := make(chan serviceCommand)
+	commands := s.hooks.commands
+	if commands == nil {
+		commands = make(chan serviceCommand)
+	}
 	closeControl, err := c.serveServiceControl(commands)
 	if err != nil {
 		return serviceFailureFallback(err, "control_transport")
@@ -188,7 +193,7 @@ func (c *Cell) Run(ctx context.Context, policy SupervisorPolicy) (result error) 
 		defer ticker.Stop()
 		ticks = ticker.C
 	}
-	// One worker at a time runs startup, each tick and each command; the loop
+	// One worker runs startup, ticks and commands other than observe. The loop
 	// touches s only while none is in flight and answers requests meanwhile.
 	work := make(chan supervisorWork, 1)
 	held := s.projectedStatus()
@@ -235,7 +240,7 @@ func (c *Cell) Run(ctx context.Context, policy SupervisorPolicy) (result error) 
 				continue
 			}
 			// One exit-host waits for the work, within its handler's admission budget.
-			if inFlight && command.action == "exit-host" && pendingExit == nil {
+			if inFlight && command.action == "exit-host" && (pendingExit == nil || pendingExit.ctx.Err() != nil) {
 				pendingExit = &command
 				continue
 			}
@@ -248,14 +253,19 @@ func (c *Cell) Run(ctx context.Context, policy SupervisorPolicy) (result error) 
 				continue
 			}
 			s.phase = "control"
+			if command.action == "observe" {
+				observed := s.serveCommand(ctx, command)
+				if ctx.Err() == nil {
+					s.phase, s.operation = "idle", "none"
+				}
+				command.reply <- serviceReply{status: observed.status, err: observed.err}
+				continue
+			}
 			launch(func() supervisorWork { return s.serveCommand(ctx, command) })
 		case done := <-work:
 			inFlight = false
 			if done.reply == nil && done.err != nil {
-				if s.shutdownBlocked && !s.shutdownFaultPending && (wasBlocked || refusedWhileLive.Load()) && serviceWorkCanceledOnly(done.err, ctx.Err()) {
-					return nil
-				}
-				return done.err
+				return s.workerExitError(done.err, ctx.Err(), wasBlocked || refusedWhileLive.Load())
 			}
 			if done.exited {
 				return s.exitDrainResult
@@ -275,11 +285,24 @@ func (c *Cell) Run(ctx context.Context, policy SupervisorPolicy) (result error) 
 			if pendingExit != nil && ctx.Err() == nil {
 				command := *pendingExit
 				pendingExit = nil
+				if command.ctx.Err() != nil {
+					continue
+				}
 				s.phase = "control"
 				launch(func() supervisorWork { return s.serveCommand(ctx, command) })
 			}
 		}
 	}
+}
+
+// After a live refusal is durable, cancellation has the same result as it
+// would at idle. Neither harness entry point should report a host failure
+// merely because a tick had not returned when the host was stopped.
+func (s *supervisor) workerExitError(err, hostErr error, published bool) error {
+	if s.shutdownBlocked && !s.shutdownFaultPending && published && serviceWorkCanceledOnly(err, hostErr) {
+		return nil
+	}
+	return err
 }
 
 // Only site labels may wrap a clean cancellation. A joined failure must survive.
@@ -317,7 +340,7 @@ func deferServiceCommand(action string, held ServiceStatus) serviceReply {
 	return serviceReply{status: held, err: errServiceControlDeferred}
 }
 
-// serveCommand runs one command on the worker. The loop publishes its reply,
+// serveCommand executes an admitted command. The loop publishes its reply,
 // except an accepted exit-host's, sent here before the drain as at HEAD.
 func (s *supervisor) serveCommand(ctx context.Context, command serviceCommand) supervisorWork {
 	runDone := ctx.Done()
