@@ -250,9 +250,11 @@ var checkpointTreeReaderPins = map[string]map[string]string{
 	"checkpoint.go:listCheckpoints": {
 		"tree":   `tree := c.checkpointTree("") defer tree.close() names, directories, err := tree.listing()`,
 		"absent": "if errors.Is(err, fs.ErrNotExist) && c.recoveryAbsent() { return nil, 0, nil }",
+		"listed": `if err != nil { return nil, 0, checkpointStateError{reason: "boundary_unreadable"} } c.checkpointStage("listed")`,
 	},
 	"checkpoint.go:validateRecovery": {
 		"absent": "if _, err := os.Lstat(c.recoveryDir()); errors.Is(err, fs.ErrNotExist) && c.recoveryAbsent() { return nil }",
+		"tree":   `tree := c.checkpointTree("") defer tree.close() if tree.hold() != nil`,
 		"hold":   `if tree.hold() != nil { return checkpointStateError{reason: "boundary_unreadable"} } return recoveryTreeFailure(tree.snapshot())`,
 	},
 	"checkpoint_tree_unix.go:close": {"release": "for _, fd := range t.listed { _ = unix.Close(fd) } t.listed = nil"},
@@ -267,7 +269,7 @@ var checkpointTreeReaderPins = map[string]map[string]string{
 		"retain":    "dup, err := unix.FcntlInt(uintptr(fd), unix.F_DUPFD_CLOEXEC, 0) if err == nil { t.listed = append(t.listed, dup) } return err }) if err != nil { return nil, nil, errPrivateLayout }",
 	},
 	"checkpoint_tree_unix.go:witness": {
-		"cut":       "f, err := t.open(ctx, path.Join(id, checkpointWitnessName)) if cut := (*leaseWaitCut)(nil); errors.As(err, &cut) { return checkpointWitness{}, false, cut }",
+		"cut":       "f, err := t.open(ctx, path.Join(id, checkpointWitnessName)) if cut := (*leaseWaitCut)(nil); errors.As(err, &cut) { return checkpointWitness{}, false, cut } if err != nil {",
 		"bound":     "if err != nil { if t.bound() != nil { return checkpointWitness{}, false, errCheckpointWitnessUnread }",
 		"directory": "privateBeneathDirectory(t.recovery, id, t.want, func(fd int, parent privateBeneathID) error",
 		"leaf":      "statErr := unix.Fstatat(fd, checkpointWitnessName, &stat, unix.AT_SYMLINK_NOFOLLOW)",
@@ -1614,6 +1616,9 @@ func TestCheckpointSourceContract(t *testing.T) {
 		{"temporary_in_run", "checkpoint.go", "tree.createTemp(path.Dir(entry.path))", "tree.createTemp(path.Dir(entry.path)); _, _ = createPrivateTemp(c.path(\"run\"))", "live_path_not_read:checkpoint.go:run"},
 		{"listing_path_reader", "checkpoint.go", "tree.witness(context.Background(), name)", "checkpointComplete(context.Background(), filepath.Join(c.recoveryDir(), name), name)", "checkpoint_tree_bypass:checkpoint.go:checkpointComplete"},
 		{"snapshot_path_walker", "checkpoint.go", "recoveryTreeFailure(tree.snapshot())", "recoveryTreeFailure(validatePrivateTreeSnapshot(c.recoveryDir(), filepath.WalkDir, validateRecoveryObject, os.Lstat))", "checkpoint_tree_bypass:checkpoint.go:filepath.WalkDir"},
+		{"snapshot_tree_unclosed", "checkpoint.go", "defer tree.close()\n\tif tree.hold() != nil", "if tree.hold() != nil", "checkpoint_reader:checkpoint.go:validateRecovery:tree"},
+		{"listing_stage_missing", "checkpoint.go", "c.checkpointStage(\"listed\")", "", "checkpoint_reader:checkpoint.go:listCheckpoints:listed"},
+		{"witness_missing_parent", "checkpoint_tree_unix.go", "return checkpointWitness{}, false, cut\n\t}\n\tif err != nil", "return checkpointWitness{}, false, cut\n\t}\n\tif errors.Is(err, fs.ErrNotExist) { return checkpointWitness{}, false, nil }\n\tif err != nil", "checkpoint_reader:checkpoint_tree_unix.go:witness:cut"},
 		// The copy reaches every name below recovery/ through its tree (LC-CKPT-WALK-1B).
 		{"copy_pathname_mkdir", "checkpoint.go", "} else if tree.mkdir(entry.path) != nil {", "} else if privateDir(filepath.Join(dir, filepath.FromSlash(entry.path)), true) != nil {", "checkpoint_tree_bypass:checkpoint.go:privateDir"},
 		{"tree_pathname_lstat", "checkpoint_tree_unix.go", "\n\treturn privateBeneathLstat(t.recovery, t.name(name), t.want)\n", "\n\treturn os.Lstat(filepath.Join(t.c.recoveryDir(), filepath.FromSlash(t.name(name))))\n", "checkpoint_tree_bypass:checkpoint_tree_unix.go:os.Lstat"},

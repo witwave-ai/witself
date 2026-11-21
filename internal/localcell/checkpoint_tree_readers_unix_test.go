@@ -5,8 +5,11 @@ package localcell
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
+
+	"golang.org/x/sys/unix"
 )
 
 // Each replacement happens in the listed stage of a single owned Inspect, with two complete checkpoints.
@@ -181,6 +184,118 @@ func TestCheckpointTreeSnapshotKinds(t *testing.T) {
 				t.Fatal("cannot prepare the refused snapshot entry")
 			}
 			checkpointDiagnosticPublic(t, k, "descendant_refused")
+		})
+	}
+}
+
+// checkpointSizedName constructs an absolute name of exactly size bytes without
+// exceeding the component limit. The target is sufficiently long to add a component.
+func checkpointSizedName(base string, size int) string {
+	for size-len(base) > 250 {
+		base = filepath.Join(base, strings.Repeat("p", 199))
+	}
+	return filepath.Join(base, strings.Repeat("p", size-len(base)-1))
+}
+
+func TestCheckpointTreePathLimit(t *testing.T) {
+	const failed, state, incomplete = "local_checkpoint_operation_failed", "local_checkpoint_state_unsupported", "local_checkpoint_incomplete"
+	const named = len("/recovery/") + len(heldTarget)
+	const witnessed = named + len("/witness.json")
+	const fence = "local_maintenance_fence_active"
+	type answers struct{ before, create, delete, repair, after string }
+	for _, row := range []struct {
+		name, witness string
+		suffix        int // absolute cell root length is PATH_MAX minus suffix
+		want          answers
+		failure       string
+	}{
+		{"deep_file", heldTarget, 0, answers{"complete", "", "", "", "copy"}, "deep private file changed the checkpoint sequence"},
+		{"deep_directory", heldTarget, 0, answers{"complete", "", "", "", "copy"}, "deep private directory changed the checkpoint sequence"},
+		{"witness_absent", "", witnessed, answers{"incomplete", incomplete, "", "", ""}, "absent long witness changed the checkpoint sequence"},
+		{"witness_present", heldTarget, witnessed, answers{"complete", "", "", "", "copy"}, "present long witness changed the checkpoint sequence"},
+		{"checkpoint_absent_witness", "", named, answers{"incomplete", incomplete, state, "", "incomplete"}, "overlong checkpoint name with absent witness changed the sequence"},
+		{"checkpoint_present_witness", heldTarget, named, answers{"complete", failed, state, "", "complete"}, "overlong checkpoint name with present witness changed the sequence"},
+		{"maintenance_name", heldTarget, len("/journal/maintenance.json"), answers{failed, fence, fence, fence, failed}, "an overlong maintenance name changed the pre-admission refusal"},
+		{"operation_lock_name", heldTarget, len("/run/operation.lock"), answers{failed, failed, failed, failed, failed}, "an overlong operation lock changed the pre-admission refusal"},
+		{"empty_boundary_with_dot", "", len("/recovery") + 2, answers{failed, failed, failed, failed, failed}, "overlong directory-only boundary suffix changed the checkpoint sequence"},
+		{"empty_boundary", "", len("/recovery") + 1, answers{failed, failed, failed, failed, failed}, "overlong empty recovery boundary changed the checkpoint sequence"},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			f, _ := checkpointFixture(t, "legacy", false)
+			c := f.cell
+			base, err := filepath.EvalSymlinks(testPrivateRoot(t))
+			size := unix.PathMax - row.suffix
+			if row.suffix == 0 {
+				size = len(base) + 80
+			}
+			long := checkpointSizedName(base, size)
+			if err != nil || os.MkdirAll(filepath.Dir(long), 0o700) != nil {
+				t.Fatal("cannot prepare the long private cell parent")
+			}
+			if strings.HasPrefix(row.name, "empty_boundary") {
+				if os.Mkdir(c.recoveryDir(), 0o700) != nil {
+					t.Fatal("cannot prepare the empty recovery boundary")
+				}
+			} else {
+				dir := checkpointPlant(t, c, heldTarget, row.witness)
+				if row.suffix == 0 {
+					// Lengthen the root only after building the fixture so the leaf is exactly PATH_MAX.
+					parent := checkpointSizedName(dir, unix.PathMax-(len(long)-len(c.cfg.Root))-2)
+					if err := os.MkdirAll(parent, 0o700); err != nil {
+						t.Fatal("cannot prepare deep private directories")
+					}
+					if row.name == "deep_file" {
+						err = os.WriteFile(filepath.Join(parent, "x"), nil, 0o600)
+					} else {
+						err = os.Mkdir(filepath.Join(parent, "x"), 0o700)
+					}
+					if err != nil {
+						t.Fatal("cannot prepare the private leaf at the pathname limit")
+					}
+				}
+			}
+			heldMove(t, c.cfg.Root, long)
+			c.cfg.Root = long
+			if strings.HasPrefix(row.name, "empty_boundary") {
+				checkpointDiagnosticReason(t, c.validateRecovery(), "boundary_unreadable")
+				_, _, err := c.listCheckpoints()
+				checkpointDiagnosticReason(t, err, "boundary_unreadable")
+			}
+			read := func() string {
+				i, err := c.Inspect(t.Context())
+				if err != nil {
+					if ClassifyCheckpointFailure(err) == (CheckpointFailure{Class: failed}) {
+						return failed
+					}
+					return "unexpected inspection failure"
+				}
+				if i.CheckpointListing != "listed" || i.CheckpointUnknown != 0 || len(i.Checkpoints) > 1 {
+					return "unexpected listing"
+				}
+				if len(i.Checkpoints) == 0 {
+					return ""
+				}
+				s := i.Checkpoints[0]
+				switch {
+				case s.ID == heldTarget && s.Complete:
+					return "complete"
+				case s.ID == heldTarget:
+					return "incomplete"
+				case s.Complete:
+					return "copy"
+				}
+				return "unexpected incomplete copy"
+			}
+			before := read()
+			create := c.Checkpoint(t.Context(), checkpointOptions(f))
+			deletion := c.DeleteCheckpoint(t.Context(), DeleteCheckpointOptions{CheckpointID: heldTarget})
+			repair := c.Repair(t.Context())
+			if read() != row.want.after || before != row.want.before ||
+				ClassifyCheckpointFailure(create) != (CheckpointFailure{Class: row.want.create}) ||
+				ClassifyCheckpointFailure(deletion) != (CheckpointFailure{Class: row.want.delete}) ||
+				ClassifyCheckpointFailure(repair) != (CheckpointFailure{Class: row.want.repair}) {
+				t.Fatal(row.failure)
+			}
 		})
 	}
 }
