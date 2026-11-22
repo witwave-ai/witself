@@ -2,6 +2,7 @@ package localcell
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -118,7 +119,7 @@ func TestPrivateTreeWalkAbsenceIsNotDescriptorAbsence(t *testing.T) {
 	}
 	// The service preparation's descriptor read is its fourth crossing, after the three of own(false).
 	crossings, from = 0, 1<<20
-	lock, err := c.own(false)
+	lock, err := c.own(context.Background(), false)
 	if err == nil {
 		err = lock.Close()
 	}

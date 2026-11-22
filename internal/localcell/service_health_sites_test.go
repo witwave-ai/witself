@@ -18,7 +18,7 @@ func TestServiceHealthFailureSubstep(t *testing.T) {
 	for _, site := range []string{"health_lock", "health_tree"} {
 		t.Run(site, func(t *testing.T) {
 			if site == "health_lock" {
-				lock, err := c.own(false)
+				lock, err := c.own(context.Background(), false)
 				if err != nil {
 					t.Fatal("cannot hold the fixture operation lock")
 				}

@@ -31,7 +31,7 @@ func serviceMaintenanceCell(t *testing.T, prepared bool) (*Cell, ServiceDescript
 	d := ServiceDescriptor{Adapter: "foreground", Payload: ServicePayload{Host: host, Args: []string{"run", "--root", c.cfg.Root}}}
 	// Lock artifacts are permitted before admission. Seed them before snapshots
 	// so later comparisons cover every filesystem object without exclusions.
-	lock, err := c.own(false)
+	lock, err := c.own(context.Background(), false)
 	if err != nil {
 		t.Fatal("maintenance fixture lock unavailable")
 	}
@@ -236,7 +236,7 @@ func serviceMaintenanceReleased(t *testing.T, c *Cell) {
 	if err != nil {
 		t.Fatal("cannot construct post-return lock contender")
 	}
-	lock, err := other.own(false)
+	lock, err := other.own(context.Background(), false)
 	if err != nil {
 		t.Fatal("service owner retained operation lock after return")
 	}
@@ -414,7 +414,7 @@ func TestServiceMaintenanceLegacyOrdering(t *testing.T) {
 					if err != nil {
 						t.Fatal("cannot construct independent lock owner")
 					}
-					lock, err := other.own(false)
+					lock, err := other.own(context.Background(), false)
 					if err != nil {
 						t.Fatal("cannot hold independent operation lock")
 					}
@@ -515,7 +515,7 @@ func TestServiceMaintenanceLegacyOrdering(t *testing.T) {
 					if err != nil {
 						t.Fatal("cannot construct independent lock owner")
 					}
-					lock, err := other.own(false)
+					lock, err := other.own(context.Background(), false)
 					if err != nil {
 						t.Fatal("cannot hold independent operation lock")
 					}
@@ -625,7 +625,7 @@ func TestServiceMaintenanceLockLifetime(t *testing.T) {
 				if err != nil {
 					t.Fatal("cannot construct independent contender")
 				}
-				lock, err := other.own(false)
+				lock, err := other.own(context.Background(), false)
 				if err != nil {
 					t.Fatal("independent contender cannot hold operation lock")
 				}
@@ -645,7 +645,7 @@ func TestServiceMaintenanceLockLifetime(t *testing.T) {
 				} else if err != nil {
 					t.Fatal("service owner did not proceed after contender released")
 				}
-				after, err := other.own(false)
+				after, err := other.own(context.Background(), false)
 				if err != nil {
 					t.Fatal("service owner retained operation lock after return")
 				}
@@ -1000,7 +1000,7 @@ func serviceMaintenancePublishedHost(t *testing.T, c *Cell, d ServiceDescriptor)
 		}
 		t.Fatal("Run did not retain independent host lease")
 	}
-	lock, err := c.own(false)
+	lock, err := c.own(context.Background(), false)
 	if err != nil {
 		t.Fatal("host lease unexpectedly owns operation lock")
 	}

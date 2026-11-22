@@ -23,7 +23,7 @@ var maintenanceHostAdmissionBoundaries = map[string]string{
 defer cancel()
 site := serviceHealthStep(ctx, "health_lock")
 defer func() { result = serviceFailureAt(result, site) }()
-lock, err := c.own(false)
+lock, err := c.own(context.Background(), false)
 if errors.Is(err, ErrLocked) { return err }
 if err != nil { return errServiceHealth }
 defer func() { _ = lock.Close() }()
@@ -37,7 +37,7 @@ if err != nil || m.AccountID == "" { return errServiceHealth }
 ` + maintenanceAdmissionStatement + `
 role, password, err := c.healthPrincipal(m)`,
 	"serviceMaintenanceObservation": `if err := ctx.Err(); err != nil { return err }
-lock, err := c.own(false)
+lock, err := c.own(context.Background(), false)
 if err != nil { return err }
 defer func() { _ = lock.Close() }()
 d, err := c.readServiceDescriptor()
@@ -526,7 +526,7 @@ func maintenanceHostMutations(owner string) []admissionSourceMutation {
 		{"VariableGeneration", "position", replaceGate(strings.ReplaceAll(maintenanceAdmissionStatement, ", 0)", ", generation)"))},
 		{"WrappedReturn", "position", replaceGate(strings.ReplaceAll(maintenanceAdmissionStatement, "return err", "return fmt.Errorf(\"extra %w\", err)"))},
 		{"IgnoreError", "position", replaceGate("_ = c.maintenanceFenceAllows(0)")},
-		{"EarlyUnlockReacquire", "position", insert(gateIndex, "_ = lock.Close(); lock, err = c.own(false); if err != nil { return err }")},
+		{"EarlyUnlockReacquire", "position", insert(gateIndex, "_ = lock.Close(); lock, err = c.own(context.Background(), false); if err != nil { return err }")},
 		{"LateDuplicate", "reference_count", insert(len(boundary)-1, maintenanceAdmissionStatement)},
 		{"MoveAfterFirstEffect", "position", func(source string) string {
 			return admissionEditStatements(source, func(statements []ast.Stmt) []ast.Stmt {
@@ -546,7 +546,7 @@ func maintenanceHostMutations(owner string) []admissionSourceMutation {
 			admissionSourceMutation{"LateReceiverRebinding", "continuous_hold_result", insert(len(boundary), "c = other")},
 			admissionSourceMutation{"LateLockAlias", "continuous_hold_result", insert(len(boundary), "otherLock := lock; _ = otherLock")},
 			admissionSourceMutation{"LateResultAlias", "continuous_hold_result", insert(len(boundary), "otherResult := &result; _ = otherResult")},
-			admissionSourceMutation{"LateUnlockReacquire", "continuous_hold_result", insert(len(boundary), "_ = lock.Close(); lock, err = c.own(false); if err != nil { return err }")},
+			admissionSourceMutation{"LateUnlockReacquire", "continuous_hold_result", insert(len(boundary), "_ = lock.Close(); lock, err = c.own(context.Background(), false); if err != nil { return err }")},
 		)
 	}
 	for index := 0; index < gateIndex; index++ {
@@ -827,7 +827,7 @@ func maintenanceHostMutateDecision(t *testing.T, original, condition string, occ
 		target.Body.List = target.Body.List[1:]
 		wrap([]ast.Stmt{first}, nil)
 	case "EarlyUnlockReacquire":
-		wrap(statements("_ = lock.Close(); lock, err = c.own(false)"), nil)
+		wrap(statements("_ = lock.Close(); lock, err = c.own(context.Background(), false)"), nil)
 	case "LateDuplicate":
 		wrap(nil, []ast.Stmt{target})
 	default:
@@ -1656,7 +1656,7 @@ func TestServiceMaintenanceDescriptorReaderInventory(t *testing.T) {
 	}
 	fn := serviceAdmissionFunction(t, "service_maintenance.go", strings.ReplaceAll(sources["service_maintenance.go"], "\r\n", "\n"), "serviceMaintenanceObservation")
 	want := admissionStatements(`if err := ctx.Err(); err != nil { return err }
-lock, err := c.own(false)
+lock, err := c.own(context.Background(), false)
 if err != nil { return err }
 defer func() { _ = lock.Close() }()
 d, err := c.readServiceDescriptor()`)

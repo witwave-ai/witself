@@ -127,7 +127,7 @@ func maintenanceAdapterAdmissionOwner(filename string, fn *ast.FuncDecl) string 
 const maintenanceAdapterLockBody = `if a.lock != nil { return a.lock(d) }
 cell, err := New(Config{Root: d.Root, Timeout: 60 * time.Second})
 if err != nil { return nil, nil, windowsTaskError(ErrServiceOwnershipConflict, "inspect:host_owner", 0, "unavailable") }
-lock, err := cell.own(false)
+lock, err := cell.own(context.Background(), false)
 if err != nil { return nil, nil, windowsTaskError(ErrServiceOwnershipConflict, "inspect:host_owner", 0, "unavailable") }
 return cell, func() { _ = lock.Close() }, nil`
 
@@ -251,7 +251,7 @@ func (a *windowsLogonTaskAdapter) mutationLock(d ServiceDescriptor) (*Cell, func
  if a.lock != nil { return a.lock(d) }
  cell, err := New(Config{Root: d.Root, Timeout: 60 * time.Second})
  if err != nil { return nil, nil, windowsTaskError(ErrServiceOwnershipConflict, "inspect:host_owner", 0, "unavailable") }
- lock, err := cell.own(false)
+ lock, err := cell.own(context.Background(), false)
  if err != nil { return nil, nil, windowsTaskError(ErrServiceOwnershipConflict, "inspect:host_owner", 0, "unavailable") }
  return cell, func() { _ = lock.Close() }, nil
 }

@@ -118,7 +118,7 @@ func (a *windowsLogonTaskAdapter) mutationLock(d ServiceDescriptor) (*Cell, func
 	if err != nil {
 		return nil, nil, windowsTaskError(ErrServiceOwnershipConflict, "inspect:host_owner", 0, "unavailable")
 	}
-	lock, err := cell.own(false)
+	lock, err := cell.own(context.Background(), false)
 	if err != nil {
 		return nil, nil, windowsTaskError(ErrServiceOwnershipConflict, "inspect:host_owner", 0, "unavailable")
 	}

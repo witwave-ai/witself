@@ -16,7 +16,7 @@ import (
 var maintenanceServiceAdmissionBoundaries = map[string]string{
 	"PrepareService": `if os.Getenv("WITSELF_RUNTIME") != "local" { return errors.New("service_local_runtime_required") }
 if err := ctx.Err(); err != nil { return err }
-lock, err := c.own(false)
+lock, err := c.own(context.Background(), false)
 if err != nil { return err }
 defer func() { _ = lock.Close() }()
 m, err := readManifest(context.Background(), c.cfg.Root)
@@ -43,14 +43,14 @@ if err := privateDir(c.path("service"), true); err != nil { return err }`,
 	"RepairService": `if err := c.SetServiceDesiredState(ctx, "stopped"); err != nil { return err }
 if err := c.Repair(ctx); err != nil { return err }
 if err := c.stopServiceChildren(ctx); err != nil { return err }
-lock, err := c.own(false)
+lock, err := c.own(context.Background(), false)
 if err != nil { return err }
 defer func() { _ = lock.Close() }()
 d, err := c.ServiceDescriptor()
 if err != nil { return err }
 ` + maintenanceAdmissionStatement + `
 d.Faulted, d.Revision, d.RepairRevision = false, d.Revision+1, d.RepairRevision+1`,
-	"reconcileServiceBoot": `lock, err := c.own(false)
+	"reconcileServiceBoot": `lock, err := c.own(context.Background(), false)
 if err != nil { return err }
 defer func() { _ = lock.Close() }()
 boot, err := serviceBootID()
@@ -65,21 +65,21 @@ if err == nil && (previous.InstallationID != d.InstallationID || previous.BootID
 if previous.BootID != "" && previous.BootID != boot {
  if err := c.reconcileOldBoot(previous.BootID, boot); err != nil { return err }
 }`,
-	"Reinstall": `lock, err := c.own(false)
+	"Reinstall": `lock, err := c.own(context.Background(), false)
 if err != nil { return err }
 defer func() { _ = lock.Close() }()
 ` + maintenanceAdmissionStatement + `
 return c.reinstallLocked(ctx, options)`,
 	"Checkpoint": `ctx = leaseWaitDetached(ctx)
 if err := c.refuseBeforeLockNames(ctx, func() error { return c.admitCheckpointDry(ctx, options) }); err != nil { return err }
-lock, err := c.own(false)
+lock, err := c.own(ctx, false)
 if err != nil { return err }
 defer func() { _ = lock.Close() }()
 ` + maintenanceReleasedAdmissionStatement + `
 return c.checkpointLocked(ctx, options)`,
 	"DeleteCheckpoint": `ctx = leaseWaitDetached(ctx)
 if err := c.refuseBeforeLockNames(ctx, func() error { return c.admitDeleteCheckpoint(ctx, options) }); err != nil { return err }
-lock, err := c.own(false)
+lock, err := c.own(ctx, false)
 if err != nil { return err }
 defer func() { _ = lock.Close() }()
 ` + maintenanceReleasedAdmissionStatement + `
@@ -498,7 +498,7 @@ func serviceAdmissionMutations(owner string) []admissionSourceMutation {
 			return strings.Replace(source, admissionIndent(admissionStatements(`defer func() { _ = lock.Close() }()`)[0]), "", 1)
 		}},
 		{"EarlyCloseThenReacquire", "continuous_hold", func(source string) string {
-			return serviceAdmissionInsert(source, gateIndex+2, "_ = lock.Close(); lock, err = c.own(false); if err != nil { return err }")
+			return serviceAdmissionInsert(source, gateIndex+2, "_ = lock.Close(); lock, err = c.own(context.Background(), false); if err != nil { return err }")
 		}},
 		{"AliasLock", "continuous_hold", func(source string) string {
 			return serviceAdmissionInsert(source, gateIndex+2, "otherLock := lock; _ = otherLock")

@@ -235,7 +235,7 @@ func TestServiceMaintenanceTransitionLegacyOrdering(t *testing.T) {
 						if err != nil {
 							t.Fatal("cannot construct legacy contender")
 						}
-						held, err = other.own(false)
+						held, err = other.own(context.Background(), false)
 						if err != nil {
 							t.Fatal("cannot acquire legacy contender")
 						}
@@ -385,7 +385,7 @@ func TestServiceMaintenanceTransitionLockLifetime(t *testing.T) {
 				if err != nil {
 					t.Fatal("cannot construct transition contender")
 				}
-				lock, err := other.own(false)
+				lock, err := other.own(context.Background(), false)
 				if err != nil {
 					t.Fatal("cannot acquire transition contender")
 				}

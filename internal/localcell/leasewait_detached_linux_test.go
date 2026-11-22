@@ -75,7 +75,10 @@ func leaseReleasedDetached(t *testing.T) {
 		lease                   int
 		ceiling, cancel         time.Duration
 	}{
-		{"inspect_owner_lock", ".owner.lock", "localcell: open owner lock: resource temporarily unavailable", "local_checkpoint_operation_failed", unix.F_RDLCK, 500 * time.Millisecond, 100 * time.Millisecond},
+		// Inspect probes through acquireLock directly. The released mutators go through own.
+		{"inspect_lock_probe", ".owner.lock", "localcell: open owner lock: resource temporarily unavailable", "local_checkpoint_operation_failed", unix.F_RDLCK, 500 * time.Millisecond, 100 * time.Millisecond},
+		{"create_owner_lock", ".owner.lock", "localcell: open owner lock: resource temporarily unavailable", "local_checkpoint_operation_failed", unix.F_RDLCK, 500 * time.Millisecond, 0},
+		{"delete_operation_lock", "run/operation.lock", "localcell: open operation lock: resource temporarily unavailable", "local_checkpoint_operation_failed", unix.F_RDLCK, 500 * time.Millisecond, 0},
 		{"create_fence", "journal/maintenance.json", "local_maintenance_fence_active", "local_maintenance_fence_active", unix.F_WRLCK, 2 * time.Second, 200 * time.Millisecond},
 		{"create_pg_version", "pg/PG_VERSION", "local_checkpoint_source_unsupported", "local_checkpoint_source_unsupported", unix.F_WRLCK, 2 * time.Second, 200 * time.Millisecond},
 		{"inspect_witness", "", "cannot read local cell checkpoint witness", "local_checkpoint_operation_failed", unix.F_WRLCK, 2 * time.Second, 200 * time.Millisecond},
@@ -86,10 +89,18 @@ func leaseReleasedDetached(t *testing.T) {
 			f, _ := checkpointFixture(t, "legacy", false)
 			c, saved, leased := f.cell, leaseWait, f.cell.path(filepath.FromSlash(row.file))
 			t.Cleanup(func() { leaseWait = saved })
-			if row.file == "" && (c.Checkpoint(t.Context(), checkpointOptions(f)) != nil || len(checkpointIDs(t, c)) != 1) {
-				t.Fatal("cannot prepare the checkpoint the witness row lists")
-			} else if row.file == "" {
+			if row.file == "" || row.name == "delete_operation_lock" {
+				if c.Checkpoint(t.Context(), checkpointOptions(f)) != nil || len(checkpointIDs(t, c)) != 1 {
+					t.Fatal("cannot prepare the released row's checkpoint")
+				}
+			}
+			if row.file == "" {
 				leased = filepath.Join(c.recoveryDir(), checkpointIDs(t, c)[0], checkpointWitnessName)
+			} else if row.name == "create_owner_lock" {
+				// With both names present the pre-admission probe defers to own.
+				if leaseRecordPlant(t, c, "locks") != nil {
+					t.Fatal("cannot prepare both lock files for checkpoint creation")
+				}
 			} else if row.name == "create_fence" {
 				updateTestFence(t, c)
 			}
@@ -113,6 +124,9 @@ func leaseReleasedDetached(t *testing.T) {
 				if strings.HasPrefix(row.name, "inspect") {
 					inspection, err = c.Inspect(ctx)
 					return err
+				}
+				if row.name == "delete_operation_lock" {
+					return c.DeleteCheckpoint(ctx, DeleteCheckpointOptions{CheckpointID: kept[0]})
 				}
 				return c.Checkpoint(ctx, checkpointOptions(f))
 			}, l.release)
@@ -204,11 +218,34 @@ func TestLeaseWaitDetachedControl(t *testing.T) {
 // pid alone; nothing written, admit never called.
 // background (ceiling 300 ms): HEAD's refusal; the lockless probe defers (nil).
 func TestLeaseWaitFence(t *testing.T) {
+	const ownerStage, operationStage = "localcell: open owner lock: ", "localcell: open operation lock: "
+	noLock := func(lock *operationLock, err error) (bool, error) {
+		if lock != nil {
+			_ = lock.Close()
+		}
+		return lock == nil, err
+	}
+	own := func(ctx context.Context, c *Cell) (bool, error) { return noLock(c.own(ctx, false)) }
+	existing := func(ctx context.Context, c *Cell) (bool, error) { return noLock(c.ownExisting(ctx)) }
+	verify := func(ctx context.Context, c *Cell) (bool, error) { return true, c.verifyAll(ctx) }
+	recoverRecord := func(ctx context.Context, c *Cell) (bool, error) { return true, c.recoverPostgresRecord(ctx) }
 	for _, row := range []struct {
 		name, prepare, leased, refusal string
 		lease                          int
 		call                           func(ctx context.Context, c *Cell) (bool, error)
 	}{
+		{"own_owner", "locks", ".owner.lock", ownerStage + syscall.EWOULDBLOCK.Error(), unix.F_RDLCK, own},
+		{"own_operation", "locks", "run/operation.lock", operationStage + syscall.EWOULDBLOCK.Error(), unix.F_RDLCK, own},
+		{"existing_owner", "locks", ".owner.lock", ownerStage + syscall.EWOULDBLOCK.Error(), unix.F_RDLCK, existing},
+		{"existing_operation", "locks", "run/operation.lock", operationStage + syscall.EWOULDBLOCK.Error(), unix.F_RDLCK, existing},
+		{"existing_fallback", "fallback", "run/operation.lock", operationStage + syscall.EWOULDBLOCK.Error(), unix.F_RDLCK, existing},
+		{"verify_first_read", "record", "pg/postmaster.pid", "cannot read PostgreSQL process record", unix.F_WRLCK, verify},
+		{"cold_first_read", "record", "pg/postmaster.pid", "cannot read PostgreSQL process record", unix.F_WRLCK, func(ctx context.Context, c *Cell) (bool, error) {
+			return true, c.checkpointCold(ctx)
+		}},
+		{"recover_first_read", "record", "pg/postmaster.pid", "cannot read PostgreSQL process record", unix.F_WRLCK, recoverRecord},
+		{"verify_state", "server_record", "run/server.json", "cannot open local cell record", unix.F_WRLCK, verify},
+		{"recover_state", "postgres_record", "run/postgres.json", "cannot open local cell record", unix.F_WRLCK, recoverRecord},
 		{"allows", "fence", "journal/maintenance.json", errMaintenanceFenceActive.Error(), unix.F_WRLCK, func(ctx context.Context, c *Cell) (bool, error) {
 			return true, c.maintenanceFenceAllows(ctx, 0)
 		}},
@@ -220,7 +257,7 @@ func TestLeaseWaitFence(t *testing.T) {
 			calls := 0
 			err := c.refuseBeforeLockNames(ctx, func() error { calls++; return nil })
 			_, run := os.Lstat(c.path("run", "operation.lock"))
-			return calls == 0 && errors.Is(run, os.ErrNotExist), err
+			return calls == 0 && lockDirectory(c.path("run")) == nil && errors.Is(run, os.ErrNotExist), err
 		}},
 	} {
 		for _, background := range []bool{true, false} {
@@ -230,6 +267,27 @@ func TestLeaseWaitFence(t *testing.T) {
 				if leaseRecordPlant(t, c, row.prepare) != nil {
 					t.Fatal("cannot prepare the fence row cell")
 				}
+				if lockDirectory(c.cfg.Root) != nil {
+					t.Fatal("the fence row root is not a real directory")
+				}
+				if lockDirectory(c.path("run")) != nil {
+					t.Fatal("the fence row process record parent is not a real directory")
+				}
+				postgresRecord := c.path("run", "postgres.json")
+				original, statErr := os.Lstat(postgresRecord)
+				if row.prepare == "postgres_record" {
+					if statErr != nil {
+						t.Fatal("the recovery row requires its planted process record")
+					}
+				} else if !errors.Is(statErr, os.ErrNotExist) {
+					t.Fatal("the fence row requires an absent PostgreSQL process record")
+				}
+				if row.prepare == "fallback" {
+					if _, err := os.Lstat(c.path(".owner.lock")); !errors.Is(err, os.ErrNotExist) {
+						t.Fatal("the fallback row requires an absent stable lock")
+					}
+				}
+				tree := checkpointTreeState(t, c)
 				before, readErr := os.ReadFile(leased)
 				l := leaseHolder(t, "kept", row.lease)
 				if !background {
@@ -242,7 +300,7 @@ func TestLeaseWaitFence(t *testing.T) {
 				if background {
 					ctx = context.Background()
 				} else {
-					time.AfterFunc(200*time.Millisecond, func() { point <- time.Now(); cancel() })
+					time.AfterFunc(leaseWait.ceiling/10, func() { point <- time.Now(); cancel() })
 				}
 				empty, started := false, time.Now()
 				err := readerWatchdog(t, func() (err error) { empty, err = row.call(ctx, c); return err }, l.release)
@@ -255,8 +313,37 @@ func TestLeaseWaitFence(t *testing.T) {
 				if readErr != nil || afterErr != nil || !bytes.Equal(before, after) {
 					t.Fatal("the fence row changed its leased file")
 				}
-				if _, record := os.Lstat(c.path("run", "postgres.json")); !errors.Is(record, os.ErrNotExist) {
-					t.Fatal("the fence row wrote a process record")
+				if original != nil {
+					current, err := os.Lstat(postgresRecord)
+					if err != nil {
+						t.Fatal("the recovery row lost its planted process record")
+					}
+					if !os.SameFile(original, current) {
+						t.Fatal("the recovery row replaced its planted process record")
+					}
+				}
+				afterTree := checkpointTreeState(t, c)
+				if row.prepare == "fallback" {
+					delete(afterTree, ".owner.lock") // the next read-only acquisition must reuse this new leaf
+				}
+				if !reflect.DeepEqual(tree, afterTree) {
+					t.Fatal("the fence row changed the cell tree")
+				}
+				lockRow := row.prepare == "locks" || row.prepare == "fallback"
+				if lockRow {
+					held, err := acquireLock(t.Context(), c.cfg.Root, false)
+					if err != nil {
+						t.Fatal("ownership reacquisition failed after the holder closed")
+					}
+					if held == nil {
+						t.Fatal("ownership reacquisition found no stable lock")
+					}
+					if len(held.files) != 2 {
+						t.Fatal("ownership reacquisition did not hold both retained locks")
+					}
+					if held.Close() != nil {
+						t.Fatal("cannot release reacquired ownership")
+					}
 				}
 				if !empty {
 					t.Fatal("the fence row gave a result beside its error")
@@ -268,7 +355,7 @@ func TestLeaseWaitFence(t *testing.T) {
 					if (row.refusal == "") != (err == nil) || err != nil && err.Error() != row.refusal {
 						t.Fatal("the placeholder context did not keep the fence row refusal")
 					}
-					if returned.Sub(started) < leaseKeptAfter {
+					if returned.Sub(started) < leaseWait.ceiling-leaseWait.longest {
 						t.Fatal("the placeholder context did not keep the fence row wait to the ceiling")
 					}
 					return
@@ -284,6 +371,12 @@ func TestLeaseWaitFence(t *testing.T) {
 				}
 				if errors.Is(err, os.ErrNotExist) {
 					t.Fatal("the fence row cut reads as an absent file")
+				}
+				if errors.Is(err, ErrLocked) {
+					t.Fatal("the fence row cut reads as ownership contention")
+				}
+				if lockRow && !strings.HasPrefix(err.Error(), strings.TrimSuffix(row.refusal, syscall.EWOULDBLOCK.Error())) {
+					t.Fatal("the ownership cut lost its lock stage")
 				}
 				if errors.Is(err, errMaintenanceFenceActive) {
 					t.Fatal("the fence row cut reads as an active fence")

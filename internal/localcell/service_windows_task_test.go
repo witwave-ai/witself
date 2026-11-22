@@ -151,7 +151,7 @@ func newWindowsTaskFake(t *testing.T) *windowsTaskFake {
 		t.Fatal("private task fixture failed")
 	}
 	cell, _ := unitCell(t)
-	lock, err := cell.own(false)
+	lock, err := cell.own(context.Background(), false)
 	if err != nil {
 		t.Fatal("task fixture lock unavailable")
 	}
@@ -170,7 +170,7 @@ func newWindowsTaskFake(t *testing.T) *windowsTaskFake {
 		return nil
 	}}
 	f.a.lock = func(ServiceDescriptor) (*Cell, func(), error) {
-		lock, err := cell.own(false)
+		lock, err := cell.own(context.Background(), false)
 		if err != nil {
 			return nil, nil, windowsTaskError(ErrServiceOwnershipConflict, "inspect:host_owner", 0, "unavailable")
 		}

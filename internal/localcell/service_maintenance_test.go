@@ -385,7 +385,7 @@ func TestServiceMaintenanceHostHealthAdmission(t *testing.T) {
 			c, d := serviceMaintenanceHostHealthCell(t)
 			switch earlier {
 			case "lock":
-				lock, err := c.own(false)
+				lock, err := c.own(context.Background(), false)
 				if err != nil {
 					t.Fatal("Health precedence could not acquire contender")
 				}
@@ -724,7 +724,7 @@ func TestServiceMaintenanceHostClassificationContention(t *testing.T) {
 		if f.s.step(t.Context()) != nil {
 			t.Fatal("Contention fixture could not enter initial hold")
 		}
-		lock, err := f.cell.own(false)
+		lock, err := f.cell.own(context.Background(), false)
 		if err != nil {
 			t.Fatal("Contention fixture could not acquire operation lock")
 		}
@@ -1336,7 +1336,7 @@ func TestServiceMaintenanceDescriptorContention(t *testing.T) {
 			t.Fatal("Contended descriptor could not seed current process")
 		}
 		f.s.status.Processes = []ServiceProcessIdentity{{Component: "worker", PID: 24, StartTime: "stale_process"}}
-		lock, err := f.cell.own(false)
+		lock, err := f.cell.own(context.Background(), false)
 		if err != nil {
 			t.Fatal("Contended descriptor could not acquire operation lock")
 		}
@@ -1357,7 +1357,7 @@ func TestServiceMaintenanceDescriptorContention(t *testing.T) {
 		if os.Remove(f.cell.path("service", "descriptor.json")) != nil {
 			t.Fatal("Contended missing descriptor could not remove record")
 		}
-		lock, err := f.cell.own(false)
+		lock, err := f.cell.own(context.Background(), false)
 		if err != nil {
 			t.Fatal("Contended missing descriptor could not acquire operation lock")
 		}
@@ -1452,7 +1452,7 @@ func TestServiceMaintenanceDescriptorCompletingStop(t *testing.T) {
 		t.Fatal("Completing stop could not seed current process")
 	}
 	f.s.running, f.s.completingStop = true, true
-	lock, err := f.cell.own(false)
+	lock, err := f.cell.own(context.Background(), false)
 	if err != nil {
 		t.Fatal("Completing stop could not acquire operation lock")
 	}

@@ -261,7 +261,7 @@ func (c *Cell) Checkpoint(ctx context.Context, options CheckpointOptions) error 
 	if err := c.refuseBeforeLockNames(ctx, func() error { return c.admitCheckpointDry(ctx, options) }); err != nil {
 		return err
 	}
-	lock, err := c.own(false)
+	lock, err := c.own(ctx, false)
 	if err != nil {
 		return err
 	}
@@ -279,7 +279,7 @@ func (c *Cell) DeleteCheckpoint(ctx context.Context, options DeleteCheckpointOpt
 	if err := c.refuseBeforeLockNames(ctx, func() error { return c.admitDeleteCheckpoint(ctx, options) }); err != nil {
 		return err
 	}
-	lock, err := c.own(false)
+	lock, err := c.own(ctx, false)
 	if err != nil {
 		return err
 	}
@@ -519,7 +519,7 @@ func (c *Cell) admitCheckpoint(ctx context.Context, options CheckpointOptions, o
 
 // checkpointCold proves no recorded postgres, server or worker is alive.
 func (c *Cell) checkpointCold(ctx context.Context) error {
-	if err := c.verifyAll(); err != nil {
+	if err := c.verifyAll(ctx); err != nil {
 		return err
 	}
 	for _, component := range []string{"postgres", "server", "worker"} {

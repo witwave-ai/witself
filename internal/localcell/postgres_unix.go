@@ -10,7 +10,7 @@ import (
 )
 
 func (c *Cell) startPostgres(ctx context.Context, _ *Manifest) error {
-	if err := c.verifyAll(); err != nil {
+	if err := c.verifyAll(context.Background()); err != nil {
 		return err
 	}
 	state, err := c.processState(context.Background(), "postgres")

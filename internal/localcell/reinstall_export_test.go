@@ -13,7 +13,7 @@ func ReinstallQueryForTest(c *Cell, query func(context.Context, *Manifest, strin
 // SeedVerifiedSchemaForTest publishes a verified schema while holding the
 // operation lock. The synthetic lifecycle peer reports schema 1 to Start.
 func SeedVerifiedSchemaForTest(c *Cell, schema int) error {
-	lock, err := c.own(false)
+	lock, err := c.own(context.Background(), false)
 	if err != nil {
 		return err
 	}

@@ -3,6 +3,7 @@
 package localcell
 
 import (
+	"context"
 	"errors"
 	"os"
 	"reflect"
@@ -39,7 +40,7 @@ func TestWindowsCheckpointInspectRecoveryAlias(t *testing.T) {
 		t.Fatal("cannot restore the exact recovery spelling")
 	}
 	// Restore the removed lock so Inspect can acquire ownership for listing.
-	lock, err := c.own(false)
+	lock, err := c.own(context.Background(), false)
 	if err != nil || lock.Close() != nil {
 		t.Fatal("cannot restore the checkpoint fixture owner lock")
 	}

@@ -118,7 +118,7 @@ var packageReferencesRows = []struct {
 	{"receiver_spelling", [][4]string{{"", "guard", "", "(os.Root).Open"}}, []string{"unknown:(os.Root).Open"}},
 	{"darwin_only_count", [][4]string{{"service_launchd_darwin.go", "before", "func NewServiceAdapter() ServiceAdapter {", "var zzPlatformReadDir = os.ReadDir\n\n"},
 		{"zz_platform.go", "+", "", "//go:build !darwin\n\npackage localcell\n\nfunc zzPlatformReadDir(string) (any, error) { return nil, nil }\n"},
-		{"lifecycle.go", "before", "\tlock, err := c.own(true)\n", "\t_, _ = zzPlatformReadDir(\".\")\n"}}, []string{"file:zz_platform.go", "ref:lifecycle.go:(*Cell).Install:os.ReadDir", "ref:service_launchd_darwin.go:zzPlatformReadDir:os.ReadDir"}},
+		{"lifecycle.go", "before", "\tlock, err := c.own(context.Background(), true)\n", "\t_, _ = zzPlatformReadDir(\".\")\n"}}, []string{"file:zz_platform.go", "ref:lifecycle.go:(*Cell).Install:os.ReadDir", "ref:service_launchd_darwin.go:zzPlatformReadDir:os.ReadDir"}},
 	{"alias_chain", [][4]string{{"lifecycle.go", "before", referencesAtRecover, "type zzCopy struct{ open func(string) (*os.File, error) }\n\nvar zzChained = zzCopy{}.open\n\nfunc zzChainUse() { _, _ = zzChained(\".\") }\n\n"}},
 		[]string{"ref:lifecycle.go:zzChainUse:openPrivateReader", "ref:lifecycle.go:zzChained:openPrivateReader"}},
 	{"generic_interface", [][4]string{{"lifecycle.go", "before", referencesAtRecover, "type zzGenOpener[T any] interface{ Open(T) (*os.File, error) }\n\nfunc zzGenIface(root *os.Root) {\n\tvar r zzGenOpener[string] = root\n\t_, _ = r.Open(\".\")\n}\n\n"}},

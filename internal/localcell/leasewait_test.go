@@ -146,7 +146,7 @@ func leaseWaitOwnContext(function *ast.FuncDecl, argument ast.Expr) bool {
 }
 
 // leaseWaitOpeners are the declarations that take the operation's context first
-// (LC-LEASE-2A, 2B, 2C1, 2C2, 2D R5 and 2D2; 2D's seam), in the package reference contract's notation.
+// (LC-LEASE-2A, 2B, 2C1, 2C2, 2D R5, 2D2 and 2D3; 2D's seam), in the package reference contract's notation.
 var leaseWaitOpeners = []string{"waitOutLease", "openPrivateReader", "openPrivateWriter", "openPostgresReader", "openPlainReader", "openLockFile",
 	"(*Cell).openCheckpointSource", "openRegularBy", "readRegular", "openRegular", "openRegularWriter", "openServiceRecord", "checkpointComplete",
 	"readMaintenanceFenceJSON", "(*Cell).readMaintenanceFence", "acquireLock", "(*Cell).readJournal", "(*Cell).journal", "(*Cell).journalCause",
@@ -156,7 +156,8 @@ var leaseWaitOpeners = []string{"waitOutLease", "openPrivateReader", "openPrivat
 	"(*Cell).principalDSN", "(*Cell).maintenanceDSN", "(*Cell).lastValueFreeDiagnostic", "(*Cell).admitReinstall", "(*Cell).reinstallAvailable", "(*Cell).finishReinstall",
 	"(*Cell).checkpointOps", "(*Cell).checkpointSummaries", "(*Cell).closeCheckpointFailure", "(*Cell).closeCheckpointLeftover", "(*Cell).listCheckpoints",
 	"(*Cell).openCheckpointEntry", "(*Cell).admitDeleteCheckpoint", "openPrincipalCredentialFile", "(*checkpointTree).open", "(*checkpointTree).witness",
-	"readJSON", "readManifest", "(*Cell).cleanupInterruption", "(*Cell).processState", "(*Cell).processStateWithRecord", "serviceAdapterRemovalHostLock", "(*Cell).checkpointCold"}
+	"readJSON", "readManifest", "(*Cell).cleanupInterruption", "(*Cell).processState", "(*Cell).processStateWithRecord", "serviceAdapterRemovalHostLock", "(*Cell).checkpointCold",
+	"(*Cell).own", "(*Cell).ownExisting", "(*Cell).verifyAll", "(*Cell).recoverPostgresRecord"}
 
 // leaseWaitPlaceholders are the non-test calls into leaseWaitOpeners that pass
 // context.Background() instead of their declaration's own context, by file and
@@ -170,33 +171,32 @@ var leaseWaitPlaceholders = map[string]int{"checkpoint_verify.go:(*Cell).verifyC
 	"installer_principals.go:(*Cell).principalOperations": 1, "installer_principals.go:(*Cell).provisionInstallerPrincipals": 2,
 	"installer_principals.go:(*Cell).runPrincipalMigration": 1, "installer_principals.go:(*Cell).verifyCredentialPurposes": 1,
 	"installer_principals.go:(*Cell).verifyInstallerStartupCatalog": 1, "installer_principals.go:(*Cell).verifyRuntimePrincipalStart": 1,
-	"launch_unix.go:(*Cell).launchChild": 1, "lifecycle.go:(*Cell).Install": 5, "lifecycle.go:(*Cell).Remove": 9, "lifecycle.go:(*Cell).Repair": 8,
-	"lifecycle.go:(*Cell).Start": 12, "lifecycle.go:(*Cell).Status": 1, "lifecycle.go:(*Cell).own": 1, "lifecycle.go:(*Cell).ownExisting": 1,
-	"lifecycle.go:(*Cell).recoverPostgresRecord": 3,
-	"lifecycle.go:(*Cell).stopSelected":          2, "lifecycle.go:(*Cell).stopSelectedLegacy": 3, "lifecycle.go:(*Cell).stopWithServiceFence": 4, "lifecycle.go:(*Cell).verifyAll": 2,
+	"launch_unix.go:(*Cell).launchChild": 1, "lifecycle.go:(*Cell).Install": 6, "lifecycle.go:(*Cell).Remove": 11, "lifecycle.go:(*Cell).Repair": 11,
+	"lifecycle.go:(*Cell).Start": 15, "lifecycle.go:(*Cell).Status": 1,
+	"lifecycle.go:(*Cell).stopSelected": 4, "lifecycle.go:(*Cell).stopSelectedLegacy": 5, "lifecycle.go:(*Cell).stopWithServiceFence": 6,
 	"lock_contention.go:classifyOwnershipFailure":        1,
-	"port_recovery.go:(*Cell).waitReadyWithPortRecovery": 2, "postgres_unix.go:(*Cell).startPostgres": 2, "postgres_windows.go:(*Cell).pendingPostgresWithoutPID": 1,
-	"postgres_windows.go:(*Cell).pendingPostmasterPID": 1, "postgres_windows.go:(*Cell).startPostgres": 2,
-	"readiness.go:(*Cell).childReadinessExit": 1, "reinstall.go:(*Cell).Reinstall": 1, "reinstall.go:(*Cell).reinstallLocked": 6,
-	"service_boot.go:(*Cell).bindServiceProcessBootWithReader": 1, "service_boot.go:(*Cell).reconcileOldBoot": 2, "service_boot.go:(*Cell).reconcileServiceBoot": 2,
+	"port_recovery.go:(*Cell).waitReadyWithPortRecovery": 2, "postgres_unix.go:(*Cell).startPostgres": 3, "postgres_windows.go:(*Cell).pendingPostgresWithoutPID": 1,
+	"postgres_windows.go:(*Cell).pendingPostmasterPID": 1, "postgres_windows.go:(*Cell).startPostgres": 3,
+	"readiness.go:(*Cell).childReadinessExit": 1, "reinstall.go:(*Cell).Reinstall": 2, "reinstall.go:(*Cell).reinstallLocked": 6,
+	"service_adapter_admission.go:serviceAdapterAdmissionForStep": 1, "service_boot.go:(*Cell).bindServiceProcessBootWithReader": 1, "service_boot.go:(*Cell).reconcileOldBoot": 2, "service_boot.go:(*Cell).reconcileServiceBoot": 3,
 	"service_control_endpoint.go:(*Cell).publishServiceControlEndpointWithBoot": 1, "service_control_endpoint.go:(*Cell).readServiceControlEndpointRecord": 1,
-	"service_control_endpoint.go:(*Cell).readServiceControlEndpointWithBoot": 1, "service_control_exit.go:(*Cell).exitServiceHostForRemoval": 2,
+	"service_control_endpoint.go:(*Cell).readServiceControlEndpointWithBoot": 1, "service_control_exit.go:(*Cell).exitServiceHostForRemoval": 3,
 	"service_control_exit.go:(*Cell).serviceHostExitIdentity": 1, "service_control_exit.go:(*Cell).serviceHostLeaseHeld": 1,
 	"service_control_exit.go:(*Cell).waitServiceHostExit": 2, "service_control_exit.go:(*supervisor).finishHostExit": 1,
-	"service_descriptor.go:(*Cell).PrepareService": 2, "service_descriptor.go:(*Cell).RepairService": 1, "service_descriptor.go:(*Cell).readServiceDescriptorForOwner": 2,
-	"service_descriptor.go:(*Cell).serviceControlSecret":         1,
-	"service_descriptor.go:(*Cell).setServiceDesiredStateLocked": 1, "service_foreground.go:(*Cell).acquireServiceLeaseWithBoot": 1,
-	"service_health.go:(*Cell).ServiceHealth": 2, "service_health.go:(*Cell).healthPrincipal": 1,
-	"service_health.go:(*Cell).serviceAPICredential": 1, "service_health.go:(*Cell).serviceLiveTree": 1, "service_launchd.go:(*launchdAgentAdapter).Apply": 1,
+	"service_descriptor.go:(*Cell).PrepareService": 3, "service_descriptor.go:(*Cell).RepairService": 2, "service_descriptor.go:(*Cell).readServiceDescriptorForOwner": 2,
+	"service_descriptor.go:(*Cell).SetServiceDesiredState": 1, "service_descriptor.go:(*Cell).serviceControlSecret": 1,
+	"service_descriptor.go:(*Cell).setServiceFaulted": 1, "service_descriptor.go:(*Cell).setServiceDesiredStateLocked": 1, "service_foreground.go:(*Cell).acquireServiceLeaseWithBoot": 1,
+	"service_health.go:(*Cell).ServiceHealth": 3, "service_health.go:(*Cell).healthPrincipal": 1,
+	"service_health.go:(*Cell).serviceAPICredential": 1, "service_health.go:(*Cell).serviceLiveTree": 2, "service_launchd.go:(*launchdAgentAdapter).Apply": 1,
 	"service_launchd.go:(*launchdAgentAdapter).Remove":     2,
-	"service_launchd.go:(*launchdAgentAdapter).ownedPlist": 1, "service_maintenance.go:(*Cell).serviceMaintenanceObservation": 1,
+	"service_launchd.go:(*launchdAgentAdapter).ownedPlist": 1, "service_maintenance.go:(*Cell).serviceMaintenanceObservation": 2,
 	"service_shutdown_other.go:(*Cell).stopChildOutcome": 1, "service_shutdown_windows.go:(*Cell).stopChildOutcomeWithBudget": 1,
 	"service_shutdown_windows.go:waitShutdownReady": 1, "service_supervisor.go:(*Cell).Run": 1, "service_supervisor.go:(*supervisor).load": 1,
 	"service_supervisor.go:(*supervisor).rememberProcesses": 2, "service_systemd_adapter.go:(*systemdUserAdapter).Apply": 1,
 	"service_systemd_adapter.go:(*systemdUserAdapter).Remove":    2,
 	"service_systemd_adapter.go:(*systemdUserAdapter).ownedUnit": 1, "service_windows_task.go:(*windowsLogonTaskAdapter).Apply": 1,
 	"service_windows_task.go:(*windowsLogonTaskAdapter).Remove": 2, "service_windows_task.go:(*windowsLogonTaskAdapter).Start": 1,
-	"stop_windows.go:(*Cell).stopPostgres": 1, "stop_windows.go:(*Cell).windowsStopRecord": 1, "update_record.go:(*Cell).authenticateUpdateInstallation": 1,
+	"service_windows_task.go:(*windowsLogonTaskAdapter).mutationLock": 1, "stop_windows.go:(*Cell).stopPostgres": 1, "stop_windows.go:(*Cell).windowsStopRecord": 1, "update_record.go:(*Cell).authenticateUpdateInstallation": 1,
 	"update_record.go:(*Cell).readDerivedUpdateRecord": 1, "update_record.go:(*Cell).readUpdateIntent": 1}
 
 // leaseWaitCutText: per file, each text exactly once. files.go's cut, then
@@ -217,6 +217,8 @@ var leaseWaitCutText = map[string][]string{"files.go": {"type leaseWaitCut struc
 	"installer_principal_credentials.go": {"\tf, err := openPrincipalCredentialFile(ctx, path, os.O_RDONLY, 0)\n\tif cut := (*leaseWaitCut)(nil); errors.As(err, &cut) {\n\t\treturn \"\", cut\n" +
 		"\t} else if err != nil {\n\t\treturn \"\", ErrLocalPrincipalCredentialsRefused\n\t}\n", "\t\tvalue, err := c.credentialPassword(ctx, m, purpose)\n" +
 		"\t\tif cut := (*leaseWaitCut)(nil); errors.As(err, &cut) {\n\t\t\treturn cut\n\t\t} else if err != nil || seen[value] {\n\t\t\treturn ErrLocalPrincipalCredentialsRefused\n\t\t}\n"},
+	"lifecycle.go": {"data, err := readRegular(ctx, openPostgresReader, postmasterBounded, c.path(\"pg\", \"postmaster.pid\"), unreadable, unreadable, unreadable)\n" +
+		"\tif cut := (*leaseWaitCut)(nil); errors.As(err, &cut) {\n\t\treturn cut\n\t}\n\tif err != nil {\n\t\treturn unreadable\n\t}\n"},
 	"reinstall.go": {"c.path(\"pg\", \"PG_VERSION\"),\n\t\terrReinstallState, errReinstallState, errReinstallState)\n\tif cut := (*leaseWaitCut)(nil); errors.As(err, &cut) {\n" +
 		"\t\treturn cut\n\t} else if err != nil {\n\t\treturn errReinstallState\n\t}\n"}}
 

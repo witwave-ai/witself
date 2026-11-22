@@ -59,7 +59,7 @@ func (c *Cell) ServiceHealth(ctx context.Context) (result error) {
 	defer cancel()
 	site := serviceHealthStep(ctx, "health_lock")
 	defer func() { result = serviceFailureAt(result, site) }()
-	lock, err := c.own(false)
+	lock, err := c.own(context.Background(), false)
 	if errors.Is(err, ErrLocked) {
 		return err
 	}
@@ -160,7 +160,7 @@ func (c *Cell) healthStore(ctx context.Context, m *Manifest) (*store.Store, erro
 }
 
 func (c *Cell) serviceLiveTree() error {
-	if err := c.verifyAll(); err != nil {
+	if err := c.verifyAll(context.Background()); err != nil {
 		return errServiceHealth
 	}
 	for _, component := range []string{"postgres", "server", "worker"} {

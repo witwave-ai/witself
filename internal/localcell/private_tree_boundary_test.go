@@ -1,6 +1,7 @@
 package localcell
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -262,7 +263,7 @@ func TestValidateRootRecoveryBoundary(t *testing.T) {
 			path := c.path("recovery")
 			test.build(t, path)
 			err := c.validateRoot(false)
-			lock, ownErr := c.own(false)
+			lock, ownErr := c.own(context.Background(), false)
 			if lock != nil {
 				if closeErr := lock.Close(); closeErr != nil {
 					t.Fatal(closeErr)

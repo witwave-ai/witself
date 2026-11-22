@@ -136,7 +136,7 @@ const maintenanceUnixAdapterHelperBody = `if owner == "" { return nil, ServiceDe
 if err := serviceAdapterConfinementForStep(d.Root, artifactDir, step); err != nil { return nil, ServiceDescriptor{}, nil, err }
 cell, err := New(Config{Root: d.Root, Timeout: 60 * time.Second})
 if err != nil { return nil, ServiceDescriptor{}, nil, serviceSystemdError(ErrServiceOwnershipConflict, step+":root", "unavailable") }
-lock, err := cell.own(false)
+lock, err := cell.own(context.Background(), false)
 if err != nil {
  if errors.Is(err, ErrLocked) { return nil, ServiceDescriptor{}, nil, err }
  return nil, ServiceDescriptor{}, nil, serviceSystemdError(ErrServiceOwnershipConflict, step+":root", "unavailable")
@@ -458,7 +458,7 @@ func TestUnixServiceMaintenanceAdmissionSourceContract(t *testing.T) {
 			{"cell_reassigned", "cell = other"},
 			{"fresh_captured", "_ = func() { _ = fresh }"},
 			{"second_helper", "_, _, _, _ = serviceAdapterAdmission(a.uid, d, outside)"},
-			{"second_lock", "_, _ = other.own(false)"},
+			{"second_lock", "_, _ = other.own(context.Background(), false)"},
 			{"second_cell", "_, _ = New(Config{})"},
 			{"late_fence", "_ = cell.maintenanceFenceAllows(0)"},
 		} {
@@ -494,8 +494,8 @@ func TestUnixServiceMaintenanceAdmissionSourceContract(t *testing.T) {
 		{"helper_owner_missing", statement(`if owner == "" { return nil, ServiceDescriptor{}, nil, serviceSystemdError(ErrServiceOwnershipConflict, step+":descriptor", "owner") }`), ""},
 		{"helper_confinement_missing", statement(`if err := serviceAdapterConfinementForStep(d.Root, artifactDir, step); err != nil { return nil, ServiceDescriptor{}, nil, err }`), ""},
 		{"helper_double_new", "cell, err := New", "_, _ = New(Config{})\ncell, err := New"},
-		{"helper_no_lock", "lock, err := cell.own(false)", "lock, err := fakeLock, fakeError"},
-		{"helper_positive_own", "cell.own(false)", "cell.own(true)"},
+		{"helper_no_lock", "lock, err := cell.own(context.Background(), false)", "lock, err := fakeLock, fakeError"},
+		{"helper_positive_own", "cell.own(context.Background(), false)", "cell.own(context.Background(), true)"},
 		{"helper_wrapped_contention", "if errors.Is(err, ErrLocked) {\n\t\t\treturn nil, ServiceDescriptor{}, nil, err", "if errors.Is(err, ErrLocked) {\n\t\t\treturn nil, ServiceDescriptor{}, nil, ErrServiceOwnershipConflict"},
 		{"helper_public_reader", "cell.serviceDescriptorForOwner(owner)", "cell.ServiceDescriptor()"},
 		{"helper_no_immutable", statement(`if !reflect.DeepEqual(windowsTaskImmutable(fresh), windowsTaskImmutable(d)) { _ = lock.Close(); return nil, ServiceDescriptor{}, nil, serviceSystemdError(ErrServiceOwnershipConflict, step+":descriptor", "stale_identity") }`), ""},

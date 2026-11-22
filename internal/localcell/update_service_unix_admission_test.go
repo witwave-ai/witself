@@ -37,7 +37,7 @@ func unixServiceFixtureCell(t *testing.T, rootName string, d ServiceDescriptor) 
 		t.Fatal("Unix fixture manifest persistence failed")
 	}
 	unixServicePersistDescriptor(t, c, d)
-	lock, err := c.own(false)
+	lock, err := c.own(context.Background(), false)
 	if err != nil {
 		t.Fatal("Unix fixture lock creation failed")
 	}
@@ -181,7 +181,7 @@ func TestUnixServiceMaintenanceApplyPrecedenceLaunchd(t *testing.T) {
 				step, detail = "apply:confinement", "overlap"
 			case "contender":
 				var err error
-				held, err = unixServiceContender(t, m.cell).own(false)
+				held, err = unixServiceContender(t, m.cell).own(context.Background(), false)
 				if err != nil {
 					t.Fatal("Launchd precedence contender failed")
 				}
@@ -262,7 +262,7 @@ func TestUnixServiceMaintenanceApplyContentionLaunchd(t *testing.T) {
 	t.Run("contender", func(t *testing.T) {
 		a, d, m := launchdFixture(t)
 		defer serviceMaintenanceReleased(t, m.cell)
-		held, err := unixServiceContender(t, m.cell).own(false)
+		held, err := unixServiceContender(t, m.cell).own(context.Background(), false)
 		if err != nil {
 			t.Fatal("Launchd contention fixture failed")
 		}
@@ -286,7 +286,7 @@ func TestUnixServiceMaintenanceApplyContentionLaunchd(t *testing.T) {
 		seen := map[string]bool{}
 		a.command = func(ctx context.Context, binary string, args ...string) ([]byte, error) {
 			if args[0] == "enable" || args[0] == "bootstrap" || (args[0] == "print" && m.loaded) {
-				held, err := other.own(false)
+				held, err := other.own(context.Background(), false)
 				if held != nil {
 					_ = held.Close()
 				}

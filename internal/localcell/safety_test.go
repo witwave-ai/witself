@@ -139,7 +139,7 @@ func TestPostgresRecoveryRequiresNativeStartEpoch(t *testing.T) {
 	if err != nil || !state.Alive || state.Matches || state.PID != child.PID {
 		t.Fatal("Inspect did not distinguish an unfenced live PostgreSQL PID")
 	}
-	if err := c.recoverPostgresRecord(); err == nil {
+	if err := c.recoverPostgresRecord(context.Background()); err == nil {
 		t.Fatal("PostgreSQL recovery accepted an unrelated native start epoch")
 	}
 	if _, err := os.Lstat(c.path("run", "postgres.json")); !errors.Is(err, os.ErrNotExist) {
@@ -147,7 +147,7 @@ func TestPostgresRecoveryRequiresNativeStartEpoch(t *testing.T) {
 	}
 	requireSafetyChildAlive(t, child)
 	writePostmaster(started.Unix())
-	if err := c.recoverPostgresRecord(); err != nil {
+	if err := c.recoverPostgresRecord(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	state, err = c.processState(t.Context(), "postgres")

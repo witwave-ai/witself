@@ -150,7 +150,7 @@ func (c *Cell) PrepareService(ctx context.Context, d ServiceDescriptor) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	lock, err := c.own(false)
+	lock, err := c.own(context.Background(), false)
 	if err != nil {
 		return err
 	}
@@ -278,7 +278,7 @@ func (c *Cell) SetServiceDesiredState(ctx context.Context, state string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	lock, err := c.own(false)
+	lock, err := c.own(context.Background(), false)
 	if err != nil {
 		return err
 	}
@@ -313,7 +313,7 @@ func (c *Cell) setServiceFaulted(ctx context.Context, faulted bool) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	lock, err := c.own(false)
+	lock, err := c.own(context.Background(), false)
 	if err != nil {
 		return err
 	}
@@ -338,7 +338,7 @@ func (c *Cell) RepairService(ctx context.Context) error {
 	if err := c.stopServiceChildren(ctx); err != nil {
 		return err
 	}
-	lock, err := c.own(false)
+	lock, err := c.own(context.Background(), false)
 	if err != nil {
 		return err
 	}

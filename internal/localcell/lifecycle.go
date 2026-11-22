@@ -10,11 +10,11 @@ import (
 	"time"
 )
 
-func (c *Cell) own(create bool) (*operationLock, error) {
+func (c *Cell) own(ctx context.Context, create bool) (*operationLock, error) {
 	if err := c.validateRoot(create); err != nil {
 		return nil, classifyOwnershipFailure(c.cfg.Root, err)
 	}
-	lock, err := acquireLock(context.Background(), c.cfg.Root, true)
+	lock, err := acquireLock(ctx, c.cfg.Root, true)
 	if err != nil {
 		return nil, classifyOwnershipFailure(c.cfg.Root, err)
 	}
@@ -26,16 +26,16 @@ func (c *Cell) own(create bool) (*operationLock, error) {
 	return lock, nil
 }
 
-func (c *Cell) ownExisting() (*operationLock, error) {
+func (c *Cell) ownExisting(ctx context.Context) (*operationLock, error) {
 	if err := c.validateRoot(false); err != nil {
 		return nil, classifyOwnershipFailure(c.cfg.Root, err)
 	}
-	lock, err := acquireLock(context.Background(), c.cfg.Root, false)
+	lock, err := acquireLock(ctx, c.cfg.Root, false)
 	if err != nil {
 		return nil, classifyOwnershipFailure(c.cfg.Root, err)
 	}
 	if lock == nil {
-		return c.own(false)
+		return c.own(ctx, false)
 	}
 	if err := c.validateRoot(false); err != nil {
 		_ = lock.Close()
@@ -82,7 +82,7 @@ func (c *Cell) Install(ctx context.Context, options InstallOptions) error {
 			return errPrincipalLayout
 		}
 	}
-	lock, err := c.own(true)
+	lock, err := c.own(context.Background(), true)
 	if err != nil {
 		return err
 	}
@@ -235,7 +235,7 @@ func (c *Cell) verifyStartAccount(ctx context.Context, m *Manifest) error {
 // Start orders PostgreSQL, server readiness, then worker readiness. It never
 // inherits the caller's environment or assumes HTTP readiness proves ownership.
 func (c *Cell) Start(ctx context.Context) error {
-	lock, err := c.own(false)
+	lock, err := c.own(context.Background(), false)
 	if err != nil {
 		return err
 	}
@@ -267,7 +267,7 @@ func (c *Cell) Start(ctx context.Context) error {
 	} else if err := c.validatePrincipalPasswords(context.Background(), m); err != nil {
 		return err
 	}
-	if err := c.verifyAll(); err != nil {
+	if err := c.verifyAll(context.Background()); err != nil {
 		return err
 	}
 	before := map[string]bool{}
@@ -300,7 +300,7 @@ func (c *Cell) Start(ctx context.Context) error {
 		run  func(context.Context) error
 	}{
 		{"postgres", func(ctx context.Context) error {
-			if err := c.verifyAll(); err != nil {
+			if err := c.verifyAll(context.Background()); err != nil {
 				return err
 			}
 			state, err := c.processState(context.Background(), "postgres")
@@ -386,7 +386,7 @@ func (c *Cell) stopServiceChildren(ctx context.Context) error {
 func (c *Cell) stopWithServiceFence(ctx context.Context, fence bool) error {
 	ctx, cancel := c.serviceShutdownDeadline(ctx)
 	defer cancel()
-	lock, err := c.own(false)
+	lock, err := c.own(context.Background(), false)
 	if err != nil {
 		return err
 	}
@@ -400,7 +400,7 @@ func (c *Cell) stopWithServiceFence(ctx context.Context, fence bool) error {
 	if err != nil {
 		return err
 	}
-	if err := c.verifyAll(); err != nil {
+	if err := c.verifyAll(context.Background()); err != nil {
 		return err
 	}
 	if err := c.layout(); err != nil {
@@ -423,7 +423,7 @@ func (c *Cell) Repair(ctx context.Context) error {
 	parent := ctx
 	ctx, cancel := c.deadline(ctx)
 	defer cancel()
-	lock, err := c.ownExisting()
+	lock, err := c.ownExisting(context.Background())
 	if err != nil {
 		return err
 	}
@@ -455,11 +455,11 @@ func (c *Cell) Repair(ctx context.Context) error {
 		return nil
 	}
 	if (pending.Operation == "start" || pending.Operation == "install" || pending.Operation == "reinstall") && pending.Step == "postgres" {
-		if err := c.recoverPostgresRecord(); err != nil {
+		if err := c.recoverPostgresRecord(context.Background()); err != nil {
 			return err
 		}
 	}
-	if err := c.verifyAll(); err != nil {
+	if err := c.verifyAll(context.Background()); err != nil {
 		return err
 	}
 	if m != nil && pending.Operation == "remove" {
@@ -529,7 +529,7 @@ func (c *Cell) Remove(ctx context.Context, options RemoveOptions) error {
 	if err := c.exitServiceHostForRemoval(ctx); err != nil {
 		return err
 	}
-	lock, err := c.ownExisting()
+	lock, err := c.ownExisting(context.Background())
 	if err != nil {
 		return err
 	}
@@ -550,7 +550,7 @@ func (c *Cell) Remove(ctx context.Context, options RemoveOptions) error {
 		}
 		return nil
 	}
-	if err := c.verifyAll(); err != nil {
+	if err := c.verifyAll(context.Background()); err != nil {
 		return err
 	}
 	if err := c.layout(); err != nil {
@@ -793,13 +793,13 @@ func (c *Cell) postmaster(ctx context.Context) (int, error) {
 // postmasterBounded is the size both reads of postmaster.pid accept.
 func postmasterBounded(info os.FileInfo) bool { return info.Size() <= 8192 }
 
-func (c *Cell) verifyAll() error {
-	pgPID, err := c.postmaster(context.Background())
+func (c *Cell) verifyAll(ctx context.Context) error {
+	pgPID, err := c.postmaster(ctx)
 	if err != nil {
 		return err
 	}
 	for _, component := range []string{"postgres", "server", "worker"} {
-		state, err := c.processState(context.Background(), component)
+		state, err := c.processState(ctx, component)
 		if err != nil {
 			return err
 		}
@@ -824,12 +824,12 @@ func (c *Cell) verifyAll() error {
 // recoverPostgresRecord is permitted only by a recorded, interrupted postgres
 // launch step. postmaster.pid supplies the data directory and start epoch;
 // native process creation time must independently agree before recording a fence.
-func (c *Cell) recoverPostgresRecord() error {
-	pid, err := c.postmaster(context.Background())
+func (c *Cell) recoverPostgresRecord(ctx context.Context) error {
+	pid, err := c.postmaster(ctx)
 	if err != nil || pid == 0 {
 		return err
 	}
-	state, err := c.processState(context.Background(), "postgres")
+	state, err := c.processState(ctx, "postgres")
 	if err != nil {
 		return err
 	}
@@ -839,10 +839,13 @@ func (c *Cell) recoverPostgresRecord() error {
 		}
 		return nil
 	}
-	// The re-read opens as the first read does: without waiting, refusing a
-	// link at the name and within the same bound. Every failure is one cause.
+	// The re-read uses the same opener and bound. Preserve a lease cut so
+	// the caller can distinguish interruption from an unreadable identity.
 	unreadable := fixedCause("cannot read PostgreSQL recovery identity")
-	data, err := readRegular(context.Background(), openPostgresReader, postmasterBounded, c.path("pg", "postmaster.pid"), unreadable, unreadable, unreadable)
+	data, err := readRegular(ctx, openPostgresReader, postmasterBounded, c.path("pg", "postmaster.pid"), unreadable, unreadable, unreadable)
+	if cut := (*leaseWaitCut)(nil); errors.As(err, &cut) {
+		return cut
+	}
 	if err != nil {
 		return unreadable
 	}
@@ -897,7 +900,7 @@ func (c *Cell) stopSelected(ctx context.Context, keep map[string]bool) error {
 	if runtime.GOOS != "windows" {
 		return c.stopSelectedLegacy(ctx, keep)
 	}
-	if err := c.verifyAll(); err != nil {
+	if err := c.verifyAll(context.Background()); err != nil {
 		return err
 	}
 	return drainServiceTree(ctx, keep, func(ctx context.Context, component string) serviceStopOutcome {
@@ -910,7 +913,7 @@ func (c *Cell) stopSelected(ctx context.Context, keep map[string]bool) error {
 		}
 		return c.stopChildOutcome(ctx, component, state)
 	}, func(ctx context.Context) error {
-		if err := c.verifyAll(); err != nil {
+		if err := c.verifyAll(context.Background()); err != nil {
 			return err
 		}
 		state, err := c.processState(context.Background(), "postgres")
@@ -925,7 +928,7 @@ func (c *Cell) stopSelected(ctx context.Context, keep map[string]bool) error {
 }
 
 func (c *Cell) stopSelectedLegacy(ctx context.Context, keep map[string]bool) error {
-	if err := c.verifyAll(); err != nil {
+	if err := c.verifyAll(context.Background()); err != nil {
 		return err
 	}
 	for _, component := range []string{"worker", "server"} {
@@ -963,7 +966,7 @@ func (c *Cell) stopSelectedLegacy(ctx context.Context, keep map[string]bool) err
 	if keep["postgres"] {
 		return nil
 	}
-	if err := c.verifyAll(); err != nil {
+	if err := c.verifyAll(context.Background()); err != nil {
 		return err
 	}
 	state, err := c.processState(context.Background(), "postgres")
