@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
@@ -159,6 +160,46 @@ func snapshotRefusalCause(t *testing.T, err error) {
 	t.Logf("snapshot refusal name class=%s", absent)
 }
 
+// What the file system itself answers to the reader's kind of open, one name
+// relative to a directory handle taken before that directory was emptied and
+// converted, without the reader's error mapping. In the parent case the decoy
+// is the object a followed junction would reach.
+func snapshotRawOpenClass(parent windows.Handle, name string, decoy windows.ByHandleFileInformation) string {
+	object, err := windows.NewNTUnicodeString(name)
+	if err != nil {
+		return "other"
+	}
+	attributes := windows.OBJECT_ATTRIBUTES{RootDirectory: parent, ObjectName: object, Attributes: windows.OBJ_CASE_INSENSITIVE}
+	attributes.Length = uint32(unsafe.Sizeof(attributes))
+	handle := windows.InvalidHandle
+	err = windows.NtCreateFile(&handle, windows.FILE_READ_ATTRIBUTES|windows.SYNCHRONIZE, &attributes, &windows.IO_STATUS_BLOCK{}, nil,
+		windows.FILE_ATTRIBUTE_NORMAL, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, windows.FILE_OPEN,
+		windows.FILE_OPEN_REPARSE_POINT|windows.FILE_SYNCHRONOUS_IO_NONALERT, 0, 0)
+	if err == nil {
+		var got windows.ByHandleFileInformation
+		infoErr := windows.GetFileInformationByHandle(handle, &got)
+		_ = windows.CloseHandle(handle)
+		if infoErr == nil && got.VolumeSerialNumber == decoy.VolumeSerialNumber && got.FileIndexHigh == decoy.FileIndexHigh && got.FileIndexLow == decoy.FileIndexLow {
+			return "opened_decoy"
+		}
+		return "opened_other"
+	}
+	var status windows.NTStatus
+	if !errors.As(err, &status) {
+		return "other"
+	}
+	switch status {
+	case windows.STATUS_OBJECT_NAME_NOT_FOUND:
+		return "name_not_found"
+	case windows.STATUS_OBJECT_PATH_NOT_FOUND:
+		return "path_not_found"
+	case windows.STATUS_REPARSE, windows.STATUS_STOPPED_ON_SYMLINK, windows.STATUS_REPARSE_POINT_ENCOUNTERED,
+		windows.STATUS_IO_REPARSE_TAG_NOT_HANDLED, windows.STATUS_IO_REPARSE_DATA_INVALID, windows.STATUS_REPARSE_POINT_NOT_RESOLVED:
+		return "reparse_status"
+	}
+	return "other"
+}
+
 func clearSpoolJunction(handle windows.Handle) error {
 	var buffer [8]byte
 	binary.LittleEndian.PutUint32(buffer[0:4], windows.IO_REPARSE_TAG_MOUNT_POINT)
@@ -200,7 +241,19 @@ func snapshotContainmentProbe(t *testing.T, ancestor, restore bool) {
 	}
 	decoy := identify(decoyPath)
 	buffer := spoolJunctionData(t, target)
+	raw := "not_run"
 	convert := func() bool {
+		// A handle taken before the conversion, as the reader's own is.
+		pointer, err := windows.UTF16PtrFromString(converted)
+		if err != nil {
+			return false
+		}
+		before, err := windows.CreateFile(pointer, windows.FILE_TRAVERSE, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+			nil, windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+		if err != nil {
+			return false
+		}
+		defer func() { _ = windows.CloseHandle(before) }()
 		if os.Rename(moved, aside) != nil {
 			return false
 		}
@@ -209,7 +262,11 @@ func snapshotContainmentProbe(t *testing.T, ancestor, restore bool) {
 			return false
 		}
 		err = setSpoolJunction(writer, buffer)
-		return windows.CloseHandle(writer) == nil && err == nil
+		if windows.CloseHandle(writer) != nil || err != nil {
+			return false
+		}
+		raw = snapshotRawOpenClass(before, filepath.Base(moved), decoy)
+		return true
 	}
 	revert := func() bool {
 		writer, err := snapshotAttributeWriter(converted)
@@ -241,6 +298,7 @@ func snapshotContainmentProbe(t *testing.T, ancestor, restore bool) {
 	if !didConvert {
 		t.Fatal("cannot convert the held directory in place")
 	}
+	t.Logf("snapshot raw open class=%s", raw)
 	if file == nil {
 		if err == nil {
 			t.Fatal("snapshot returned no result")
@@ -356,6 +414,30 @@ func TestWindowsPrivateSnapshot(t *testing.T) {
 		blocked := errors.Is(renameErr, windows.ERROR_SHARING_VIOLATION) || errors.Is(renameErr, windows.ERROR_ACCESS_DENIED)
 		if !blocked || err != nil || file == nil || os.Rename(root, retired) != nil {
 			t.Fatal("private snapshot did not pin its parent through the open")
+		}
+	})
+	// Before the leaf is opened nothing below the parent is open, so only the
+	// reader's own handle on the parent can refuse its rename.
+	t.Run("pinned_before_open", func(t *testing.T) {
+		root, path := fixture(t)
+		retired := root + "-retired"
+		attempted := false
+		var renameErr error
+		file, err := windowsPrivateSnapshot(path, true, func(index, total int) {
+			if index != total-1 || attempted {
+				return
+			}
+			attempted = true
+			if renameErr = os.Rename(root, retired); renameErr == nil {
+				_ = os.Rename(retired, root)
+			}
+		}, nil)
+		if file != nil {
+			_ = file.Close()
+		}
+		blocked := errors.Is(renameErr, windows.ERROR_SHARING_VIOLATION) || errors.Is(renameErr, windows.ERROR_ACCESS_DENIED)
+		if !attempted || !blocked || err != nil || file == nil {
+			t.Fatal("private snapshot did not pin its parent before the open")
 		}
 	})
 	t.Run("reparse_attribute", func(t *testing.T) {
