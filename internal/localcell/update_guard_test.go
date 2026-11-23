@@ -417,12 +417,12 @@ func updateOrdinaryAdmissions(file string, fn *ast.FuncDecl) map[*ast.SelectorEx
 	return map[*ast.SelectorExpr]bool{admitted[0]: true}
 }
 
-// maintenanceFenceContext accepts exactly two first arguments of an admission,
-// whose generation is the second (LC-LEASE-2C2): Checkpoint's and
-// DeleteCheckpoint's own ctx, and context.Background() at every other owner.
+// Only released checkpoint owners and the context-aware service admissions pass their own context.
 func maintenanceFenceContext(fn *ast.FuncDecl, argument ast.Expr) bool {
-	if fn.Name.Name != "Checkpoint" && fn.Name.Name != "DeleteCheckpoint" {
+	switch fn.Name.Name {
+	case "Checkpoint", "DeleteCheckpoint", "PrepareService", "RepairService", "setServiceDesiredStateLocked", "serviceMaintenanceObservation":
+		return leaseWaitOwnContext(fn, argument) && admissionNodeText(argument) == "ctx"
+	default:
 		return admissionNodeText(argument) == "context.Background()"
 	}
-	return leaseWaitOwnContext(fn, argument) && admissionNodeText(argument) == "ctx"
 }

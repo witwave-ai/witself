@@ -30,20 +30,20 @@ defer func() { _ = lock.Close() }()
 site = serviceHealthStep(ctx, "health_tree")
 d, err := c.ServiceDescriptor()
 if err != nil || d.DesiredState != "running" || d.Faulted { return errServiceHealth }
-if err := c.serviceStartFence(); err != nil { return errServiceHealth }
+if err := c.serviceStartFence(context.Background()); err != nil { return errServiceHealth }
 if err := c.serviceLiveTree(); err != nil { return errServiceHealth }
 m, err := readManifest(context.Background(), c.cfg.Root)
 if err != nil || m.AccountID == "" { return errServiceHealth }
 ` + maintenanceAdmissionStatement + `
 role, password, err := c.healthPrincipal(m)`,
 	"serviceMaintenanceObservation": `if err := ctx.Err(); err != nil { return err }
-lock, err := c.own(context.Background(), false)
+lock, err := c.own(ctx, false)
 if err != nil { return err }
 defer func() { _ = lock.Close() }()
-d, err := c.readServiceDescriptor()
+d, err := c.readServiceDescriptor(ctx)
 if err != nil { return err }
 if observed != nil { *observed = d }
-` + maintenanceAdmissionStatement + `
+` + maintenanceReleasedAdmissionStatement + `
 return nil`,
 }
 
@@ -57,6 +57,7 @@ return s.observeServiceMaintenanceInto(ctx, nil)
 }`,
 	"observeServiceMaintenanceInto": `func (s *supervisor) observeServiceMaintenanceInto(ctx context.Context, observed *ServiceDescriptor) (bool, error) {
 err := s.cell.serviceMaintenanceObservation(ctx, observed)
+if serviceLeaseCut(err) { return false, err }
 if cancellation := serviceControlCancellation(ctx); cancellation != nil { return false, cancellation }
 if ctx.Err() != nil { return false, ctx.Err() }
 if errors.Is(err, errMaintenanceFenceActive) { s.maintenanceHeld = true; return true, nil }
@@ -505,7 +506,7 @@ func TestServiceMaintenanceHostSourceContract(t *testing.T) {
 func maintenanceHostMutations(owner string) []admissionSourceMutation {
 	boundary := admissionStatements(maintenanceHostAdmissionBoundaries[owner])
 	gateIndex := len(boundary) - 2
-	gate := admissionIndent(admissionStatements(maintenanceAdmissionStatement)[0])
+	gate := admissionIndent(admissionStatements(maintenanceOwnerStatement(owner))[0])
 	replaceGate := func(text string) func(string) string {
 		return func(source string) string { return strings.Replace(source, gate, text, 1) }
 	}
@@ -516,18 +517,18 @@ func maintenanceHostMutations(owner string) []admissionSourceMutation {
 		{"DeleteGate", "reference_count", replaceGate("")},
 		{"EarlyReturnAtFunctionStart", "position", insert(0, "if c.cfg.Timeout > 0 { return nil }")},
 		{"EarlyReturnImmediatelyBeforeGate", "position", insert(gateIndex, "if c.cfg.Timeout > 0 { return nil }")},
-		{"GotoPastGate", "position", replaceGate("if c.cfg.Timeout > 0 { goto admitted }; " + maintenanceAdmissionStatement + "; admitted: {}")},
+		{"GotoPastGate", "position", replaceGate("if c.cfg.Timeout > 0 { goto admitted }; " + maintenanceOwnerStatement(owner) + "; admitted: {}")},
 		{"ReceiverRebinding", "position", insert(0, "c = other")},
 		{"DeferredSwallow", "position", insert(0, "defer func() { result = nil }()")},
 		{"SwitchReturn", "position", insert(gateIndex, "switch { case c.cfg.Timeout > 0: return nil }")},
 		{"SelectReturn", "position", insert(gateIndex, "select { default: return nil }")},
-		{"PositiveGeneration", "position", replaceGate(strings.ReplaceAll(maintenanceAdmissionStatement, ", 0)", ", 7)"))},
-		{"HexZeroGeneration", "position", replaceGate(strings.ReplaceAll(maintenanceAdmissionStatement, ", 0)", ", 0x0)"))},
-		{"VariableGeneration", "position", replaceGate(strings.ReplaceAll(maintenanceAdmissionStatement, ", 0)", ", generation)"))},
-		{"WrappedReturn", "position", replaceGate(strings.ReplaceAll(maintenanceAdmissionStatement, "return err", "return fmt.Errorf(\"extra %w\", err)"))},
+		{"PositiveGeneration", "position", replaceGate(strings.ReplaceAll(maintenanceOwnerStatement(owner), ", 0)", ", 7)"))},
+		{"HexZeroGeneration", "position", replaceGate(strings.ReplaceAll(maintenanceOwnerStatement(owner), ", 0)", ", 0x0)"))},
+		{"VariableGeneration", "position", replaceGate(strings.ReplaceAll(maintenanceOwnerStatement(owner), ", 0)", ", generation)"))},
+		{"WrappedReturn", "position", replaceGate(strings.ReplaceAll(maintenanceOwnerStatement(owner), "return err", "return fmt.Errorf(\"extra %w\", err)"))},
 		{"IgnoreError", "position", replaceGate("_ = c.maintenanceFenceAllows(0)")},
 		{"EarlyUnlockReacquire", "position", insert(gateIndex, "_ = lock.Close(); lock, err = c.own(context.Background(), false); if err != nil { return err }")},
-		{"LateDuplicate", "reference_count", insert(len(boundary)-1, maintenanceAdmissionStatement)},
+		{"LateDuplicate", "reference_count", insert(len(boundary)-1, maintenanceOwnerStatement(owner))},
 		{"MoveAfterFirstEffect", "position", func(source string) string {
 			return admissionEditStatements(source, func(statements []ast.Stmt) []ast.Stmt {
 				statements[gateIndex], statements[gateIndex+1] = statements[gateIndex+1], statements[gateIndex]
@@ -1023,7 +1024,7 @@ var maintenanceHostSupervisorPins = map[string]string{
 	if err := serviceControlCapability(); err != nil {
 		return err
 	}
-	d, err := c.ServiceDescriptor()
+	d, err := c.serviceDescriptor(ctx)
 	if err != nil {
 		return serviceFailureAt(err, "initial_descriptor")
 	}
@@ -1047,7 +1048,7 @@ var maintenanceHostSupervisorPins = map[string]string{
 	if commands == nil {
 		commands = make(chan serviceCommand)
 	}
-	closeControl, err := c.serveServiceControlForPlatform(commands, runtime.GOOS, d)
+	closeControl, err := c.serveServiceControlForPlatform(ctx, commands, runtime.GOOS, d)
 	if err != nil {
 		return serviceFailureFallback(err, "control_transport")
 	}
@@ -1077,7 +1078,7 @@ var maintenanceHostSupervisorPins = map[string]string{
 				fmt.Fprintf(os.Stderr, "service_shutdown phase=%s operation=%s journal_pending=%t journal_read_ok=%t\n",
 					s.phase, s.operation, progress.pending != nil || progress.tornTail, journalErr == nil)
 			}
-			if errors.Is(result, ctx.Err()) {
+			if !serviceLeaseCut(result) && errors.Is(result, ctx.Err()) {
 				result = nil
 			}
 		}
@@ -1257,7 +1258,7 @@ var maintenanceHostSupervisorPins = map[string]string{
 	s.maintenanceDisplay = false
 	s.maintenanceBusy = false
 	defer func() {
-		if cancellation := serviceControlCancellation(ctx); cancellation != nil {
+		if cancellation := serviceControlCancellation(ctx); cancellation != nil || serviceLeaseCut(result) {
 			s.status = previousStatus
 			s.maintenanceHeld, s.maintenanceDisplay = previousHeld, previousDisplay
 			s.maintenanceBusy = previousBusy
@@ -1266,7 +1267,7 @@ var maintenanceHostSupervisorPins = map[string]string{
 				s.maintenanceDisplay, s.maintenanceBusy = false, false
 			}
 			var located *serviceFailure
-			if !errors.As(result, &located) || located.site != "control_cancelled" || !errors.Is(result, ctx.Err()) {
+			if !serviceLeaseCut(result) && (!errors.As(result, &located) || located.site != "control_cancelled" || !errors.Is(result, ctx.Err())) {
 				result = cancellation
 			}
 			return
@@ -1284,8 +1285,8 @@ var maintenanceHostSupervisorPins = map[string]string{
 	var err error
 	held := false
 	if s.completingStop {
-		d, err = s.cell.ServiceDescriptor()
-		if cancellation := serviceControlCancellation(ctx); cancellation != nil {
+		d, err = s.cell.serviceDescriptor(ctx)
+		if cancellation := serviceControlCancellation(ctx); cancellation != nil && !serviceLeaseCut(err) {
 			return cancellation
 		}
 		if err != nil {
@@ -1293,12 +1294,12 @@ var maintenanceHostSupervisorPins = map[string]string{
 		}
 	} else {
 		held, err = s.observeServiceMaintenanceInto(ctx, &d)
-		if cancellation := serviceControlCancellation(ctx); cancellation != nil {
+		if cancellation := serviceControlCancellation(ctx); cancellation != nil && !serviceLeaseCut(err) {
 			return cancellation
 		}
 		if errors.Is(err, ErrLocked) {
-			d, err = s.cell.ServiceDescriptor()
-			if cancellation := serviceControlCancellation(ctx); cancellation != nil {
+			d, err = s.cell.serviceDescriptor(ctx)
+			if cancellation := serviceControlCancellation(ctx); cancellation != nil && !serviceLeaseCut(err) {
 				return cancellation
 			}
 			if err != nil {
@@ -1527,7 +1528,7 @@ var maintenanceHostSupervisorPins = map[string]string{
 			s.completingStop = false
 		}
 	case "start":
-		d, readErr := s.cell.ServiceDescriptor()
+		d, readErr := s.cell.serviceDescriptor(ctx)
 		if readErr != nil {
 			err = readErr
 		} else if d.Faulted || d.DesiredState == "maintenance" {
@@ -1588,7 +1589,7 @@ func TestServiceMaintenanceDescriptorObservationContract(t *testing.T) {
 		t.Fatalf("Descriptor observation invariant failed %s", invariant)
 	}
 	ast.Inspect(fn.Body, func(node ast.Node) bool {
-		if selector, ok := node.(*ast.SelectorExpr); ok && selector.Sel.Name == "ServiceDescriptor" {
+		if selector, ok := node.(*ast.SelectorExpr); ok && (selector.Sel.Name == "ServiceDescriptor" || selector.Sel.Name == "serviceDescriptor") {
 			t.Error("Descriptor observation repeats root validation")
 		}
 		return true
@@ -1601,13 +1602,20 @@ func TestServiceMaintenanceDescriptorReaderContract(t *testing.T) {
 	fn := serviceAdmissionFunction(t, "service_descriptor.go", source, "ServiceDescriptor")
 	const wrapper = `package localcell
 func (c *Cell) ServiceDescriptor() (ServiceDescriptor, error) {
+return c.serviceDescriptor(context.Background())
+}
+func (c *Cell) serviceDescriptor(ctx context.Context) (ServiceDescriptor, error) {
 var d ServiceDescriptor
 if err := c.validateRoot(false); err != nil { return d, err }
-return c.readServiceDescriptor()
+return c.readServiceDescriptor(ctx)
 }`
 	want := serviceAdmissionFunction(t, "wrapper.go", wrapper, "ServiceDescriptor")
 	if admissionNodeText(fn) != admissionNodeText(want) {
 		t.Fatal("Descriptor public reader validation changed")
+	}
+	inner := serviceAdmissionFunction(t, "service_descriptor.go", source, "serviceDescriptor")
+	if admissionNodeText(inner) != admissionNodeText(serviceAdmissionFunction(t, "wrapper.go", wrapper, "serviceDescriptor")) {
+		t.Fatal("Descriptor service reader validation changed")
 	}
 	reader := serviceAdmissionFunction(t, "service_descriptor.go", source, "readServiceDescriptor")
 	ast.Inspect(reader.Body, func(node ast.Node) bool {
@@ -1653,15 +1661,15 @@ func TestServiceMaintenanceDescriptorReaderInventory(t *testing.T) {
 			})
 		}
 	}
-	if len(callers) != 2 || callers["service_descriptor.go/ServiceDescriptor"] != 1 || callers["service_maintenance.go/serviceMaintenanceObservation"] != 1 {
+	if len(callers) != 2 || callers["service_descriptor.go/serviceDescriptor"] != 1 || callers["service_maintenance.go/serviceMaintenanceObservation"] != 1 {
 		t.Fatal("Descriptor private reader caller inventory changed")
 	}
 	fn := serviceAdmissionFunction(t, "service_maintenance.go", strings.ReplaceAll(sources["service_maintenance.go"], "\r\n", "\n"), "serviceMaintenanceObservation")
 	want := admissionStatements(`if err := ctx.Err(); err != nil { return err }
-lock, err := c.own(context.Background(), false)
+lock, err := c.own(ctx, false)
 if err != nil { return err }
 defer func() { _ = lock.Close() }()
-d, err := c.readServiceDescriptor()`)
+d, err := c.readServiceDescriptor(ctx)`)
 	if len(fn.Body.List) < len(want) {
 		t.Fatal("Descriptor observation lock prelude is incomplete")
 	}
@@ -1686,7 +1694,7 @@ func TestServiceMaintenanceDescriptorStepContract(t *testing.T) {
 	ast.Inspect(fn.Body, func(node ast.Node) bool {
 		if selector, ok := node.(*ast.SelectorExpr); ok {
 			switch selector.Sel.Name {
-			case "ServiceDescriptor":
+			case "serviceDescriptor":
 				reads++
 			case "observeServiceMaintenanceInto":
 				observations++

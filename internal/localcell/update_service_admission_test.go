@@ -278,7 +278,7 @@ func TestServiceMaintenancePreparationAdmission(t *testing.T) {
 				if err != nil || got.Revision != 1 || got.RepairRevision != 0 || got.Faulted || got.Payload.Generation == "" {
 					t.Fatal("unfenced preparation did not publish baseline descriptor")
 				}
-				if _, err := c.serviceControlSecret(); err != nil {
+				if _, err := c.serviceControlSecret(t.Context()); err != nil {
 					t.Fatal("unfenced preparation did not publish private secret")
 				}
 				if _, err := os.Lstat(c.path("service", "transition.json")); !errors.Is(err, os.ErrNotExist) {
@@ -887,7 +887,7 @@ func TestServiceMaintenanceAbsentParity(t *testing.T) {
 					want.Payload.Generation = m.InstallationID + "-1"
 				}
 				serviceMaintenanceParityFile(t, c, "service/descriptor.json", serviceMaintenanceParityJSON(t, want))
-				secret, secretErr := c.serviceControlSecret()
+				secret, secretErr := c.serviceControlSecret(t.Context())
 				if secretErr != nil || len(secret) != 43 {
 					t.Fatal("absent preparation generated secret shape changed")
 				}

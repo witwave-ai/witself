@@ -48,7 +48,7 @@ func snapshotAdmissionRows(t *testing.T) {
 		observed := false
 		err := snapshotRename(snapshotStage(t, path, fresh), path, func(after bool) {
 			if after {
-				got, readErr := c.readServiceControlSecret()
+				got, readErr := c.readServiceControlSecret(t.Context())
 				observed = readErr == nil && bytes.Equal(got, fresh)
 			}
 		})

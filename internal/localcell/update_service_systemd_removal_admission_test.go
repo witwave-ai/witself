@@ -314,7 +314,7 @@ func TestServiceAdapterRemovalThenApplySystemd(t *testing.T) {
 	if a.Remove(t.Context(), d) != nil {
 		t.Fatal("Systemd reinstall fixture removal failed")
 	}
-	fresh, err := m.cell.serviceDescriptorForOwner(a.uid)
+	fresh, err := m.cell.serviceDescriptorForOwner(t.Context(), a.uid)
 	if err != nil || fresh.DesiredState != "stopped" {
 		t.Fatal("Systemd completed removal lost stopped intent")
 	}

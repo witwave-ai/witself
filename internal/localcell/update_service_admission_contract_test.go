@@ -16,11 +16,11 @@ import (
 var maintenanceServiceAdmissionBoundaries = map[string]string{
 	"PrepareService": `if os.Getenv("WITSELF_RUNTIME") != "local" { return errors.New("service_local_runtime_required") }
 if err := ctx.Err(); err != nil { return err }
-lock, err := c.own(context.Background(), false)
+lock, err := c.own(ctx, false)
 if err != nil { return err }
 defer func() { _ = lock.Close() }()
-m, err := readManifest(context.Background(), c.cfg.Root)
-if err != nil || !m.Installed || m.RemovalRetained { return errors.New("service_installation_required") }
+m, err := readManifest(ctx, c.cfg.Root)
+if err != nil || !m.Installed || m.RemovalRetained { return serviceReadFailure(err, errors.New("service_installation_required")) }
 uid, err := serviceOwner()
 if err != nil { return err }
 d.Version, d.InstallationID, d.UID, d.Root = 1, m.InstallationID, uid, c.cfg.Root
@@ -31,24 +31,24 @@ if d.ResourceProfile == "" { d.ResourceProfile = "unconfigured" }
 if d.Payload.Generation == "" { d.Payload.Generation = m.InstallationID + "-1" }
 d.Revision, d.RepairRevision, d.Faulted = 1, 0, false
 if err := validateServiceDescriptor(d); err != nil { return err }
-old, err := c.ServiceDescriptor()
+old, err := c.serviceDescriptor(ctx)
 if err == nil {
  if old.Adapter != d.Adapter || old.Runtime != d.Runtime || !reflect.DeepEqual(old.Payload, d.Payload) { return ErrServiceOwnershipConflict }
- _, err = c.serviceControlSecret()
+ _, err = c.serviceControlSecret(ctx)
  return err
 }
 if !errors.Is(err, os.ErrNotExist) { return err }
-` + maintenanceAdmissionStatement + `
+` + maintenanceReleasedAdmissionStatement + `
 if err := privateDir(c.path("service"), true); err != nil { return err }`,
 	"RepairService": `if err := c.SetServiceDesiredState(ctx, "stopped"); err != nil { return err }
 if err := c.Repair(ctx); err != nil { return err }
 if err := c.stopServiceChildren(ctx); err != nil { return err }
-lock, err := c.own(context.Background(), false)
+lock, err := c.own(ctx, false)
 if err != nil { return err }
 defer func() { _ = lock.Close() }()
-d, err := c.ServiceDescriptor()
+d, err := c.serviceDescriptor(ctx)
 if err != nil { return err }
-` + maintenanceAdmissionStatement + `
+` + maintenanceReleasedAdmissionStatement + `
 d.Faulted, d.Revision, d.RepairRevision = false, d.Revision+1, d.RepairRevision+1`,
 	"reconcileServiceBoot": `lock, err := c.own(context.Background(), false)
 if err != nil { return err }
@@ -88,7 +88,7 @@ return c.deleteCheckpointLocked(ctx, options)`,
 
 // maintenanceOwnerStatement is owner's admission (LC-LEASE-2C2).
 func maintenanceOwnerStatement(owner string) string {
-	return map[bool]string{true: maintenanceReleasedAdmissionStatement, false: maintenanceAdmissionStatement}[owner == "Checkpoint" || owner == "DeleteCheckpoint"]
+	return map[bool]string{true: maintenanceReleasedAdmissionStatement, false: maintenanceAdmissionStatement}[owner == "Checkpoint" || owner == "DeleteCheckpoint" || owner == "PrepareService" || owner == "RepairService" || owner == "serviceMaintenanceObservation"]
 }
 
 var maintenanceServiceAdmissionFiles = map[string]string{

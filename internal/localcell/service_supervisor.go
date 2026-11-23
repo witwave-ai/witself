@@ -116,7 +116,7 @@ func (c *Cell) Run(ctx context.Context, policy SupervisorPolicy) (result error) 
 	if err := serviceControlCapability(); err != nil {
 		return err
 	}
-	d, err := c.ServiceDescriptor()
+	d, err := c.serviceDescriptor(ctx)
 	if err != nil {
 		return serviceFailureAt(err, "initial_descriptor")
 	}
@@ -140,7 +140,7 @@ func (c *Cell) Run(ctx context.Context, policy SupervisorPolicy) (result error) 
 	if commands == nil {
 		commands = make(chan serviceCommand)
 	}
-	closeControl, err := c.serveServiceControlForPlatform(commands, runtime.GOOS, d)
+	closeControl, err := c.serveServiceControlForPlatform(ctx, commands, runtime.GOOS, d)
 	if err != nil {
 		return serviceFailureFallback(err, "control_transport")
 	}
@@ -170,7 +170,7 @@ func (c *Cell) Run(ctx context.Context, policy SupervisorPolicy) (result error) 
 				fmt.Fprintf(os.Stderr, "service_shutdown phase=%s operation=%s journal_pending=%t journal_read_ok=%t\n",
 					s.phase, s.operation, progress.pending != nil || progress.tornTail, journalErr == nil)
 			}
-			if errors.Is(result, ctx.Err()) {
+			if !serviceLeaseCut(result) && errors.Is(result, ctx.Err()) {
 				result = nil
 			}
 		}
@@ -506,6 +506,9 @@ func (s *supervisor) call(ctx context.Context, operation string, hook func(conte
 		hookCtx = withServiceHealthProgress(hookCtx, &s.healthProgress)
 	}
 	err := hook(hookCtx)
+	if serviceLeaseCut(err) {
+		return err
+	}
 	s.latchServiceShutdownRefusal(ctx, operation, err)
 	if cancellation := serviceControlCancellation(ctx); cancellation != nil {
 		return cancellation
@@ -531,7 +534,7 @@ func (s *supervisor) step(ctx context.Context) (result error) {
 	s.maintenanceDisplay = false
 	s.maintenanceBusy = false
 	defer func() {
-		if cancellation := serviceControlCancellation(ctx); cancellation != nil {
+		if cancellation := serviceControlCancellation(ctx); cancellation != nil || serviceLeaseCut(result) {
 			s.status = previousStatus
 			s.maintenanceHeld, s.maintenanceDisplay = previousHeld, previousDisplay
 			s.maintenanceBusy = previousBusy
@@ -540,7 +543,7 @@ func (s *supervisor) step(ctx context.Context) (result error) {
 				s.maintenanceDisplay, s.maintenanceBusy = false, false
 			}
 			var located *serviceFailure
-			if !errors.As(result, &located) || located.site != "control_cancelled" || !errors.Is(result, ctx.Err()) {
+			if !serviceLeaseCut(result) && (!errors.As(result, &located) || located.site != "control_cancelled" || !errors.Is(result, ctx.Err())) {
 				result = cancellation
 			}
 			return
@@ -558,8 +561,8 @@ func (s *supervisor) step(ctx context.Context) (result error) {
 	var err error
 	held := false
 	if s.completingStop {
-		d, err = s.cell.ServiceDescriptor()
-		if cancellation := serviceControlCancellation(ctx); cancellation != nil {
+		d, err = s.cell.serviceDescriptor(ctx)
+		if cancellation := serviceControlCancellation(ctx); cancellation != nil && !serviceLeaseCut(err) {
 			return cancellation
 		}
 		if err != nil {
@@ -567,12 +570,12 @@ func (s *supervisor) step(ctx context.Context) (result error) {
 		}
 	} else {
 		held, err = s.observeServiceMaintenanceInto(ctx, &d)
-		if cancellation := serviceControlCancellation(ctx); cancellation != nil {
+		if cancellation := serviceControlCancellation(ctx); cancellation != nil && !serviceLeaseCut(err) {
 			return cancellation
 		}
 		if errors.Is(err, ErrLocked) {
-			d, err = s.cell.ServiceDescriptor()
-			if cancellation := serviceControlCancellation(ctx); cancellation != nil {
+			d, err = s.cell.serviceDescriptor(ctx)
+			if cancellation := serviceControlCancellation(ctx); cancellation != nil && !serviceLeaseCut(err) {
 				return cancellation
 			}
 			if err != nil {
@@ -872,7 +875,7 @@ func (s *supervisor) command(ctx context.Context, action string) (ServiceStatus,
 			s.completingStop = false
 		}
 	case "start":
-		d, readErr := s.cell.ServiceDescriptor()
+		d, readErr := s.cell.serviceDescriptor(ctx)
 		if readErr != nil {
 			err = readErr
 		} else if d.Faulted || d.DesiredState == "maintenance" {

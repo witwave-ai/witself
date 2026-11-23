@@ -24,7 +24,7 @@ func installServiceFixtureControlToken(t *testing.T, c *Cell) []byte {
 	if err := writeAtomicBytes(c.path("service", "control.secret"), token, nil); err != nil {
 		t.Fatal("cannot install synthetic control token")
 	}
-	observed, err := c.serviceControlSecret()
+	observed, err := c.serviceControlSecret(t.Context())
 	if err != nil || !bytes.Equal([]byte(observed), token) {
 		t.Fatal("synthetic installation did not retain the known control token")
 	}

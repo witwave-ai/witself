@@ -147,7 +147,7 @@ func leaseWaitOwnContext(function *ast.FuncDecl, argument ast.Expr) bool {
 
 // leaseWaitOpeners are the declarations that take the operation's context first
 // (LC-LEASE-2A, 2B, 2C1, 2C2, 2D R5, 2D2 and 2D3; 2D's seam), in the package reference contract's notation.
-var leaseWaitOpeners = []string{"waitOutLease", "openPrivateReader", "openPrivateWriter", "openPostgresReader", "openPlainReader", "openLockFile",
+var leaseWaitOpeners = slices.Concat(leaseWaitServiceOpeners, []string{"waitOutLease", "openPrivateReader", "openPrivateWriter", "openPostgresReader", "openPlainReader", "openLockFile",
 	"(*Cell).openCheckpointSource", "openRegularBy", "readRegular", "openRegular", "openRegularWriter", "openServiceRecord", "checkpointComplete",
 	"readMaintenanceFenceJSON", "(*Cell).readMaintenanceFence", "acquireLock", "(*Cell).readJournal", "(*Cell).journal", "(*Cell).journalCause",
 	"(*Cell).step", "(*Cell).begin", "(*Cell).finish", "(*Cell).discardJournalTail", "(*Cell).finishRemoval", "(*Cell).finishRetainedRemoval",
@@ -157,7 +157,37 @@ var leaseWaitOpeners = []string{"waitOutLease", "openPrivateReader", "openPrivat
 	"(*Cell).checkpointOps", "(*Cell).checkpointSummaries", "(*Cell).closeCheckpointFailure", "(*Cell).closeCheckpointLeftover", "(*Cell).listCheckpoints",
 	"(*Cell).openCheckpointEntry", "(*Cell).admitDeleteCheckpoint", "openPrincipalCredentialFile", "(*checkpointTree).open", "(*checkpointTree).witness",
 	"readJSON", "readManifest", "readManifestBy", "readServiceRecordJSON", "readManifestJSON", "openAdmissionRecord", "(*Cell).readServiceControlEndpointRecordBy", "(*Cell).serviceControlSecretBy", "(*Cell).cleanupInterruption", "(*Cell).processState", "(*Cell).processStateWithRecord", "serviceAdapterRemovalHostLock", "(*Cell).checkpointCold",
-	"(*Cell).own", "(*Cell).ownExisting", "(*Cell).verifyAll", "(*Cell).recoverPostgresRecord"}
+	"(*Cell).own", "(*Cell).ownExisting", "(*Cell).verifyAll", "(*Cell).recoverPostgresRecord"})
+
+// The service entries can call only these lease-aware readers with their own context.
+var leaseWaitServiceOpeners = strings.Fields(`(*Cell).serviceDescriptor (*Cell).serviceDescriptorForOwner (*Cell).readServiceDescriptor (*Cell).readServiceDescriptorForOwner
+(*Cell).serviceControlSecret (*Cell).serviceStartFence (*Cell).setServiceDesiredStateLocked (*Cell).commitServiceFault (*Cell).validateTaskHost
+(*Cell).readServiceControlSecret (*Cell).serveServiceControlForPlatform`)
+
+var leaseWaitServiceCalls = map[string]string{
+	"service_control.go:(*Cell).Control":                               "readServiceControlSecret",
+	"service_control.go:(*Cell).readServiceControlSecret":              "serviceControlSecretBy",
+	"service_control.go:(*Cell).serveServiceControlForPlatform":        "readServiceControlSecret",
+	"service_control_exit.go:(*Cell).startHostExitRequest":             "readServiceControlSecret",
+	"service_descriptor.go:(*Cell).PrepareService":                     "maintenanceFenceAllows own readManifest serviceControlSecret serviceControlSecret serviceDescriptor",
+	"service_descriptor.go:(*Cell).RepairService":                      "maintenanceFenceAllows own serviceDescriptor",
+	"service_descriptor.go:(*Cell).SetServiceDesiredState":             "own setServiceDesiredStateLocked",
+	"service_descriptor.go:(*Cell).commitServiceFault":                 "own serviceDescriptor",
+	"service_descriptor.go:(*Cell).readServiceDescriptor":              "readServiceDescriptorForOwner",
+	"service_descriptor.go:(*Cell).readServiceDescriptorForOwner":      "readManifestBy readServiceRecordJSON",
+	"service_descriptor.go:(*Cell).serviceControlSecret":               "serviceControlSecretBy",
+	"service_descriptor.go:(*Cell).serviceDescriptor":                  "readServiceDescriptor",
+	"service_descriptor.go:(*Cell).serviceDescriptorForOwner":          "readServiceDescriptorForOwner",
+	"service_descriptor.go:(*Cell).serviceStartFence":                  "serviceDescriptor",
+	"service_descriptor.go:(*Cell).setServiceDesiredStateLocked":       "maintenanceFenceAllows serviceDescriptor",
+	"service_descriptor.go:(*Cell).setServiceFaulted":                  "commitServiceFault",
+	"service_maintenance.go:(*Cell).serviceMaintenanceObservation":     "maintenanceFenceAllows own readServiceDescriptor",
+	"service_shutdown_supervisor.go:(*supervisor).commitShutdownFault": "commitServiceFault",
+	"service_supervisor.go:(*Cell).Run":                                "serveServiceControlForPlatform serviceDescriptor",
+	"service_supervisor.go:(*supervisor).command":                      "serviceDescriptor",
+	"service_supervisor.go:(*supervisor).step":                         "serviceDescriptor serviceDescriptor",
+	"service_task_host.go:(*Cell).validateTaskHost":                    "serviceDescriptor",
+}
 
 // leaseWaitPlaceholders are the non-test calls into leaseWaitOpeners that pass
 // context.Background() instead of their declaration's own context, by file and
@@ -171,27 +201,25 @@ var leaseWaitPlaceholders = map[string]int{"checkpoint_verify.go:(*Cell).verifyC
 	"installer_principals.go:(*Cell).principalOperations": 1, "installer_principals.go:(*Cell).provisionInstallerPrincipals": 2,
 	"installer_principals.go:(*Cell).runPrincipalMigration": 1, "installer_principals.go:(*Cell).verifyCredentialPurposes": 1,
 	"installer_principals.go:(*Cell).verifyInstallerStartupCatalog": 1, "installer_principals.go:(*Cell).verifyRuntimePrincipalStart": 1,
-	"launch_unix.go:(*Cell).launchChild": 1, "lifecycle.go:(*Cell).Install": 6, "lifecycle.go:(*Cell).Remove": 11, "lifecycle.go:(*Cell).Repair": 11,
-	"lifecycle.go:(*Cell).Start": 15, "lifecycle.go:(*Cell).Status": 1,
-	"lifecycle.go:(*Cell).stopSelected": 4, "lifecycle.go:(*Cell).stopSelectedLegacy": 5, "lifecycle.go:(*Cell).stopWithServiceFence": 6,
+	"launch_unix.go:(*Cell).launchChild": 1, "lifecycle.go:(*Cell).Install": 6, "lifecycle.go:(*Cell).Remove": 12, "lifecycle.go:(*Cell).Repair": 11,
+	"lifecycle.go:(*Cell).Start": 16, "lifecycle.go:(*Cell).Status": 1,
+	"lifecycle.go:(*Cell).stopSelected": 4, "lifecycle.go:(*Cell).stopSelectedLegacy": 5, "lifecycle.go:(*Cell).stopWithServiceFence": 7,
 	"lock_contention.go:classifyOwnershipFailure":        1,
 	"port_recovery.go:(*Cell).waitReadyWithPortRecovery": 2, "postgres_unix.go:(*Cell).startPostgres": 3, "postgres_windows.go:(*Cell).pendingPostgresWithoutPID": 1,
 	"postgres_windows.go:(*Cell).pendingPostmasterPID": 1, "postgres_windows.go:(*Cell).startPostgres": 3,
 	"readiness.go:(*Cell).childReadinessExit": 1, "reinstall.go:(*Cell).Reinstall": 2, "reinstall.go:(*Cell).reinstallLocked": 6,
-	"service_adapter_admission.go:serviceAdapterAdmissionForStep": 1, "service_boot.go:(*Cell).bindServiceProcessBootWithReader": 1, "service_boot.go:(*Cell).reconcileOldBoot": 2, "service_boot.go:(*Cell).reconcileServiceBoot": 3,
+	"service_adapter_admission.go:serviceAdapterAdmissionForStep": 2, "service_boot.go:(*Cell).bindServiceProcessBootWithReader": 1, "service_boot.go:(*Cell).reconcileOldBoot": 2, "service_boot.go:(*Cell).reconcileServiceBoot": 3,
 	"service_control_endpoint.go:(*Cell).completeServiceLease": 1, "service_control_endpoint.go:(*Cell).removeOwnedServiceControlEndpointBy": 1,
 	"service_control_endpoint.go:(*Cell).publishServiceControlEndpointWithBoot": 1, "service_control_endpoint.go:(*Cell).readServiceControlEndpointRecord": 1,
-	"service_control.go:(*Cell).readServiceControlSecret": 1, "service_control_endpoint.go:(*Cell).readServiceControlEndpointWithBoot": 2, "service_control_exit.go:(*Cell).exitServiceHostForRemoval": 3,
+	"service_control_endpoint.go:(*Cell).readServiceControlEndpointWithBoot": 2, "service_control_exit.go:(*Cell).exitServiceHostForRemoval": 3,
 	"service_control_exit.go:(*Cell).serviceHostExitIdentity": 1, "service_control_exit.go:(*Cell).serviceHostLeaseHeld": 1,
 	"service_control_exit.go:(*Cell).waitServiceHostExit": 2, "service_control_exit.go:(*supervisor).finishHostExit": 1,
-	"service_descriptor.go:(*Cell).PrepareService": 3, "service_descriptor.go:(*Cell).RepairService": 2, "service_descriptor.go:(*Cell).readServiceDescriptorForOwner": 2,
-	"service_descriptor.go:(*Cell).SetServiceDesiredState": 1, "service_descriptor.go:(*Cell).serviceControlSecret": 1,
-	"service_descriptor.go:(*Cell).commitServiceFault": 1, "service_descriptor.go:(*Cell).setServiceDesiredStateLocked": 1, "service_foreground.go:(*Cell).acquireServiceLeaseForPlatform": 1,
-	"service_health.go:(*Cell).ServiceHealth": 3, "service_health.go:(*Cell).healthPrincipal": 1,
+	"service_task_host.go:(*Cell).ValidateTaskHost": 1, "service_descriptor.go:(*Cell).ServiceDescriptor": 1, "service_foreground.go:(*Cell).acquireServiceLeaseForPlatform": 1,
+	"service_health.go:(*Cell).ServiceHealth": 4, "service_health.go:(*Cell).healthPrincipal": 1,
 	"service_health.go:(*Cell).serviceAPICredential": 1, "service_health.go:(*Cell).serviceLiveTree": 2, "service_launchd.go:(*launchdAgentAdapter).Apply": 1,
 	"service_launchd.go:(*launchdAgentAdapter).Remove":     2,
-	"service_launchd.go:(*launchdAgentAdapter).ownedPlist": 1, "service_maintenance.go:(*Cell).serviceMaintenanceObservation": 2,
-	"service_shutdown_other.go:(*Cell).stopChildOutcome": 1, "service_shutdown_windows.go:(*Cell).stopChildOutcomeWithBudget": 1,
+	"service_launchd.go:(*launchdAgentAdapter).ownedPlist": 1,
+	"service_shutdown_other.go:(*Cell).stopChildOutcome":   1, "service_shutdown_windows.go:(*Cell).stopChildOutcomeWithBudget": 1,
 	"service_shutdown_windows.go:waitShutdownReady": 1, "service_supervisor.go:(*Cell).Run": 1, "service_supervisor.go:(*supervisor).load": 1,
 	"service_supervisor.go:(*supervisor).rememberProcesses": 2, "service_systemd_adapter.go:(*systemdUserAdapter).Apply": 1,
 	"service_systemd_adapter.go:(*systemdUserAdapter).Remove":    2,
@@ -265,6 +293,7 @@ var leaseWaitReleasedCallers = map[string]int{"lifecycle.go:(*Cell).Status": 1}
 type leaseWaitCall struct {
 	site   string
 	offset int
+	target string
 }
 
 // leaseWaitTyped type-checks the sources system builds through the package
@@ -320,7 +349,7 @@ func leaseWaitTyped(world *referencesWorld, system string, sources map[string]st
 				ast.Inspect(node, func(node ast.Node) bool {
 					if identifier, ok := node.(*ast.Ident); ok && !called[identifier] {
 						if object := leaseWaitOrigin(info.Uses[identifier]); object != nil && targets[object] {
-							calls[leaseWaitCall{name + ":" + owner, fset.PositionFor(identifier.Pos(), false).Offset}] = "value"
+							calls[leaseWaitCall{name + ":" + owner, fset.PositionFor(identifier.Pos(), false).Offset, identifier.Name}] = "value"
 						}
 					}
 					call, _ := node.(*ast.CallExpr)
@@ -333,7 +362,7 @@ func leaseWaitTyped(world *referencesWorld, system string, sources map[string]st
 					if callee == nil && !seam {
 						return true
 					}
-					use, own, receiver := leaseWaitCall{name + ":" + owner, fset.PositionFor(call.Pos(), false).Offset}, leaseWaitOwnTyped(info, holder, call.Args), (*types.Var)(nil)
+					use, own, receiver := leaseWaitCall{name + ":" + owner, fset.PositionFor(call.Pos(), false).Offset, referencesIdentifier(call.Fun).Name}, leaseWaitOwnTyped(info, holder, call.Args), (*types.Var)(nil)
 					if !seam {
 						receiver = callee.Signature().Recv()
 					}
@@ -428,9 +457,14 @@ func leaseWaitContract(sources map[string]string) (result []string) {
 			calls[call] = kind
 		}
 	}
+	serviceCalls := map[string][]string{}
 	for call, kind := range calls {
 		switch _, owner, _ := strings.Cut(call.site, ":"); kind {
-		case "live": // an own context enters the layer only from the layer or a released declaration
+		case "live":
+			if _, service := leaseWaitServiceCalls[call.site]; service || slices.Contains(leaseWaitServiceOpeners, "(*Cell)."+call.target) {
+				serviceCalls[call.site] = append(serviceCalls[call.site], call.target)
+				continue
+			}
 			failures["lease_wait_live:"+call.site] = failures["lease_wait_live:"+call.site] || !slices.Contains(leaseWaitOpeners, owner) && !slices.Contains(leaseWaitReleased, call.site)
 		case "value":
 			values[call.site]++
@@ -441,6 +475,10 @@ func leaseWaitContract(sources map[string]string) (result []string) {
 			placeholders[call.site]++
 			failures["lease_wait_placeholder:"+call.site] = failures["lease_wait_placeholder:"+call.site] || kind != "placeholder"
 		}
+	}
+	for _, site := range slices.Concat(slices.Collect(maps.Keys(serviceCalls)), slices.Collect(maps.Keys(leaseWaitServiceCalls))) {
+		slices.Sort(serviceCalls[site])
+		failures["lease_wait_live:"+site] = strings.Join(serviceCalls[site], " ") != leaseWaitServiceCalls[site]
 	}
 	for _, site := range slices.Concat(slices.Collect(maps.Keys(values)), slices.Collect(maps.Keys(leaseWaitValueUses))) {
 		failures["lease_wait_value:"+site] = values[site] != leaseWaitValueUses[site]
@@ -498,7 +536,8 @@ func leaseWaitContract(sources map[string]string) (result []string) {
 			referencesDeclarations(declaration, func(owner string, node ast.Node) {
 				function, _ := node.(*ast.FuncDecl) // G1: a layer declaration that assigns or exposes its own context
 				function = leaseWaitHolder(function, node)
-				layer := function != nil && (slices.Contains(leaseWaitOpeners, owner) || slices.Contains(leaseWaitReleased, name+":"+owner))
+				_, service := leaseWaitServiceCalls[name+":"+owner]
+				layer := function != nil && (service || slices.Contains(leaseWaitOpeners, owner) || slices.Contains(leaseWaitReleased, name+":"+owner))
 				ast.Inspect(node, func(node ast.Node) bool {
 					var targets []ast.Expr
 					switch node := node.(type) {
@@ -586,8 +625,14 @@ func leaseWaitContract(sources map[string]string) (result []string) {
 	for _, site := range slices.Concat(leaseWaitReleased, leaseWaitDetachedHeld) {
 		failures["lease_wait_detached"] = failures["lease_wait_detached"] || placeholders[site] != 0
 	}
-	for _, site := range slices.Concat(slices.Collect(maps.Keys(reassigned)), leaseWaitReleased[:3]) { // only the three entries' detach
-		failures["lease_wait_reassigned:"+site] = reassigned[site] != map[bool]int{true: 1}[slices.Contains(leaseWaitReleased[:3], site)]
+	for _, site := range slices.Concat(slices.Collect(maps.Keys(reassigned)), leaseWaitReleased[:3]) {
+		want := map[bool]int{true: 1}[slices.Contains(leaseWaitReleased[:3], site)]
+		if site == "service_supervisor.go:(*supervisor).command" {
+			// The whole command body is pinned in maintenanceHostSupervisorPins:
+			// its optional health timeout and command marker both derive from ctx.
+			want = 2
+		}
+		failures["lease_wait_reassigned:"+site] = reassigned[site] != want
 	}
 	for file, texts := range leaseWaitCutText {
 		for _, text := range texts {
@@ -792,6 +837,7 @@ func TestLeaseWaitSourceContract(t *testing.T) {
 // for good, and lets go only within first/2 of last seeing its lease unbroken, then takes it again by
 // raw fcntl calls, a refused re-take retried for at most first/4.
 var leaseHolderRules = map[string]string{"take": "\tgo l.hold(f, l.retake, leaseWait.first, time.Now())\n", "hold": `func (l *writerLease) hold(f *os.File, retaking bool, first time.Duration, fresh time.Time) {
+	defer l.holders.Done()
 	nap, lost := func() { time.Sleep(100 * time.Microsecond) }, false
 	if retaking {
 		runtime.LockOSThread()

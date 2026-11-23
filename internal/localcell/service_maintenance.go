@@ -21,19 +21,19 @@ func (c *Cell) serviceMaintenanceObservation(ctx context.Context, observed *Serv
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	lock, err := c.own(context.Background(), false)
+	lock, err := c.own(ctx, false)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = lock.Close() }()
-	d, err := c.readServiceDescriptor()
+	d, err := c.readServiceDescriptor(ctx)
 	if err != nil {
 		return err
 	}
 	if observed != nil {
 		*observed = d
 	}
-	if err := c.maintenanceFenceAllows(context.Background(), 0); err != nil {
+	if err := c.maintenanceFenceAllows(ctx, 0); err != nil {
 		return err
 	}
 	return nil
@@ -45,6 +45,9 @@ func (s *supervisor) observeServiceMaintenance(ctx context.Context) (bool, error
 
 func (s *supervisor) observeServiceMaintenanceInto(ctx context.Context, observed *ServiceDescriptor) (bool, error) {
 	err := s.cell.serviceMaintenanceObservation(ctx, observed)
+	if serviceLeaseCut(err) {
+		return false, err
+	}
 	if cancellation := serviceControlCancellation(ctx); cancellation != nil {
 		return false, cancellation
 	}

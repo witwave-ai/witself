@@ -38,7 +38,7 @@ func (s *supervisor) commitShutdownFault(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	err := s.cell.commitServiceFault(true, &s.shutdownFaultCommit)
+	err := s.cell.commitServiceFault(ctx, true, &s.shutdownFaultCommit)
 	s.shutdownFaultPending = err != nil
 	return err
 }

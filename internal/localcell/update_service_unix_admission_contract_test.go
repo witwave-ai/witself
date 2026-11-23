@@ -141,7 +141,7 @@ if err != nil {
  if errors.Is(err, ErrLocked) { return nil, ServiceDescriptor{}, nil, err }
  return nil, ServiceDescriptor{}, nil, serviceSystemdError(ErrServiceOwnershipConflict, step+":root", "unavailable")
 }
-fresh, err := cell.serviceDescriptorForOwner(owner)
+fresh, err := cell.serviceDescriptorForOwner(context.Background(), owner)
 if err != nil {
  _ = lock.Close()
  return nil, ServiceDescriptor{}, nil, serviceSystemdError(ErrServiceOwnershipConflict, step+":descriptor", "unavailable")
@@ -280,7 +280,7 @@ func unixServiceDescriptorOwnerSourceContract(t *testing.T) {
 	sources := admissionReadSources(t)
 	for _, ending := range []string{"LF", "CRLF"} {
 		t.Run("source_"+ending, func(t *testing.T) {
-			wrappers, ownerReaders, lockReaders := 0, 0, 0
+			wrappers, validated, ownerReaders, lockReaders := 0, 0, 0, 0
 			ownerCalls, lockOwnerCalls, helperCalls, nativeUIDs := 0, 0, 0, 0
 			bodyMatches := func(fn *ast.FuncDecl, source string) bool {
 				want := admissionStatements(source)
@@ -312,21 +312,26 @@ func unixServiceDescriptorOwnerSourceContract(t *testing.T) {
 					switch owner {
 					case "ServiceDescriptor":
 						wrappers++
+						if filename != "service_descriptor.go" || updateReceiverName(fn) != "Cell" || !bodyMatches(fn, "return c.serviceDescriptor(context.Background())") {
+							t.Fatal("Public descriptor wrapper changed")
+						}
+					case "serviceDescriptor":
+						validated++
 						if filename != "service_descriptor.go" || updateReceiverName(fn) != "Cell" || !bodyMatches(fn, `var d ServiceDescriptor
 if err := c.validateRoot(false); err != nil { return d, err }
-return c.readServiceDescriptor()`) {
-							t.Fatal("Public descriptor wrapper changed")
+return c.readServiceDescriptor(ctx)`) {
+							t.Fatal("Validated descriptor reader changed")
 						}
 					case "serviceDescriptorForOwner":
 						ownerReaders++
 						if filename != "service_descriptor.go" || updateReceiverName(fn) != "Cell" || !bodyMatches(fn, `var d ServiceDescriptor
 if err := c.validateRoot(false); err != nil { return d, err }
-return c.readServiceDescriptorForOwner(owner)`) {
+return c.readServiceDescriptorForOwner(ctx, owner)`) {
 							t.Fatal("Owner descriptor wrapper changed")
 						}
 					case "readServiceDescriptor":
 						lockReaders++
-						if filename != "service_descriptor.go" || updateReceiverName(fn) != "Cell" || !bodyMatches(fn, `return c.readServiceDescriptorForOwner("")`) {
+						if filename != "service_descriptor.go" || updateReceiverName(fn) != "Cell" || !bodyMatches(fn, `return c.readServiceDescriptorForOwner(ctx, "")`) {
 							t.Fatal("Lock held descriptor wrapper changed")
 						}
 					}
@@ -334,15 +339,15 @@ return c.readServiceDescriptorForOwner(owner)`) {
 						if call, ok := node.(*ast.CallExpr); ok {
 							if selector, ok := call.Fun.(*ast.SelectorExpr); ok && selector.Sel.Name == "serviceDescriptorForOwner" {
 								ownerCalls++
-								if filename != "service_adapter_admission.go" || owner != "serviceAdapterAdmissionForStep" || admissionNodeText(call) != "cell.serviceDescriptorForOwner(owner)" {
+								if filename != "service_adapter_admission.go" || owner != "serviceAdapterAdmissionForStep" || admissionNodeText(call) != "cell.serviceDescriptorForOwner(context.Background(), owner)" {
 									t.Fatal("Owner descriptor call escaped admission")
 								}
 							}
 							if selector, ok := call.Fun.(*ast.SelectorExpr); ok && selector.Sel.Name == "readServiceDescriptorForOwner" {
 								lockOwnerCalls++
-								want := `c.readServiceDescriptorForOwner("")`
+								want := `c.readServiceDescriptorForOwner(ctx, "")`
 								if owner == "serviceDescriptorForOwner" {
-									want = "c.readServiceDescriptorForOwner(owner)"
+									want = "c.readServiceDescriptorForOwner(ctx, owner)"
 								}
 								if filename != "service_descriptor.go" || fn == nil || updateReceiverName(fn) != "Cell" || (owner != "serviceDescriptorForOwner" && owner != "readServiceDescriptor") || admissionNodeText(call) != want {
 									t.Fatal("Lock held owner descriptor call escaped wrappers")
@@ -377,7 +382,7 @@ return c.readServiceDescriptorForOwner(owner)`) {
 					})
 				}
 			}
-			if wrappers != 1 || ownerReaders != 1 || lockReaders != 1 || ownerCalls != 1 || lockOwnerCalls != 2 || helperCalls != 2 || nativeUIDs != 2 {
+			if wrappers != 1 || validated != 1 || ownerReaders != 1 || lockReaders != 1 || ownerCalls != 1 || lockOwnerCalls != 2 || helperCalls != 2 || nativeUIDs != 2 {
 				t.Fatal("Descriptor source owner inventory changed")
 			}
 		})
@@ -497,7 +502,7 @@ func TestUnixServiceMaintenanceAdmissionSourceContract(t *testing.T) {
 		{"helper_no_lock", "lock, err := cell.own(context.Background(), false)", "lock, err := fakeLock, fakeError"},
 		{"helper_positive_own", "cell.own(context.Background(), false)", "cell.own(context.Background(), true)"},
 		{"helper_wrapped_contention", "if errors.Is(err, ErrLocked) {\n\t\t\treturn nil, ServiceDescriptor{}, nil, err", "if errors.Is(err, ErrLocked) {\n\t\t\treturn nil, ServiceDescriptor{}, nil, ErrServiceOwnershipConflict"},
-		{"helper_public_reader", "cell.serviceDescriptorForOwner(owner)", "cell.ServiceDescriptor()"},
+		{"helper_public_reader", "cell.serviceDescriptorForOwner(context.Background(), owner)", "cell.ServiceDescriptor()"},
 		{"helper_no_immutable", statement(`if !reflect.DeepEqual(windowsTaskImmutable(fresh), windowsTaskImmutable(d)) { _ = lock.Close(); return nil, ServiceDescriptor{}, nil, serviceSystemdError(ErrServiceOwnershipConflict, step+":descriptor", "stale_identity") }`), ""},
 		{"helper_missing_failure_release", "_ = lock.Close()", "_ = lock"},
 		{"helper_return_other_cell", "return cell, fresh, func()", "return other, fresh, func()"},

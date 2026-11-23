@@ -43,7 +43,7 @@ func TestTaskHostValidationReopensManifestOwnerGenerationAndExecutable(t *testin
 		ownerCalled = true
 		return nil
 	}
-	d, err := c.validateTaskHost(original.Payload.Generation, owner)
+	d, err := c.validateTaskHost(t.Context(), original.Payload.Generation, owner)
 	if err != nil || !reflect.DeepEqual(d, original) || !ownerCalled || os.Getenv("WITSELF_RUNTIME") != "hosted" {
 		t.Fatal("read only task host validation changed runtime or descriptor")
 	}
@@ -58,13 +58,17 @@ func TestTaskHostValidationReopensManifestOwnerGenerationAndExecutable(t *testin
 		{"host", func(d *ServiceDescriptor) { d.Payload.Host = filepath.Join(c.cfg.Root, "missing-host") }},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			ownerCalled = false
 			changed := original
 			test.change(&changed)
 			if err := writeAtomic(c.path("service", "descriptor.json"), changed, nil); err != nil {
 				t.Fatal("cannot change task host refusal fixture")
 			}
-			if _, err := c.validateTaskHost(original.Payload.Generation, owner); err == nil {
+			if _, err := c.validateTaskHost(t.Context(), original.Payload.Generation, owner); err == nil {
 				t.Fatal("task host validation accepted a mismatched identity")
+			}
+			if ownerCalled != (test.name == "host") {
+				t.Fatal("task host native owner gate ran out of order")
 			}
 			if os.Getenv("WITSELF_RUNTIME") != "hosted" {
 				t.Fatal("refused task host validation selected local runtime")
@@ -87,7 +91,7 @@ func TestTaskHostPublicEntryUsesOwnerValidation(t *testing.T) {
 		t.Fatal("task host public entry disagreed with native owner policy")
 	}
 	refusal := errors.New("fixture token refusal")
-	if _, err := c.validateTaskHost(descriptor.Payload.Generation, func(string) error { return refusal }); !errors.Is(err, refusal) {
+	if _, err := c.validateTaskHost(t.Context(), descriptor.Payload.Generation, func(string) error { return refusal }); !errors.Is(err, refusal) {
 		t.Fatal("task host ignored its native owner validation refusal")
 	}
 	source, err := os.ReadFile("service_task_host.go")
@@ -95,7 +99,7 @@ func TestTaskHostPublicEntryUsesOwnerValidation(t *testing.T) {
 		t.Fatal("cannot read task host validation contract")
 	}
 	normalized := strings.ReplaceAll(string(source), "\r\n", "\n")
-	if !strings.Contains(normalized, "func (c *Cell) ValidateTaskHost(generation string) (ServiceDescriptor, error) {\n\treturn c.validateTaskHost(generation, validateTaskHostOwner)\n}") {
+	if !strings.Contains(normalized, "func (c *Cell) ValidateTaskHost(generation string) (ServiceDescriptor, error) {\n\treturn c.validateTaskHost(context.Background(), generation, validateTaskHostOwner)\n}") {
 		t.Fatal("task host public entry omitted the native owner gate")
 	}
 }

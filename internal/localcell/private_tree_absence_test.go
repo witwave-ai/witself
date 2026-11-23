@@ -77,7 +77,7 @@ func TestPrivateTreeWalkersWalkAgain(t *testing.T) {
 // a walk that met a vanished directory is a layout refusal at every descriptor reader, never an absence.
 func TestPrivateTreeWalkAbsenceIsNotDescriptorAbsence(t *testing.T) {
 	c, d := descriptorTestCell(t) // WITSELF_RUNTIME=local, a prepared foreground descriptor
-	if c.SetServiceDesiredState(t.Context(), "stopped") != nil || !errors.Is(c.serviceStartFence(), ErrServiceDesiredState) {
+	if c.SetServiceDesiredState(t.Context(), "stopped") != nil || !errors.Is(c.serviceStartFence(t.Context()), ErrServiceDesiredState) {
 		t.Fatal("cannot fence the descriptor fixture with a stopped state")
 	}
 	before, err := os.ReadFile(c.path("service", "descriptor.json"))
@@ -102,7 +102,7 @@ func TestPrivateTreeWalkAbsenceIsNotDescriptorAbsence(t *testing.T) {
 	if _, err := c.ServiceDescriptor(); !errors.Is(err, errPrivateLayout) || errors.Is(err, fs.ErrNotExist) {
 		t.Error("the descriptor read took a vanished tree object for an absent descriptor")
 	}
-	if c.serviceStartFence() == nil {
+	if c.serviceStartFence(t.Context()) == nil {
 		t.Error("the start fence opened on a vanished tree object")
 	}
 	if c.reinstallServiceFence() == nil {
@@ -114,7 +114,7 @@ func TestPrivateTreeWalkAbsenceIsNotDescriptorAbsence(t *testing.T) {
 	if c.exitServiceHostForRemoval(t.Context()) == nil {
 		t.Error("the removal skipped its host exit on a vanished tree object")
 	}
-	if err := c.setServiceDesiredStateLocked("stopped"); err == nil || errors.Is(err, fs.ErrNotExist) {
+	if err := c.setServiceDesiredStateLocked(t.Context(), "stopped"); err == nil || errors.Is(err, fs.ErrNotExist) {
 		t.Error("the desired-state write took a vanished tree object for an absent descriptor")
 	}
 	// The service preparation's descriptor read is its fourth crossing, after the three of own(false).
