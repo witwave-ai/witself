@@ -15,7 +15,7 @@ import (
 // private_beneath_unix.go's imports (none renamed), unix and seam calls by exact text and count, the unix constants it
 // may name (anything else named from unix breaks a key), and the pathname calls it never names, beside any filepath function.
 var (
-	privateBeneathImports = []string{"errors", "golang.org/x/sys/unix", "io/fs", "math/rand/v2", "os", "strconv", "strings", "time"}
+	privateBeneathImports = []string{"errors", "golang.org/x/sys/unix", "io", "io/fs", "math/rand/v2", "os", "strconv", "strings", "time"}
 	privateBeneathCalls   = map[string]int{"unix.Fstat(dir, &device)": 1, "unix.Fstat(next, &stat)": 1, "unix.Close(next)": 1,
 		"unix.Openat(dir, part, unix.O_NOFOLLOW | unix.O_DIRECTORY | unix.O_CLOEXEC, 0)": 1, "unix.Fstat(dir, &parent)": 1, "unix.Fstat(fd, &stat)": 1,
 		"unix.Openat(dir, last, unix.O_RDONLY | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_CLOEXEC, 0)": 1, "unix.Close(fd)": 2, "unix.Mkdirat(dir, last, 0o700)": 1,
@@ -24,13 +24,13 @@ var (
 		"unix.Openat(dir, last, unix.O_RDONLY | unix.O_NOFOLLOW | unix.O_NONBLOCK | unix.O_NOCTTY | unix.O_CLOEXEC, 0)": 1, "unix.FcntlInt(uintptr(fd), unix.F_DUPFD_CLOEXEC, 0)": 1,
 		"unix.Fstatat(fd, names[index], &stat, unix.AT_SYMLINK_NOFOLLOW)": 1, "unix.Unlinkat(dir, last, 0)": 1, "unix.Unlinkat(dir, last, unix.AT_REMOVEDIR)": 1,
 		"unix.Fstat(fd, &self)": 1, "unix.Fstatat(fd, name, &stat, unix.AT_SYMLINK_NOFOLLOW)": 1, "unix.Unlinkat(fd, name, 0)": 1, "unix.Unlinkat(fd, name, unix.AT_REMOVEDIR)": 1,
-		"privateBeneathSameDevice(uint64(self.Dev), uint64(stat.Dev))": 1, "dir.Sync()": 1}
-	privateBeneathConstants = strings.Fields("AT_REMOVEDIR AT_SYMLINK_NOFOLLOW EBADF EEXIST EINVAL ENOENT ENOTDIR EXDEV F_DUPFD_CLOEXEC O_CLOEXEC O_CREAT O_DIRECTORY O_EXCL O_NOCTTY O_NOFOLLOW O_NONBLOCK O_RDONLY O_RDWR S_IFDIR S_IFIFO S_IFLNK S_IFMT S_IFREG Stat_t")
+		"privateBeneathSameDevice(uint64(self.Dev), uint64(stat.Dev))": 1, "privateBeneathMadeID(fd, stat)": 1, "dir.Readdirnames(1)": 1, "dir.Sync()": 1}
+	privateBeneathConstants = strings.Fields("AT_REMOVEDIR AT_SYMLINK_NOFOLLOW EBADF EEXIST EINVAL ENOENT ENOTDIR ENOTEMPTY EXDEV F_DUPFD_CLOEXEC O_CLOEXEC O_CREAT O_DIRECTORY O_EXCL O_NOCTTY O_NOFOLLOW O_NONBLOCK O_RDONLY O_RDWR S_IFDIR S_IFIFO S_IFLNK S_IFMT S_IFREG Stat_t")
 	privateBeneathPathname  = strings.Fields("os.Open os.OpenFile os.Lstat os.Stat os.Mkdir os.MkdirAll os.Rename os.Remove os.RemoveAll os.ReadDir os.Create os.CreateTemp os.Chmod os.OpenRoot unix.Fsync")
 	// The walk's declarations the copy's tree (checkpoint_tree_unix.go) may name, by owning declaration (the type
 	// checkpointTree and its constructor share one) and count (N5 of LC-CKPT-WALK-1BR); anything else breaks a key.
 	privateBeneathTreeNames = map[string]int{"checkpointTree:privateBeneathID": 2, "want:privateBeneathID": 1, "lstat:privateBeneathLstat": 1,
-		"mkdir:privateBeneathMkdir": 1, "mkdir:privateBeneathSync": 1, "mkdir:privateBeneathID": 1, "createTemp:privateBeneathCreateTemp": 1,
+		"mkdir:privateBeneathMkdir": 1, "mkdir:privateBeneathSync": 1, "recordMkdir:privateBeneathID": 2, "createTemp:privateBeneathCreateTemp": 1,
 		"publish:privateBeneathPublish": 1, "sync:privateBeneathDirectory": 1, "sync:privateBeneathID": 1, "sync:privateBeneathSync": 1,
 		"discard:privateBeneathLstat": 3, "discard:privateBeneathIdentity": 1, "checkpointTreeRemoveDirectory:privateBeneathID": 1,
 		// delete's admission, adoption, unseal and sweep; the discard removes through the sweep (LC-CKPT-WALK-1C3B).
@@ -138,6 +138,10 @@ func TestPrivateBeneathSourceContract(t *testing.T) {
 		{"walk_follows", walk, [][2]string{{"unix.O_NOFOLLOW|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)", "unix.O_DIRECTORY|unix.O_CLOEXEC, 0)"}},
 			[]string{open + "DIRECTORY | unix.O_CLOEXEC, 0)", open + "NOFOLLOW | unix.O_DIRECTORY | unix.O_CLOEXEC, 0)"}},
 		{"walk_pathname", walk, [][2]string{{"\tparts := strings.Split(name, \"/\")\n", "\tparts := strings.Split(name, \"/\")\n\t_, _ = os.Lstat(name)\n"}}, []string{"private_beneath_pathname:os.Lstat"}},
+		{"mkdir_lists_by_name", walk, [][2]string{{"dir.Readdirnames(1)", "os.ReadDir(dir.Name())"}},
+			[]string{"private_beneath_call:dir.Readdirnames(1)", "private_beneath_pathname:os.ReadDir"}},
+		{"mkdir_checks_parent", walk, [][2]string{{"privateBeneathMadeID(fd, stat)", "privateBeneathMadeID(dir, stat)"}},
+			[]string{"private_beneath_call:privateBeneathMadeID(fd, stat)"}},
 		{"sync_raw", walk, [][2]string{{"return privateBeneathDup(fd, func(dir *os.File) error { return dir.Sync() })", "return unix.Fsync(fd)"}},
 			[]string{"private_beneath_call:dir.Sync()", "private_beneath_pathname:unix.Fsync"}},
 		{"reference_elsewhere", "checkpoint.go", [][2]string{{"\nfunc ClassifyCheckpointFailure(", "\nfunc zz() { _ = privateBeneathAt }\n\nfunc ClassifyCheckpointFailure("}},

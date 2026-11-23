@@ -358,7 +358,7 @@ postgres_windows.go
 	(*Cell).windowsPostgresReady readPostgresFile
 	(*Cell).windowsStalePostmaster readPostgresFile
 private_beneath_unix.go
-	import errors golang.org/x/sys/unix io/fs math/rand/v2 os strconv strings time
+	import errors golang.org/x/sys/unix io io/fs math/rand/v2 os strconv strings time
 	privateBeneathAt (*os.Root).Open golang.org/x/sys/unix.Openat
 	privateBeneathCreateTemp golang.org/x/sys/unix.Openat os.NewFile
 	privateBeneathDup golang.org/x/sys/unix.FcntlInt os.NewFile
