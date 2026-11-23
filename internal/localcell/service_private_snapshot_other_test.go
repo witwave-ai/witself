@@ -60,7 +60,7 @@ func snapshotAdmissionRows(t *testing.T) {
 		t.Run(row, func(t *testing.T) {
 			c, d := descriptorTestCell(t)
 			boot := func() (string, error) { return "fixture-boot", nil }
-			lease, err := c.acquireServiceLeaseWithBoot(d, boot)
+			lease, err := c.acquireServiceLeaseForPlatform(d, boot, "windows")
 			if err != nil {
 				t.Fatal("cannot prepare private snapshot lease")
 			}
@@ -68,6 +68,9 @@ func snapshotAdmissionRows(t *testing.T) {
 			name, err := newServiceControlPipeName(d.InstallationID)
 			if err != nil {
 				t.Fatal("cannot prepare private snapshot endpoint")
+			}
+			if c.completeServiceLease(d, name, boot) != nil {
+				t.Fatal("cannot complete private snapshot lease")
 			}
 			want, err := c.publishServiceControlEndpointWithBoot(name, boot)
 			if err != nil {

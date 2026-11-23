@@ -782,13 +782,19 @@ func TestWindowsPrivatePipeDecoyServer(t *testing.T) {
 			if err != nil {
 				t.Fatal("cannot name decoy fixture")
 			}
+			if c.completeServiceLease(descriptor, name, serviceBootID) != nil {
+				t.Fatal("cannot complete peer fixture lease")
+			}
 			record, err := c.publishServiceControlEndpoint(name)
 			if err != nil {
 				t.Fatal("cannot publish decoy fixture")
 			}
 			command, _, output := windowsPipeFixtureCommand(ctx, t, "pipe-decoy", name)
 			windowsPipeFixtureReady(ctx, t, output)
-			staleLease := originalLease
+			var staleLease serviceLeaseRecord
+			if readServiceRecordJSON(t.Context(), c.path("service", "lease.json"), &staleLease) != nil {
+				t.Fatal("cannot read complete fixture lease")
+			}
 			if mismatch == "start" {
 				record.HostPID, staleLease.PID = command.Process.Pid, command.Process.Pid
 				record.HostStartIdentity, staleLease.StartIdentity = "windows:0:1", "windows:0:1"
@@ -1248,4 +1254,14 @@ func TestWindowsPrivatePipeDisconnectedPeerEOF(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The native transport fixtures acquire their lease directly. Run passes the
+// descriptor that it checked before acquiring that lease.
+func (c *Cell) listenServiceControl() (net.Listener, error) {
+	initial, err := c.ServiceDescriptor()
+	if err != nil {
+		return nil, err
+	}
+	return c.listenRunServiceControl(initial)
 }

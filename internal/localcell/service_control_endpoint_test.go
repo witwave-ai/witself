@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -17,8 +18,11 @@ func endpointFixture(t *testing.T) (serviceControlEndpointRecord, ServiceDescrip
 		t.Fatal("cannot construct endpoint fixture")
 	}
 	d := ServiceDescriptor{InstallationID: "lc_fixture", UID: "fixture-owner", Revision: 7, Payload: ServicePayload{Generation: "generation-1"}}
-	l := serviceLeaseRecord{Version: 1, InstallationID: d.InstallationID, Owner: d.UID, PID: 123, StartIdentity: "windows:1:2", BootID: "windows:fixture-boot"}
-	r := serviceControlEndpointRecord{Version: 1, InstallationID: d.InstallationID, Generation: d.Payload.Generation, DescriptorRevision: d.Revision,
+	l := serviceLeaseRecord{
+		serviceLeaseIdentity: serviceLeaseIdentity{Version: 2, InstallationID: d.InstallationID, Owner: d.UID, PID: 123, StartIdentity: "windows:1:2", BootID: "windows:fixture-boot"},
+		BindingRevision:      d.Revision, Generation: d.Payload.Generation, PipeName: name,
+	}
+	r := serviceControlEndpointRecord{Version: 2, InstallationID: d.InstallationID, Generation: d.Payload.Generation, BindingRevision: d.Revision,
 		BootID: l.BootID, HostPID: l.PID, HostStartIdentity: l.StartIdentity, PipeName: name}
 	return r, d, l
 }
@@ -91,8 +95,29 @@ func TestServiceControlEndpointBindingRefusals(t *testing.T) {
 		{"generation", func(r *serviceControlEndpointRecord, _ *ServiceDescriptor, _ *serviceLeaseRecord, _ *string) {
 			r.Generation = "other"
 		}},
+		{"issue_revision", func(r *serviceControlEndpointRecord, _ *ServiceDescriptor, _ *serviceLeaseRecord, _ *string) {
+			r.BindingRevision--
+		}},
+		{"issue_higher", func(_ *serviceControlEndpointRecord, _ *ServiceDescriptor, l *serviceLeaseRecord, _ *string) {
+			l.BindingRevision--
+		}},
+		{"issue_zero", func(r *serviceControlEndpointRecord, _ *ServiceDescriptor, l *serviceLeaseRecord, _ *string) {
+			r.BindingRevision, l.BindingRevision = 0, 0
+		}},
+		{"issue_future", func(_ *serviceControlEndpointRecord, d *ServiceDescriptor, _ *serviceLeaseRecord, _ *string) {
+			d.Revision--
+		}},
+		{"lease_name", func(_ *serviceControlEndpointRecord, _ *ServiceDescriptor, l *serviceLeaseRecord, _ *string) {
+			l.PipeName = ""
+		}},
+		{"lease_generation", func(_ *serviceControlEndpointRecord, _ *ServiceDescriptor, l *serviceLeaseRecord, _ *string) {
+			l.Generation = "other"
+		}},
+		{"prior_activation", func(_ *serviceControlEndpointRecord, d *ServiceDescriptor, l *serviceLeaseRecord, _ *string) {
+			l.PipeName, _ = newServiceControlPipeName(d.InstallationID)
+		}},
 		{"revision", func(r *serviceControlEndpointRecord, _ *ServiceDescriptor, _ *serviceLeaseRecord, _ *string) {
-			r.DescriptorRevision++
+			r.BindingRevision++
 		}},
 		{"boot", func(_ *serviceControlEndpointRecord, _ *ServiceDescriptor, _ *serviceLeaseRecord, b *string) {
 			*b = "other"
@@ -187,35 +212,6 @@ func TestServiceControlEndpointPrivateReadAndOwnedRemoval(t *testing.T) {
 	}
 }
 
-func TestServiceControlEndpointRevisionRefresh(t *testing.T) {
-	c, d := descriptorTestCell(t)
-	r, _, _ := endpointFixture(t)
-	r.InstallationID, r.Generation, r.DescriptorRevision = d.InstallationID, d.Payload.Generation, d.Revision
-	c.serviceControlOwned = &r
-	if err := writeAtomic(c.path("service", "control-endpoint.json"), r, nil); err != nil {
-		t.Fatal("cannot prepare host endpoint")
-	}
-	if err := c.SetServiceDesiredState(t.Context(), "stopped"); err != nil {
-		t.Fatal("host command failed to advance descriptor and endpoint")
-	}
-	fresh, err := c.readServiceControlEndpointRecord()
-	if err != nil || fresh.DescriptorRevision != d.Revision+1 || !sameServiceControlHost(fresh, r) {
-		t.Fatal("host command left stale endpoint revision")
-	}
-	replacement := fresh
-	replacement.HostPID++
-	if writeAtomic(c.path("service", "control-endpoint.json"), replacement, nil) != nil {
-		t.Fatal("cannot prepare replacement")
-	}
-	if err := c.refreshOwnedServiceControlEndpoint(d); !errors.Is(err, ErrServiceControlRefused) {
-		t.Fatal("revision refresh adopted replacement host")
-	}
-	got, err := c.readServiceControlEndpointRecord()
-	if err != nil || got != replacement {
-		t.Fatal("revision refresh changed replacement endpoint")
-	}
-}
-
 func TestServiceControlHostedRefusesBeforeDiscovery(t *testing.T) {
 	c, _ := unitCell(t)
 	for _, selection := range []string{"", "hosted"} {
@@ -229,52 +225,215 @@ func TestServiceControlHostedRefusesBeforeDiscovery(t *testing.T) {
 	}
 }
 
-func TestServiceControlEndpointPublicationAndLiveRead(t *testing.T) {
-	c, d := descriptorTestCell(t)
+const bindingLiveFailure = "live discovery lost its activation fence"
+
+func endpointTestActivation(t *testing.T, c *Cell, d ServiceDescriptor, boot func() (string, error)) (*operationLock, serviceControlEndpointRecord) {
+	t.Helper()
+	lease, err := c.acquireServiceLeaseForPlatform(d, boot, "windows")
+	if err != nil {
+		t.Fatal(bindingLiveFailure)
+	}
+	t.Cleanup(func() { _ = lease.Close() })
 	name, err := newServiceControlPipeName(d.InstallationID)
-	if err != nil {
-		t.Fatal("cannot construct publication fixture")
+	if err != nil || c.completeServiceLease(d, name, boot) != nil {
+		t.Fatal(bindingLiveFailure)
 	}
-	// The transport owns binding; this tests only its portable publication seam.
-	if _, err := c.publishServiceControlEndpoint(name); !errors.Is(err, ErrServiceControlRefused) {
-		t.Fatal("endpoint published without host lease")
-	}
-	if _, err := c.readServiceControlEndpoint(); !errors.Is(err, ErrServiceControlRefused) {
-		t.Fatal("missing endpoint accepted by live reader")
-	}
-	boot := func() (string, error) { return "windows:synthetic-boot", nil }
-	lease, err := c.acquireServiceLeaseWithBoot(d, boot)
-	if err != nil {
-		t.Fatal("cannot acquire publication fixture lease")
-	}
-	defer func() { _ = lease.Close() }()
 	record, err := c.publishServiceControlEndpointWithBoot(name, boot)
 	if err != nil {
-		t.Fatal("valid leased endpoint could not publish")
+		t.Fatal(bindingLiveFailure)
 	}
 	fresh, err := c.readServiceControlEndpointWithBoot(boot)
 	if err != nil || fresh != record {
-		t.Fatal("published endpoint lost live descriptor/lease/boot binding")
+		t.Fatal(bindingLiveFailure)
 	}
-	for _, mutation := range []string{"boot", "revision", "start", "lease"} {
-		changed := record
-		switch mutation {
-		case "boot":
-			changed.BootID += "-stale"
-		case "revision":
-			changed.DescriptorRevision++
-		case "start":
-			changed.HostStartIdentity += "-stale"
-		case "lease":
-			if removePrivateFile(c.path("service", "lease.json")) != nil {
-				t.Fatal("cannot remove fixture lease record")
+	return lease, record
+}
+
+func TestServiceControlEndpointPublicationAndLiveRead(t *testing.T) {
+	for _, row := range []string{"issue_revision", "state_advanced", "legacy_mixed", "successor", "boot", "start", "lease", "provisional", "legacy_bootstrap", "missing"} {
+		t.Run(row, func(t *testing.T) {
+			c, d := descriptorTestCell(t)
+			boot := func() (string, error) { return "windows:synthetic-boot", nil }
+			name, err := newServiceControlPipeName(d.InstallationID)
+			if err != nil {
+				t.Fatal(bindingLiveFailure)
 			}
+			if row == "missing" {
+				if _, err := c.publishServiceControlEndpoint(name); !errors.Is(err, ErrServiceControlRefused) {
+					t.Fatal(bindingLiveFailure)
+				}
+				if _, err := c.readServiceControlEndpointWithBoot(boot); !errors.Is(err, ErrServiceControlRefused) {
+					t.Fatal(bindingLiveFailure)
+				}
+				return
+			}
+			if row == "provisional" || row == "legacy_bootstrap" {
+				platform := "windows"
+				if row == "legacy_bootstrap" {
+					platform = "linux"
+				}
+				lock, err := c.acquireServiceLeaseForPlatform(d, boot, platform)
+				if err != nil {
+					t.Fatal(bindingLiveFailure)
+				}
+				defer func() { _ = lock.Close() }()
+				if row == "legacy_bootstrap" && !errors.Is(c.completeServiceLease(d, name, boot), ErrServiceControlRefused) {
+					t.Fatal(bindingLiveFailure)
+				}
+				if _, err := c.publishServiceControlEndpointWithBoot(name, boot); !errors.Is(err, ErrServiceControlRefused) {
+					t.Fatal(bindingLiveFailure)
+				}
+				return
+			}
+			if row == "successor" {
+				testServiceBindingSuccessor(t, c, d, boot)
+				return
+			}
+			_, record := endpointTestActivation(t, c, d, boot)
+			changed := record
+			switch row {
+			case "issue_revision":
+				// Keep the claimed revision positive and within the live state
+				// range. Only its disagreement with the issued lease refuses.
+				if c.SetServiceDesiredState(t.Context(), "stopped") != nil {
+					t.Fatal(bindingLiveFailure)
+				}
+				advanced, err := c.ServiceDescriptor()
+				if err != nil || advanced.Revision != record.BindingRevision+1 {
+					t.Fatal(bindingLiveFailure)
+				}
+				changed.BindingRevision = advanced.Revision
+			case "state_advanced":
+				if c.SetServiceDesiredState(t.Context(), "stopped") != nil {
+					t.Fatal(bindingLiveFailure)
+				}
+				advanced, err := c.ServiceDescriptor()
+				if err != nil || advanced.Revision <= record.BindingRevision {
+					t.Fatal(bindingLiveFailure)
+				}
+				got, err := c.readServiceControlEndpointWithBoot(boot)
+				if err != nil || got != record {
+					t.Fatal(bindingLiveFailure)
+				}
+				return
+			case "legacy_mixed":
+				// Neither direction may use the other version as authority.
+				var live serviceLeaseRecord
+				leasePath := c.path("service", "lease.json")
+				if readServiceRecordJSON(t.Context(), leasePath, &live) != nil {
+					t.Fatal(bindingLiveFailure)
+				}
+				old := live.serviceLeaseIdentity
+				old.Version = 1
+				if writeAtomic(leasePath, old, nil) != nil {
+					t.Fatal(bindingLiveFailure)
+				}
+				if _, err := c.readServiceControlEndpointWithBoot(boot); !errors.Is(err, ErrServiceControlRefused) {
+					t.Fatal(bindingLiveFailure)
+				}
+				if writeAtomic(leasePath, live, nil) != nil {
+					t.Fatal(bindingLiveFailure)
+				}
+				changed.Version = 1
+			case "boot":
+				changed.BootID += "-stale"
+			case "start":
+				changed.HostStartIdentity += "-stale"
+			case "lease":
+				if removePrivateFile(c.path("service", "lease.json")) != nil {
+					t.Fatal(bindingLiveFailure)
+				}
+			}
+			if writeAtomic(c.path("service", "control-endpoint.json"), changed, nil) != nil {
+				t.Fatal(bindingLiveFailure)
+			}
+			if _, err := c.readServiceControlEndpointWithBoot(boot); !errors.Is(err, ErrServiceControlRefused) {
+				t.Fatal(bindingLiveFailure)
+			}
+		})
+	}
+}
+
+const bindingLifetimeFailure = "listener lifetime disagreed with discovery"
+
+func TestServiceBindingLifetime(t *testing.T) {
+	testBindingLifetimePhases(t)
+	t.Run("successor_preserved", func(t *testing.T) {
+		c, d := descriptorTestCell(t)
+		boot := func() (string, error) { return "fixture-boot", nil }
+		_, record := endpointTestActivation(t, c, d, boot)
+		successor := record
+		var err error
+		successor.PipeName, err = newServiceControlPipeName(d.InstallationID)
+		if err != nil {
+			t.Fatal(bindingLifetimeFailure)
 		}
-		if writeAtomic(c.path("service", "control-endpoint.json"), changed, nil) != nil {
-			t.Fatal("cannot publish refused fixture")
+		published := false
+		err = c.removeOwnedServiceControlEndpointBy(record, func() {
+			published = writeAtomic(c.path("service", "control-endpoint.json"), successor, nil) == nil
+		})
+		survivor, readErr := c.readServiceControlEndpointRecord()
+		if !published || !errors.Is(err, ErrServiceControlRefused) || readErr != nil || survivor != successor {
+			t.Fatal(bindingLifetimeFailure)
 		}
-		if _, err := c.readServiceControlEndpointWithBoot(boot); !errors.Is(err, ErrServiceControlRefused) {
-			t.Fatal("live endpoint reader accepted stale authority")
+		if c.removeOwnedServiceControlEndpoint(successor) != nil {
+			t.Fatal(bindingLifetimeFailure)
 		}
+	})
+}
+
+// Standalone transport fixtures have no Run to supply the validated launch
+// descriptor. Unix opens the same socket even in fixtures without a descriptor.
+func (c *Cell) serveServiceControl(commands chan<- serviceCommand) (func(), error) {
+	var initial ServiceDescriptor
+	if runtime.GOOS == "windows" {
+		var err error
+		initial, err = c.ServiceDescriptor()
+		if err != nil {
+			return nil, err
+		}
+	}
+	return c.serveServiceControlForPlatform(commands, runtime.GOOS, initial)
+}
+
+func TestServiceBindingIssueDescriptor(t *testing.T) {
+	for _, row := range []string{"generation_changed", "host_changed", "state_advanced"} {
+		t.Run(row, func(t *testing.T) {
+			c, initial := descriptorTestCell(t)
+			lock, err := c.acquireServiceLeaseForPlatform(initial, func() (string, error) { return "fixture-boot", nil }, "windows")
+			if err != nil {
+				t.Fatal(bindingLifetimeFailure)
+			}
+			defer func() { _ = lock.Close() }()
+			if row == "state_advanced" {
+				if c.SetServiceDesiredState(t.Context(), "stopped") != nil {
+					t.Fatal(bindingLifetimeFailure)
+				}
+				d, err := c.serviceListenerDescriptor(initial)
+				if err != nil || d.Revision <= initial.Revision || d.DesiredState != "stopped" {
+					t.Fatal(bindingLifetimeFailure)
+				}
+				name, err := newServiceControlPipeName(initial.InstallationID)
+				boot := func() (string, error) { return "fixture-boot", nil }
+				var issued serviceLeaseRecord
+				if err != nil || c.completeServiceLease(initial, name, boot) != nil ||
+					readServiceRecordJSON(t.Context(), c.path("service", "lease.json"), &issued) != nil || issued.BindingRevision != d.Revision {
+					t.Fatal(bindingLifetimeFailure)
+				}
+				return
+			}
+			current := initial
+			if row == "generation_changed" {
+				current.Payload.Generation += "-changed"
+			} else {
+				current.Payload.Host += "-other"
+			}
+			if writeAtomic(c.path("service", "descriptor.json"), current, nil) != nil {
+				t.Fatal(bindingLifetimeFailure)
+			}
+			if _, err := c.serviceListenerDescriptor(initial); !errors.Is(err, ErrServiceControlRefused) {
+				t.Fatal(bindingLifetimeFailure)
+			}
+		})
 	}
 }

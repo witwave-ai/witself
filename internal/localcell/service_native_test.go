@@ -506,15 +506,22 @@ func waitServiceReadyAfter(parent context.Context, t *testing.T, cell *localcell
 	ticker := time.NewTicker(25 * time.Millisecond)
 	defer ticker.Stop()
 	var stats nativeServiceReadinessStatistics
+	published := cell.NativeTestEndpointPublished()
 	for {
-		attemptStarted := time.Now()
-		status, err := cell.Control(ctx, "health")
-		stats.observe(err, time.Since(waitingStarted), time.Since(attemptStarted))
-		if len(diagnostics) != 0 {
-			diagnostics[0].controlErr = err
-		}
-		if err == nil && status.Healthy {
-			return time.Since(started)
+		if published() {
+			attemptStarted := time.Now()
+			status, err := cell.Control(ctx, "health")
+			stats.observe(err, time.Since(waitingStarted), time.Since(attemptStarted))
+			if len(diagnostics) != 0 {
+				diagnostics[0].controlErr = err
+			}
+			if err == nil && status.Healthy {
+				return time.Since(started)
+			}
+			if localcell.NativeTestEndpointRecordRefused(err) {
+				stats.log(t.Logf, time.Since(waitingStarted), budget)
+				t.Fatal("native service authenticated health did not become ready")
+			}
 		}
 		if len(diagnostics) != 0 && diagnostics[0].foregroundExit.finished() {
 			stats.log(t.Logf, time.Since(waitingStarted), budget)

@@ -4,15 +4,32 @@ import (
 	"context"
 	"errors"
 	"os"
+	"runtime"
 )
 
-type serviceLeaseRecord struct {
+type serviceLeaseIdentity struct {
 	Version        int    `json:"version"`
 	BootID         string `json:"boot_id"`
 	StartIdentity  string `json:"start_identity"`
 	PID            int    `json:"pid"`
 	Owner          string `json:"owner"`
 	InstallationID string `json:"installation_id"`
+}
+
+type serviceLeaseRecord struct {
+	serviceLeaseIdentity
+	Generation      string `json:"generation,omitempty"`
+	BindingRevision uint64 `json:"binding_revision,omitempty"`
+	PipeName        string `json:"pipe_name,omitempty"`
+}
+
+// The Unix wire record predates Windows listener issuance. Its strict decoder
+// still rejects every field outside the original identity, even an empty one.
+func (r *serviceLeaseRecord) hostFields() any {
+	if runtime.GOOS == "windows" {
+		return r
+	}
+	return &r.serviceLeaseIdentity
 }
 
 // The stable file is never unlinked: unlinking a held lease permits two hosts
@@ -22,6 +39,10 @@ func (c *Cell) acquireServiceLease(d ServiceDescriptor) (*operationLock, error) 
 }
 
 func (c *Cell) acquireServiceLeaseWithBoot(d ServiceDescriptor, readBoot func() (string, error)) (*operationLock, error) {
+	return c.acquireServiceLeaseForPlatform(d, readBoot, runtime.GOOS)
+}
+
+func (c *Cell) acquireServiceLeaseForPlatform(d ServiceDescriptor, readBoot func() (string, error), platform string) (*operationLock, error) {
 	if err := privateDir(c.path("service"), false); err != nil {
 		return nil, serviceFailureAt(err, "lease_directory")
 	}
@@ -50,7 +71,13 @@ func (c *Cell) acquireServiceLeaseWithBoot(d ServiceDescriptor, readBoot func() 
 		_ = lock.Close()
 		return nil, err
 	}
-	record := serviceLeaseRecord{Version: 1, BootID: boot, StartIdentity: start, PID: os.Getpid(), Owner: d.UID, InstallationID: d.InstallationID}
+	record := serviceLeaseRecord{
+		serviceLeaseIdentity: serviceLeaseIdentity{Version: 1, BootID: boot, StartIdentity: start, PID: os.Getpid(), Owner: d.UID, InstallationID: d.InstallationID},
+		PipeName:             "",
+	}
+	if platform == "windows" {
+		record.Version = 2
+	}
 	if err := c.publishServiceLease(c.path("service", "lease.json"), record); err != nil {
 		_ = lock.Close()
 		return nil, serviceFailureAt(err, "lease_write")

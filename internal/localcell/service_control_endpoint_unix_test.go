@@ -36,3 +36,27 @@ func TestServiceControlEndpointUnixPrivateRecord(t *testing.T) {
 		t.Fatal("endpoint refusal changed symlink target")
 	}
 }
+
+func TestServiceHostExitUnixLeaseFormat(t *testing.T) {
+	c, d := descriptorTestCell(t)
+	lock, err := c.acquireServiceLease(d)
+	if err != nil {
+		t.Fatal("could not prepare version-one host lease")
+	}
+	defer func() { _ = lock.Close() }()
+	_, original, err := c.serviceHostExitIdentity()
+	if err != nil || original.Version != 1 {
+		t.Fatal("Unix exit refused its original lease")
+	}
+	// Even a zero-valued Windows field was unknown to the Unix reader.
+	legacy := struct {
+		serviceLeaseIdentity
+		BindingRevision uint64 `json:"binding_revision"`
+	}{serviceLeaseIdentity: original.serviceLeaseIdentity}
+	if writeAtomic(c.path("service", "lease.json"), legacy, nil) != nil {
+		t.Fatal("could not publish mixed lease fixture")
+	}
+	if _, _, err := c.serviceHostExitIdentity(); err == nil {
+		t.Fatal("Unix exit accepted a field outside its lease format")
+	}
+}

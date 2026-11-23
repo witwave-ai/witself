@@ -713,3 +713,53 @@ func WindowsPrivateRemove(path string) error {
 	}
 	return nil
 }
+
+// WindowsPrivateRemoveSameFile removes the object whose contents the caller
+// checked on expected. Keep the original file open so its identity cannot be
+// reused. The final disposition uses the compared DELETE handle, even if the
+// name is replaced between comparison and disposition.
+func WindowsPrivateRemoveSameFile(path string, expected *os.File) error {
+	clean, err := windowsPrivateCleanPath(path)
+	if err != nil {
+		return err
+	}
+	parent := filepath.Dir(clean)
+	guard, _, err := windowsPrivateGuard(parent)
+	if err != nil {
+		return err
+	}
+	defer guard.close()
+	if len(guard) == 0 || guard[len(guard)-1].path != parent {
+		return errWindowsPrivatePathChanged
+	}
+	if err := WindowsPrivateValidate(clean, false); err != nil {
+		return err
+	}
+	handle, err := windowsPrivateAt(guard[len(guard)-1].handle, filepath.Base(clean), windows.DELETE|windows.READ_CONTROL,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, windows.FILE_OPEN, windows.FILE_NON_DIRECTORY_FILE, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = windows.CloseHandle(handle) }()
+	if err := windowsPrivateValidateHandle(handle, false); err != nil {
+		return err
+	}
+	if err := guard.verify(clean, handle, false); err != nil {
+		return err
+	}
+	var original, current windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(windows.Handle(expected.Fd()), &original); err != nil {
+		return windowsPrivateFailure(err)
+	}
+	if err := windows.GetFileInformationByHandle(handle, &current); err != nil {
+		return windowsPrivateFailure(err)
+	}
+	if !windowsPrivateSameIdentity(original, current) {
+		return errWindowsPrivatePathChanged
+	}
+	remove := byte(1)
+	if err := windows.SetFileInformationByHandle(handle, windows.FileDispositionInfo, &remove, 1); err != nil {
+		return windowsPrivateFailure(err)
+	}
+	return nil
+}

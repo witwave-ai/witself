@@ -235,6 +235,12 @@ func (c *Cell) serviceControlSecretBy(ctx context.Context, open func(context.Con
 	return string(b), nil
 }
 
+func (c *Cell) serviceDescriptorBoundary(stage string, d ServiceDescriptor) {
+	if c.observeServiceDescriptor != nil {
+		c.observeServiceDescriptor(stage, d)
+	}
+}
+
 // Descriptor publication is an acknowledged journaled transition. The pending
 // record is replayed conservatively before any launch; it cannot relax a fence.
 func (c *Cell) writeServiceDescriptor(d ServiceDescriptor) (result error) {
@@ -242,16 +248,19 @@ func (c *Cell) writeServiceDescriptor(d ServiceDescriptor) (result error) {
 	if err := writeAtomic(c.path("service", "transition.json"), d, nil); err != nil {
 		return err
 	}
+	c.serviceDescriptorBoundary("journal", d)
 	if err := writeAtomic(c.path("service", "descriptor.json"), d, nil); err != nil {
 		return err
 	}
+	c.serviceDescriptorBoundary("descriptor", d)
 	if err := removePrivateFile(c.path("service", "transition.json")); err != nil {
 		return err
 	}
 	if err := syncDirectory(c.path("service")); err != nil {
 		return err
 	}
-	return c.refreshOwnedServiceControlEndpoint(d)
+	c.serviceDescriptorBoundary("retired", d)
+	return nil
 }
 
 func (c *Cell) serviceStartFence() error {

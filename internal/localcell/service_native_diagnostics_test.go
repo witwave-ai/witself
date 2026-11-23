@@ -1574,14 +1574,14 @@ func TestNativeServiceLaunchdStderrBounds(t *testing.T) {
 // This diagnostic record deliberately keeps data local: only field-presence and
 // equality booleans reach the log, including when parsing fails.
 type nativeServiceEndpointDiagnosticRecord struct {
-	Version            int    `json:"version"`
-	InstallationID     string `json:"installation_id"`
-	Generation         string `json:"generation"`
-	DescriptorRevision uint64 `json:"descriptor_revision"`
-	BootID             string `json:"boot_id"`
-	HostPID            int    `json:"host_pid"`
-	HostStartIdentity  string `json:"host_start_identity"`
-	PipeName           string `json:"pipe_name"`
+	Version           int    `json:"version"`
+	InstallationID    string `json:"installation_id"`
+	Generation        string `json:"generation"`
+	BindingRevision   uint64 `json:"binding_revision"`
+	BootID            string `json:"boot_id"`
+	HostPID           int    `json:"host_pid"`
+	HostStartIdentity string `json:"host_start_identity"`
+	PipeName          string `json:"pipe_name"`
 }
 
 func nativeServiceDiagnosticRecord(root, name string, target any) (present, valid bool) {
@@ -1614,12 +1614,15 @@ func nativeServiceWindowsEndpointDiagnostics(log func(string, ...any), root stri
 	var endpoint nativeServiceEndpointDiagnosticRecord
 	var descriptor localcell.ServiceDescriptor
 	var lease struct {
-		Version        int    `json:"version"`
-		BootID         string `json:"boot_id"`
-		PID            int    `json:"pid"`
-		StartIdentity  string `json:"start_identity"`
-		InstallationID string `json:"installation_id"`
-		Owner          string `json:"owner"`
+		Version         int    `json:"version"`
+		BootID          string `json:"boot_id"`
+		PID             int    `json:"pid"`
+		StartIdentity   string `json:"start_identity"`
+		InstallationID  string `json:"installation_id"`
+		Owner           string `json:"owner"`
+		Generation      string `json:"generation"`
+		BindingRevision uint64 `json:"binding_revision"`
+		PipeName        string `json:"pipe_name"`
 	}
 	endpointPresent, endpointValid := nativeServiceDiagnosticRecord(root, "control-endpoint.json", &endpoint)
 	descriptorPresent, descriptorValid := nativeServiceDiagnosticRecord(root, "descriptor.json", &descriptor)
@@ -1627,14 +1630,14 @@ func nativeServiceWindowsEndpointDiagnostics(log func(string, ...any), root stri
 	descriptorPair, leasePair := endpointValid && descriptorValid, endpointValid && leaseValid
 	log("native service endpoint record_present=%t record_decoded=%t descriptor_present=%t descriptor_decoded=%t lease_present=%t lease_decoded=%t", endpointPresent, endpointValid, descriptorPresent, descriptorValid, leasePresent, leaseValid)
 	log("native service endpoint version_valid=%t installation_equal=%t generation_equal=%t revision_equal=%t host_pid_equal=%t host_start_equal=%t boot_equal=%t owner_equal=%t pipe_present=%t",
-		endpointValid && endpoint.Version == 1, descriptorPair && endpoint.InstallationID != "" && endpoint.InstallationID == descriptor.InstallationID,
-		descriptorPair && endpoint.Generation != "" && endpoint.Generation == descriptor.Payload.Generation,
-		descriptorPair && endpoint.DescriptorRevision > 0 && endpoint.DescriptorRevision == descriptor.Revision,
+		leasePair && endpoint.Version == 2 && lease.Version == 2, descriptorPair && endpoint.InstallationID != "" && endpoint.InstallationID == descriptor.InstallationID && leasePair && lease.InstallationID == endpoint.InstallationID,
+		descriptorPair && endpoint.Generation != "" && endpoint.Generation == descriptor.Payload.Generation && leasePair && lease.Generation == endpoint.Generation,
+		descriptorPair && endpoint.BindingRevision > 0 && endpoint.BindingRevision <= descriptor.Revision && leasePair && endpoint.BindingRevision == lease.BindingRevision,
 		leasePair && endpoint.HostPID > 1 && endpoint.HostPID == lease.PID,
 		leasePair && endpoint.HostStartIdentity != "" && endpoint.HostStartIdentity == lease.StartIdentity,
 		leasePair && endpoint.BootID != "" && endpoint.BootID == lease.BootID,
 		descriptorValid && leaseValid && lease.Owner != "" && lease.Owner == descriptor.UID,
-		endpointValid && endpoint.PipeName != "")
+		leasePair && endpoint.PipeName != "" && endpoint.PipeName == lease.PipeName)
 	// The platform seam permits portable Windows-diagnostic fixtures; only a
 	// Windows process may query the actual Windows boot identity here.
 	if runtime.GOOS == "windows" {
@@ -1706,9 +1709,9 @@ func TestNativeServiceWindowsFailureDiagnostics(t *testing.T) {
 			t.Fatal("cannot write diagnostic fixture")
 		}
 	}
-	write("control-endpoint.json", nativeServiceEndpointDiagnosticRecord{Version: 1, InstallationID: "fixture", Generation: "generation", DescriptorRevision: 1, BootID: "windows:boot", HostPID: 50, HostStartIdentity: "windows:1:2", PipeName: pipe})
+	write("control-endpoint.json", nativeServiceEndpointDiagnosticRecord{Version: 2, InstallationID: "fixture", Generation: "generation", BindingRevision: 1, BootID: "windows:boot", HostPID: 50, HostStartIdentity: "windows:1:2", PipeName: pipe})
 	write("descriptor.json", localcell.ServiceDescriptor{InstallationID: "fixture", Revision: 1, UID: sid, Payload: localcell.ServicePayload{Generation: "generation"}})
-	write("lease.json", map[string]any{"version": 1, "boot_id": "windows:boot", "pid": 50, "start_identity": "windows:1:2", "installation_id": "fixture", "owner": sid})
+	write("lease.json", map[string]any{"version": 2, "binding_revision": 1, "pipe_name": pipe, "generation": "generation", "boot_id": "windows:boot", "pid": 50, "start_identity": "windows:1:2", "installation_id": "fixture", "owner": sid})
 	var stderr strings.Builder
 	for i := 0; i < 35; i++ {
 		fmt.Fprintf(&stderr, "host-line-%02d %s %s %s\n", i, sid, pipe, privatePath)
@@ -1748,7 +1751,7 @@ func TestNativeServiceWindowsFailureDiagnostics(t *testing.T) {
 			t.Error("Windows host log tail exceeded thirty lines")
 		}
 	}
-	write("control-endpoint.json", nativeServiceEndpointDiagnosticRecord{Version: 1, InstallationID: "other", Generation: "other", DescriptorRevision: 2, BootID: "other", HostPID: 51, HostStartIdentity: "other"})
+	write("control-endpoint.json", nativeServiceEndpointDiagnosticRecord{Version: 2, InstallationID: "other", Generation: "other", BindingRevision: 2, BootID: "other", HostPID: 51, HostStartIdentity: "other"})
 	logged.Reset()
 	nativeServiceWindowsEndpointDiagnostics(func(format string, args ...any) { fmt.Fprintf(&logged, format+"\n", args...) }, root)
 	for _, key := range []string{"installation_equal", "generation_equal", "revision_equal", "host_pid_equal", "host_start_equal", "boot_equal", "pipe_present"} {

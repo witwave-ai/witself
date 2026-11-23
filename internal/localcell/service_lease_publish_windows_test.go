@@ -120,10 +120,10 @@ func leasePublishWindowsFixture(t *testing.T) (*Cell, string, []byte, serviceLea
 		t.Fatal("cannot create private lease fixture directory")
 	}
 	path := c.path("service", "lease.json")
-	record := serviceLeaseRecord{
+	record := serviceLeaseRecord{serviceLeaseIdentity: serviceLeaseIdentity{
 		Version: 1, BootID: "synthetic-boot", StartIdentity: "synthetic-old-process",
 		PID: 101, Owner: "synthetic-owner", InstallationID: "lc_test",
-	}
+	}}
 	if err := writeAtomic(path, record, nil); err != nil {
 		t.Fatal("cannot publish initial lease fixture")
 	}

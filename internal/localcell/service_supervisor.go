@@ -138,7 +138,7 @@ func (c *Cell) Run(ctx context.Context, policy SupervisorPolicy) (result error) 
 	if commands == nil {
 		commands = make(chan serviceCommand)
 	}
-	closeControl, err := c.serveServiceControl(commands)
+	closeControl, err := c.serveServiceControlForPlatform(commands, runtime.GOOS, d)
 	if err != nil {
 		return serviceFailureFallback(err, "control_transport")
 	}
@@ -760,7 +760,7 @@ func (s *supervisor) rememberProcesses(d ServiceDescriptor) {
 		}
 	}
 	var lease serviceLeaseRecord
-	if readJSON(context.Background(), s.cell.path("service", "lease.json"), &lease) == nil && lease.PID > 1 && lease.StartIdentity != "" && lease.InstallationID == d.InstallationID && lease.Owner == d.UID {
+	if readJSON(context.Background(), s.cell.path("service", "lease.json"), lease.hostFields()) == nil && lease.PID > 1 && lease.StartIdentity != "" && lease.InstallationID == d.InstallationID && lease.Owner == d.UID {
 		s.status.Processes = append(s.status.Processes, ServiceProcessIdentity{Component: "service-host", PID: lease.PID, StartTime: lease.StartIdentity})
 	}
 }

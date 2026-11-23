@@ -23,12 +23,24 @@ import (
 // Host exit is a distinct authenticated transaction. An accepted response is
 // only an acknowledgement; a caller must observe the retained host and lease.
 type serviceHostExitEnvelope struct {
+	serviceHostExitBinding
 	InstallationID string `json:"installation_id"`
 	Generation     string `json:"generation"`
 	HostPID        int    `json:"host_pid"`
 	BootID         string `json:"boot_id"`
 	Challenge      string `json:"challenge"`
 }
+
+// Exact Windows activation selected for exit. Comparing the complete record
+// binds the retained process to its own listener. Unix has no such wire field.
+type serviceHostExitActivation struct {
+	Activation *serviceControlEndpointRecord `json:"activation"`
+}
+
+func (b serviceHostExitActivation) matches(record serviceControlEndpointRecord) bool {
+	return b.Activation != nil && *b.Activation == record
+}
+
 type serviceHostExitResponse struct {
 	Disposition string `json:"disposition"`
 	Challenge   string `json:"challenge"`
@@ -123,30 +135,30 @@ func (c *Cell) serviceHostExitIdentity() (ServiceDescriptor, serviceLeaseRecord,
 		return d, serviceLeaseRecord{}, hostExitFailure("identity_tree", false, errors.Join(hostExitRefused("envelope"), err))
 	}
 	var lease serviceLeaseRecord
-	if err := readServiceRecordJSON(context.Background(), c.path("service", "lease.json"), &lease); err != nil {
+	if err := readServiceRecordJSON(context.Background(), c.path("service", "lease.json"), lease.hostFields()); err != nil {
 		return d, lease, hostExitFailure("lease_validate", false, errors.Join(hostExitRefused("envelope"), err))
 	}
 	boot, err := serviceBootID()
-	if err != nil || boot == "" || lease.Version != 1 || lease.BootID != boot || lease.InstallationID != d.InstallationID || lease.Owner != d.UID || lease.PID <= 1 || lease.StartIdentity == "" {
+	if err != nil || boot == "" || !validHostExitLease(d, lease, boot) || lease.BootID != boot || lease.InstallationID != d.InstallationID || lease.Owner != d.UID || lease.PID <= 1 || lease.StartIdentity == "" {
 		return d, lease, hostExitRefused("envelope")
 	}
 	return d, lease, nil
 }
 
-func (c *Cell) validateHostExitEnvelope(envelope serviceHostExitEnvelope) error {
+func (c *Cell) validateHostExitEnvelope(envelope serviceHostExitEnvelope, listener net.Listener) error {
 	d, lease, err := c.serviceHostExitIdentity()
 	if err != nil {
 		return err
 	}
 	identity, alive, err := processIdentity(os.Getpid())
 	if err != nil || !alive || lease.PID != os.Getpid() || lease.StartIdentity != identity ||
-		envelope.InstallationID != d.InstallationID || envelope.Generation != d.Payload.Generation || envelope.HostPID != lease.PID || envelope.BootID != lease.BootID || !validHostExitChallenge(envelope.Challenge) {
+		envelope.InstallationID != d.InstallationID || envelope.Generation != d.Payload.Generation || envelope.HostPID != lease.PID || envelope.BootID != lease.BootID || !c.hostExitBindingMatches(envelope.serviceHostExitBinding, lease, listener) || !validHostExitChallenge(envelope.Challenge) {
 		return hostExitRefused("envelope")
 	}
 	return nil
 }
 
-func (c *Cell) serveHostExit(w http.ResponseWriter, r *http.Request, commands chan<- serviceCommand, closed <-chan struct{}, requests *serviceHostExitRequests) {
+func (c *Cell) serveHostExit(w http.ResponseWriter, r *http.Request, commands chan<- serviceCommand, closed <-chan struct{}, requests *serviceHostExitRequests, listener net.Listener) {
 	budgets := serviceHostExitBudgets(c.cfg.Timeout)
 	ctx, cancel := context.WithTimeout(r.Context(), serviceHostExitPhaseBudget(r.Context(), budgets.transaction))
 	defer cancel()
@@ -161,7 +173,7 @@ func (c *Cell) serveHostExit(w http.ResponseWriter, r *http.Request, commands ch
 	decoder := json.NewDecoder(limited)
 	decoder.DisallowUnknownFields()
 	var envelope serviceHostExitEnvelope
-	if decoder.Decode(&envelope) != nil || decoder.Decode(new(any)) != io.EOF || limited.N == 0 || c.validateHostExitEnvelope(envelope) != nil {
+	if decoder.Decode(&envelope) != nil || decoder.Decode(new(any)) != io.EOF || limited.N == 0 || c.validateHostExitEnvelope(envelope, listener) != nil {
 		http.Error(w, "service_control_refused: host_exit:envelope", http.StatusConflict)
 		return
 	}
@@ -247,7 +259,7 @@ func (c *Cell) serveHostExit(w http.ResponseWriter, r *http.Request, commands ch
 
 func (s *supervisor) acceptHostExit(ctx context.Context) (ServiceStatus, error) {
 	envelope, ok := ctx.Value(serviceHostExitKey{}).(serviceHostExitEnvelope)
-	if !ok || s.cell.validateHostExitEnvelope(envelope) != nil {
+	if !ok || s.cell.validateHostExitEnvelope(envelope, nil) != nil {
 		return s.status, hostExitRefused("envelope")
 	}
 	if s.status.State == "faulted" || s.status.HostExit == "accepted" || s.status.HostExit == "refused" {
@@ -354,7 +366,7 @@ func (s *serviceHostExitSession) finish() {
 }
 
 func (c *Cell) startHostExitRequest(ctx context.Context, envelope serviceHostExitEnvelope) (*serviceHostExitSession, error) {
-	if os.Getenv("WITSELF_RUNTIME") != "local" || serviceControlCapability() != nil || c.validateServiceControlEndpoint() != nil {
+	if os.Getenv("WITSELF_RUNTIME") != "local" || serviceControlCapability() != nil || c.validateHostExitEndpoint(envelope.serviceHostExitBinding) != nil {
 		return nil, hostExitRefused("envelope")
 	}
 	secret, err := c.readServiceControlSecret()
@@ -372,7 +384,9 @@ func (c *Cell) startHostExitRequest(ctx context.Context, envelope serviceHostExi
 	defer ackCancel()
 	stopACK := context.AfterFunc(ackCtx, cancel)
 	defer stopACK()
-	transport := &http.Transport{Proxy: nil, DisableKeepAlives: true, ResponseHeaderTimeout: admission, DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) { return c.dialServiceControl(ctx) }}
+	transport := &http.Transport{Proxy: nil, DisableKeepAlives: true, ResponseHeaderTimeout: admission, DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return c.dialHostExitEndpoint(ctx, envelope.serviceHostExitBinding)
+	}}
 	client := &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	request, err := http.NewRequestWithContext(requestCtx, http.MethodPost, "http://localcell/exit-host", bytes.NewReader(body))
 	if err != nil {
@@ -448,7 +462,7 @@ func (c *Cell) newHostExitEnvelope() (serviceHostExitEnvelope, serviceLeaseRecor
 	if _, err := rand.Read(challenge[:]); err != nil {
 		return serviceHostExitEnvelope{}, lease, hostExitRefused("envelope")
 	}
-	return serviceHostExitEnvelope{InstallationID: d.InstallationID, Generation: d.Payload.Generation, HostPID: lease.PID, BootID: lease.BootID, Challenge: strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(challenge[:]))}, lease, nil
+	return serviceHostExitEnvelope{serviceHostExitBinding: hostExitBindingForLease(lease), InstallationID: d.InstallationID, Generation: d.Payload.Generation, HostPID: lease.PID, BootID: lease.BootID, Challenge: strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(challenge[:]))}, lease, nil
 }
 
 func (c *Cell) controlExitHost(ctx context.Context) (ServiceStatus, error) {
@@ -580,9 +594,7 @@ func (c *Cell) exitServiceHostForRemoval(ctx context.Context) error {
 		}
 		return nil
 	}
-	// The live host owns its endpoint revision. Persist intent through its
-	// authenticated stop command so Windows endpoint discovery remains bound
-	// to that owner's descriptor publication, then request host exit.
+	// Persist stopped intent through the authenticated host before requesting exit.
 	for {
 		_, err := c.Control(ctx, "stop")
 		if err == nil {
@@ -649,7 +661,7 @@ func (c *Cell) waitServiceHostExit(ctx context.Context, lease serviceLeaseRecord
 			return hostExitFailure("observe", true, errors.Join(hostExitRefused("drain"), ctx.Err()))
 		}
 		var current serviceLeaseRecord
-		if err := readServiceRecordJSON(context.Background(), c.path("service", "lease.json"), &current); err != nil || current != lease {
+		if err := readServiceRecordJSON(context.Background(), c.path("service", "lease.json"), current.hostFields()); err != nil || current != lease {
 			return hostExitFailure("lease_validate", true, errors.Join(hostExitRefused("envelope"), err))
 		}
 		held, err := c.serviceHostLeaseHeld()

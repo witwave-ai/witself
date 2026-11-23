@@ -151,10 +151,19 @@ func TestWindowsServiceForegroundSubprocessCommands(t *testing.T) {
 		ready := false
 		for !ready {
 			probeCtx, probeCancel := context.WithDeadline(ctx, waitDeadline)
-			status, probeErr := cell.Control(probeCtx, "status")
+			var probeErr error
+			_, endpointErr := os.Lstat(filepath.Join(root, "service", "control-endpoint.json"))
+			if endpointErr == nil {
+				var status localcell.ServiceStatus
+				status, probeErr = cell.Control(probeCtx, "status")
+				ready = probeErr == nil && status.State == "stopped"
+			}
 			probeCancel()
-			if probeErr == nil && status.State == "stopped" {
-				ready = true
+			if errors.Is(probeErr, localcell.ErrServiceControlRefused) {
+				t.Logf("foreground_exit class=%s", "probe_refused")
+				t.Fatal("foreground readiness refused after endpoint publication")
+			}
+			if ready {
 				break
 			}
 			select {
@@ -220,11 +229,7 @@ func TestWindowsServiceForegroundSubprocessCommands(t *testing.T) {
 		}
 		oldStart, oldBoot = endpoint.HostStartIdentity, endpoint.BootID
 		for _, action := range []string{"status", "observe", "stop", "status", "observe"} {
-			class, gaps := windowsStoppedCommand(commandCtx, allowance, action, client.invoke)
-			if gaps > 0 {
-				t.Logf("foreground_exit class=%s", "endpoint_record_retry")
-				t.Logf("foreground endpoint record refusals=%d", gaps)
-			}
+			class := windowsStoppedCommand(commandCtx, allowance, action, client.invoke)
 			if class != "" {
 				t.Logf("foreground_exit class=%s", "command_state "+action+" "+class)
 				t.Fatal("foreground command did not preserve durable stopped state")

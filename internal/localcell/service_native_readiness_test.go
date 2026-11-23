@@ -226,6 +226,7 @@ func TestNativeServiceReadinessSourceContract(t *testing.T) {
 		{"waitServiceReadyAfter(proofCtx, t, cell, restartStarted, firstReady, &diagnostics)", "waitServiceReadyAfter(proofCtx, t, cell, restartStarted, 0, &diagnostics)"},
 		{"budget := nativeServiceReadinessBudget(nativeServiceHostBound, firstReady)", "budget := 90 * time.Second"},
 		{"ctx, cancel := proof.phase(parent, budget)", "ctx, cancel := context.WithTimeout(t.Context(), budget)"},
+		{"published := cell.NativeTestEndpointPublished()", "published := func() bool { return true }"},
 		{"stats.observe(err, time.Since(waitingStarted), time.Since(attemptStarted))", "stats.observe(nil, time.Since(waitingStarted), time.Since(attemptStarted))"},
 		{"stats.log(t.Logf, time.Since(waitingStarted), budget)", "stats.log(t.Logf, 0, budget)"},
 		{"if err == nil && status.Healthy {", "if err == nil || nativeServiceControlDiagnostic(err) == \"localcell: service_control_deferred\" {"},
@@ -263,12 +264,13 @@ func nativeServiceReadinessSourceContract(source []byte) bool {
 			"waitServiceReadyAfter(proofCtx, t, cell, restartStarted, firstReady, &diagnostics)":    1,
 		},
 		"waitServiceReadyAfter": {
-			"waitingStarted := time.Now()": 1,
+			"published := cell.NativeTestEndpointPublished()":                            1,
+			"waitingStarted := time.Now()":                                               1,
 			"budget := nativeServiceReadinessBudget(nativeServiceHostBound, firstReady)": 1,
 			"proof = diagnostics[0].proof":                                               1,
 			"ctx, cancel := proof.phase(parent, budget)":                                 1,
 			"stats.observe(err, time.Since(waitingStarted), time.Since(attemptStarted))": 1,
-			"stats.log(t.Logf, time.Since(waitingStarted), budget)":                      2,
+			"stats.log(t.Logf, time.Since(waitingStarted), budget)":                      3,
 			"if err == nil && status.Healthy { return time.Since(started) }":             1,
 		},
 	}
