@@ -14,14 +14,14 @@ import (
 // The containing directory must also be private. The returned handle can finish
 // reading its original object across a private publisher's atomic replacement.
 func WindowsPrivateOpenSnapshot(path string) (*os.File, error) {
-	return windowsPrivateSnapshot(path, true, nil)
+	return windowsPrivateSnapshot(path, true, nil, nil)
 }
 
 // WindowsPrivateValidateSnapshot checks an ordinary file reported by a private
 // tree walk. The walker checks each directory separately. This form needs only
 // the leaf's original guard and security-query rights, without data access.
 func WindowsPrivateValidateSnapshot(path string) error {
-	file, err := windowsPrivateSnapshot(path, false, nil)
+	file, err := windowsPrivateSnapshot(path, false, nil, nil)
 	if err != nil {
 		return err
 	}
@@ -35,7 +35,11 @@ func WindowsPrivateValidateSnapshot(path string) error {
 // attributes can change in place, so check the held chain again after opening
 // the leaf. Only this last handle permits replacement. No name lookup can
 // substitute a different object for its security check or its content.
-func windowsPrivateSnapshot(path string, content bool, opened func()) (*os.File, error) {
+//
+// step and opened are test seams and are nil in every production call. step
+// runs just before component index of total is opened relative to its held
+// parent; opened runs once the leaf handle exists, before it is validated.
+func windowsPrivateSnapshot(path string, content bool, step func(index, total int), opened func()) (*os.File, error) {
 	clean, err := windowsPrivateCleanPath(path)
 	if err != nil {
 		return nil, err
@@ -57,6 +61,9 @@ func windowsPrivateSnapshot(path string, content bool, opened func()) (*os.File,
 		if i == 0 {
 			parent, err = windowsPrivateSnapshotVolume(clean[:3], access)
 		} else {
+			if step != nil {
+				step(i-1, len(parts))
+			}
 			parent, err = windowsPrivateSnapshotAt(parent, parts[i-1], access, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, true)
 		}
 		if err != nil {
@@ -83,6 +90,9 @@ func windowsPrivateSnapshot(path string, content bool, opened func()) (*os.File,
 	access := uint32(windows.FILE_EXECUTE | windows.READ_CONTROL)
 	if content {
 		access |= windows.GENERIC_READ
+	}
+	if step != nil {
+		step(len(parts)-1, len(parts))
 	}
 	handle, err := windowsPrivateSnapshotAt(parent, parts[len(parts)-1], access, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, false)
 	if err != nil {
