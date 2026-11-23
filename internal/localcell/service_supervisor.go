@@ -301,7 +301,7 @@ func (c *Cell) Run(ctx context.Context, policy SupervisorPolicy) (result error) 
 // would at idle. Neither harness entry point should report a host failure
 // merely because a tick had not returned when the host was stopped.
 func (s *supervisor) workerExitError(err, hostErr error, published bool) error {
-	if s.shutdownBlocked && !s.shutdownFaultPending && published && serviceWorkCanceledOnly(err, hostErr) {
+	if s.shutdownBlocked && (!s.shutdownFaultPending || s.shutdownFaultCommit.revision != 0) && published && serviceWorkCanceledOnly(err, hostErr) {
 		return nil
 	}
 	return err

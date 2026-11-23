@@ -91,6 +91,76 @@ func (f *faultCommitGuardFixture) interruptRetirement(t *testing.T) {
 }
 
 func runServiceFaultGuardPaths(t *testing.T) {
+	t.Run("plain_reuse", func(t *testing.T) {
+		const failure = "same refusal committed a second fault"
+		f := newFaultCommitGuardFixture(t)
+		if f.s.step(f.ctx) != nil {
+			t.Fatal(failure)
+		}
+		d := f.descriptor(t)
+		if d.Revision != f.d.Revision+1 || !d.Faulted || *f.stops != 1 || !f.s.shutdownBlocked || f.s.shutdownFaultPending {
+			t.Fatal(failure)
+		}
+	})
+	t.Run("outside_repair_after_settle", func(t *testing.T) {
+		const failure = "settled refusal overwrote an outside repair"
+		f := newFaultCommitGuardFixture(t)
+		if f.s.step(f.ctx) != nil {
+			t.Fatal(failure)
+		}
+		committed := f.descriptor(t)
+		if !committed.Faulted || committed.Revision != f.d.Revision+1 || f.s.shutdownFaultPending {
+			t.Fatal(failure)
+		}
+		if publicationClient(t, f.cell).RepairService(t.Context()) != nil {
+			t.Fatal(failure)
+		}
+		repaired := f.descriptor(t)
+		if repaired.Faulted || repaired.Revision <= committed.Revision || f.s.step(f.ctx) != nil {
+			t.Fatal(failure)
+		}
+		d := f.descriptor(t)
+		if d.Revision != repaired.Revision || d.Faulted || *f.stops != 1 ||
+			!f.s.shutdownBlocked || f.s.status.Reason != "service_stop_refused" {
+			t.Fatal(failure)
+		}
+	})
+	t.Run("contended_durable_cancel", func(t *testing.T) {
+		const failure = "durable refusal turned host cancellation into a failure"
+		f := newFaultCommitGuardFixture(t)
+		var release func()
+		err := f.step(t, nil, func() { release = f.holdOperation(t, failure) })
+		d := f.descriptor(t)
+		_, journalErr := os.Lstat(f.cell.path("service", "transition.json"))
+		if err != nil || f.s.status.State != "busy" || !d.Faulted || d.Revision != f.d.Revision+1 ||
+			!errors.Is(journalErr, os.ErrNotExist) {
+			t.Fatal(failure)
+		}
+		release()
+		f.cancel()
+		tickErr := f.s.step(f.ctx)
+		if !errors.Is(tickErr, context.Canceled) || f.s.workerExitError(tickErr, f.ctx.Err(), true) != nil {
+			t.Fatal(failure)
+		}
+	})
+	t.Run("pending_then_cancelled", func(t *testing.T) {
+		const failure = "cancelled follow-up lost the pending refusal"
+		f := newFaultCommitGuardFixture(t)
+		var release func()
+		err := f.step(t, func() { release = f.holdOperation(t, failure) }, func() {
+			d := f.descriptor(t)
+			if d.Faulted || d.Revision != f.d.Revision || !f.s.shutdownFaultPending {
+				t.Fatal(failure)
+			}
+			release()
+			f.cancel()
+		})
+		d := f.descriptor(t)
+		if !errors.Is(err, context.Canceled) || d.Faulted || d.Revision != f.d.Revision ||
+			!f.s.shutdownFaultPending || f.s.workerExitError(err, f.ctx.Err(), true) != err {
+			t.Fatal(failure)
+		}
+	})
 	for _, row := range []string{"new_refusal", "independent_fault"} {
 		t.Run(row, func(t *testing.T) {
 			f := newFaultCommitGuardFixture(t)
@@ -290,4 +360,15 @@ func runServiceFaultGuardPaths(t *testing.T) {
 		}
 		f.settled(t, f.d.Revision+1)
 	})
+}
+
+func (f *faultCommitGuardFixture) holdOperation(t *testing.T, failure string) func() {
+	t.Helper()
+	lock, err := publicationClient(t, f.cell).own(t.Context(), false)
+	if err != nil {
+		t.Fatal(failure)
+	}
+	release := sync.OnceFunc(func() { _ = lock.Close() })
+	t.Cleanup(release)
+	return release
 }

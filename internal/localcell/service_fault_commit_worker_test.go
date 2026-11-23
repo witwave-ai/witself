@@ -18,6 +18,85 @@ func runServiceFaultRealPaths(t *testing.T) {
 	for _, row := range []string{"running_health", "failed_start", "poststart_health", "delivered_exit"} {
 		t.Run(row, func(t *testing.T) { serviceFaultCommitWorker(t, row) })
 	}
+	t.Run("run_contended_durable_cancel", runContendedDurableCancel)
+}
+
+func runContendedDurableCancel(t *testing.T) {
+	const failure = "host cancellation after a contended durable refusal failed"
+	c := serviceCancellationReceiptCell(t)
+	initial := prepareSupervisorTest(t, c)
+	client := publicationClient(t, c)
+	w := &serviceWorkerHost{cell: c, ticks: make(chan time.Time), commands: make(chan serviceCommand)}
+	h, _, _, _, _ := supervisorTestHooks()
+	h.ticks, h.commands, h.windowsShutdownPolicy = w.ticks, w.commands, true
+	var unhealthy atomic.Bool
+	h.health = func(context.Context) error {
+		if unhealthy.Load() {
+			return errServiceUnhealthy
+		}
+		return nil
+	}
+	h.stop = func(context.Context) error {
+		if unhealthy.Load() {
+			return ErrServiceControlRefused
+		}
+		return nil
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	entered, resume := make(chan struct{}, 1), make(chan struct{}, 1)
+	gate := &serviceWorkerTickGate{Context: ctx, hold: func() {
+		entered <- struct{}{}
+		select {
+		case <-resume:
+		case <-ctx.Done():
+		}
+	}}
+	h.beforeFaultWrite = func() { gate.arm.Store(true) }
+	w.done = StartJoinedTestRunForTest(t, cancel, c.cfg.Timeout, func() error {
+		return c.Run(gate, SupervisorPolicy{hooks: &h})
+	})
+	w.ready(t)
+	discovery := publicationDiscoveryAt(t, client, failure)
+
+	// The first command-marker read after the latch returns precedes the
+	// follow-up. Hold the operation lock until the host publishes busy.
+	unhealthy.Store(true)
+	w.within(t, nil, w.ticks, failure)
+	w.within(t, entered, nil, failure)
+	d, err := client.ServiceDescriptor()
+	if err != nil || !d.Faulted || d.Revision != initial.Revision+1 {
+		t.Fatal(failure)
+	}
+	lock, err := client.own(t.Context(), false)
+	if err != nil {
+		t.Fatal(failure)
+	}
+	release := sync.OnceFunc(func() { _ = lock.Close() })
+	defer release()
+	resume <- struct{}{}
+	probe, end := context.WithTimeout(t.Context(), c.cfg.Timeout)
+	defer end()
+	if v := serviceWorkerSettled(probe, t, client.Control); v.State != "busy" || v.Reason != "service_operation_in_progress" ||
+		!discovery.unchanged(publicationDiscoveryAt(t, client, failure)) {
+		t.Fatal(failure)
+	}
+	release()
+
+	// Cancel inside the next tick's maintenance observation, before the
+	// blocked host can recheck the fault or return to the idle select.
+	gate.arm.Store(true)
+	w.within(t, nil, w.ticks, failure)
+	w.within(t, entered, nil, failure)
+	cancel()
+	if serviceWorkerReceive(t, w, w.done, failure) != nil {
+		t.Fatal(failure)
+	}
+	final, err := client.ServiceDescriptor()
+	if err != nil || !final.Faulted || final.Revision != d.Revision {
+		t.Fatal(failure)
+	}
 }
 
 func serviceFaultCommitWorker(t *testing.T, row string) {
