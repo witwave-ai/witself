@@ -96,6 +96,7 @@ type supervisor struct {
 	publishStopRefusal   func()
 	shutdownBlocked      bool
 	shutdownFaultPending bool
+	shutdownFaultCommit  serviceFaultCommit
 	maintenanceHeld      bool
 	maintenanceDisplay   bool
 	maintenanceBusy      bool
@@ -134,6 +135,7 @@ func (c *Cell) Run(ctx context.Context, policy SupervisorPolicy) (result error) 
 		return err
 	}
 	defer func() { _ = lease.Close() }()
+	defer s.retireShutdownFault()
 	commands := s.hooks.commands
 	if commands == nil {
 		commands = make(chan serviceCommand)
@@ -816,7 +818,12 @@ func (s *supervisor) fault(ctx context.Context, reason string) error {
 		return err
 	}
 	s.status.State, s.status.Reason, s.status.Healthy = "faulted", reason, false
-	err := s.cell.setServiceFaulted(ctx, true)
+	var err error
+	if reason == "service_stop_refused" && s.shutdownBlocked {
+		err = s.commitShutdownFault(ctx)
+	} else {
+		err = s.cell.setServiceFaulted(ctx, true)
+	}
 	if errors.Is(err, ErrLocked) {
 		return s.busy()
 	}
@@ -898,6 +905,7 @@ func (s *supervisor) command(ctx context.Context, action string) (ServiceStatus,
 		err = s.cell.RepairService(ctx)
 		if err == nil {
 			s.shutdownBlocked, s.shutdownFaultPending = false, false
+			s.retireShutdownFault()
 			s.running = false
 			err = s.step(ctx)
 		}

@@ -1042,6 +1042,7 @@ var maintenanceHostSupervisorPins = map[string]string{
 		return err
 	}
 	defer func() { _ = lease.Close() }()
+	defer s.retireShutdownFault()
 	commands := s.hooks.commands
 	if commands == nil {
 		commands = make(chan serviceCommand)
@@ -1559,6 +1560,7 @@ var maintenanceHostSupervisorPins = map[string]string{
 		err = s.cell.RepairService(ctx)
 		if err == nil {
 			s.shutdownBlocked, s.shutdownFaultPending = false, false
+			s.retireShutdownFault()
 			s.running = false
 			err = s.step(ctx)
 		}

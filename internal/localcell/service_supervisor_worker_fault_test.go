@@ -131,8 +131,8 @@ func serviceWorkerRefusal(t *testing.T, stage string) {
 		if stage == "blocked_tick" {
 			w.within(t, gate.idle, nil, "faulted worker did not return to idle")
 		} else {
-			// This row is about the tick after the repair. It asks only once the refused stop's two
-			// publications are complete; the endpoint_refresh row covers a request made between them.
+			// Wait for the refused tick to settle before repairing. The
+			// endpoint_refresh row observes the fault writer while held.
 			w.within(t, gate.idle, nil, "refused stop did not return to idle before the repair")
 			if v := serviceWorkerSettled(ctx, t, c.Control); v.Reason != "service_stop_refused" {
 				t.Fatal("completed tick did not publish its stop refusal")
