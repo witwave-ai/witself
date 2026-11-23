@@ -83,9 +83,11 @@ func TestValidateRootTreeRetry(t *testing.T) {
 	}
 }
 
-// The boundary: validateRoot's first statement, validateRootTree and the walkers' boundary (FLAKE-63B).
+// The boundary: validateRoot's observed walk, validateRootTree and the walkers' boundary (FLAKE-63B).
 const validateRootTreeSource = "package localcell\nfunc (c *Cell) validateRoot() {\n" +
-	"if err := validatePrivateTreeRetried(c.cfg.Root); err != nil { return err } }\n" +
+	"if c.observeRootWalk != nil { c.observeRootWalk(true) }\n" +
+	"if err := validatePrivateTreeRetried(c.cfg.Root); err != nil { return err }\n" +
+	"if c.observeRootWalk != nil { c.observeRootWalk(false) } }\n" +
 	"func validateRootTree() { retryable := func(err error) bool { return transient(err) || errors.Is(err, os.ErrNotExist) }\n" +
 	"_, err := retryPublish(func() error { return validate(root) }, retryable, h); if errors.Is(err, os.ErrNotExist) { return errPrivateLayout }; return err }\n" +
 	"var validatePrivateTreeRetried = func(root string) error { return validateRootTree(root, validatePrivateTree, runtimeconfig.WindowsPrivateTransient, leasePublishHooks{}) }\n"
@@ -128,8 +130,8 @@ func validateRootTreeParts(source string) string {
 	for _, declaration := range file.Decls {
 		if function, ok := declaration.(*ast.FuncDecl); ok && function.Body != nil && len(function.Body.List) != 0 {
 			switch {
-			case function.Name.Name == "validateRoot" && function.Recv != nil:
-				statement = serviceBootPublicationText(function.Body.List[0])
+			case function.Name.Name == "validateRoot" && function.Recv != nil && len(function.Body.List) >= 3:
+				statement = serviceBootPublicationText(&ast.BlockStmt{List: function.Body.List[:3]})
 			case function.Name.Name == "validateRootTree" && function.Recv == nil:
 				body = serviceBootPublicationText(function.Body)
 			}

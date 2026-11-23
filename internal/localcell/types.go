@@ -192,6 +192,8 @@ type Cell struct {
 	children               map[string]*childObservation
 	// Test failpoint between releasing an allocation and probing it. Nil in production.
 	afterPortAllocation func(Ports)
+	// A test can park a publication immediately before or after the real walk.
+	observeRootWalk func(before bool)
 	// Test observers scoped to interrupted PostgreSQL recovery. Nil in production.
 	recoveryProcessIdentity  func(int) (string, bool, error)
 	recoveryProcessStartedAt func(int) (time.Time, error)

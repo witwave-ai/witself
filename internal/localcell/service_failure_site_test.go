@@ -301,7 +301,7 @@ func TestServiceFailureSiteSourceContract(t *testing.T) {
 			`WriteServiceHostFailure(os.Stderr, c.removeServiceControlEndpoint(), "endpoint_remove")`,
 		},
 		"service_control_endpoint.go": {
-			`func (c *Cell) readServiceControlEndpointRecord() (endpoint serviceControlEndpointRecord, result error) {
+			`func (c *Cell) readServiceControlEndpointRecordBy(ctx context.Context, open func(context.Context, string, error) (*os.File, error)) (endpoint serviceControlEndpointRecord, result error) {
 	defer func() { result = serviceFailureFallback(result, "endpoint_read") }()`,
 			`func (c *Cell) publishServiceControlEndpointWithBoot(pipeName string, readBoot func() (string, error)) (endpoint serviceControlEndpointRecord, result error) {
 	defer func() { result = serviceFailureFallback(result, "endpoint_write") }()`,
@@ -432,7 +432,7 @@ func TestServiceFailureSiteSourceContract(t *testing.T) {
 // new raw filesystem/lifecycle return cannot pass merely because its function
 // still contains the old reviewed wrapper somewhere else.
 func TestServiceFailureSiteProducerInventory(t *testing.T) {
-	producers := strings.Fields(`privateDir servicePrivateRecord openPrivateFile readPrivateFile openRegular openRegularBy readRegular openServiceRecord readJSON readManifest writeAtomic writeAtomicBytes removePrivateFile validateRoot validatePrivate validatePrivateTree validateRootPath openLockFile serviceControlSecret ServiceDescriptor readServiceDescriptor serviceDescriptorForOwner readServiceDescriptorForOwner PrepareService New readServiceControlSecret readServiceControlEndpointRecord readServiceControlEndpointWithBoot readServiceControlEndpoint publishServiceControlEndpoint publishServiceControlEndpointWithBoot removeOwnedServiceControlEndpoint refreshOwnedServiceControlEndpoint removeServiceControlEndpoint listenServiceControl dialServiceControl serveServiceControl serveServiceControlForPlatform Control Run load save tick step call command Repair Stop Start SetServiceDesiredState RepairService setServiceFaulted bindServiceProcessBoot bindServiceProcessBootWithReader reconcileServiceBoot reconcileServiceBootWithReader reconcileOldBoot writeServiceDescriptor own newSupervisor acquireLease acquireServiceLease acquireServiceLeaseWithBoot stopServiceChildren ServiceHealth hook operation retryServiceContention publishServiceLease serviceMaintenanceObservation observeServiceMaintenance observeServiceMaintenanceInto resumeServiceStartup failAfterMaintenanceObservation projectedStatus holdMaintenance serviceMaintenanceOnly`)
+	producers := strings.Fields(`WindowsPrivateOpenSnapshot WindowsPrivateValidateSnapshot readServiceControlEndpointRecordBy serviceControlSecretBy readManifestBy readManifestJSON readServiceRecordJSON openAdmissionRecord decodeLocalRecord privateDir servicePrivateRecord openPrivateFile readPrivateFile openRegular openRegularBy readRegular openServiceRecord readJSON readManifest writeAtomic writeAtomicBytes removePrivateFile validateRoot validatePrivate validatePrivateTree validateRootPath openLockFile serviceControlSecret ServiceDescriptor readServiceDescriptor serviceDescriptorForOwner readServiceDescriptorForOwner PrepareService New readServiceControlSecret readServiceControlEndpointRecord readServiceControlEndpointWithBoot readServiceControlEndpoint publishServiceControlEndpoint publishServiceControlEndpointWithBoot removeOwnedServiceControlEndpoint refreshOwnedServiceControlEndpoint removeServiceControlEndpoint listenServiceControl dialServiceControl serveServiceControl serveServiceControlForPlatform Control Run load save tick step call command Repair Stop Start SetServiceDesiredState RepairService setServiceFaulted bindServiceProcessBoot bindServiceProcessBootWithReader reconcileServiceBoot reconcileServiceBootWithReader reconcileOldBoot writeServiceDescriptor own newSupervisor acquireLease acquireServiceLease acquireServiceLeaseWithBoot stopServiceChildren ServiceHealth hook operation retryServiceContention publishServiceLease serviceMaintenanceObservation observeServiceMaintenance observeServiceMaintenanceInto resumeServiceStartup failAfterMaintenanceObservation projectedStatus holdMaintenance serviceMaintenanceOnly`)
 	selected := make(map[string]bool)
 	for _, producer := range producers {
 		selected[producer] = true
@@ -469,7 +469,7 @@ func TestServiceFailureSiteProducerInventory(t *testing.T) {
 		},
 		"service_control.go": {
 			"Control":                        "dialServiceControl readServiceControlSecret",
-			"readServiceControlSecret":       "serviceControlSecret validateRoot",
+			"readServiceControlSecret":       "openAdmissionRecord serviceControlSecretBy validateRoot",
 			"serveServiceControl":            "serveServiceControlForPlatform",
 			"serveServiceControlForPlatform": "listenServiceControl readServiceControlSecret removeServiceControlEndpoint serviceMaintenanceOnly",
 		},
@@ -477,10 +477,11 @@ func TestServiceFailureSiteProducerInventory(t *testing.T) {
 			"publishServiceControlEndpoint":         "publishServiceControlEndpointWithBoot",
 			"publishServiceControlEndpointWithBoot": "ServiceDescriptor readJSON servicePrivateRecord writeAtomic",
 			"readServiceControlEndpoint":            "readServiceControlEndpointWithBoot",
-			"readServiceControlEndpointRecord":      "openServiceRecord privateDir",
-			"readServiceControlEndpointWithBoot":    "ServiceDescriptor readJSON readServiceControlEndpointRecord servicePrivateRecord",
+			"readServiceControlEndpointRecord":      "openServiceRecord readServiceControlEndpointRecordBy",
+			"readServiceControlEndpointWithBoot":    "ServiceDescriptor openAdmissionRecord readServiceControlEndpointRecordBy readServiceRecordJSON",
 			"refreshOwnedServiceControlEndpoint":    "readServiceControlEndpointRecord writeAtomic",
 			"removeOwnedServiceControlEndpoint":     "readServiceControlEndpointRecord removePrivateFile",
+			"readServiceControlEndpointRecordBy":    "privateDir",
 		},
 		"service_control_windows.go": {
 			"dialServiceControl":             "readServiceControlEndpoint",
@@ -502,13 +503,14 @@ func TestServiceFailureSiteProducerInventory(t *testing.T) {
 			"serviceDescriptorForOwner":     "readServiceDescriptorForOwner validateRoot",
 			"openServiceRecord":             "openRegularBy",
 			"readServiceDescriptor":         "readServiceDescriptorForOwner",
-			"readServiceDescriptorForOwner": "privateDir readJSON readManifest servicePrivateRecord",
+			"readServiceDescriptorForOwner": "privateDir readManifestBy readManifestJSON readServiceRecordJSON",
 			"SetServiceDesiredState":        "own",
-			"serviceControlSecret":          "openServiceRecord privateDir",
+			"serviceControlSecret":          "openServiceRecord serviceControlSecretBy",
 			"serviceStartFence":             "ServiceDescriptor",
 			"setServiceDesiredStateLocked":  "ServiceDescriptor writeServiceDescriptor",
 			"setServiceFaulted":             "ServiceDescriptor own writeServiceDescriptor",
 			"writeServiceDescriptor":        "refreshOwnedServiceControlEndpoint removePrivateFile writeAtomic writeAtomic",
+			"serviceControlSecretBy":        "privateDir",
 		},
 		"../tools/localcellharness/service.go": {
 			"runServiceCommandForGOOS": "Control New New PrepareService RepairService Run ServiceDescriptor ServiceDescriptor SetServiceDesiredState Stop",
@@ -551,6 +553,11 @@ func TestServiceFailureSiteProducerInventory(t *testing.T) {
 				}
 				if selected[name] {
 					calls = append(calls, name)
+				}
+				if len(call.Args) > 0 && (name == "readManifestBy" || name == "readServiceControlEndpointRecordBy" || name == "serviceControlSecretBy") {
+					if arg, ok := call.Args[len(call.Args)-1].(*ast.Ident); ok && selected[arg.Name] {
+						calls = append(calls, arg.Name)
+					}
 				}
 				return true
 			})

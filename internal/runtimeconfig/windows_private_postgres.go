@@ -215,5 +215,5 @@ func WindowsPrivatePostgresRename(root, oldPath, newPath string) error {
 	}
 	return windowsPrivateRename(oldPath, newPath, validate, func(handle windows.Handle, directory bool) error {
 		return windowsPostgresValidateHandle(handle, directory, false)
-	})
+	}, nil)
 }

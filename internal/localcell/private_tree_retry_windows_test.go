@@ -12,16 +12,16 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// FLAKE-63 on a real handle. A private creation keeps its rollback handle (DELETE,
-// every sharing mode) until it has verified the object, as the fixture's server and
-// worker create their launch counter below run/ while the boot binding walks the tree;
-// the walk's guard denies delete sharing, which [MS-FSA] 2.1.5.1.2.2 then refuses.
+// A private directory creation keeps its rollback handle (DELETE, every sharing
+// mode) until it has verified the object. The walk's directory guard denies
+// delete sharing. Ordinary file snapshots share delete and can complete while
+// a publisher holds its renamed file (TestServicePrivateSnapshot).
 func TestWindowsBootBindingTreeRetry(t *testing.T) {
 	// Without a descriptor the binding returns before it reads the boot identity.
 	readBoot := func() (string, error) { return "", errors.New("synthetic boot identity refusal") }
 	t.Run("pair", func(t *testing.T) {
-		c, counter := windowsTreeRetryCell(t)
-		release := holdTreeDelete(t, counter)
+		c, _ := windowsTreeRetryCell(t)
+		release := holdTreeDelete(t, c.path("run"))
 		err := validatePrivateTree(c.cfg.Root)
 		release()
 		if !errors.Is(err, windows.ERROR_SHARING_VIOLATION) {
@@ -35,8 +35,8 @@ func TestWindowsBootBindingTreeRetry(t *testing.T) {
 		}
 	})
 	t.Run("released", func(t *testing.T) {
-		c, counter := windowsTreeRetryCell(t)
-		release, hold, released := holdTreeDelete(t, counter), serviceLeasePublishBudget/8, make(chan struct{})
+		c, _ := windowsTreeRetryCell(t)
+		release, hold, released := holdTreeDelete(t, c.path("run")), serviceLeasePublishBudget/8, make(chan struct{})
 		go func() {
 			defer close(released)
 			time.Sleep(hold)
@@ -54,8 +54,8 @@ func TestWindowsBootBindingTreeRetry(t *testing.T) {
 		}
 	})
 	t.Run("held", func(t *testing.T) {
-		c, counter := windowsTreeRetryCell(t)
-		release, done, fused := holdTreeDelete(t, counter), make(chan struct{}), make(chan struct{})
+		c, _ := windowsTreeRetryCell(t)
+		release, done, fused := holdTreeDelete(t, c.path("run")), make(chan struct{}), make(chan struct{})
 		go func() { // fuse: a retry that ignored its budget ends in success instead of never
 			defer close(fused)
 			select {

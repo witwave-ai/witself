@@ -33,7 +33,7 @@ func init() {
 	}})
 }
 
-// A real delete handle below the tree, proved on the bare walk: released within the budget, the walker
+// A real directory delete handle below the tree, proved on the bare walk: released within the budget, the walker
 // passes after it; kept past it (a fuse at three budgets), the walker ends after the budget in today's
 // (unretried) refusal. One check per expectation (LC-TREEWALK-F1).
 func TestWindowsPrivateTreeWalkersHolder(t *testing.T) {
@@ -42,7 +42,7 @@ func TestWindowsPrivateTreeWalkersHolder(t *testing.T) {
 			held := hold > serviceLeasePublishBudget
 			t.Run(walker.name+map[bool]string{false: "/released", true: "/held"}[held], func(t *testing.T) {
 				root, run := walker.setup(t)
-				release, today, previous := holdTreeDelete(t, filepath.Join(root, "manifest.json")), error(nil), validatePrivateTreeRetried
+				release, today, previous := holdTreeDelete(t, filepath.Join(root, "run")), error(nil), validatePrivateTreeRetried
 				t.Cleanup(func() { validatePrivateTreeRetried = previous })
 				if validatePrivateTree(root) == nil {
 					t.Fatalf("cannot refuse the bare tree walk with the held delete handle: %s", walker.name)
@@ -51,10 +51,16 @@ func TestWindowsPrivateTreeWalkersHolder(t *testing.T) {
 					validatePrivateTreeRetried = validatePrivateTree
 					today, validatePrivateTreeRetried = run(), previous
 				}
-				started, timer := time.Now(), time.AfterFunc(hold, release)
+				released := make(chan struct{})
+				started, timer := time.Now(), time.AfterFunc(hold, func() {
+					defer close(released)
+					release()
+				})
 				err := run()
 				elapsed := time.Since(started)
-				timer.Stop()
+				if !timer.Stop() {
+					<-released
+				}
 				release()
 				switch {
 				case !held && (walker.outcome == nil && err != nil || walker.outcome != nil && !walker.outcome(err, nil)):

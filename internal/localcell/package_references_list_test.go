@@ -22,11 +22,11 @@ syscall.Open syscall.Openat syscall.Creat syscall.CreateFile
 golang.org/x/sys/unix.Open golang.org/x/sys/unix.Openat golang.org/x/sys/unix.Openat2 golang.org/x/sys/unix.Creat
 golang.org/x/sys/windows.CreateFile golang.org/x/sys/windows.Open
 net/http.Dir net/http.ServeFile net/http.FileServer net/http.FS net/http.ServeFileFS net/http.FileServerFS
-github.com/witwave-ai/witself/internal/runtimeconfig.WindowsPrivateOpenFile github.com/witwave-ai/witself/internal/runtimeconfig.WindowsPrivateCreateTemp
+github.com/witwave-ai/witself/internal/runtimeconfig.WindowsPrivateOpenFile github.com/witwave-ai/witself/internal/runtimeconfig.WindowsPrivateOpenSnapshot github.com/witwave-ai/witself/internal/runtimeconfig.WindowsPrivateValidateSnapshot github.com/witwave-ai/witself/internal/runtimeconfig.WindowsPrivateCreateTemp
 github.com/witwave-ai/witself/internal/runtimeconfig.WindowsPrivatePostgresOpen github.com/witwave-ai/witself/internal/runtimeconfig.WindowsPrivatePostgresRead
 github.com/witwave-ai/witself/internal/runtimeconfig.WindowsPrivateOpenRoot github.com/witwave-ai/witself/internal/runtimeconfig.OpenSpoolRoot
 openPrivateFile openPrivateReader openPrivateWriter openPlainReader openPostgresReader readPrivateFile readPostgresFile createPrivateTemp
-openLockFile openRegular openRegularBy openRegularWriter readRegular openServiceRecord readWindowsTaskRecord readJSON readMaintenanceFenceJSON
+openLockFile openRegular openRegularBy openRegularWriter readRegular openServiceRecord openAdmissionRecord openWindowsServiceSnapshot readServiceRecordJSON readManifestJSON readManifestBy readWindowsTaskRecord readJSON readMaintenanceFenceJSON
 syncDirectory (*Cell).openCheckpointSource (*Cell).holdCheckpoint (*Cell).holdRecovery
 (reflect.Value).Call (reflect.Value).CallSlice (reflect.Value).Method (reflect.Value).MethodByName (reflect.Type).Method (reflect.Type).MethodByName
 unsafe.Pointer unsafe.Add unsafe.Slice unsafe.String unsafe.StringData unsafe.SliceData
@@ -226,7 +226,7 @@ files.go
 	openRegularWriter openPrivateWriter
 	privateDir makePrivateDir syncDirectory
 	readJSON openRegular
-	readManifest readJSON
+	readManifest readJSON readManifestBy
 	readRegular openRegularBy
 	syncDirectory os.Open
 	syncJournalDirectory syncDirectory
@@ -241,27 +241,34 @@ files_other.go
 	(*Cell).writePostgresConfig writeAtomicBytes
 	createPrivateTemp os.CreateTemp
 	makePrivateDir os.Mkdir
+	openAdmissionRecord openServiceRecord
 	openPlainReader openPrivateReader
 	openPostgresReader openPrivateReader
 	openPrivateFile os.OpenFile
 	openPrivateReader os.OpenFile
 	openPrivateWriter os.OpenFile
 	publishPrivateFile os.Rename
+	readManifestJSON readJSON
 	readPostgresFile readPrivateFile
 	readPrivateFile os.ReadFile
+	readServiceRecordJSON readJSON
 	removePrivateFile os.Remove
 files_windows.go
 	import context errors github.com/witwave-ai/witself/internal/runtimeconfig io os path/filepath
 	createPrivateTemp github.com/witwave-ai/witself/internal/runtimeconfig.WindowsPrivateCreateTemp
 	makePrivateDir github.com/witwave-ai/witself/internal/runtimeconfig.WindowsPrivateMkdir
+	openAdmissionRecord openWindowsServiceSnapshot
+	openWindowsServiceSnapshot github.com/witwave-ai/witself/internal/runtimeconfig.WindowsPrivateOpenSnapshot github.com/witwave-ai/witself/internal/runtimeconfig.WindowsPrivateValidateSnapshot
 	openPlainReader os.Open
 	openPrivateFile github.com/witwave-ai/witself/internal/runtimeconfig.WindowsPrivateOpenFile
 	openPrivateReader openPrivateFile
 	openPrivateWriter openPrivateFile
 	publishPrivateFile github.com/witwave-ai/witself/internal/runtimeconfig.WindowsPrivateRename
+	readManifestJSON github.com/witwave-ai/witself/internal/runtimeconfig.WindowsPrivateOpenSnapshot openRegularBy
 	readPrivateFile openPrivateFile
+	readServiceRecordJSON openWindowsServiceSnapshot
 	removePrivateFile github.com/witwave-ai/witself/internal/runtimeconfig.WindowsPrivateRemove
-	validatePrivateTree path/filepath.WalkDir
+	validatePrivateTree github.com/witwave-ai/witself/internal/runtimeconfig.WindowsPrivateValidateSnapshot path/filepath.WalkDir
 fixed_cause.go
 installation_identity.go
 	import github.com/witwave-ai/witself/internal/id strings
@@ -419,24 +426,26 @@ service_boot_windows.go
 service_control.go
 	import context crypto/subtle encoding/json errors fmt io net net/http os runtime strconv sync time
 	(*Cell).Control (*net.UnixListener).Close
+	(*Cell).readServiceControlSecret openAdmissionRecord
 	(*Cell).serveServiceControlForPlatform (*Cell).listenServiceControl (*Cell).removeServiceControlEndpoint (*os.File).Write x3
 	startServiceControlServer (*os.File).Write
 	writeServiceControlResponse (*os.File).Write
 service_control_endpoint.go
 	import context crypto/rand encoding/base32 encoding/json io os strings
 	(*Cell).publishServiceControlEndpointWithBoot readJSON writeAtomic
-	(*Cell).readServiceControlEndpointRecord openServiceRecord privateDir
-	(*Cell).readServiceControlEndpointWithBoot readJSON
+	(*Cell).readServiceControlEndpointRecord openServiceRecord
+	(*Cell).readServiceControlEndpointRecordBy privateDir
+	(*Cell).readServiceControlEndpointWithBoot openAdmissionRecord readServiceRecordJSON
 	(*Cell).refreshOwnedServiceControlEndpoint writeAtomic
 	(*Cell).removeOwnedServiceControlEndpoint removePrivateFile
 service_control_exit.go
 	import bytes context crypto/rand encoding/base32 encoding/json errors fmt io net net/http os runtime strconv strings sync syscall time
 	(*Cell).exitServiceHostForRemoval readJSON
 	(*Cell).serveHostExit (*os.File).Write x2
-	(*Cell).serviceHostExitIdentity readJSON
+	(*Cell).serviceHostExitIdentity readServiceRecordJSON
 	(*Cell).serviceHostLeaseHeld openLockFile
 	(*Cell).startHostExitRequest (*net.UnixListener).Close
-	(*Cell).waitServiceHostExit readJSON x2
+	(*Cell).waitServiceHostExit readJSON readServiceRecordJSON
 	(*serviceHostExitSession).finish (*net.UnixListener).Close
 	(*supervisor).finishHostExit (*os.File).Write
 service_control_exit_budget.go
@@ -465,8 +474,9 @@ service_descriptor.go
 	import context crypto/rand encoding/base64 errors io os os/user path/filepath reflect strconv strings
 	(*Cell).PrepareService (*Cell).writeServiceDescriptor privateDir writeAtomicBytes
 	(*Cell).RepairService (*Cell).writeServiceDescriptor
-	(*Cell).readServiceDescriptorForOwner privateDir readJSON
-	(*Cell).serviceControlSecret openServiceRecord privateDir
+	(*Cell).readServiceDescriptorForOwner privateDir readManifestBy readManifestJSON readServiceRecordJSON
+	(*Cell).serviceControlSecret openServiceRecord
+	(*Cell).serviceControlSecretBy privateDir
 	(*Cell).setServiceDesiredStateLocked (*Cell).writeServiceDescriptor
 	(*Cell).setServiceFaulted (*Cell).writeServiceDescriptor
 	(*Cell).writeServiceDescriptor removePrivateFile syncDirectory writeAtomic x2
