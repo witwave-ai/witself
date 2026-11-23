@@ -35,6 +35,51 @@ func openPrivateReader(_ context.Context, path string) (*os.File, error) {
 	return openPrivateFile(path, os.O_RDONLY, 0)
 }
 
+// Snapshots serve read-only admission. In particular the endpoint owner still
+// uses the ordinary guarded read before it updates or removes its record.
+func openAdmissionRecord(_ context.Context, path string, open error) (*os.File, error) {
+	return openWindowsServiceSnapshot(path, open, true)
+}
+
+func openWindowsServiceSnapshot(path string, open error, requireDirForMissing bool) (*os.File, error) {
+	f, err := runtimeconfig.WindowsPrivateOpenSnapshot(path)
+	if err == nil {
+		return f, nil
+	}
+	// Only classify the refusal. A lookup here can never return a file or
+	// authorize reading a byte. Preserve the public distinction between an
+	// absent, non-private and otherwise unreadable service record.
+	info, statErr := os.Lstat(path)
+	if errors.Is(statErr, os.ErrNotExist) && (!requireDirForMissing || absentBelowDirectory(path)) {
+		return nil, os.ErrNotExist
+	}
+	if statErr != nil || !info.Mode().IsRegular() || runtimeconfig.WindowsPrivateValidateSnapshot(path) != nil {
+		return nil, errors.New("service_record_not_private")
+	}
+	return nil, open
+}
+
+func readServiceRecordJSON(_ context.Context, path string, dst any) error {
+	// servicePrivateRecord historically classified ERROR_PATH_NOT_FOUND as
+	// missing even below a non-directory, before readJSON inspected the name.
+	f, err := openWindowsServiceSnapshot(path, errors.New("cannot open local cell record"), false)
+	if err != nil {
+		return err
+	}
+	return decodeLocalRecord(f, dst)
+}
+
+func readManifestJSON(ctx context.Context, path string, dst any) error {
+	f, err := openRegularBy(ctx, func(_ context.Context, path string) (*os.File, error) {
+		return runtimeconfig.WindowsPrivateOpenSnapshot(path)
+	}, nil, path, errors.New("cannot inspect local cell record"),
+		errors.New("local cell record must be a regular file"), errors.New("cannot open local cell record"))
+	if err != nil {
+		return err
+	}
+	return decodeLocalRecord(f, dst)
+}
+
 // openPrivateWriter is the guarded open too: it refuses flags outside its list,
 // so the Unix non-blocking and no-follow flags never reach it.
 func openPrivateWriter(_ context.Context, path string, flags int, mode os.FileMode) (*os.File, error) {
@@ -81,7 +126,10 @@ func validatePrivateTree(root string) error {
 		// Only the real validators are wired here: privateTreeEntry chooses the
 		// rule and validates <root>/recovery as one object without descending.
 		return privateTreeEntry(root, path, directory, func() error {
-			return validatePrivate(path, directory)
+			if directory {
+				return validatePrivate(path, true)
+			}
+			return runtimeconfig.WindowsPrivateValidateSnapshot(path)
 		}, func(pg string) error {
 			return runtimeconfig.WindowsPrivatePostgresValidate(pg, path, directory)
 		})

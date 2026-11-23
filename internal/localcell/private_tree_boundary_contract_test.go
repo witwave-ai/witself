@@ -126,10 +126,10 @@ func recoveryBoundaryWired(function *ast.FuncDecl) bool {
 			types.ExprString(entry) != "privateTreeEntry(root, path, directory, (func() error literal), (func(pg string) error literal))" {
 			return false
 		}
-		strictSignature, strict, strictOK := recoveryBoundaryReturned(entry.Args[3])
+		strict := serviceBootPublicationText(entry.Args[3])
 		postgresSignature, postgres, postgresOK := recoveryBoundaryReturned(entry.Args[4])
-		return strictOK && postgresOK && strictSignature == "func() error" && postgresSignature == "func(pg string) error" &&
-			types.ExprString(strict) == "validatePrivate(path, directory)" &&
+		return postgresOK && postgresSignature == "func(pg string) error" &&
+			strict == "func() error { if directory { return validatePrivate(path, true) } return runtimeconfig.WindowsPrivateValidateSnapshot(path) }" &&
 			types.ExprString(postgres) == "runtimeconfig.WindowsPrivatePostgresValidate(pg, path, directory)"
 	}
 	return false
@@ -229,7 +229,10 @@ func TestRecoveryBoundarySourceContract(t *testing.T) {
 		t.Fatalf("recovery boundary source contract failed: %v", failures)
 	}
 	const wiredClosure = `		return privateTreeEntry(root, path, directory, func() error {
-			return validatePrivate(path, directory)
+			if directory {
+				return validatePrivate(path, true)
+			}
+			return runtimeconfig.WindowsPrivateValidateSnapshot(path)
 		}, func(pg string) error {
 			return runtimeconfig.WindowsPrivatePostgresValidate(pg, path, directory)
 		})`
@@ -271,7 +274,8 @@ func TestRecoveryBoundarySourceContract(t *testing.T) {
 		{"signature_renamed", "files_other.go", "func validatePrivateTree(string) error { return nil }", "func validatePrivateTreeOther(string) error { return nil }", "declaration:files_other.go"},
 		// The Windows walk wires only the real validators into the boundary.
 		{"wiring_reverted", "files_windows.go", wiredClosure, revertedClosure, "windows_wiring"},
-		{"wiring_other_validator", "files_windows.go", "\t\t\treturn validatePrivate(path, directory)\n", "\t\t\treturn runtimeconfig.WindowsPrivateValidate(path, directory)\n", "windows_wiring"},
+		{"wiring_other_validator", "files_windows.go", "\t\t\t\treturn validatePrivate(path, true)\n", "\t\t\t\treturn runtimeconfig.WindowsPrivateValidate(path, true)\n", "windows_wiring"},
+		{"legacy_leaf_guard", "files_windows.go", "\t\t\treturn runtimeconfig.WindowsPrivateValidateSnapshot(path)\n", "\t\t\treturn validatePrivate(path, false)\n", "windows_wiring"},
 		{"wiring_other_root", "files_windows.go", "return privateTreeEntry(root, path, directory,", "return privateTreeEntry(filepath.Dir(root), path, directory,", "windows_wiring"},
 		{"wiring_postgres_root", "files_windows.go", "WindowsPrivatePostgresValidate(pg, path, directory)", "WindowsPrivatePostgresValidate(root, path, directory)", "windows_wiring"},
 		{"unparsable", "files.go", "package localcell\n", "package localcell {\n", "parse:files.go"},

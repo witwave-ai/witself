@@ -118,10 +118,7 @@ func (c *Cell) readServiceDescriptorForOwner(owner string) (ServiceDescriptor, e
 		return d, err
 	}
 	path := c.path("service", "descriptor.json")
-	if err := servicePrivateRecord(path); err != nil {
-		return d, err
-	}
-	if err := readJSON(context.Background(), path, &d); err != nil {
+	if err := readServiceRecordJSON(context.Background(), path, &d); err != nil {
 		return d, err
 	}
 	if owner == "" {
@@ -131,7 +128,7 @@ func (c *Cell) readServiceDescriptorForOwner(owner string) (ServiceDescriptor, e
 	} else if err := validateServiceDescriptorOwner(d, owner); err != nil {
 		return d, err
 	}
-	m, err := readManifest(context.Background(), c.cfg.Root)
+	m, err := readManifestBy(context.Background(), c.cfg.Root, readManifestJSON)
 	if err != nil {
 		return d, err
 	}
@@ -215,11 +212,15 @@ func (c *Cell) PrepareService(ctx context.Context, d ServiceDescriptor) error {
 }
 
 func (c *Cell) serviceControlSecret() (string, error) {
+	return c.serviceControlSecretBy(context.Background(), openServiceRecord)
+}
+
+func (c *Cell) serviceControlSecretBy(ctx context.Context, open func(context.Context, string, error) (*os.File, error)) (string, error) {
 	if err := privateDir(c.path("service"), false); err != nil {
 		return "", err
 	}
 	invalid := errors.New("service_control_secret_invalid")
-	f, err := openServiceRecord(context.Background(), c.path("service", "control.secret"), invalid)
+	f, err := open(ctx, c.path("service", "control.secret"), invalid)
 	if err != nil {
 		return "", err
 	}

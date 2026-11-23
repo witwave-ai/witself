@@ -123,10 +123,7 @@ func (c *Cell) serviceHostExitIdentity() (ServiceDescriptor, serviceLeaseRecord,
 		return d, serviceLeaseRecord{}, hostExitFailure("identity_tree", false, errors.Join(hostExitRefused("envelope"), err))
 	}
 	var lease serviceLeaseRecord
-	if err := servicePrivateRecord(c.path("service", "lease.json")); err != nil {
-		return d, lease, hostExitFailure("lease_validate", false, errors.Join(hostExitRefused("envelope"), err))
-	}
-	if err := readJSON(context.Background(), c.path("service", "lease.json"), &lease); err != nil {
+	if err := readServiceRecordJSON(context.Background(), c.path("service", "lease.json"), &lease); err != nil {
 		return d, lease, hostExitFailure("lease_validate", false, errors.Join(hostExitRefused("envelope"), err))
 	}
 	boot, err := serviceBootID()
@@ -652,10 +649,7 @@ func (c *Cell) waitServiceHostExit(ctx context.Context, lease serviceLeaseRecord
 			return hostExitFailure("observe", true, errors.Join(hostExitRefused("drain"), ctx.Err()))
 		}
 		var current serviceLeaseRecord
-		if err := servicePrivateRecord(c.path("service", "lease.json")); err != nil {
-			return hostExitFailure("lease_validate", true, errors.Join(hostExitRefused("envelope"), err))
-		}
-		if err := readJSON(context.Background(), c.path("service", "lease.json"), &current); err != nil || current != lease {
+		if err := readServiceRecordJSON(context.Background(), c.path("service", "lease.json"), &current); err != nil || current != lease {
 			return hostExitFailure("lease_validate", true, errors.Join(hostExitRefused("envelope"), err))
 		}
 		held, err := c.serviceHostLeaseHeld()

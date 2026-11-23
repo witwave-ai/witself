@@ -156,7 +156,7 @@ var leaseWaitOpeners = []string{"waitOutLease", "openPrivateReader", "openPrivat
 	"(*Cell).principalDSN", "(*Cell).maintenanceDSN", "(*Cell).lastValueFreeDiagnostic", "(*Cell).admitReinstall", "(*Cell).reinstallAvailable", "(*Cell).finishReinstall",
 	"(*Cell).checkpointOps", "(*Cell).checkpointSummaries", "(*Cell).closeCheckpointFailure", "(*Cell).closeCheckpointLeftover", "(*Cell).listCheckpoints",
 	"(*Cell).openCheckpointEntry", "(*Cell).admitDeleteCheckpoint", "openPrincipalCredentialFile", "(*checkpointTree).open", "(*checkpointTree).witness",
-	"readJSON", "readManifest", "(*Cell).cleanupInterruption", "(*Cell).processState", "(*Cell).processStateWithRecord", "serviceAdapterRemovalHostLock", "(*Cell).checkpointCold",
+	"readJSON", "readManifest", "readManifestBy", "readServiceRecordJSON", "readManifestJSON", "openAdmissionRecord", "(*Cell).readServiceControlEndpointRecordBy", "(*Cell).serviceControlSecretBy", "(*Cell).cleanupInterruption", "(*Cell).processState", "(*Cell).processStateWithRecord", "serviceAdapterRemovalHostLock", "(*Cell).checkpointCold",
 	"(*Cell).own", "(*Cell).ownExisting", "(*Cell).verifyAll", "(*Cell).recoverPostgresRecord"}
 
 // leaseWaitPlaceholders are the non-test calls into leaseWaitOpeners that pass
@@ -180,7 +180,7 @@ var leaseWaitPlaceholders = map[string]int{"checkpoint_verify.go:(*Cell).verifyC
 	"readiness.go:(*Cell).childReadinessExit": 1, "reinstall.go:(*Cell).Reinstall": 2, "reinstall.go:(*Cell).reinstallLocked": 6,
 	"service_adapter_admission.go:serviceAdapterAdmissionForStep": 1, "service_boot.go:(*Cell).bindServiceProcessBootWithReader": 1, "service_boot.go:(*Cell).reconcileOldBoot": 2, "service_boot.go:(*Cell).reconcileServiceBoot": 3,
 	"service_control_endpoint.go:(*Cell).publishServiceControlEndpointWithBoot": 1, "service_control_endpoint.go:(*Cell).readServiceControlEndpointRecord": 1,
-	"service_control_endpoint.go:(*Cell).readServiceControlEndpointWithBoot": 1, "service_control_exit.go:(*Cell).exitServiceHostForRemoval": 3,
+	"service_control.go:(*Cell).readServiceControlSecret": 1, "service_control_endpoint.go:(*Cell).readServiceControlEndpointWithBoot": 2, "service_control_exit.go:(*Cell).exitServiceHostForRemoval": 3,
 	"service_control_exit.go:(*Cell).serviceHostExitIdentity": 1, "service_control_exit.go:(*Cell).serviceHostLeaseHeld": 1,
 	"service_control_exit.go:(*Cell).waitServiceHostExit": 2, "service_control_exit.go:(*supervisor).finishHostExit": 1,
 	"service_descriptor.go:(*Cell).PrepareService": 3, "service_descriptor.go:(*Cell).RepairService": 2, "service_descriptor.go:(*Cell).readServiceDescriptorForOwner": 2,
@@ -248,10 +248,14 @@ var leaseWaitDetachedHeld = []string{"checkpoint_unix.go:(*Cell).openCheckpointS
 	"checkpoint.go:(*Cell).openCheckpointEntry", "checkpoint.go:(*Cell).checkpointOps"}
 
 // leaseWaitValueUses are the non-test uses of an opener other than as a callee
-// (G5), each an opener handed to openRegularBy or readRegular as its open, by
+// (G5), including openers handed to an admission reader or readRegular, by
 // file and declaration with their counts; leaseWaitReleasedCallers are the
 // non-test calls into leaseWaitReleased from outside it (G2, G5).
-var leaseWaitValueUses = map[string]int{"checkpoint.go:(*Cell).admitCheckpoint": 1, "commands.go:(*Cell).password": 1, "files.go:openRegular": 1,
+var leaseWaitValueUses = map[string]int{
+	"files.go:readManifest": 1, "service_control.go:(*Cell).readServiceControlSecret": 1,
+	"service_control_endpoint.go:(*Cell).readServiceControlEndpointRecord": 1, "service_control_endpoint.go:(*Cell).readServiceControlEndpointWithBoot": 1,
+	"service_descriptor.go:(*Cell).readServiceDescriptorForOwner": 1, "service_descriptor.go:(*Cell).serviceControlSecret": 1,
+	"checkpoint.go:(*Cell).admitCheckpoint": 1, "commands.go:(*Cell).password": 1, "files.go:openRegular": 1,
 	"lifecycle.go:(*Cell).postmaster": 1, "lifecycle.go:(*Cell).recoverPostgresRecord": 1, "reinstall.go:(*Cell).reinstallAvailable": 1, "service_descriptor.go:openServiceRecord": 1}
 var leaseWaitReleasedCallers = map[string]int{"lifecycle.go:(*Cell).Status": 1}
 

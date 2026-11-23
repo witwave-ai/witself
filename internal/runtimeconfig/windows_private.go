@@ -606,10 +606,17 @@ func WindowsPrivateCreateTemp(dir string) (*os.File, error) {
 // and the published object is rolled back by handle. Existing destinations are
 // validated before replacement; sharing violations leave both files intact.
 func WindowsPrivateRename(oldPath, newPath string) error {
-	return windowsPrivateRename(oldPath, newPath, WindowsPrivateValidate, windowsPrivateValidateHandle)
+	return WindowsPrivateRenameObserved(oldPath, newPath, nil)
 }
 
-func windowsPrivateRename(oldPath, newPath string, validate func(string, bool) error, validateHandle func(windows.Handle, bool) error) error {
+// WindowsPrivateRenameObserved runs the same private publication with a
+// synchronous observer immediately before and after the native rename. Both
+// DELETE handles are still held at these boundaries when replacing a file.
+func WindowsPrivateRenameObserved(oldPath, newPath string, boundary func(after bool)) error {
+	return windowsPrivateRename(oldPath, newPath, WindowsPrivateValidate, windowsPrivateValidateHandle, boundary)
+}
+
+func windowsPrivateRename(oldPath, newPath string, validate func(string, bool) error, validateHandle func(windows.Handle, bool) error, boundary func(bool)) error {
 	oldClean, err := windowsPrivateCleanPath(oldPath)
 	if err != nil {
 		return err
@@ -663,8 +670,14 @@ func windowsPrivateRename(oldPath, newPath string, validate func(string, bool) e
 	if err := oldGuard.verify(oldClean, handle, false); err != nil {
 		return err
 	}
+	if boundary != nil {
+		boundary(false)
+	}
 	if err := windowsPrivateReplace(handle, newClean); err != nil {
 		return windowsPrivateFailure(err)
+	}
+	if boundary != nil {
+		boundary(true)
 	}
 	if err := oldGuard.verify(newClean, handle, false); err != nil {
 		return windowsPrivateRollback(handle, err)

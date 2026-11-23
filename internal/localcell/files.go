@@ -61,8 +61,14 @@ func privateDir(path string, create bool) error {
 }
 
 func (c *Cell) validateRoot(create bool) error {
+	if c.observeRootWalk != nil {
+		c.observeRootWalk(true)
+	}
 	if err := validatePrivateTreeRetried(c.cfg.Root); err != nil {
 		return err
+	}
+	if c.observeRootWalk != nil {
+		c.observeRootWalk(false)
 	}
 	// Resolve parent aliases once at the trust boundary; never follow a root or
 	// layout symlink. Callers must supply an existing parent directory.
@@ -95,8 +101,8 @@ func (c *Cell) validateRoot(create bool) error {
 
 // validateRootTree runs validate(root), one complete read-only private-tree
 // walk, as an attempt of the shared bounded retry: on Windows a concurrent
-// private creation, publication or removal holds what it changes with delete
-// access, which the walk's guard does not share (slice FLAKE-63). A walk that
+// private creation, publication or removal can meet a transient native
+// failure (slice FLAKE-63). A walk that
 // met a vanished object (os.ErrNotExist) is an incomplete pass, never an absence:
 // it is walked again with the same backoff inside the same budget, and still
 // incomplete when the budget ends it is errPrivateLayout (LC-TREEWALK-F1); an
@@ -264,6 +270,10 @@ func readJSON(ctx context.Context, path string, dst any) error {
 	if err != nil {
 		return err
 	}
+	return decodeLocalRecord(f, dst)
+}
+
+func decodeLocalRecord(f *os.File, dst any) error {
 	defer func() { _ = f.Close() }()
 	decoder := json.NewDecoder(io.LimitReader(f, 1<<20))
 	decoder.DisallowUnknownFields()
@@ -277,8 +287,12 @@ func readJSON(ctx context.Context, path string, dst any) error {
 }
 
 func readManifest(ctx context.Context, root string) (*Manifest, error) {
+	return readManifestBy(ctx, root, readJSON)
+}
+
+func readManifestBy(ctx context.Context, root string, read func(context.Context, string, any) error) (*Manifest, error) {
 	var m Manifest
-	if err := readJSON(ctx, filepath.Join(root, "manifest.json"), &m); err != nil {
+	if err := read(ctx, filepath.Join(root, "manifest.json"), &m); err != nil {
 		return nil, err
 	}
 	if m.LayoutVersion != LayoutVersion {

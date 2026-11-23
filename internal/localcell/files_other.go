@@ -114,6 +114,21 @@ func openPlainReader(ctx context.Context, path string) (*os.File, error) {
 	return openPrivateReader(ctx, path)
 }
 
+func openAdmissionRecord(ctx context.Context, path string, open error) (*os.File, error) {
+	return openServiceRecord(ctx, path, open)
+}
+
+func readServiceRecordJSON(ctx context.Context, path string, dst any) error {
+	if err := servicePrivateRecord(path); err != nil {
+		return err
+	}
+	return readJSON(ctx, path, dst)
+}
+
+func readManifestJSON(ctx context.Context, path string, dst any) error {
+	return readJSON(ctx, path, dst)
+}
+
 func readPrivateFile(path string) ([]byte, error) { return os.ReadFile(path) }
 
 func createPrivateTemp(dir string) (*os.File, error) { return os.CreateTemp(dir, ".pending-*") }

@@ -76,7 +76,7 @@ func (c *Cell) readServiceControlSecret() (secretBytes []byte, result error) {
 	if err := c.validateRoot(false); err != nil {
 		return nil, ErrServiceControlRefused
 	}
-	secret, err := c.serviceControlSecret()
+	secret, err := c.serviceControlSecretBy(context.Background(), openAdmissionRecord)
 	if err != nil {
 		return nil, ErrServiceControlRefused
 	}

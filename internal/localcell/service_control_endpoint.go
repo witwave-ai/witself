@@ -102,12 +102,16 @@ func validateServiceControlRecord(record serviceControlEndpointRecord, d Service
 	return nil
 }
 
-func (c *Cell) readServiceControlEndpointRecord() (endpoint serviceControlEndpointRecord, result error) {
+func (c *Cell) readServiceControlEndpointRecord() (serviceControlEndpointRecord, error) {
+	return c.readServiceControlEndpointRecordBy(context.Background(), openServiceRecord)
+}
+
+func (c *Cell) readServiceControlEndpointRecordBy(ctx context.Context, open func(context.Context, string, error) (*os.File, error)) (endpoint serviceControlEndpointRecord, result error) {
 	defer func() { result = serviceFailureFallback(result, "endpoint_read") }()
 	if privateDir(c.path("service"), false) != nil {
 		return serviceControlEndpointRecord{}, serviceEndpointRefused("record")
 	}
-	f, err := openServiceRecord(context.Background(), c.path("service", "control-endpoint.json"), serviceEndpointRefused("record"))
+	f, err := open(ctx, c.path("service", "control-endpoint.json"), serviceEndpointRefused("record"))
 	if err != nil {
 		return serviceControlEndpointRecord{}, serviceEndpointRefused("record")
 	}
@@ -124,12 +128,12 @@ func (c *Cell) readServiceControlEndpointWithBoot(readBoot func() (string, error
 	if err != nil {
 		return serviceControlEndpointRecord{}, serviceFailureAt(serviceEndpointRefused("record"), "endpoint_descriptor")
 	}
-	record, err := c.readServiceControlEndpointRecord()
+	record, err := c.readServiceControlEndpointRecordBy(context.Background(), openAdmissionRecord)
 	if err != nil {
 		return serviceControlEndpointRecord{}, err
 	}
 	var lease serviceLeaseRecord
-	if servicePrivateRecord(c.path("service", "lease.json")) != nil || readJSON(context.Background(), c.path("service", "lease.json"), &lease) != nil {
+	if readServiceRecordJSON(context.Background(), c.path("service", "lease.json"), &lease) != nil {
 		return serviceControlEndpointRecord{}, serviceFailureAt(serviceEndpointRefused("host_identity"), "endpoint_lease")
 	}
 	boot, err := readBoot()
