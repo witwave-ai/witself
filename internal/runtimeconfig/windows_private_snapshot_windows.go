@@ -111,6 +111,10 @@ func windowsPrivateSnapshot(path string, content bool, step func(index, total in
 		_ = file.Close()
 		return nil, err
 	}
+	// A held handle keeps its identity, so only the reparse attribute can
+	// refuse here: a held directory emptied and converted in place after it
+	// was opened, and still converted now. The identity comparison is a
+	// cheap invariant, not a second defence.
 	for _, entry := range guard {
 		var current windows.ByHandleFileInformation
 		err := windows.GetFileInformationByHandle(entry.handle, &current)

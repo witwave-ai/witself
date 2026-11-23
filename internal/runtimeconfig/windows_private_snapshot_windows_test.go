@@ -29,7 +29,7 @@ func TestWindowsPrivateSnapshotContainment(t *testing.T) {
 		file, err := WindowsPrivateOpenSnapshot(path)
 		if file == nil && err != nil {
 			t.Logf("refused")
-			return
+			t.Fatal("private snapshot refused its ordinary object")
 		}
 		if file == nil {
 			t.Fatal("snapshot returned no result")
@@ -56,6 +56,55 @@ func TestWindowsPrivateSnapshotContainment(t *testing.T) {
 	t.Run("converted_ancestor", func(t *testing.T) { snapshotContainmentProbe(t, true, true) })
 	t.Run("converted_parent_kept", func(t *testing.T) { snapshotContainmentProbe(t, false, false) })
 	t.Run("converted_ancestor_kept", func(t *testing.T) { snapshotContainmentProbe(t, true, false) })
+	// The open leaf shares delete, so its directory can be emptied and turned
+	// into a junction after the leaf open and before validation. The final
+	// check of the held chain must refuse; nothing else in the suite reaches it.
+	t.Run("converted_after_open", func(t *testing.T) {
+		root := windowsPrivateTestRoot(t)
+		inner, target, aside := filepath.Join(root, "inner"), filepath.Join(root, "target"), filepath.Join(root, "aside")
+		if WindowsPrivateMkdir(inner) != nil || WindowsPrivateMkdir(target) != nil {
+			t.Fatal("cannot prepare containment fixture layout")
+		}
+		path := filepath.Join(inner, "record")
+		created, err := WindowsPrivateOpenFile(path, os.O_CREATE|os.O_EXCL|os.O_RDONLY)
+		if err != nil || created.Close() != nil {
+			t.Fatal("cannot prepare containment fixture object")
+		}
+		buffer := spoolJunctionData(t, target)
+		converted := false
+		t.Cleanup(func() {
+			if !converted {
+				return
+			}
+			if writer, err := snapshotAttributeWriter(inner); err == nil {
+				_ = clearSpoolJunction(writer)
+				_ = windows.CloseHandle(writer)
+			}
+		})
+		file, err := windowsPrivateSnapshot(path, true, nil, func() {
+			if os.Rename(path, aside) != nil {
+				return
+			}
+			writer, err := snapshotAttributeWriter(inner)
+			if err != nil {
+				return
+			}
+			converted = setSpoolJunction(writer, buffer) == nil
+			_ = windows.CloseHandle(writer)
+		})
+		if file != nil {
+			_ = file.Close()
+		}
+		if !converted {
+			t.Fatal("cannot convert the held directory in place")
+		}
+		if file != nil || err == nil {
+			t.Logf("snapshot containment class=%s", "admitted_converted")
+			t.Fatal("private snapshot admitted a converted chain")
+		}
+		t.Logf("snapshot containment class=%s", "refused")
+		snapshotRefusalCause(t, err)
+	})
 	// What the file system answers when a directory that still has an entry is
 	// asked to become a junction. Nothing about admission is asserted here.
 	t.Run("nonempty_conversion", func(t *testing.T) {
@@ -95,6 +144,19 @@ func snapshotAttributeWriter(path string) (windows.Handle, error) {
 	}
 	return windows.CreateFile(pointer, windows.FILE_WRITE_ATTRIBUTES, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
 		nil, windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+}
+
+// Two fixed classes say why a converted chain was refused: the private
+// failure class, and whether the name was simply absent from the emptied
+// directory's own index.
+func snapshotRefusalCause(t *testing.T, err error) {
+	t.Helper()
+	absent := "present"
+	if errors.Is(err, os.ErrNotExist) {
+		absent = "absent"
+	}
+	t.Logf("snapshot refusal class=%s", WindowsPrivateFailureClass(err))
+	t.Logf("snapshot refusal name class=%s", absent)
 }
 
 func clearSpoolJunction(handle windows.Handle) error {
@@ -184,6 +246,7 @@ func snapshotContainmentProbe(t *testing.T, ancestor, restore bool) {
 			t.Fatal("snapshot returned no result")
 		}
 		t.Logf("snapshot containment class=%s", "refused")
+		snapshotRefusalCause(t, err)
 		return
 	}
 	var got windows.ByHandleFileInformation
