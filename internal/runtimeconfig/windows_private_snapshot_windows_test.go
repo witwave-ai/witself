@@ -12,6 +12,43 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+func TestWindowsPrivateSnapshotContainment(t *testing.T) {
+	t.Run("ordinary", func(t *testing.T) {
+		path := filepath.Join(windowsPrivateTestRoot(t), "record")
+		original, err := WindowsPrivateOpenFile(path, os.O_CREATE|os.O_EXCL|os.O_RDONLY)
+		if err != nil {
+			t.Fatal("cannot prepare snapshot identity control")
+		}
+		var want windows.ByHandleFileInformation
+		err = windows.GetFileInformationByHandle(windows.Handle(original.Fd()), &want)
+		if closeErr := original.Close(); err != nil || closeErr != nil {
+			t.Fatal("cannot identify snapshot identity control")
+		}
+
+		file, err := WindowsPrivateOpenSnapshot(path)
+		if file == nil && err != nil {
+			t.Logf("refused")
+			return
+		}
+		if file == nil {
+			t.Fatal("snapshot returned no result")
+		}
+		defer func() { _ = file.Close() }()
+		var got windows.ByHandleFileInformation
+		if windows.GetFileInformationByHandle(windows.Handle(file.Fd()), &got) != nil {
+			t.Fatal("cannot identify returned snapshot")
+		}
+		if got.VolumeSerialNumber != want.VolumeSerialNumber || got.FileIndexHigh != want.FileIndexHigh || got.FileIndexLow != want.FileIndexLow {
+			t.Logf("escaped")
+			t.Fatal("private snapshot left its pinned chain")
+		}
+		if err != nil {
+			t.Fatal("snapshot returned a handle on refusal")
+		}
+		t.Logf("contained")
+	})
+}
+
 func TestWindowsPrivateSnapshot(t *testing.T) {
 	fixture := func(t *testing.T) (root, path string) {
 		t.Helper()

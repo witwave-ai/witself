@@ -14,6 +14,22 @@ import (
 )
 
 func TestWindowsOwnershipFailureBusyClassification(t *testing.T) {
+	t.Run("denies_read_sharing", windowsOwnershipDeniesReadSharing)
+	t.Run("fully_shared_delete", func(t *testing.T) {
+		c, _ := unitCell(t)
+		holdTreeDelete(t, c.path("manifest.json"))
+		// The holder remains open through pre-lock and post-lock validation.
+		owner, err := c.own(t.Context(), false)
+		if err != nil || owner == nil {
+			t.Fatal("fully sharing DELETE holder blocked Windows ownership")
+		}
+		if err := owner.Close(); err != nil {
+			t.Fatal("cannot release Windows ownership fixture lock")
+		}
+	})
+}
+
+func windowsOwnershipDeniesReadSharing(t *testing.T) {
 	c, _ := unitCell(t)
 	root := c.cfg.Root
 	if err := privateDir(c.path("pg"), true); err != nil {
@@ -28,17 +44,15 @@ func TestWindowsOwnershipFailureBusyClassification(t *testing.T) {
 			_ = owner.Close()
 		}
 	})
-	// unitCell publishes this harmless private record outside PGDATA. DELETE
-	// access models the transient rollback handle held by private file creation.
-	// Its broad sharing permits metadata snapshots, but the tree validator's
-	// guard denies delete sharing and must refuse this already-open handle.
+	// Match the full-sharing holder's access, but deny the read sharing
+	// required by the tree validator's FILE_EXECUTE access on a regular leaf.
 	pointer, err := windows.UTF16PtrFromString(c.path("manifest.json"))
 	if err != nil {
 		t.Fatal("cannot encode Windows ownership blocker path")
 	}
-	blocker, err := windows.CreateFile(pointer, windows.DELETE,
-		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
-		nil, windows.OPEN_EXISTING, windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	blocker, err := windows.CreateFile(pointer, windows.DELETE|windows.FILE_READ_ATTRIBUTES,
+		windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil, windows.OPEN_EXISTING,
+		windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
 	if err != nil {
 		t.Fatal("cannot open Windows ownership DELETE blocker")
 	}
