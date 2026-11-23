@@ -104,8 +104,8 @@ func validateServiceControlRecord(record serviceControlEndpointRecord, d Service
 	return nil
 }
 
-func (c *Cell) readServiceControlEndpointRecord() (serviceControlEndpointRecord, error) {
-	return c.readServiceControlEndpointRecordBy(context.Background(), openServiceRecord)
+func (c *Cell) readServiceControlEndpointRecord(ctx context.Context) (serviceControlEndpointRecord, error) {
+	return c.readServiceControlEndpointRecordBy(ctx, openServiceRecord)
 }
 
 func (c *Cell) readServiceControlEndpointRecordBy(ctx context.Context, open func(context.Context, string, error) (*os.File, error)) (endpoint serviceControlEndpointRecord, result error) {
@@ -115,29 +115,29 @@ func (c *Cell) readServiceControlEndpointRecordBy(ctx context.Context, open func
 	}
 	f, err := open(ctx, c.path("service", "control-endpoint.json"), serviceEndpointRefused("record"))
 	if err != nil {
-		return serviceControlEndpointRecord{}, serviceEndpointRefused("record")
+		return serviceControlEndpointRecord{}, serviceReadFailure(err, serviceEndpointRefused("record"))
 	}
 	defer func() { _ = f.Close() }()
 	return decodeServiceControlEndpoint(f)
 }
 
-func (c *Cell) readServiceControlEndpoint() (serviceControlEndpointRecord, error) {
-	return c.readServiceControlEndpointWithBoot(serviceBootID)
+func (c *Cell) readServiceControlEndpoint(ctx context.Context) (serviceControlEndpointRecord, error) {
+	return c.readServiceControlEndpointWithBoot(ctx, serviceBootID)
 }
 
-func (c *Cell) readServiceControlEndpointWithBoot(readBoot func() (string, error)) (serviceControlEndpointRecord, error) {
-	d, err := c.ServiceDescriptor()
+func (c *Cell) readServiceControlEndpointWithBoot(ctx context.Context, readBoot func() (string, error)) (serviceControlEndpointRecord, error) {
+	d, err := c.serviceDescriptor(ctx)
 	if err != nil {
-		return serviceControlEndpointRecord{}, serviceFailureAt(serviceEndpointRefused("record"), "endpoint_descriptor")
+		return serviceControlEndpointRecord{}, serviceFailureAt(serviceReadFailure(err, serviceEndpointRefused("record")), "endpoint_descriptor")
 	}
 	c.serviceDescriptorBoundary("sampled", d)
-	record, err := c.readServiceControlEndpointRecordBy(context.Background(), openAdmissionRecord)
+	record, err := c.readServiceControlEndpointRecordBy(ctx, openAdmissionRecord)
 	if err != nil {
 		return serviceControlEndpointRecord{}, err
 	}
 	var lease serviceLeaseRecord
-	if readServiceRecordJSON(context.Background(), c.path("service", "lease.json"), &lease) != nil {
-		return serviceControlEndpointRecord{}, serviceFailureAt(serviceEndpointRefused("host_identity"), "endpoint_lease")
+	if err := readServiceRecordJSON(ctx, c.path("service", "lease.json"), &lease); err != nil {
+		return serviceControlEndpointRecord{}, serviceFailureAt(serviceReadFailure(err, serviceEndpointRefused("host_identity")), "endpoint_lease")
 	}
 	boot, err := readBoot()
 	if err != nil {
@@ -152,27 +152,27 @@ func (c *Cell) readServiceControlEndpointWithBoot(readBoot func() (string, error
 // Run checked its executable against initial before taking the lifetime lock.
 // Sample the issue revision under that lock, without adopting a different
 // installation, owner or executable payload during startup.
-func (c *Cell) serviceListenerDescriptor(initial ServiceDescriptor) (ServiceDescriptor, error) {
-	d, err := c.ServiceDescriptor()
+func (c *Cell) serviceListenerDescriptor(ctx context.Context, initial ServiceDescriptor) (ServiceDescriptor, error) {
+	d, err := c.serviceDescriptor(ctx)
 	if err != nil || d.InstallationID != initial.InstallationID || d.UID != initial.UID || !reflect.DeepEqual(d.Payload, initial.Payload) {
-		return ServiceDescriptor{}, serviceEndpointRefused("record")
+		return ServiceDescriptor{}, serviceReadFailure(err, serviceEndpointRefused("record"))
 	}
 	return d, nil
 }
 
 // The first instance is already reserved. Only a provisional lease belonging
 // to this activation's host may become eligible for discovery.
-func (c *Cell) completeServiceLease(initial ServiceDescriptor, name string, readBoot func() (string, error)) error {
+func (c *Cell) completeServiceLease(ctx context.Context, initial ServiceDescriptor, name string, readBoot func() (string, error)) error {
 	// Reservation can overlap a state writer. Issue at the revision of a
 	// current descriptor for the same validated host payload.
-	d, err := c.serviceListenerDescriptor(initial)
+	d, err := c.serviceListenerDescriptor(ctx, initial)
 	if err != nil {
 		return serviceFailureAt(err, "endpoint_descriptor")
 	}
 	provisional := serviceLeaseRecord{}
 	path := c.path("service", "lease.json")
-	if err := readServiceRecordJSON(context.Background(), path, &provisional); err != nil {
-		return serviceFailureAt(serviceEndpointRefused("host_identity"), "endpoint_lease")
+	if err := readServiceRecordJSON(ctx, path, &provisional); err != nil {
+		return serviceFailureAt(serviceReadFailure(err, serviceEndpointRefused("host_identity")), "endpoint_lease")
 	}
 	start, alive, err := processIdentity(os.Getpid())
 	if err != nil || !alive || provisional.PID != os.Getpid() || provisional.StartIdentity != start ||
@@ -203,19 +203,19 @@ func serviceEndpointForLease(lease serviceLeaseRecord) serviceControlEndpointRec
 
 // Publication revalidates the descriptor and the completed lease. An
 // intervening state-only write does not change the listener's issue revision.
-func (c *Cell) publishServiceControlEndpoint(pipeName string) (serviceControlEndpointRecord, error) {
-	return c.publishServiceControlEndpointWithBoot(pipeName, serviceBootID)
+func (c *Cell) publishServiceControlEndpoint(ctx context.Context, pipeName string) (serviceControlEndpointRecord, error) {
+	return c.publishServiceControlEndpointWithBoot(ctx, pipeName, serviceBootID)
 }
 
-func (c *Cell) publishServiceControlEndpointWithBoot(pipeName string, readBoot func() (string, error)) (endpoint serviceControlEndpointRecord, result error) {
+func (c *Cell) publishServiceControlEndpointWithBoot(ctx context.Context, pipeName string, readBoot func() (string, error)) (endpoint serviceControlEndpointRecord, result error) {
 	defer func() { result = serviceFailureFallback(result, "endpoint_write") }()
-	d, err := c.ServiceDescriptor()
+	d, err := c.serviceDescriptor(ctx)
 	if err != nil {
-		return serviceControlEndpointRecord{}, serviceFailureAt(serviceEndpointRefused("record"), "endpoint_descriptor")
+		return serviceControlEndpointRecord{}, serviceFailureAt(serviceReadFailure(err, serviceEndpointRefused("record")), "endpoint_descriptor")
 	}
 	var lease serviceLeaseRecord
-	if readServiceRecordJSON(context.Background(), c.path("service", "lease.json"), &lease) != nil {
-		return serviceControlEndpointRecord{}, serviceFailureAt(serviceEndpointRefused("host_identity"), "endpoint_lease")
+	if err := readServiceRecordJSON(ctx, c.path("service", "lease.json"), &lease); err != nil {
+		return serviceControlEndpointRecord{}, serviceFailureAt(serviceReadFailure(err, serviceEndpointRefused("host_identity")), "endpoint_lease")
 	}
 	boot, err := readBoot()
 	if err != nil {
@@ -238,19 +238,19 @@ func (c *Cell) publishServiceControlEndpointWithBoot(pipeName string, readBoot f
 	return record, nil
 }
 
-func (c *Cell) removeOwnedServiceControlEndpoint(owned serviceControlEndpointRecord) error {
-	return c.removeOwnedServiceControlEndpointBy(owned, nil)
+func (c *Cell) removeOwnedServiceControlEndpoint(ctx context.Context, owned serviceControlEndpointRecord) error {
+	return c.removeOwnedServiceControlEndpointBy(ctx, owned, nil)
 }
 
-func (c *Cell) removeOwnedServiceControlEndpointBy(owned serviceControlEndpointRecord, matched func()) (result error) {
+func (c *Cell) removeOwnedServiceControlEndpointBy(ctx context.Context, owned serviceControlEndpointRecord, matched func()) (result error) {
 	defer func() { result = serviceFailureFallback(result, "endpoint_remove") }()
 	path := c.path("service", "control-endpoint.json")
 	if privateDir(c.path("service"), false) != nil {
 		return serviceFailureAt(serviceEndpointRefused("host_identity"), "endpoint_read")
 	}
-	f, err := openServiceRecord(context.Background(), path, serviceEndpointRefused("record"))
+	f, err := openServiceRecord(ctx, path, serviceEndpointRefused("record"))
 	if err != nil {
-		return serviceFailureAt(serviceEndpointRefused("host_identity"), "endpoint_read")
+		return serviceFailureAt(serviceReadFailure(err, serviceEndpointRefused("host_identity")), "endpoint_read")
 	}
 	defer func() { _ = f.Close() }()
 	record, err := decodeServiceControlEndpoint(f)

@@ -19,8 +19,8 @@ func hostExitBindingForLease(serviceLeaseRecord) serviceHostExitBinding {
 func (*serviceControlHostState) hostExitBindingMatches(serviceHostExitBinding, serviceLeaseRecord, net.Listener) bool {
 	return true
 }
-func (c *Cell) validateHostExitEndpoint(serviceHostExitBinding) error {
-	return c.validateServiceControlEndpoint()
+func (c *Cell) validateHostExitEndpoint(ctx context.Context, _ serviceHostExitBinding) error {
+	return c.validateServiceControlEndpoint(ctx)
 }
 func (c *Cell) dialHostExitEndpoint(ctx context.Context, _ serviceHostExitBinding) (net.Conn, error) {
 	return c.dialServiceControl(ctx)

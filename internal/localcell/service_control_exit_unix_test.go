@@ -777,7 +777,7 @@ func TestServiceHostExitAdmissionEarlyRefusalUnix(t *testing.T) {
 				t.Fatal("refusal fixture lease unavailable")
 			}
 			t.Cleanup(func() { _ = lease.Close() })
-			listener, err := c.listenServiceControl()
+			listener, err := c.listenServiceControl(t.Context())
 			if err != nil {
 				t.Fatal("refusal fixture listener unavailable")
 			}

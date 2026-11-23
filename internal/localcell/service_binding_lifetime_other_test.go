@@ -16,10 +16,10 @@ func testBindingLifetimePhases(t *testing.T) {
 			boot := func() (string, error) { return "fixture-boot", nil }
 			if row == "removed" {
 				_, record := endpointTestActivation(t, c, d, boot)
-				if c.removeOwnedServiceControlEndpoint(record) != nil {
+				if c.removeOwnedServiceControlEndpoint(t.Context(), record) != nil {
 					t.Fatal(bindingLifetimeFailure)
 				}
-				if _, err := c.readServiceControlEndpointWithBoot(boot); !errors.Is(err, ErrServiceControlRefused) {
+				if _, err := c.readServiceControlEndpointWithBoot(t.Context(), boot); !errors.Is(err, ErrServiceControlRefused) {
 					t.Fatal(bindingLifetimeFailure)
 				}
 				return
@@ -36,11 +36,11 @@ func testBindingLifetimePhases(t *testing.T) {
 			}
 			if row == "no_publication" {
 				name, err := newServiceControlPipeName(d.InstallationID)
-				if err != nil || c.completeServiceLease(d, name, boot) != nil {
+				if err != nil || c.completeServiceLease(t.Context(), d, name, boot) != nil {
 					t.Fatal(bindingLifetimeFailure)
 				}
 			}
-			if _, err := c.readServiceControlEndpointWithBoot(boot); !errors.Is(err, ErrServiceControlRefused) {
+			if _, err := c.readServiceControlEndpointWithBoot(t.Context(), boot); !errors.Is(err, ErrServiceControlRefused) {
 				t.Fatal(bindingLifetimeFailure)
 			}
 		})
@@ -60,7 +60,7 @@ func testServiceBindingSuccessor(t *testing.T, c *Cell, d ServiceDescriptor, boo
 	if writeAtomic(c.path("service", "control-endpoint.json"), old, nil) != nil {
 		t.Fatal(bindingLiveFailure)
 	}
-	if _, err := c.readServiceControlEndpointWithBoot(boot); !errors.Is(err, ErrServiceControlRefused) {
+	if _, err := c.readServiceControlEndpointWithBoot(t.Context(), boot); !errors.Is(err, ErrServiceControlRefused) {
 		t.Fatal(bindingLiveFailure)
 	}
 }

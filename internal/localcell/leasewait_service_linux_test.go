@@ -20,10 +20,18 @@ func TestServiceReadLeaseContext(t *testing.T) {
 	}{
 		{"descriptor", "descriptor.json", func(ctx context.Context, c *Cell) error { _, err := c.serviceDescriptor(ctx); return err }},
 		{"control_secret", "control.secret", func(ctx context.Context, c *Cell) error { _, err := c.readServiceControlSecret(ctx); return err }},
+		{"endpoint", "control-endpoint.json", func(ctx context.Context, c *Cell) error {
+			_, err := c.readServiceControlEndpointRecord(ctx)
+			return err
+		}},
 	} {
 		for _, holder := range []string{"kept", "retaken"} {
 			t.Run(row.name+"/"+holder, func(t *testing.T) {
 				c, initial := descriptorTestCell(t) // unitCell pins both homes.
+				var published serviceControlEndpointRecord
+				if row.name == "endpoint" {
+					_, published = endpointTestActivation(t, c, initial, func() (string, error) { return "fixture-boot", nil })
+				}
 				ctx, cancel := context.WithCancel(t.Context())
 				cancel()
 				if row.read(ctx, c) != nil {
@@ -58,6 +66,22 @@ func TestServiceReadLeaseContext(t *testing.T) {
 				}
 				if elapsed >= leaseWait.ceiling/2 {
 					t.Fatal("service reader waited past half the lease ceiling")
+				}
+				if row.name == "endpoint" {
+					var site *serviceFailure
+					if !errors.As(err, &site) {
+						t.Fatal("endpoint cut lost its site wrapper")
+					}
+					if site.site != "endpoint_read" {
+						t.Fatal("endpoint cut lost its read site")
+					}
+					record, err := c.readServiceControlEndpointRecord(t.Context())
+					if err != nil {
+						t.Fatal("endpoint was unreadable after a cut")
+					}
+					if record != published {
+						t.Fatal("endpoint read changed its published activation")
+					}
 				}
 				after, err := c.ServiceDescriptor()
 				if err != nil {
@@ -125,7 +149,7 @@ func TestLeaseServiceRepairAcknowledgement(t *testing.T) {
 	host := serviceWorkerOnCell(t, fresh, "", false)
 	bound, stop := context.WithTimeout(t.Context(), serviceControlBudget(fresh.cfg.Timeout, 3))
 	defer stop()
-	for fresh.validateServiceControlEndpoint() != nil {
+	for fresh.validateServiceControlEndpoint(t.Context()) != nil {
 		select {
 		case <-host.done:
 			t.Fatal("host exited before publishing discovery")
@@ -223,7 +247,7 @@ func TestServiceExitLease(t *testing.T) {
 			envelope, lease, err := c.newHostExitEnvelope()
 			requireServiceLease(t, err == nil, "cannot identify the host before exit")
 			if row == "envelope" {
-				listener, err := c.listenServiceControl()
+				listener, err := c.listenServiceControl(t.Context())
 				requireServiceLease(t, err == nil, "cannot prepare the exit endpoint")
 				defer func() { _ = listener.Close() }()
 			}
@@ -267,6 +291,78 @@ func TestServiceExitLease(t *testing.T) {
 				requireServiceLease(t, exit.phase == "observe", "session cut lost its observation phase")
 				requireServiceLease(t, exit.accepted, "session cut lost its accepted disposition")
 			}
+		})
+	}
+}
+
+func TestServiceEndpointLeaseWait(t *testing.T) {
+	for _, row := range []struct{ operation, file, site string }{
+		{"complete", "descriptor.json", "endpoint_descriptor"}, {"complete", "lease.json", "endpoint_lease"},
+		{"publish", "descriptor.json", "endpoint_descriptor"}, {"publish", "lease.json", "endpoint_lease"},
+		{"read", "descriptor.json", "endpoint_descriptor"}, {"read", "lease.json", "endpoint_lease"},
+		{"read", "control-endpoint.json", "endpoint_read"}, {"retire", "control-endpoint.json", "endpoint_read"},
+	} {
+		t.Run(row.operation+"/"+row.file, func(t *testing.T) {
+			c, d := descriptorTestCell(t)
+			boot := func() (string, error) { return "fixture-boot", nil }
+			lock, err := c.acquireServiceLeaseForPlatform(d, boot, "windows")
+			requireServiceLease(t, err == nil, "cannot acquire provisional fixture lease")
+			defer func() { _ = lock.Close() }()
+			name, err := newServiceControlPipeName(d.InstallationID)
+			requireServiceLease(t, err == nil, "cannot name fixture listener")
+			if row.operation != "complete" {
+				requireServiceLease(t, c.completeServiceLease(t.Context(), d, name, boot) == nil, "cannot complete fixture lease")
+			}
+			var owned serviceControlEndpointRecord
+			published := row.operation == "read" || row.operation == "retire"
+			if published {
+				owned, err = c.publishServiceControlEndpointWithBoot(t.Context(), name, boot)
+				requireServiceLease(t, err == nil, "cannot publish fixture endpoint")
+			}
+			leasePath := c.path("service", "lease.json")
+			var before, after serviceLeaseRecord
+			requireServiceLease(t, readServiceRecordJSON(t.Context(), leasePath, &before) == nil, "cannot read original host lease")
+			call := func(ctx context.Context) error {
+				switch row.operation {
+				case "complete":
+					return c.completeServiceLease(ctx, d, name, boot)
+				case "publish":
+					_, err := c.publishServiceControlEndpointWithBoot(ctx, name, boot)
+					return err
+				case "retire":
+					return c.removeOwnedServiceControlEndpoint(ctx, owned)
+				default:
+					_, err := c.readServiceControlEndpointWithBoot(ctx, boot)
+					return err
+				}
+			}
+			holder := leaseTaken(t, leaseHolder(t, "kept", unix.F_WRLCK), c.path("service", row.file))
+			leaseWait.ceiling = 2 * time.Second
+			ctx, cancel := context.WithCancel(t.Context())
+			done := make(chan error, 1)
+			go func() { done <- call(ctx) }()
+			_, broken := leaseContextBroken(holder)
+			cancel()
+			err = <-done
+			holder.close()
+			requireServiceLease(t, broken, "endpoint operation never reached the leased file")
+			requireServiceLease(t, serviceLeaseCut(err), "endpoint operation lost lease cut")
+			requireServiceLease(t, errors.Is(err, context.Canceled), "endpoint operation lost cancellation")
+			requireServiceLease(t, !errors.Is(err, ErrServiceControlRefused), "endpoint operation classified the cut as a refusal")
+			var failure *serviceFailure
+			requireServiceLease(t, errors.As(err, &failure), "endpoint cut lost its site")
+			requireServiceLease(t, failure.site == row.site, "endpoint cut received the wrong site")
+			requireServiceLease(t, readServiceRecordJSON(t.Context(), leasePath, &after) == nil, "cannot read host lease after cut")
+			requireServiceLease(t, after == before, "interrupted validation replaced the lease")
+			if published {
+				got, err := c.readServiceControlEndpointWithBoot(t.Context(), boot)
+				requireServiceLease(t, err == nil, "interrupted validation removed discovery")
+				requireServiceLease(t, got == owned, "interrupted validation replaced discovery")
+			} else {
+				_, err := os.Lstat(c.path("service", "control-endpoint.json"))
+				requireServiceLease(t, errors.Is(err, os.ErrNotExist), "interrupted validation published discovery")
+			}
+			requireServiceLease(t, call(ctx) == nil, "unleased retry failed at its first attempt")
 		})
 	}
 }

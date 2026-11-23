@@ -360,7 +360,7 @@ func TestServiceRunRejectsDifferentImmutableHost(t *testing.T) {
 	if err := testWriteFile(d.Payload.Host, nil, 0o700); err != nil {
 		t.Fatal("cannot create host ownership fixture")
 	}
-	if err := c.writeServiceDescriptor(d); err != nil {
+	if err := c.writeServiceDescriptor(t.Context(), d); err != nil {
 		t.Fatal(err)
 	}
 	if err := c.Run(t.Context(), SupervisorPolicy{}); !errors.Is(err, ErrServiceOwnershipConflict) {

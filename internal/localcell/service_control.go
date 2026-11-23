@@ -102,7 +102,7 @@ func (c *Cell) Control(ctx context.Context, action string) (ServiceStatus, error
 	if !validServiceAction(action) {
 		return ServiceStatus{}, ErrServiceControlRefused
 	}
-	if err := c.validateServiceControlEndpoint(); err != nil {
+	if err := c.validateServiceControlEndpoint(ctx); err != nil {
 		return ServiceStatus{}, err
 	}
 	transport := &http.Transport{Proxy: nil, DisableKeepAlives: true, DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
@@ -235,7 +235,7 @@ func (c *Cell) serveServiceControlForPlatform(ctx context.Context, commands chan
 	if err != nil {
 		return nil, err
 	}
-	listener, err := c.listenRunServiceControl(initial)
+	listener, err := c.listenRunServiceControl(ctx, initial)
 	if err != nil {
 		return nil, err
 	}
@@ -309,7 +309,7 @@ func (c *Cell) serveServiceControlForPlatform(ctx context.Context, commands chan
 	stop := startServiceControlServer(server, listener, closed, server.WriteTimeout)
 	return func() {
 		stop()
-		WriteServiceHostFailure(os.Stderr, c.removeServiceControlEndpoint(), "endpoint_remove")
+		WriteServiceHostFailure(os.Stderr, c.removeServiceControlEndpoint(context.WithoutCancel(ctx)), "endpoint_remove")
 	}, nil
 }
 

@@ -64,7 +64,7 @@ func testBindingLifetimePhases(t *testing.T) {
 						return err
 					}
 					var issued serviceLeaseRecord
-					_, discoveryErr := c.readServiceControlEndpoint()
+					_, discoveryErr := c.readServiceControlEndpoint(t.Context())
 					completed = errors.Is(discoveryErr, ErrServiceControlRefused) && readServiceRecordJSON(ctx, path, &issued) == nil &&
 						firstName != "" && issued.PipeName == firstName && issued.BindingRevision == d.Revision && issued.Generation == d.Payload.Generation
 					// A private directory at the final name makes endpoint
@@ -72,7 +72,7 @@ func testBindingLifetimePhases(t *testing.T) {
 					return makePrivateDir(c.path("service", "control-endpoint.json"))
 				}
 			}
-			listener, listenErr := c.listenServiceControl()
+			listener, listenErr := c.listenServiceControl(t.Context())
 			if listener != nil {
 				defer func() { _ = listener.Close() }()
 			}
@@ -81,12 +81,12 @@ func testBindingLifetimePhases(t *testing.T) {
 			}
 			switch row {
 			case "pre_reserve":
-				got, err := c.readServiceControlEndpoint()
+				got, err := c.readServiceControlEndpoint(t.Context())
 				if listenErr != nil || err != nil || got.PipeName != firstName || got.BindingRevision != d.Revision || got.Generation != d.Payload.Generation {
 					t.Fatal(bindingLifetimeFailure)
 				}
 			case "issue_after_reserve":
-				got, err := c.readServiceControlEndpoint()
+				got, err := c.readServiceControlEndpoint(t.Context())
 				if listenErr != nil || err != nil || issueRevision <= d.Revision || got.BindingRevision != issueRevision {
 					t.Fatal(bindingLifetimeFailure)
 				}
@@ -100,7 +100,7 @@ func testBindingLifetimePhases(t *testing.T) {
 						t.Fatal(bindingLifetimeFailure)
 					}
 				}
-				if _, err := c.readServiceControlEndpoint(); !errors.Is(err, ErrServiceControlRefused) {
+				if _, err := c.readServiceControlEndpoint(t.Context()); !errors.Is(err, ErrServiceControlRefused) {
 					t.Fatal(bindingLifetimeFailure)
 				}
 				conn, err := windowsDialPipe(ctx, serviceControlEndpointRecord{PipeName: firstName})
@@ -114,7 +114,7 @@ func testBindingLifetimePhases(t *testing.T) {
 				if listenErr != nil || listener.Close() != nil {
 					t.Fatal(bindingLifetimeFailure)
 				}
-				if _, err := c.readServiceControlEndpoint(); err != nil {
+				if _, err := c.readServiceControlEndpoint(t.Context()); err != nil {
 					t.Fatal(bindingLifetimeFailure)
 				}
 				conn, err := c.dialServiceControl(ctx)
@@ -125,13 +125,13 @@ func testBindingLifetimePhases(t *testing.T) {
 					t.Fatal(bindingLifetimeFailure)
 				}
 			case "removed":
-				if listenErr != nil || c.removeServiceControlEndpoint() != nil {
+				if listenErr != nil || c.removeServiceControlEndpoint(t.Context()) != nil {
 					t.Fatal(bindingLifetimeFailure)
 				}
 				if _, err := os.Lstat(c.path("service", "control-endpoint.json")); !errors.Is(err, os.ErrNotExist) {
 					t.Fatal(bindingLifetimeFailure)
 				}
-				if _, err := c.readServiceControlEndpoint(); !errors.Is(err, ErrServiceControlRefused) {
+				if _, err := c.readServiceControlEndpoint(t.Context()); !errors.Is(err, ErrServiceControlRefused) {
 					t.Fatal(bindingLifetimeFailure)
 				}
 				other, err := c.acquireServiceLease(d)
@@ -154,7 +154,7 @@ func testServiceBindingSuccessor(t *testing.T, c *Cell, _ ServiceDescriptor, _ f
 	defer cancel()
 	first := serviceWorkerOnCell(t, c, "", false)
 	first.ready(t)
-	old, err := c.readServiceControlEndpoint()
+	old, err := c.readServiceControlEndpoint(t.Context())
 	if err != nil {
 		t.Fatal(bindingLiveFailure)
 	}
@@ -170,7 +170,7 @@ func testServiceBindingSuccessor(t *testing.T, c *Cell, _ ServiceDescriptor, _ f
 
 	next := serviceWorkerOnCell(t, c, "", false)
 	next.ready(t)
-	current, err := c.readServiceControlEndpoint()
+	current, err := c.readServiceControlEndpoint(t.Context())
 	if err != nil || old.HostPID != current.HostPID || old.HostStartIdentity != current.HostStartIdentity || old.PipeName == current.PipeName {
 		t.Fatal(bindingLiveFailure)
 	}
@@ -293,7 +293,7 @@ func TestWindowsServiceControlCompletionFailure(t *testing.T) {
 	t.Run("next_start", func(t *testing.T) {
 		next := serviceWorkerOnCell(t, c, "", false)
 		next.ready(t)
-		fresh, err := c.readServiceControlEndpoint()
+		fresh, err := c.readServiceControlEndpoint(t.Context())
 		if err != nil || fresh.PipeName == reserved.PipeName {
 			t.Fatal("next start did not publish a fresh listener")
 		}

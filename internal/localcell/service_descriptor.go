@@ -225,7 +225,7 @@ func (c *Cell) PrepareService(ctx context.Context, d ServiceDescriptor) error {
 	} else if err != nil {
 		return err
 	}
-	return c.writeServiceDescriptor(d)
+	return c.writeServiceDescriptor(ctx, d)
 }
 
 func (c *Cell) serviceControlSecret(ctx context.Context) (string, error) {
@@ -260,7 +260,7 @@ func (c *Cell) serviceDescriptorBoundary(stage string, d ServiceDescriptor) {
 
 // Descriptor publication is an acknowledged journaled transition. The pending
 // record is replayed conservatively before any launch; it cannot relax a fence.
-func (c *Cell) writeServiceDescriptor(d ServiceDescriptor) (result error) {
+func (c *Cell) writeServiceDescriptor(_ context.Context, d ServiceDescriptor) (result error) {
 	defer func() { result = serviceFailureFallback(result, "descriptor_write") }()
 	if err := writeAtomic(c.path("service", "transition.json"), d, nil); err != nil {
 		return err
@@ -333,7 +333,7 @@ func (c *Cell) setServiceDesiredStateLocked(ctx context.Context, state string) e
 		}
 	}
 	d.DesiredState, d.Revision = state, d.Revision+1
-	return c.writeServiceDescriptor(d)
+	return c.writeServiceDescriptor(ctx, d)
 }
 
 func (c *Cell) setServiceFaulted(ctx context.Context, faulted bool) error {
@@ -373,7 +373,7 @@ func (c *Cell) commitServiceFault(ctx context.Context, faulted bool, prior *serv
 		*prior = serviceFaultCommit{}
 	}
 	d.Faulted, d.Revision = faulted, d.Revision+1
-	if err := c.writeServiceDescriptor(d); err != nil {
+	if err := c.writeServiceDescriptor(ctx, d); err != nil {
 		return err
 	}
 	if prior != nil {
@@ -407,5 +407,5 @@ func (c *Cell) RepairService(ctx context.Context) error {
 		return err
 	}
 	d.Faulted, d.Revision, d.RepairRevision = false, d.Revision+1, d.RepairRevision+1
-	return c.writeServiceDescriptor(d)
+	return c.writeServiceDescriptor(ctx, d)
 }

@@ -18,7 +18,7 @@ if state == "running" {
  ` + maintenanceReleasedAdmissionStatement + `
 }
 d.DesiredState, d.Revision = state, d.Revision+1
-return c.writeServiceDescriptor(d)`
+return c.writeServiceDescriptor(ctx, d)`
 
 var maintenanceTransitionCallerPrefixes = map[string]string{
 	"SetServiceDesiredState": `if !validServiceDesiredState(state) { return ErrServiceDesiredState }
@@ -250,7 +250,7 @@ func maintenanceTransitionContract(sources map[string]string) []string {
 						valid = ok && admissionNodeText(call.Args[0]) == "context.Background()" && argument.Kind == token.STRING && argument.Value == `"stopped"`
 					}
 				case "writeServiceDescriptor":
-					valid = filename == "service_descriptor.go" && len(call.Args) == 1 && maintenanceTransitionDirectReceiver(owner, selector.X, "c") &&
+					valid = filename == "service_descriptor.go" && len(call.Args) == 2 && leaseWaitOwnContext(owner, call.Args[0]) && maintenanceTransitionDirectReceiver(owner, selector.X, "c") &&
 						(owner.Name.Name == "PrepareService" || owner.Name.Name == "setServiceDesiredStateLocked" || owner.Name.Name == "commitServiceFault" || owner.Name.Name == "RepairService")
 				case "setServiceFaulted", "commitServiceFault":
 					if method == "commitServiceFault" && filename == "service_descriptor.go" {
@@ -375,7 +375,7 @@ func TestServiceMaintenanceTransitionContractFixtures(t *testing.T) {
 				return statements
 			})
 		}},
-		{"WriterAlias", "service_descriptor.go", "commitServiceFault", "writeServiceDescriptor_caller_shape", replace("if err := c.writeServiceDescriptor(d);", "writer := c.writeServiceDescriptor; if err := writer(d);")},
+		{"WriterAlias", "service_descriptor.go", "commitServiceFault", "writeServiceDescriptor_caller_shape", replace("if err := c.writeServiceDescriptor(ctx, d);", "writer := c.writeServiceDescriptor; if err := writer(ctx, d);")},
 		{"FaultCallerCancel", "service_supervisor.go", "fault", "setServiceFaulted_caller_shape", replace("commitCtx := context.WithoutCancel(ctx)", "commitCtx := ctx")},
 		{"FaultFalse", "service_supervisor.go", "fault", "setServiceFaulted_caller_shape", replace("setServiceFaulted(commitCtx, true)", "setServiceFaulted(commitCtx, false)")},
 		{"FaultVariable", "service_shutdown_supervisor.go", "commitShutdownFault", "commitServiceFault_caller_shape", replace("commitServiceFault(ctx, true,", "commitServiceFault(ctx, faulted,")},
@@ -387,7 +387,7 @@ func TestServiceMaintenanceTransitionContractFixtures(t *testing.T) {
 		{"FourthSetterCaller", "service_descriptor.go", `func (c *Cell) fourthSetter() error { return c.setServiceDesiredStateLocked(context.Background(), "stopped") }`, setter + "_caller_count"},
 		{"SetterMethodValue", "service_descriptor.go", `var setterAlias = (*Cell).setServiceDesiredStateLocked`, setter + "_caller_shape"},
 		{"SetterDuplicateOwner", "duplicate_windows.go", `func (c *Cell) setServiceDesiredStateLocked(ctx context.Context, state string) error { return nil }`, setter + "_owner_count"},
-		{"FifthWriterCaller", "service_descriptor.go", `func (c *Cell) fifthWriter(d ServiceDescriptor) error { return c.writeServiceDescriptor(d) }`, "writeServiceDescriptor_caller_count"},
+		{"FifthWriterCaller", "service_descriptor.go", `func (c *Cell) fifthWriter(ctx context.Context, d ServiceDescriptor) error { return c.writeServiceDescriptor(ctx, d) }`, "writeServiceDescriptor_caller_count"},
 		{"ThirdFaultCaller", "service_descriptor.go", `func (c *Cell) clearFault(ctx context.Context) error { return c.setServiceFaulted(ctx, false) }`, "setServiceFaulted_caller_count"},
 		{"ExtraFaultCommitCaller", "service_descriptor.go", `func (c *Cell) clearFault(ctx context.Context) error { return c.commitServiceFault(ctx, false, nil) }`, "commitServiceFault_caller_count"},
 		{"NinthGateDescriptor", "service_descriptor.go", `func (c *Cell) ninthGate() error { ` + maintenanceAdmissionStatement + `; return nil }`, "service_descriptor.go_reference_count"},
@@ -447,10 +447,10 @@ func TestServiceMaintenanceTransitionCallerInventoryFixtures(t *testing.T) {
 				})
 			case "writeServiceDescriptor":
 				input["service_descriptor.go"] = admissionMutateFunction(t, input["service_descriptor.go"], "commitServiceFault", func(source string) string {
-					return strings.Replace(source, "if err := c.writeServiceDescriptor(d); err != nil {", "if err != nil {", 1)
+					return strings.Replace(source, "if err := c.writeServiceDescriptor(ctx, d); err != nil {", "if err != nil {", 1)
 				})
 				input["service_descriptor.go"] = admissionMutateFunction(t, input["service_descriptor.go"], "PrepareService", func(source string) string {
-					return strings.Replace(source, "return c.writeServiceDescriptor(d)", "_ = c.writeServiceDescriptor(d); return c.writeServiceDescriptor(d)", 1)
+					return strings.Replace(source, "return c.writeServiceDescriptor(ctx, d)", "_ = c.writeServiceDescriptor(ctx, d); return c.writeServiceDescriptor(ctx, d)", 1)
 				})
 			case "setServiceFaulted":
 				input["service_supervisor.go"] = admissionMutateFunction(t, input["service_supervisor.go"], "fault", func(source string) string {

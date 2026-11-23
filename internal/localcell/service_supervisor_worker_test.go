@@ -169,7 +169,7 @@ func (w *serviceWorkerHost) ready(t *testing.T) ServiceStatus {
 			}
 			published = err == nil
 		} else {
-			published = w.cell.validateServiceControlEndpoint() == nil
+			published = w.cell.validateServiceControlEndpoint(t.Context()) == nil
 		}
 		if published {
 			status := serviceWorkerSettled(ctx, t, w.cell.Control)
@@ -369,7 +369,7 @@ func serviceWorkerCold(t *testing.T, plant string, faulted bool) {
 			r := supervisorRecord{Version: 1, RepairRevision: d.RepairRevision, Failures: make([]time.Time, 5)}
 			if plant == "wrong_revision" {
 				d.RepairRevision++
-				if c.writeServiceDescriptor(d) != nil {
+				if c.writeServiceDescriptor(t.Context(), d) != nil {
 					t.Fatal("could not supersede the failure record")
 				}
 			}

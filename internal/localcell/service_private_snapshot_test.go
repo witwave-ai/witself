@@ -175,13 +175,13 @@ func TestServicePrivateSnapshot(t *testing.T) {
 			t.Fatal("cannot acquire private snapshot control fixture")
 		}
 		defer func() { _ = lease.Close() }()
-		listener, err := c.listenServiceControl()
+		listener, err := c.listenServiceControl(t.Context())
 		if err != nil {
 			t.Fatal("cannot publish private snapshot control fixture")
 		}
 		defer func() {
 			_ = listener.Close()
-			_ = c.removeServiceControlEndpoint()
+			_ = c.removeServiceControlEndpoint(t.Context())
 		}()
 		walks := 0
 		c.observeRootWalk = func(before bool) {
@@ -255,10 +255,10 @@ func snapshotHostExitLease(t *testing.T) {
 			}
 			defer func() { _ = lock.Close() }()
 			if runtime.GOOS == "windows" {
-				if _, err := c.listenServiceControl(); err != nil {
+				if _, err := c.listenServiceControl(t.Context()); err != nil {
 					t.Fatal(snapshotAdmissionLost)
 				}
-				if c.removeServiceControlEndpoint() != nil {
+				if c.removeServiceControlEndpoint(t.Context()) != nil {
 					t.Fatal(snapshotAdmissionLost)
 				}
 			}

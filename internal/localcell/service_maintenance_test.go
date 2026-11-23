@@ -67,7 +67,7 @@ func serviceMaintenanceHostSeed(t *testing.T, f serviceMaintenanceHostFixture, s
 	case "repair_revision":
 		q.Attempts, q.Failures, q.NextStart = 3, []time.Time{f.now.Add(-time.Millisecond)}, f.now.Add(10*time.Millisecond)
 		f.d.RepairRevision++
-		if f.cell.writeServiceDescriptor(f.d) != nil {
+		if f.cell.writeServiceDescriptor(t.Context(), f.d) != nil {
 			t.Fatal("Host fixture could not advance repair revision")
 		}
 	case "running":
@@ -401,12 +401,12 @@ func TestServiceMaintenanceHostHealthAdmission(t *testing.T) {
 				}
 			case "intent":
 				d.DesiredState = "stopped"
-				if c.writeServiceDescriptor(d) != nil {
+				if c.writeServiceDescriptor(t.Context(), d) != nil {
 					t.Fatal("Health precedence could not seed stopped intent")
 				}
 			case "fault":
 				d.Faulted = true
-				if c.writeServiceDescriptor(d) != nil {
+				if c.writeServiceDescriptor(t.Context(), d) != nil {
 					t.Fatal("Health precedence could not seed existing fault")
 				}
 			case "transition":
@@ -554,11 +554,11 @@ func serviceMaintenanceHostExitContext(t *testing.T, c *Cell, d ServiceDescripto
 	t.Cleanup(func() { _ = lease.Close() })
 	var listener net.Listener
 	if runtime.GOOS == "windows" {
-		listener, err = c.listenServiceControl()
+		listener, err = c.listenServiceControl(t.Context())
 		if err != nil {
 			t.Fatal("Safety exit fixture could not reserve its listener")
 		}
-		t.Cleanup(func() { _ = c.removeServiceControlEndpoint() })
+		t.Cleanup(func() { _ = c.removeServiceControlEndpoint(t.Context()) })
 	}
 	envelope, _, err := c.newHostExitEnvelope()
 	if err != nil || c.validateHostExitEnvelope(envelope, listener) != nil {
@@ -769,7 +769,7 @@ func TestServiceMaintenanceHostClassificationContention(t *testing.T) {
 				t.Fatal("Classifier release changed its legacy result identity")
 			}
 			serviceMaintenanceReleased(t, f.cell)
-			if outcome == "descriptor_error" && f.cell.writeServiceDescriptor(f.d) != nil {
+			if outcome == "descriptor_error" && f.cell.writeServiceDescriptor(t.Context(), f.d) != nil {
 				t.Fatal("Classifier release could not restore descriptor")
 			}
 			if outcome != "maintenance" {
@@ -1435,7 +1435,7 @@ func TestServiceMaintenanceDescriptorHeldProjection(t *testing.T) {
 	}
 	f.d.DesiredState, f.d.Payload.Generation = "stopped", "replacement_generation"
 	f.d.Revision++
-	if f.cell.writeServiceDescriptor(f.d) != nil {
+	if f.cell.writeServiceDescriptor(t.Context(), f.d) != nil {
 		t.Fatal("Held descriptor could not publish replacement")
 	}
 	if f.s.step(t.Context()) != nil {
@@ -1453,7 +1453,7 @@ func TestServiceMaintenanceDescriptorHeldProjection(t *testing.T) {
 func TestServiceMaintenanceDescriptorCompletingStop(t *testing.T) {
 	f := newServiceMaintenanceHostFixture(t)
 	f.d.DesiredState = "stopped"
-	if f.cell.writeServiceDescriptor(f.d) != nil {
+	if f.cell.writeServiceDescriptor(t.Context(), f.d) != nil {
 		t.Fatal("Completing stop could not publish stopped descriptor")
 	}
 	known := ProcessRecord{PID: 23, StartTime: "completing_stop_process", Root: f.d.Root, Component: "server"}

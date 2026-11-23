@@ -304,21 +304,21 @@ func TestServiceFailureSiteSourceContract(t *testing.T) {
 		if errors.As(err, &located) {
 			return serviceFailureAt(refusal, located.site)
 		}`,
-			`WriteServiceHostFailure(os.Stderr, c.removeServiceControlEndpoint(), "endpoint_remove")`,
+			`WriteServiceHostFailure(os.Stderr, c.removeServiceControlEndpoint(context.WithoutCancel(ctx)), "endpoint_remove")`,
 		},
 		"service_control_endpoint.go": {
 			`func (c *Cell) readServiceControlEndpointRecordBy(ctx context.Context, open func(context.Context, string, error) (*os.File, error)) (endpoint serviceControlEndpointRecord, result error) {
 	defer func() { result = serviceFailureFallback(result, "endpoint_read") }()`,
-			`func (c *Cell) publishServiceControlEndpointWithBoot(pipeName string, readBoot func() (string, error)) (endpoint serviceControlEndpointRecord, result error) {
+			`func (c *Cell) publishServiceControlEndpointWithBoot(ctx context.Context, pipeName string, readBoot func() (string, error)) (endpoint serviceControlEndpointRecord, result error) {
 	defer func() { result = serviceFailureFallback(result, "endpoint_write") }()`,
-			`func (c *Cell) removeOwnedServiceControlEndpointBy(owned serviceControlEndpointRecord, matched func()) (result error) {
+			`func (c *Cell) removeOwnedServiceControlEndpointBy(ctx context.Context, owned serviceControlEndpointRecord, matched func()) (result error) {
 	defer func() { result = serviceFailureFallback(result, "endpoint_remove") }()`,
-			`d, err := c.serviceListenerDescriptor(initial)
+			`d, err := c.serviceListenerDescriptor(ctx, initial)
 	if err != nil {
 		return serviceFailureAt(err, "endpoint_descriptor")
 	}`,
-			`if err := readServiceRecordJSON(context.Background(), path, &provisional); err != nil {
-		return serviceFailureAt(serviceEndpointRefused("host_identity"), "endpoint_lease")
+			`if err := readServiceRecordJSON(ctx, path, &provisional); err != nil {
+		return serviceFailureAt(serviceReadFailure(err, serviceEndpointRefused("host_identity")), "endpoint_lease")
 	}`,
 			`if err := c.publishServiceLease(path, provisional); err != nil {
 		return serviceFailureAt(err, "lease_write")
@@ -326,9 +326,9 @@ func TestServiceFailureSiteSourceContract(t *testing.T) {
 			`if privateDir(c.path("service"), false) != nil {
 		return serviceFailureAt(serviceEndpointRefused("host_identity"), "endpoint_read")
 	}`,
-			`f, err := openServiceRecord(context.Background(), path, serviceEndpointRefused("record"))
+			`f, err := openServiceRecord(ctx, path, serviceEndpointRefused("record"))
 	if err != nil {
-		return serviceFailureAt(serviceEndpointRefused("host_identity"), "endpoint_read")
+		return serviceFailureAt(serviceReadFailure(err, serviceEndpointRefused("host_identity")), "endpoint_read")
 	}`,
 			`record, err := decodeServiceControlEndpoint(f)
 	if err != nil {
@@ -336,9 +336,9 @@ func TestServiceFailureSiteSourceContract(t *testing.T) {
 	}`,
 		},
 		"service_control_windows.go": {
-			`d, err := c.serviceListenerDescriptor(initial)
+			`d, err := c.serviceListenerDescriptor(ctx, initial)
 	if err != nil {
-		return nil, serviceFailureAt(windowsControlRefusal("endpoint:record"), "endpoint_descriptor")`,
+		return nil, serviceFailureAt(serviceReadFailure(err, windowsControlRefusal("endpoint:record")), "endpoint_descriptor")`,
 		},
 		"service_native_diagnostics_test.go": {
 			`var sites strings.Builder
@@ -351,7 +351,7 @@ func TestServiceFailureSiteSourceContract(t *testing.T) {
 		},
 		"service_boot.go": {`func (c *Cell) bindServiceProcessBootWithReader(component string, readBoot func() (string, error)) (result error) {
 	defer func() { result = serviceFailureFallback(result, "boot_binding") }()`},
-		"service_descriptor.go": {`func (c *Cell) writeServiceDescriptor(d ServiceDescriptor) (result error) {
+		"service_descriptor.go": {`func (c *Cell) writeServiceDescriptor(_ context.Context, d ServiceDescriptor) (result error) {
 	defer func() { result = serviceFailureFallback(result, "descriptor_write") }()`},
 		"../tools/localcellharness/service.go": {
 			`defer func() {
@@ -498,15 +498,15 @@ func TestServiceFailureSiteProducerInventory(t *testing.T) {
 		},
 		"service_control_endpoint.go": {
 			"publishServiceControlEndpoint":         "publishServiceControlEndpointWithBoot",
-			"publishServiceControlEndpointWithBoot": "ServiceDescriptor readServiceRecordJSON writeAtomic",
+			"publishServiceControlEndpointWithBoot": "readServiceRecordJSON serviceDescriptor writeAtomic",
 			"readServiceControlEndpoint":            "readServiceControlEndpointWithBoot",
 			"readServiceControlEndpointRecord":      "openServiceRecord readServiceControlEndpointRecordBy",
-			"readServiceControlEndpointWithBoot":    "ServiceDescriptor openAdmissionRecord readServiceControlEndpointRecordBy readServiceRecordJSON",
+			"readServiceControlEndpointWithBoot":    "openAdmissionRecord readServiceControlEndpointRecordBy readServiceRecordJSON serviceDescriptor",
 			"removeOwnedServiceControlEndpoint":     "removeOwnedServiceControlEndpointBy",
 			"readServiceControlEndpointRecordBy":    "privateDir",
 			"removeOwnedServiceControlEndpointBy":   "openServiceRecord privateDir removeServiceEndpointFile",
 			"completeServiceLease":                  "publishServiceLease readServiceRecordJSON serviceListenerDescriptor",
-			"serviceListenerDescriptor":             "ServiceDescriptor",
+			"serviceListenerDescriptor":             "serviceDescriptor",
 		},
 		"service_control_windows.go": {
 			"dialServiceControl":             "readServiceControlEndpoint",
@@ -609,8 +609,8 @@ func TestServiceFailureSiteEndpointReadPropagation(t *testing.T) {
 		run  func() error
 		text string
 	}{
-		{"read", func() error { _, err := c.readServiceControlEndpointRecord(); return err }, "localcell: service_control_refused: endpoint:record"},
-		{"remove", func() error { return c.removeOwnedServiceControlEndpoint(record) }, "localcell: service_control_refused: endpoint:host_identity"},
+		{"read", func() error { _, err := c.readServiceControlEndpointRecord(t.Context()); return err }, "localcell: service_control_refused: endpoint:record"},
+		{"remove", func() error { return c.removeOwnedServiceControlEndpoint(t.Context(), record) }, "localcell: service_control_refused: endpoint:host_identity"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := tc.run()

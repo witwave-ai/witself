@@ -12,7 +12,7 @@ import (
 
 func serviceControlCapability() error { return nil }
 
-func (c *Cell) validateServiceControlEndpoint() error {
+func (c *Cell) validateServiceControlEndpoint(_ context.Context) error {
 	info, err := os.Lstat(c.path("service", "control.sock"))
 	if err != nil || info.Mode()&os.ModeSocket == 0 || info.Mode().Perm() != 0o600 {
 		return ErrServiceControlRefused
@@ -24,10 +24,10 @@ func (c *Cell) validateServiceControlEndpoint() error {
 	return nil
 }
 
-func (c *Cell) listenServiceControl() (net.Listener, error) {
+func (c *Cell) listenServiceControl(ctx context.Context) (net.Listener, error) {
 	path := c.path("service", "control.sock")
 	if _, err := os.Lstat(path); err == nil {
-		if err := c.validateServiceControlEndpoint(); err != nil {
+		if err := c.validateServiceControlEndpoint(ctx); err != nil {
 			return nil, err
 		}
 		if err := removePrivateFile(path); err != nil {
@@ -50,8 +50,8 @@ func (c *Cell) listenServiceControl() (net.Listener, error) {
 	return listener, nil
 }
 
-func (c *Cell) removeServiceControlEndpoint() error {
-	if err := c.validateServiceControlEndpoint(); err != nil {
+func (c *Cell) removeServiceControlEndpoint(ctx context.Context) error {
+	if err := c.validateServiceControlEndpoint(ctx); err != nil {
 		return err
 	}
 	return removePrivateFile(c.path("service", "control.sock"))

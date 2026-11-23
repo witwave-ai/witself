@@ -45,7 +45,7 @@ func serviceMaintenanceControlSeed(t *testing.T, f serviceMaintenanceHostFixture
 		f.s.pendingStartup = serviceStartupReconcile
 		f.s.startupFaulted = state == "pending_startup_faulted"
 	}
-	if f.cell.writeServiceDescriptor(d) != nil || f.s.save() != nil {
+	if f.cell.writeServiceDescriptor(t.Context(), d) != nil || f.s.save() != nil {
 		t.Fatal("Control seed could not persist initial state")
 	}
 	f.s.status.HostExit = "refused"

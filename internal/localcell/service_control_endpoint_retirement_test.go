@@ -17,7 +17,7 @@ func TestServiceControlEndpointRetirement(t *testing.T) {
 	}
 	defer func() { _ = reader.Close() }()
 
-	if c.removeOwnedServiceControlEndpoint(retired) != nil {
+	if c.removeOwnedServiceControlEndpoint(t.Context(), retired) != nil {
 		t.Fatal("owner could not remove its endpoint")
 	}
 	_, statErr := os.Lstat(path)
@@ -30,11 +30,11 @@ func TestServiceControlEndpointRetirement(t *testing.T) {
 	}
 	defer func() { _ = next.Close() }()
 	name, err := newServiceControlPipeName(d.InstallationID)
-	if err != nil || name == retired.PipeName || c.completeServiceLease(d, name, boot) != nil {
+	if err != nil || name == retired.PipeName || c.completeServiceLease(t.Context(), d, name, boot) != nil {
 		t.Fatal("cannot complete the successor host lease")
 	}
-	published, publishErr := c.publishServiceControlEndpointWithBoot(name, boot)
-	fresh, freshErr := c.readServiceControlEndpointWithBoot(boot)
+	published, publishErr := c.publishServiceControlEndpointWithBoot(t.Context(), name, boot)
+	fresh, freshErr := c.readServiceControlEndpointWithBoot(t.Context(), boot)
 	held, heldErr := decodeServiceControlEndpoint(reader)
 
 	for _, row := range []struct {

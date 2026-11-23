@@ -782,10 +782,10 @@ func TestWindowsPrivatePipeDecoyServer(t *testing.T) {
 			if err != nil {
 				t.Fatal("cannot name decoy fixture")
 			}
-			if c.completeServiceLease(descriptor, name, serviceBootID) != nil {
+			if c.completeServiceLease(t.Context(), descriptor, name, serviceBootID) != nil {
 				t.Fatal("cannot complete peer fixture lease")
 			}
-			record, err := c.publishServiceControlEndpoint(name)
+			record, err := c.publishServiceControlEndpoint(t.Context(), name)
 			if err != nil {
 				t.Fatal("cannot publish decoy fixture")
 			}
@@ -1000,12 +1000,12 @@ func TestWindowsServiceControlEndpointCleanup(t *testing.T) {
 				t.Fatal("cannot acquire cleanup fixture lease")
 			}
 			defer func() { _ = lease.Close() }()
-			listener, err := c.listenServiceControl()
+			listener, err := c.listenServiceControl(t.Context())
 			if err != nil {
 				t.Fatal("cannot create cleanup fixture listener")
 			}
 			defer func() { windowsPipeTestClose(ctx, t, listener.(*windowsPipeListener)) }()
-			owned, err := c.readServiceControlEndpoint()
+			owned, err := c.readServiceControlEndpoint(t.Context())
 			if err != nil {
 				t.Fatal("cannot read owned endpoint fixture")
 			}
@@ -1020,7 +1020,7 @@ func TestWindowsServiceControlEndpointCleanup(t *testing.T) {
 				}
 			}
 			removed := make(chan error, 1)
-			go func() { removed <- c.removeServiceControlEndpoint() }()
+			go func() { removed <- c.removeServiceControlEndpoint(t.Context()) }()
 			select {
 			case err = <-removed:
 			case <-ctx.Done():
@@ -1030,7 +1030,7 @@ func TestWindowsServiceControlEndpointCleanup(t *testing.T) {
 				if !errors.Is(err, ErrServiceControlRefused) {
 					t.Fatal("cleanup did not refuse replacement record")
 				}
-				after, readErr := c.readServiceControlEndpointRecord()
+				after, readErr := c.readServiceControlEndpointRecord(t.Context())
 				if readErr != nil || after != successor {
 					t.Fatal("old host removed replacement endpoint record")
 				}
@@ -1144,7 +1144,7 @@ func TestWindowsServiceControlPublicationAfterFirstInstance(t *testing.T) {
 		calls++
 		return windows.InvalidHandle, windows.ERROR_ACCESS_DENIED
 	}
-	listener, err := c.listenServiceControl()
+	listener, err := c.listenServiceControl(t.Context())
 	if listener != nil || err == nil || err.Error() != "localcell: service_control_unavailable: pipe:first_instance" || calls != 1 {
 		t.Fatal("failed first-create did not refuse at exact boundary")
 	}
@@ -1152,12 +1152,12 @@ func TestWindowsServiceControlPublicationAfterFirstInstance(t *testing.T) {
 		t.Fatal("failed first-create published an endpoint")
 	}
 	windowsCreateNamedPipe = original
-	listener, err = c.listenServiceControl()
+	listener, err = c.listenServiceControl(t.Context())
 	if err != nil {
 		t.Fatal("valid first-create did not publish")
 	}
 	t.Cleanup(func() { windowsPipeTestClose(ctx, t, listener.(*windowsPipeListener)) })
-	record, err := c.readServiceControlEndpoint()
+	record, err := c.readServiceControlEndpoint(t.Context())
 	if err != nil || record.HostPID != os.Getpid() || record.Generation != descriptor.Payload.Generation || !validServiceControlPipeName(record.PipeName, descriptor.InstallationID) {
 		t.Fatal("successful first-create publication was not valid")
 	}
@@ -1258,10 +1258,10 @@ func TestWindowsPrivatePipeDisconnectedPeerEOF(t *testing.T) {
 
 // The native transport fixtures acquire their lease directly. Run passes the
 // descriptor that it checked before acquiring that lease.
-func (c *Cell) listenServiceControl() (net.Listener, error) {
-	initial, err := c.ServiceDescriptor()
+func (c *Cell) listenServiceControl(ctx context.Context) (net.Listener, error) {
+	initial, err := c.serviceDescriptor(ctx)
 	if err != nil {
 		return nil, err
 	}
-	return c.listenRunServiceControl(initial)
+	return c.listenRunServiceControl(ctx, initial)
 }

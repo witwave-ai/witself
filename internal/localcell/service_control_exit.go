@@ -366,8 +366,11 @@ func (s *serviceHostExitSession) finish() {
 }
 
 func (c *Cell) startHostExitRequest(ctx context.Context, envelope serviceHostExitEnvelope) (*serviceHostExitSession, error) {
-	if os.Getenv("WITSELF_RUNTIME") != "local" || serviceControlCapability() != nil || c.validateHostExitEndpoint(envelope.serviceHostExitBinding) != nil {
+	if os.Getenv("WITSELF_RUNTIME") != "local" || serviceControlCapability() != nil {
 		return nil, hostExitRefused("envelope")
+	}
+	if err := c.validateHostExitEndpoint(ctx, envelope.serviceHostExitBinding); err != nil {
+		return nil, serviceReadFailure(err, hostExitRefused("envelope"))
 	}
 	secret, err := c.readServiceControlSecret(ctx)
 	if err != nil {
