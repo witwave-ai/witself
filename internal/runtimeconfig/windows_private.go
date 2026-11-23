@@ -757,6 +757,19 @@ func WindowsPrivateRemoveSameFile(path string, expected *os.File) error {
 	if !windowsPrivateSameIdentity(original, current) {
 		return errWindowsPrivatePathChanged
 	}
+	// POSIX disposition releases the name when our DELETE handle closes,
+	// while readers that shared delete can finish reading the old object.
+	flags := uint32(windows.FILE_DISPOSITION_DELETE | windows.FILE_DISPOSITION_POSIX_SEMANTICS)
+	err = windows.SetFileInformationByHandle(handle, windows.FileDispositionInfoEx, (*byte)(unsafe.Pointer(&flags)), uint32(unsafe.Sizeof(flags)))
+	switch err {
+	case nil:
+		return nil
+	case windows.ERROR_INVALID_PARAMETER, windows.ERROR_INVALID_FUNCTION, windows.ERROR_NOT_SUPPORTED:
+		// Older Windows can reject the fixed class or flags as invalid.
+		// A filesystem can report the operation unimplemented or unsupported.
+	default:
+		return windowsPrivateFailure(err)
+	}
 	remove := byte(1)
 	if err := windows.SetFileInformationByHandle(handle, windows.FileDispositionInfo, &remove, 1); err != nil {
 		return windowsPrivateFailure(err)

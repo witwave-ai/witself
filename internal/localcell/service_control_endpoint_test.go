@@ -95,6 +95,9 @@ func TestServiceControlEndpointBindingRefusals(t *testing.T) {
 		{"generation", func(r *serviceControlEndpointRecord, _ *ServiceDescriptor, _ *serviceLeaseRecord, _ *string) {
 			r.Generation = "other"
 		}},
+		{"descriptor_generation", func(_ *serviceControlEndpointRecord, d *ServiceDescriptor, _ *serviceLeaseRecord, _ *string) {
+			d.Payload.Generation = "other"
+		}},
 		{"issue_revision", func(r *serviceControlEndpointRecord, _ *ServiceDescriptor, _ *serviceLeaseRecord, _ *string) {
 			r.BindingRevision--
 		}},
@@ -126,6 +129,10 @@ func TestServiceControlEndpointBindingRefusals(t *testing.T) {
 		{"pipe", func(r *serviceControlEndpointRecord, _ *ServiceDescriptor, _ *serviceLeaseRecord, _ *string) {
 			r.PipeName += "a"
 		}},
+		{"pipe_namespace", func(r *serviceControlEndpointRecord, d *ServiceDescriptor, l *serviceLeaseRecord, _ *string) {
+			r.PipeName = strings.Replace(r.PipeName, d.InstallationID, "other", 1)
+			l.PipeName = r.PipeName
+		}},
 		{"pid", func(r *serviceControlEndpointRecord, _ *ServiceDescriptor, _ *serviceLeaseRecord, _ *string) {
 			r.HostPID++
 		}},
@@ -142,6 +149,9 @@ func TestServiceControlEndpointBindingRefusals(t *testing.T) {
 		}},
 		{"lease_version", func(_ *serviceControlEndpointRecord, _ *ServiceDescriptor, l *serviceLeaseRecord, _ *string) {
 			l.Version++
+		}},
+		{"lease_version_one", func(_ *serviceControlEndpointRecord, _ *ServiceDescriptor, l *serviceLeaseRecord, _ *string) {
+			l.Version = 1
 		}},
 		{"lease_boot", func(_ *serviceControlEndpointRecord, _ *ServiceDescriptor, l *serviceLeaseRecord, _ *string) {
 			l.BootID = "other"
@@ -394,6 +404,65 @@ func (c *Cell) serveServiceControl(commands chan<- serviceCommand) (func(), erro
 		}
 	}
 	return c.serveServiceControlForPlatform(commands, runtime.GOOS, initial)
+}
+
+func TestServiceBindingLeaseCompletionRefusals(t *testing.T) {
+	for _, row := range []string{"already_completed", "foreign_pid", "different_boot"} {
+		t.Run(row, func(t *testing.T) {
+			c, d := descriptorTestCell(t)
+			boot := func() (string, error) { return "fixture-boot", nil }
+			lock, err := c.acquireServiceLeaseForPlatform(d, boot, "windows")
+			if err != nil {
+				t.Fatal("could not acquire provisional lease")
+			}
+			defer func() { _ = lock.Close() }()
+			path := c.path("service", "lease.json")
+			var lease serviceLeaseRecord
+			if readServiceRecordJSON(t.Context(), path, &lease) != nil {
+				t.Fatal("could not read provisional lease")
+			}
+			name, err := newServiceControlPipeName(d.InstallationID)
+			if err != nil {
+				t.Fatal("could not construct candidate listener name")
+			}
+			requireRefusal := func() {
+				t.Helper()
+				before, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal("could not read lease before completion")
+				}
+				if !errors.Is(c.completeServiceLease(d, name, boot), ErrServiceControlRefused) {
+					t.Fatal("invalid lease completion accepted")
+				}
+				after, err := os.ReadFile(path)
+				if err != nil || !bytes.Equal(before, after) {
+					t.Fatal("refused completion changed the lease")
+				}
+				if _, err := os.Lstat(c.path("service", "control-endpoint.json")); !errors.Is(err, os.ErrNotExist) {
+					t.Fatal("refused completion published an endpoint")
+				}
+			}
+			switch row {
+			case "already_completed":
+				oldName, err := newServiceControlPipeName(d.InstallationID)
+				if err != nil || c.completeServiceLease(d, oldName, boot) != nil {
+					t.Fatal("could not complete prior activation")
+				}
+				requireRefusal()
+				// The prior name alone must also prevent reissue, independent
+				// of the generation and revision on a fully completed lease.
+				lease.PipeName = oldName
+			case "foreign_pid":
+				lease.PID++
+			case "different_boot":
+				lease.BootID += "-other"
+			}
+			if writeAtomic(path, lease, nil) != nil {
+				t.Fatal("could not prepare lease for completion")
+			}
+			requireRefusal()
+		})
+	}
 }
 
 func TestServiceBindingIssueDescriptor(t *testing.T) {

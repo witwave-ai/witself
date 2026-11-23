@@ -12,6 +12,64 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+func TestWindowsPrivateRemoveSameFileWithOpenReader(t *testing.T) {
+	root := windowsPrivateTestRoot(t)
+	stage := func(content string) string {
+		t.Helper()
+		file, err := WindowsPrivateCreateTemp(root)
+		if err != nil {
+			t.Fatal("cannot create private removal fixture")
+		}
+		_, err = file.WriteString(content)
+		if closeErr := file.Close(); err != nil || closeErr != nil {
+			t.Fatal("cannot write private removal fixture")
+		}
+		return file.Name()
+	}
+	const before, after = "retired record", "successor record"
+	path, successor := stage(before), stage(after)
+	// Snapshot readers share read, write and delete. Keep an independent
+	// reader alive after the removal caller closes its compared file.
+	reader, err := WindowsPrivateOpenSnapshot(path)
+	if err != nil {
+		t.Fatal("cannot open private removal reader")
+	}
+	defer func() { _ = reader.Close() }()
+	compared, err := WindowsPrivateOpenSnapshot(path)
+	if err != nil {
+		t.Fatal("cannot open private removal comparison")
+	}
+	removeErr := WindowsPrivateRemoveSameFile(path, compared)
+	if compared.Close() != nil {
+		t.Fatal("cannot close private removal comparison")
+	}
+	_, statErr := os.Lstat(path)
+	publishErr := WindowsPrivateRename(successor, path)
+	current, currentErr := os.ReadFile(path)
+	retired, retiredErr := io.ReadAll(reader)
+
+	for _, row := range []struct {
+		name, success, failure, diagnostic string
+		ok                                 bool
+	}{
+		{"removed", "removed", "remove_refused", "same-object removal failed with a shared reader", removeErr == nil},
+		{"name_absent", "name_released", "name_unreleased", "private removal did not release the name immediately", errors.Is(statErr, os.ErrNotExist)},
+		{"successor_published", "published", "publication_failed", "private successor publication failed with the retired reader open", publishErr == nil && currentErr == nil && string(current) == after},
+		{"reader_retained", "original_bytes", "read_changed", "private removal lost the retired reader's bytes", retiredErr == nil && string(retired) == before},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			class := row.success
+			if !row.ok {
+				class = row.failure
+			}
+			t.Logf("remove_same_file class=%s", class)
+			if !row.ok {
+				t.Fatal(row.diagnostic)
+			}
+		})
+	}
+}
+
 func TestWindowsPrivateRenameWithOpenReaders(t *testing.T) {
 	for _, shareDelete := range []bool{true, false} {
 		name := "sharing-denied-preserves-both-files"

@@ -231,3 +231,71 @@ func TestWindowsServiceControlRunRetainsInitialPayload(t *testing.T) {
 		t.Fatal(bindingLifetimeFailure)
 	}
 }
+
+func TestWindowsServiceControlCompletionFailure(t *testing.T) {
+	c, _ := descriptorTestCell(t)
+	c.cfg.Timeout = 5 * time.Second
+	injected := errors.New("injected completed lease publication failure")
+	var reserved serviceControlEndpointRecord
+	var firstInstanceOccupied bool
+	hooks := serviceLeasePublishTestHooks
+	defer func() { serviceLeasePublishTestHooks = hooks }()
+	serviceLeasePublishTestHooks.write = func(path string, value any, before func() error) error {
+		lease, ok := value.(serviceLeaseRecord)
+		if !ok || lease.PipeName == "" {
+			return writeAtomicOnce(path, value, before)
+		}
+		// Observe the native reservation at the exact failed publication.
+		reserved = serviceEndpointForLease(lease)
+		probe, err := windowsListenPipe(reserved.PipeName)
+		if probe != nil {
+			_ = probe.Close()
+		}
+		firstInstanceOccupied = err != nil && err.Error() == "localcell: service_control_unavailable: pipe:first_instance"
+		return injected
+	}
+	policy, _, _, _, _ := supervisorTestHooks()
+	ctx, cancel := context.WithTimeout(t.Context(), c.cfg.Timeout)
+	defer cancel()
+	err := c.Run(ctx, SupervisorPolicy{hooks: &policy})
+	serviceLeasePublishTestHooks = hooks
+	if !errors.Is(err, injected) || !firstInstanceOccupied {
+		t.Fatal("did not fail lease completion after a successful first-instance reservation")
+	}
+
+	t.Run("listener_closed", func(t *testing.T) {
+		// A new first instance at the exact retired name requires every
+		// server instance of the failed listener to have been closed.
+		probe, err := windowsListenPipe(reserved.PipeName)
+		if err != nil {
+			t.Fatal("failed lease completion left the listener reserved")
+		}
+		if probe.Close() != nil {
+			t.Fatal("could not release the first-instance probe")
+		}
+	})
+	t.Run("endpoint_absent", func(t *testing.T) {
+		if _, err := os.Lstat(c.path("service", "control-endpoint.json")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatal("failed lease completion left an endpoint record")
+		}
+	})
+	t.Run("dial_refused", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(t.Context(), c.cfg.Timeout)
+		defer cancel()
+		conn, err := windowsDialPipe(ctx, reserved)
+		if conn != nil {
+			_ = conn.Close()
+		}
+		if err == nil || err.Error() != windowsControlRefusal("pipe:open").Error() {
+			t.Fatal("dial of the failed reservation was not refused at open")
+		}
+	})
+	t.Run("next_start", func(t *testing.T) {
+		next := serviceWorkerOnCell(t, c, "", false)
+		next.ready(t)
+		fresh, err := c.readServiceControlEndpoint()
+		if err != nil || fresh.PipeName == reserved.PipeName {
+			t.Fatal("next start did not publish a fresh listener")
+		}
+	})
+}
