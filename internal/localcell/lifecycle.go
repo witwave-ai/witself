@@ -247,7 +247,7 @@ func (c *Cell) Start(ctx context.Context) error {
 	if !m.Installed {
 		return errors.New("local cell installation is incomplete")
 	}
-	if err := c.serviceStartFence(); err != nil {
+	if err := c.serviceStartFence(context.Background()); err != nil {
 		return err
 	}
 	if err := c.maintenanceFenceAllows(context.Background(), 0); err != nil {
@@ -392,7 +392,7 @@ func (c *Cell) stopWithServiceFence(ctx context.Context, fence bool) error {
 	}
 	defer func() { _ = lock.Close() }()
 	if fence {
-		if err := c.setServiceDesiredStateLocked("stopped"); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err := c.setServiceDesiredStateLocked(context.Background(), "stopped"); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
 	}
@@ -537,7 +537,7 @@ func (c *Cell) Remove(ctx context.Context, options RemoveOptions) error {
 	if err := c.maintenanceFenceAllows(context.Background(), 0); err != nil {
 		return err
 	}
-	if err := c.setServiceDesiredStateLocked("stopped"); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := c.setServiceDesiredStateLocked(context.Background(), "stopped"); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	m, err := readManifest(context.Background(), c.cfg.Root)

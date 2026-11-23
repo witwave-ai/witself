@@ -75,7 +75,7 @@ defer func() { _ = lock.Close() }()
 m, err := readManifest(context.Background(), c.cfg.Root)
 if err != nil { return err }
 if !m.Installed { return errors.New("local cell installation is incomplete") }
-if err := c.serviceStartFence(); err != nil { return err }
+if err := c.serviceStartFence(context.Background()); err != nil { return err }
 ` + maintenanceAdmissionStatement + `
 m.MigrationWait, m.JobRestartPolicy = c.runtimeSettings(m)`,
 	"Repair": `parent := ctx
@@ -100,7 +100,7 @@ lock, err := c.ownExisting(context.Background())
 if err != nil { return err }
 defer func() { _ = lock.Close() }()
 ` + maintenanceAdmissionStatement + `
-if err := c.setServiceDesiredStateLocked("stopped"); err != nil && !errors.Is(err, os.ErrNotExist) { return err }`,
+if err := c.setServiceDesiredStateLocked(context.Background(), "stopped"); err != nil && !errors.Is(err, os.ErrNotExist) { return err }`,
 }
 
 var maintenanceAdmissionParameters = map[string]string{
@@ -458,7 +458,7 @@ func TestMaintenanceFenceAdmissionSourceContractMutations(t *testing.T) {
 			if owner == "Start" {
 				mutations = append(mutations, admissionSourceMutation{"BeforeServiceFence", "position", func(body string) string {
 					body = strings.Replace(body, gate, "", 1)
-					return strings.Replace(body, "if err := c.serviceStartFence()", gate+"\nif err := c.serviceStartFence()", 1)
+					return strings.Replace(body, "if err := c.serviceStartFence(context.Background())", gate+"\nif err := c.serviceStartFence(context.Background())", 1)
 				}})
 				mutations = append(mutations, admissionSourceMutation{"fence_literal_moved", "literal_zero_direct_error_return", func(body string) string {
 					return strings.Replace(body, "Allows(context.Background(), 0)", "Allows(context.Background(), 1)", 1) // LC-LEASE-2C2

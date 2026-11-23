@@ -33,7 +33,7 @@ func TestServiceShutdownControlResponseDeadline(t *testing.T) {
 			oldWriteLimit := serviceControlBudget(c.cfg.Timeout, 4)
 			drain := 2 * oldWriteLimit
 			commands := make(chan serviceCommand)
-			closeControl, err := c.serveServiceControlForPlatform(commands, "windows", descriptor)
+			closeControl, err := c.serveServiceControlForPlatform(t.Context(), commands, "windows", descriptor)
 			if err != nil {
 				t.Fatal("control listener unavailable")
 			}
@@ -53,7 +53,7 @@ func TestServiceShutdownControlResponseDeadline(t *testing.T) {
 				case <-t.Context().Done():
 				}
 			}()
-			secret, err := c.readServiceControlSecret()
+			secret, err := c.readServiceControlSecret(t.Context())
 			if err != nil {
 				t.Fatal("control material unavailable")
 			}

@@ -116,8 +116,11 @@ func (c *Cell) Run(ctx context.Context, policy SupervisorPolicy) (result error) 
 	if err := serviceControlCapability(); err != nil {
 		return err
 	}
-	d, err := c.ServiceDescriptor()
+	d, err := c.serviceDescriptor(ctx)
 	if err != nil {
+		if serviceLeaseCut(err) && errors.Is(err, ctx.Err()) {
+			return nil
+		}
 		return serviceFailureAt(err, "initial_descriptor")
 	}
 	if err := validateServiceHost(d); err != nil {
@@ -140,8 +143,11 @@ func (c *Cell) Run(ctx context.Context, policy SupervisorPolicy) (result error) 
 	if commands == nil {
 		commands = make(chan serviceCommand)
 	}
-	closeControl, err := c.serveServiceControlForPlatform(commands, runtime.GOOS, d)
+	closeControl, err := c.serveServiceControlForPlatform(ctx, commands, runtime.GOOS, d)
 	if err != nil {
+		if serviceLeaseCut(err) && errors.Is(err, ctx.Err()) {
+			return nil
+		}
 		return serviceFailureFallback(err, "control_transport")
 	}
 	defer closeControl()
@@ -506,6 +512,9 @@ func (s *supervisor) call(ctx context.Context, operation string, hook func(conte
 		hookCtx = withServiceHealthProgress(hookCtx, &s.healthProgress)
 	}
 	err := hook(hookCtx)
+	if serviceLeaseCut(err) {
+		return serviceControlLeaseResult(ctx, err)
+	}
 	s.latchServiceShutdownRefusal(ctx, operation, err)
 	if cancellation := serviceControlCancellation(ctx); cancellation != nil {
 		return cancellation
@@ -531,7 +540,7 @@ func (s *supervisor) step(ctx context.Context) (result error) {
 	s.maintenanceDisplay = false
 	s.maintenanceBusy = false
 	defer func() {
-		if cancellation := serviceControlCancellation(ctx); cancellation != nil {
+		if cancellation := serviceControlCancellation(ctx); cancellation != nil || serviceLeaseCut(result) {
 			s.status = previousStatus
 			s.maintenanceHeld, s.maintenanceDisplay = previousHeld, previousDisplay
 			s.maintenanceBusy = previousBusy
@@ -540,7 +549,7 @@ func (s *supervisor) step(ctx context.Context) (result error) {
 				s.maintenanceDisplay, s.maintenanceBusy = false, false
 			}
 			var located *serviceFailure
-			if !errors.As(result, &located) || located.site != "control_cancelled" || !errors.Is(result, ctx.Err()) {
+			if !serviceLeaseCut(result) && (!errors.As(result, &located) || located.site != "control_cancelled" || !errors.Is(result, ctx.Err())) {
 				result = cancellation
 			}
 			return
@@ -558,8 +567,8 @@ func (s *supervisor) step(ctx context.Context) (result error) {
 	var err error
 	held := false
 	if s.completingStop {
-		d, err = s.cell.ServiceDescriptor()
-		if cancellation := serviceControlCancellation(ctx); cancellation != nil {
+		d, err = s.cell.serviceDescriptor(ctx)
+		if cancellation := serviceControlCancellation(ctx); cancellation != nil && !serviceLeaseCut(err) {
 			return cancellation
 		}
 		if err != nil {
@@ -567,12 +576,12 @@ func (s *supervisor) step(ctx context.Context) (result error) {
 		}
 	} else {
 		held, err = s.observeServiceMaintenanceInto(ctx, &d)
-		if cancellation := serviceControlCancellation(ctx); cancellation != nil {
+		if cancellation := serviceControlCancellation(ctx); cancellation != nil && !serviceLeaseCut(err) {
 			return cancellation
 		}
 		if errors.Is(err, ErrLocked) {
-			d, err = s.cell.ServiceDescriptor()
-			if cancellation := serviceControlCancellation(ctx); cancellation != nil {
+			d, err = s.cell.serviceDescriptor(ctx)
+			if cancellation := serviceControlCancellation(ctx); cancellation != nil && !serviceLeaseCut(err) {
 				return cancellation
 			}
 			if err != nil {
@@ -818,11 +827,17 @@ func (s *supervisor) fault(ctx context.Context, reason string) error {
 		return err
 	}
 	s.status.State, s.status.Reason, s.status.Healthy = "faulted", reason, false
+	commitCtx := context.WithoutCancel(ctx)
 	var err error
 	if reason == "service_stop_refused" && s.shutdownBlocked {
-		err = s.commitShutdownFault(ctx)
+		// The latch already attempted this write. Preserve its result if the
+		// follow-up was canceled before admission; finish any admitted write.
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		err = s.commitShutdownFault(commitCtx)
 	} else {
-		err = s.cell.setServiceFaulted(ctx, true)
+		err = s.cell.setServiceFaulted(commitCtx, true)
 	}
 	if errors.Is(err, ErrLocked) {
 		return s.busy()
@@ -830,7 +845,17 @@ func (s *supervisor) fault(ctx context.Context, reason string) error {
 	return err
 }
 
-func (s *supervisor) command(ctx context.Context, action string) (ServiceStatus, error) {
+// A disconnected command keeps its typed cut for the Go caller while the
+// receipt writer recognizes the entire branch as an abandoned client.
+func serviceControlLeaseResult(ctx context.Context, err error) error {
+	if abandoned, ok := serviceControlCancellation(ctx).(*serviceControlClientCancellation); ok && serviceLeaseCut(err) {
+		abandoned.cause = err
+		return abandoned
+	}
+	return err
+}
+
+func (s *supervisor) command(ctx context.Context, action string) (_ ServiceStatus, commandErr error) {
 	// Only the host's health bound can produce an unhealthy verdict. A caller
 	// asking to wait less cancels the command instead, preserving the previous
 	// completed status and leaving subsequent decisions to the periodic tick.
@@ -840,6 +865,7 @@ func (s *supervisor) command(ctx context.Context, action string) (ServiceStatus,
 		defer cancel()
 	}
 	ctx = context.WithValue(ctx, serviceControlCommandKey{}, true)
+	defer func() { commandErr = serviceControlLeaseResult(ctx, commandErr) }()
 	if err := serviceControlCancellation(ctx); err != nil {
 		return s.projectedStatus(), err
 	}
@@ -872,7 +898,7 @@ func (s *supervisor) command(ctx context.Context, action string) (ServiceStatus,
 			s.completingStop = false
 		}
 	case "start":
-		d, readErr := s.cell.ServiceDescriptor()
+		d, readErr := s.cell.serviceDescriptor(ctx)
 		if readErr != nil {
 			err = readErr
 		} else if d.Faulted || d.DesiredState == "maintenance" {

@@ -239,3 +239,117 @@ func TestLeaseWaitContextReleased(t *testing.T) {
 	}
 	leaseReleasedDetached(t) // LC-LEASE-2C2's rows (leasewait_detached_linux_test.go)
 }
+
+// Cancel at the break, then release well inside the ceiling.
+func cancelAtServiceLeaseBreak(t *testing.T, l *writerLease, cancel context.CancelFunc) {
+	t.Helper()
+	released := make(chan bool, 1)
+	go func() {
+		_, broken := leaseContextBroken(l)
+		cancel()
+		time.Sleep(leaseWait.ceiling / 20)
+		l.release()
+		released <- broken
+	}()
+	t.Cleanup(func() {
+		requireServiceLease(t, <-released, "service operation never broke the held lease")
+	})
+}
+
+func interruptedSupervisorStep(t *testing.T, l *writerLease, s *supervisor, origin string) error {
+	t.Helper()
+	ctx, cancel := context.WithCancel(t.Context())
+	cancelAtServiceLeaseBreak(t, l, cancel)
+	if origin == "tick" {
+		return s.step(ctx)
+	}
+	_, err := s.command(ctx, "status")
+	var receipt bytes.Buffer
+	WriteServiceHostFailure(&receipt, err, "supervisor_command")
+	requireServiceLease(t, receipt.Len() == 0, "abandoned status emitted a host failure receipt")
+	return err
+}
+
+func TestLeaseSupervisorFault(t *testing.T) {
+	for _, origin := range []string{"tick", "status"} {
+		for _, file := range []string{"descriptor", "owner"} {
+			t.Run(origin+"/"+file, func(t *testing.T) {
+				c, _ := unitCell(t)
+				d := prepareSupervisorTest(t, c)
+				h, _, _, _, healthy := supervisorTestHooks()
+				s := newSupervisor(c, SupervisorPolicy{hooks: &h})
+				requireServiceLease(t, s.load(d) == nil, "cannot load fault fixture")
+				requireServiceLease(t, s.step(t.Context()) == nil, "fault fixture startup failed")
+				requireServiceLease(t, s.running, "fault fixture did not start a child")
+				path, kind := c.path("service", "descriptor.json"), unix.F_WRLCK
+				if file == "owner" {
+					path, kind = c.path(".owner.lock"), unix.F_RDLCK
+				}
+				l := leaseHolder(t, "kept", kind)
+				leaseWait.ceiling = 2 * time.Second
+				*healthy = false
+				s.hooks.stop = func(context.Context) error {
+					leaseTaken(t, l, path)
+					return errors.New("synthetic stop refusal")
+				}
+				_ = interruptedSupervisorStep(t, l, s, origin)
+				after, err := c.ServiceDescriptor()
+				requireServiceLease(t, err == nil, "cannot reread committed supervisor fault")
+				requireServiceLease(t, after.Faulted, "cancellation lost the durable supervisor fault")
+				requireServiceLease(t, after.Revision == d.Revision+1, "supervisor fault did not advance exactly one revision")
+				nextHooks, _, starts, _, _ := supervisorTestHooks()
+				next := newSupervisor(c, SupervisorPolicy{hooks: &nextHooks})
+				requireServiceLease(t, next.load(after) == nil, "fresh supervisor could not load the faulted cell")
+				requireServiceLease(t, next.step(t.Context()) == nil, "fresh supervisor could not observe the faulted cell")
+				requireServiceLease(t, next.status.State == "faulted", "fresh supervisor lost the faulted state")
+				requireServiceLease(t, next.status.Reason == "service_circuit_open", "fresh supervisor lost the open circuit reason")
+				requireServiceLease(t, *starts == 0, "fresh supervisor launched a child behind the fault")
+			})
+		}
+	}
+}
+
+func TestLeaseSupervisorObservation(t *testing.T) {
+	for _, origin := range []string{"tick", "status"} {
+		t.Run(origin, func(t *testing.T) {
+			c := serviceCancellationReceiptCell(t)
+			d := prepareSupervisorTest(t, c)
+			l := leaseHolder(t, "kept", unix.F_WRLCK)
+			leaseWait.ceiling = 2 * time.Second
+			if origin == "tick" {
+				host := serviceWorkerOnCell(t, c, "", false)
+				host.ready(t)
+				leaseTaken(t, l, c.path("service", "descriptor.json"))
+				host.within(t, nil, host.ticks, "host did not accept observation tick")
+				cancelAtServiceLeaseBreak(t, l, host.cancel)
+				requireServiceLease(t, <-host.done == nil, "Run returned a failure for its own interrupted observation")
+				return
+			}
+			h, _, _, _, _ := supervisorTestHooks()
+			s := newSupervisor(c, SupervisorPolicy{hooks: &h})
+			requireServiceLease(t, s.load(d) == nil, "cannot load status observation fixture")
+			leaseTaken(t, l, c.path("service", "descriptor.json"))
+			err := interruptedSupervisorStep(t, l, s, origin)
+			requireServiceLease(t, serviceLeaseCut(err), "abandoned status observation lost its typed cut")
+			requireServiceLease(t, errors.Is(err, context.Canceled), "abandoned status observation lost its cancellation cause")
+		})
+	}
+}
+
+func TestLeaseSupervisorShutdownFault(t *testing.T) {
+	f := newFaultCommitGuardFixture(t)
+	holder := leaseHolder(t, "kept", unix.F_WRLCK)
+	leaseWait.ceiling = 2 * time.Second
+	var release func()
+	err := f.step(t, func() { release = f.holdOperation(t, "cannot hold the first fault attempt") }, func() {
+		release()
+		leaseTaken(t, holder, f.cell.path("service", "descriptor.json"))
+		cancelAtServiceLeaseBreak(t, holder, f.cancel)
+	})
+	d := f.descriptor(t)
+	requireServiceLease(t, err == nil, "admitted shutdown fault returned the later cancellation")
+	requireServiceLease(t, d.Faulted, "admitted shutdown fault was lost")
+	requireServiceLease(t, d.Revision == f.d.Revision+1, "admitted shutdown fault advanced the wrong revision")
+	requireServiceLease(t, !f.s.shutdownFaultPending, "admitted shutdown fault remained pending")
+	requireServiceLease(t, f.s.shutdownFaultCommit.revision == d.Revision, "admitted shutdown fault lost its receipt")
+}

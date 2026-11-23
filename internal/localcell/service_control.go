@@ -71,14 +71,14 @@ func serviceControlActionBudgetForPlatform(bound time.Duration, shares int, acti
 	return serviceControlBudget(bound, shares)
 }
 
-func (c *Cell) readServiceControlSecret() (secretBytes []byte, result error) {
+func (c *Cell) readServiceControlSecret(ctx context.Context) (secretBytes []byte, result error) {
 	defer func() { result = serviceFailureAt(result, "control_secret") }()
 	if err := c.validateRoot(false); err != nil {
 		return nil, ErrServiceControlRefused
 	}
-	secret, err := c.serviceControlSecretBy(context.Background(), openAdmissionRecord)
+	secret, err := c.serviceControlSecretBy(ctx, openAdmissionRecord)
 	if err != nil {
-		return nil, ErrServiceControlRefused
+		return nil, serviceReadFailure(err, ErrServiceControlRefused)
 	}
 	return []byte(secret), nil
 }
@@ -95,7 +95,7 @@ func (c *Cell) Control(ctx context.Context, action string) (ServiceStatus, error
 	if err := serviceControlCapability(); err != nil {
 		return ServiceStatus{}, err
 	}
-	secret, err := c.readServiceControlSecret()
+	secret, err := c.readServiceControlSecret(ctx)
 	if err != nil {
 		return ServiceStatus{}, err
 	}
@@ -230,8 +230,8 @@ func validServiceAction(action string) bool {
 	return false
 }
 
-func (c *Cell) serveServiceControlForPlatform(commands chan<- serviceCommand, platform string, initial ServiceDescriptor) (func(), error) {
-	secret, err := c.readServiceControlSecret()
+func (c *Cell) serveServiceControlForPlatform(ctx context.Context, commands chan<- serviceCommand, platform string, initial ServiceDescriptor) (func(), error) {
+	secret, err := c.readServiceControlSecret(ctx)
 	if err != nil {
 		return nil, err
 	}

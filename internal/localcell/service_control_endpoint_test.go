@@ -2,6 +2,7 @@ package localcell
 
 import (
 	"bytes"
+	"context"
 	"encoding/base32"
 	"encoding/json"
 	"errors"
@@ -403,7 +404,7 @@ func (c *Cell) serveServiceControl(commands chan<- serviceCommand) (func(), erro
 			return nil, err
 		}
 	}
-	return c.serveServiceControlForPlatform(commands, runtime.GOOS, initial)
+	return c.serveServiceControlForPlatform(context.Background(), commands, runtime.GOOS, initial)
 }
 
 func TestServiceBindingLeaseCompletionRefusals(t *testing.T) {

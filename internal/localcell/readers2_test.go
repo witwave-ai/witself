@@ -39,7 +39,7 @@ var reader2Rows = []reader2Row{
 		if privateDir(c.path("service"), true) != nil || writeAtomicBytes(path, []byte(base64.RawURLEncoding.EncodeToString(make([]byte, 32))), nil) != nil {
 			t.Fatal("cannot prepare the reader control secret")
 		}
-		return path, func() error { plant(path); return reader2Value(c.serviceControlSecret()) }
+		return path, func() error { plant(path); return reader2Value(c.serviceControlSecret(t.Context())) }
 	}},
 	// The credential keeps its pinned check; the existing open seam plants.
 	{"credentialPassword", ErrLocalPrincipalCredentialsRefused.Error(), ErrLocalPrincipalCredentialsRefused.Error(), ErrLocalPrincipalCredentialsRefused.Error(), func(t *testing.T, plant func(string)) (string, func() error) {

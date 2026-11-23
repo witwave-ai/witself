@@ -45,7 +45,7 @@ func hostExitSocketFixture(t *testing.T, bounds ...time.Duration) (*Cell, chan s
 
 func hostExitRawRequest(t *testing.T, c *Cell, body []byte) (int, serviceHostExitResponse, string) {
 	t.Helper()
-	secret, err := c.readServiceControlSecret()
+	secret, err := c.readServiceControlSecret(t.Context())
 	if err != nil {
 		t.Fatal("fixture authentication unavailable")
 	}

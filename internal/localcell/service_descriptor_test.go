@@ -48,14 +48,14 @@ func TestServiceDescriptorExplicitRuntimeAndImmutablePayload(t *testing.T) {
 	if err := c.PrepareService(t.Context(), d); err != nil {
 		t.Fatal(err)
 	}
-	before, err := c.serviceControlSecret()
+	before, err := c.serviceControlSecret(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := c.PrepareService(t.Context(), d); err != nil {
 		t.Fatal(err)
 	}
-	after, err := c.serviceControlSecret()
+	after, err := c.serviceControlSecret(t.Context())
 	if err != nil || before != after {
 		t.Fatal("idempotent preparation changed the credential")
 	}

@@ -37,7 +37,7 @@ func serviceAdapterAdmissionForStep(owner string, d ServiceDescriptor, artifactD
 		}
 		return nil, ServiceDescriptor{}, nil, serviceSystemdError(ErrServiceOwnershipConflict, step+":root", "unavailable")
 	}
-	fresh, err := cell.serviceDescriptorForOwner(owner)
+	fresh, err := cell.serviceDescriptorForOwner(context.Background(), owner)
 	if err != nil {
 		_ = lock.Close()
 		return nil, ServiceDescriptor{}, nil, serviceSystemdError(ErrServiceOwnershipConflict, step+":descriptor", "unavailable")

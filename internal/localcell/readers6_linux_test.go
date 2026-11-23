@@ -28,6 +28,7 @@ func init() {
 // do runs fn on its descriptor while held. Its holder polls F_GETLEASE (hold) and at a break records
 // it and lets go, lets go and takes the lease again (retaken), or keeps it.
 type writerLease struct {
+	holders            sync.WaitGroup
 	mu                 sync.Mutex
 	file               *os.File
 	lease              int
@@ -55,6 +56,7 @@ func (l *writerLease) take(name string) {
 	f, err := os.Open(name)
 	if _, leaseErr := unix.FcntlInt(f.Fd(), unix.F_SETLEASE, l.lease); err == nil && leaseErr == nil {
 		l.file = f
+		l.holders.Add(1)
 		go l.hold(f, l.retake, leaseWait.first, time.Now())
 	} else {
 		_ = f.Close()
@@ -67,6 +69,7 @@ func (l *writerLease) take(name string) {
 // timer slack, on a thread locked for good, which ends with the holder. fresh is when it last saw
 // its lease held and unbroken (taken, at first).
 func (l *writerLease) hold(f *os.File, retaking bool, first time.Duration, fresh time.Time) {
+	defer l.holders.Done()
 	nap, lost := func() { time.Sleep(100 * time.Microsecond) }, false
 	if retaking {
 		runtime.LockOSThread()
@@ -125,7 +128,10 @@ func (l *writerLease) release() {
 	l.do(func(fd uintptr) { l.retake = false; _, _ = unix.FcntlInt(fd, unix.F_SETLEASE, unix.F_UNLCK) })
 }
 
-func (l *writerLease) close() { l.do(func(uintptr) { _ = l.file.Close(); l.file = nil }) }
+func (l *writerLease) close() {
+	l.do(func(uintptr) { _ = l.file.Close(); l.file = nil })
+	l.holders.Wait()
+}
 
 // A read lease held on the journal when a write open starts is waited out: a holder that lets
 // go at the break costs a moment; one kept past the ceiling (300 ms here) gives the site's open

@@ -369,9 +369,9 @@ func (c *Cell) startHostExitRequest(ctx context.Context, envelope serviceHostExi
 	if os.Getenv("WITSELF_RUNTIME") != "local" || serviceControlCapability() != nil || c.validateHostExitEndpoint(envelope.serviceHostExitBinding) != nil {
 		return nil, hostExitRefused("envelope")
 	}
-	secret, err := c.readServiceControlSecret()
+	secret, err := c.readServiceControlSecret(ctx)
 	if err != nil {
-		return nil, hostExitRefused("envelope")
+		return nil, serviceReadFailure(err, hostExitRefused("envelope"))
 	}
 	body, err := json.Marshal(envelope)
 	if err != nil {
@@ -601,7 +601,7 @@ func (c *Cell) exitServiceHostForRemoval(ctx context.Context) error {
 			break
 		}
 		if !errors.Is(err, errServiceControlDeferred) {
-			return hostExitRefused("drain")
+			return serviceReadFailure(err, hostExitRefused("drain"))
 		}
 		// A busy host did not admit the stop. Give its worker time to finish.
 		select {
@@ -695,6 +695,9 @@ func (c *Cell) waitServiceHostExit(ctx context.Context, lease serviceLeaseRecord
 			observeCtx, observeCancel := context.WithTimeout(ctx, 100*time.Millisecond)
 			status, statusErr := c.Control(observeCtx, "observe")
 			observeCancel()
+			if serviceLeaseCut(statusErr) && ctx.Err() != nil {
+				return hostExitFailure("observe", true, statusErr)
+			}
 			if statusErr == nil && (status.HostExit == "refused" || status.State == "faulted") {
 				return hostExitFailure("observe", true, errors.Join(hostExitRefused("drain"), ctx.Err()))
 			}

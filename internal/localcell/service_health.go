@@ -72,7 +72,7 @@ func (c *Cell) ServiceHealth(ctx context.Context) (result error) {
 	if err != nil || d.DesiredState != "running" || d.Faulted {
 		return errServiceHealth
 	}
-	if err := c.serviceStartFence(); err != nil {
+	if err := c.serviceStartFence(context.Background()); err != nil {
 		return errServiceHealth
 	}
 	if err := c.serviceLiveTree(); err != nil {

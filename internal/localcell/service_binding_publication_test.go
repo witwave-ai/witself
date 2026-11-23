@@ -203,7 +203,7 @@ func publicationWriteRow(t *testing.T, row string) {
 		}
 	} else {
 		var transition ServiceDescriptor
-		if readServiceRecordJSON(ctx, journal, &transition) != nil || transition.Revision != pending.Revision || !errors.Is(probe.serviceStartFence(), ErrServiceDesiredState) {
+		if readServiceRecordJSON(ctx, journal, &transition) != nil || transition.Revision != pending.Revision || !errors.Is(probe.serviceStartFence(t.Context()), ErrServiceDesiredState) {
 			t.Fatal(text)
 		}
 	}

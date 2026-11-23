@@ -196,11 +196,17 @@ func TestServiceFailureSiteSourceContract(t *testing.T) {
 		return nil, serviceFailureAt(err, "lease_write")`,
 		},
 		"service_supervisor.go": {
-			`d, err := c.ServiceDescriptor()
+			`d, err := c.serviceDescriptor(ctx)
 	if err != nil {
+		if serviceLeaseCut(err) && errors.Is(err, ctx.Err()) {
+			return nil
+		}
 		return serviceFailureAt(err, "initial_descriptor")`,
-			`closeControl, err := c.serveServiceControlForPlatform(commands, runtime.GOOS, d)
+			`closeControl, err := c.serveServiceControlForPlatform(ctx, commands, runtime.GOOS, d)
 	if err != nil {
+		if serviceLeaseCut(err) && errors.Is(err, ctx.Err()) {
+			return nil
+		}
 		return serviceFailureFallback(err, "control_transport")`,
 			`result = errors.Join(result, serviceFailureAt(repairErr, "shutdown_repair"), serviceFailureAt(stopErr, "shutdown_stop"))`,
 			`func (s *supervisor) load(d ServiceDescriptor) (result error) {
@@ -244,20 +250,20 @@ func TestServiceFailureSiteSourceContract(t *testing.T) {
 					s.phase, s.operation, progress.pending != nil || progress.tornTail, journalErr == nil)
 			}`,
 			`if s.completingStop {
-		d, err = s.cell.ServiceDescriptor()
-		if cancellation := serviceControlCancellation(ctx); cancellation != nil {
+		d, err = s.cell.serviceDescriptor(ctx)
+		if cancellation := serviceControlCancellation(ctx); cancellation != nil && !serviceLeaseCut(err) {
 			return cancellation
 		}
 		if err != nil {
 			return serviceFailureAt(err, "supervisor_traversal")`,
 			`return status, serviceFailureFallback(err, "supervisor_command")`,
 			`held, err = s.observeServiceMaintenanceInto(ctx, &d)
-		if cancellation := serviceControlCancellation(ctx); cancellation != nil {
+		if cancellation := serviceControlCancellation(ctx); cancellation != nil && !serviceLeaseCut(err) {
 			return cancellation
 		}
 		if errors.Is(err, ErrLocked) {
-			d, err = s.cell.ServiceDescriptor()
-			if cancellation := serviceControlCancellation(ctx); cancellation != nil {
+			d, err = s.cell.serviceDescriptor(ctx)
+			if cancellation := serviceControlCancellation(ctx); cancellation != nil && !serviceLeaseCut(err) {
 				return cancellation
 			}
 			if err != nil {
@@ -291,7 +297,7 @@ func TestServiceFailureSiteSourceContract(t *testing.T) {
 			`if err := s.call(ctx, "stop", s.hooks.stop); err != nil {
 			return serviceFailureAt(err, "startup_stop")`,
 		},
-		"service_control.go": {`func (c *Cell) readServiceControlSecret() (secretBytes []byte, result error) {
+		"service_control.go": {`func (c *Cell) readServiceControlSecret(ctx context.Context) (secretBytes []byte, result error) {
 	defer func() { result = serviceFailureAt(result, "control_secret") }()`,
 			`if errors.As(err, &refusal) {
 		var located *serviceFailure
@@ -443,7 +449,7 @@ func TestServiceFailureSiteSourceContract(t *testing.T) {
 // new raw filesystem/lifecycle return cannot pass merely because its function
 // still contains the old reviewed wrapper somewhere else.
 func TestServiceFailureSiteProducerInventory(t *testing.T) {
-	producers := strings.Fields(`commitServiceFault commitShutdownFault persistServiceShutdownFault latchServiceShutdownRefusal WindowsPrivateOpenSnapshot WindowsPrivateValidateSnapshot WindowsPrivateRemoveSameFile serviceListenerDescriptor listenRunServiceControl removeServiceEndpointFile acquireServiceLeaseForPlatform completeServiceLease removeOwnedServiceControlEndpointBy readServiceControlEndpointRecordBy serviceControlSecretBy readManifestBy readManifestJSON readServiceRecordJSON openAdmissionRecord decodeLocalRecord privateDir servicePrivateRecord openPrivateFile readPrivateFile openRegular openRegularBy readRegular openServiceRecord readJSON readManifest writeAtomic writeAtomicBytes removePrivateFile validateRoot validatePrivate validatePrivateTree validateRootPath openLockFile serviceControlSecret ServiceDescriptor readServiceDescriptor serviceDescriptorForOwner readServiceDescriptorForOwner PrepareService New readServiceControlSecret readServiceControlEndpointRecord readServiceControlEndpointWithBoot readServiceControlEndpoint publishServiceControlEndpoint publishServiceControlEndpointWithBoot removeOwnedServiceControlEndpoint removeServiceControlEndpoint listenServiceControl dialServiceControl serveServiceControlForPlatform Control Run load save tick step call command Repair Stop Start SetServiceDesiredState RepairService setServiceFaulted bindServiceProcessBoot bindServiceProcessBootWithReader reconcileServiceBoot reconcileServiceBootWithReader reconcileOldBoot writeServiceDescriptor own newSupervisor acquireLease acquireServiceLease acquireServiceLeaseWithBoot stopServiceChildren ServiceHealth hook operation retryServiceContention publishServiceLease serviceMaintenanceObservation observeServiceMaintenance observeServiceMaintenanceInto resumeServiceStartup failAfterMaintenanceObservation projectedStatus holdMaintenance serviceMaintenanceOnly`)
+	producers := strings.Fields(`commitServiceFault commitShutdownFault persistServiceShutdownFault latchServiceShutdownRefusal WindowsPrivateOpenSnapshot WindowsPrivateValidateSnapshot WindowsPrivateRemoveSameFile serviceListenerDescriptor listenRunServiceControl removeServiceEndpointFile acquireServiceLeaseForPlatform completeServiceLease removeOwnedServiceControlEndpointBy readServiceControlEndpointRecordBy serviceControlSecretBy readManifestBy readManifestJSON readServiceRecordJSON openAdmissionRecord decodeLocalRecord privateDir servicePrivateRecord openPrivateFile readPrivateFile openRegular openRegularBy readRegular openServiceRecord readJSON readManifest writeAtomic writeAtomicBytes removePrivateFile validateRoot validatePrivate validatePrivateTree validateRootPath openLockFile serviceControlSecret ServiceDescriptor serviceDescriptor readServiceDescriptor serviceDescriptorForOwner readServiceDescriptorForOwner PrepareService New readServiceControlSecret readServiceControlEndpointRecord readServiceControlEndpointWithBoot readServiceControlEndpoint publishServiceControlEndpoint publishServiceControlEndpointWithBoot removeOwnedServiceControlEndpoint removeServiceControlEndpoint listenServiceControl dialServiceControl serveServiceControlForPlatform Control Run load save tick step call command Repair Stop Start SetServiceDesiredState RepairService setServiceFaulted bindServiceProcessBoot bindServiceProcessBootWithReader reconcileServiceBoot reconcileServiceBootWithReader reconcileOldBoot writeServiceDescriptor own newSupervisor acquireLease acquireServiceLease acquireServiceLeaseWithBoot stopServiceChildren ServiceHealth hook operation retryServiceContention publishServiceLease serviceMaintenanceObservation observeServiceMaintenance observeServiceMaintenanceInto resumeServiceStartup failAfterMaintenanceObservation projectedStatus holdMaintenance serviceMaintenanceOnly`)
 	selected := make(map[string]bool)
 	for _, producer := range producers {
 		selected[producer] = true
@@ -465,9 +471,9 @@ func TestServiceFailureSiteProducerInventory(t *testing.T) {
 			"acquireServiceLeaseForPlatform": "openLockFile privateDir publishServiceLease servicePrivateRecord",
 		},
 		"service_supervisor.go": {
-			"Run":                    "ServiceDescriptor acquireLease acquireServiceLeaseWithBoot load newSupervisor projectedStatus projectedStatus retryServiceContention retryServiceContention retryServiceContention serveServiceControlForPlatform serviceMaintenanceOnly tick tick",
+			"Run":                    "acquireLease acquireServiceLeaseWithBoot load newSupervisor projectedStatus projectedStatus retryServiceContention retryServiceContention retryServiceContention serveServiceControlForPlatform serviceDescriptor serviceMaintenanceOnly tick tick",
 			"call":                   "hook latchServiceShutdownRefusal",
-			"command":                "RepairService ServiceDescriptor SetServiceDesiredState SetServiceDesiredState SetServiceDesiredState call observeServiceMaintenance projectedStatus projectedStatus projectedStatus step step step step",
+			"command":                "RepairService SetServiceDesiredState SetServiceDesiredState SetServiceDesiredState call observeServiceMaintenance projectedStatus projectedStatus projectedStatus serviceDescriptor step step step step",
 			"failed":                 "save",
 			"fault":                  "commitShutdownFault setServiceFaulted",
 			"load":                   "readJSON servicePrivateRecord",
@@ -475,7 +481,7 @@ func TestServiceFailureSiteProducerInventory(t *testing.T) {
 			"retryServiceContention": "operation",
 			"save":                   "writeAtomic",
 			"serveCommand":           "command",
-			"step":                   "ServiceDescriptor ServiceDescriptor call call call call call call call failAfterMaintenanceObservation failAfterMaintenanceObservation failAfterMaintenanceObservation holdMaintenance holdMaintenance holdMaintenance holdMaintenance holdMaintenance observeServiceMaintenanceInto save save save save save",
+			"step":                   "call call call call call call call failAfterMaintenanceObservation failAfterMaintenanceObservation failAfterMaintenanceObservation holdMaintenance holdMaintenance holdMaintenance holdMaintenance holdMaintenance observeServiceMaintenanceInto save save save save save serviceDescriptor serviceDescriptor",
 			"tick":                   "observeServiceMaintenance resumeServiceStartup step",
 		},
 		"service_maintenance.go": {
@@ -516,19 +522,20 @@ func TestServiceFailureSiteProducerInventory(t *testing.T) {
 			"startServicePostgres":             "bindServiceProcessBoot",
 		},
 		"service_descriptor.go": {
-			"PrepareService":                "ServiceDescriptor own privateDir readManifest serviceControlSecret serviceControlSecret writeAtomicBytes writeServiceDescriptor",
-			"RepairService":                 "Repair ServiceDescriptor SetServiceDesiredState own stopServiceChildren writeServiceDescriptor",
-			"ServiceDescriptor":             "readServiceDescriptor validateRoot",
+			"PrepareService":                "own privateDir readManifest serviceControlSecret serviceControlSecret serviceDescriptor writeAtomicBytes writeServiceDescriptor",
+			"RepairService":                 "Repair SetServiceDesiredState own serviceDescriptor stopServiceChildren writeServiceDescriptor",
+			"ServiceDescriptor":             "serviceDescriptor",
+			"serviceDescriptor":             "readServiceDescriptor validateRoot",
 			"serviceDescriptorForOwner":     "readServiceDescriptorForOwner validateRoot",
 			"openServiceRecord":             "openRegularBy",
 			"readServiceDescriptor":         "readServiceDescriptorForOwner",
 			"readServiceDescriptorForOwner": "privateDir readManifestBy readManifestJSON readServiceRecordJSON",
 			"SetServiceDesiredState":        "own",
 			"serviceControlSecret":          "openServiceRecord serviceControlSecretBy",
-			"serviceStartFence":             "ServiceDescriptor",
-			"setServiceDesiredStateLocked":  "ServiceDescriptor writeServiceDescriptor",
+			"serviceStartFence":             "serviceDescriptor",
+			"setServiceDesiredStateLocked":  "serviceDescriptor writeServiceDescriptor",
 			"setServiceFaulted":             "commitServiceFault",
-			"commitServiceFault":            "ServiceDescriptor own writeServiceDescriptor",
+			"commitServiceFault":            "own serviceDescriptor writeServiceDescriptor",
 			"writeServiceDescriptor":        "removePrivateFile writeAtomic writeAtomic",
 			"serviceControlSecretBy":        "privateDir",
 		},

@@ -549,7 +549,7 @@ func TestServiceAdapterDescriptorOwnerContract(t *testing.T) {
 			if name == "public_reader" {
 				fresh, err = m.cell.ServiceDescriptor()
 			} else {
-				fresh, err = m.cell.serviceDescriptorForOwner("1001")
+				fresh, err = m.cell.serviceDescriptorForOwner(t.Context(), "1001")
 			}
 			switch name {
 			case "accepted":

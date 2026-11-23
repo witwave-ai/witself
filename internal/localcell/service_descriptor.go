@@ -88,28 +88,45 @@ func openServiceRecord(ctx context.Context, path string, open error) (*os.File, 
 
 // ServiceDescriptor reads the current fence and revalidates installation identity.
 func (c *Cell) ServiceDescriptor() (ServiceDescriptor, error) {
-	var d ServiceDescriptor
-	if err := c.validateRoot(false); err != nil {
-		return d, err
-	}
-	return c.readServiceDescriptor()
+	return c.serviceDescriptor(context.Background())
 }
 
-func (c *Cell) serviceDescriptorForOwner(owner string) (ServiceDescriptor, error) {
+func serviceLeaseCut(err error) bool {
+	var cut *leaseWaitCut
+	return errors.As(err, &cut)
+}
+
+// Keep the full cause and its site when a lease wait was interrupted.
+func serviceReadFailure(err, refusal error) error {
+	if serviceLeaseCut(err) {
+		return err
+	}
+	return refusal
+}
+
+func (c *Cell) serviceDescriptor(ctx context.Context) (ServiceDescriptor, error) {
 	var d ServiceDescriptor
 	if err := c.validateRoot(false); err != nil {
 		return d, err
 	}
-	return c.readServiceDescriptorForOwner(owner)
+	return c.readServiceDescriptor(ctx)
+}
+
+func (c *Cell) serviceDescriptorForOwner(ctx context.Context, owner string) (ServiceDescriptor, error) {
+	var d ServiceDescriptor
+	if err := c.validateRoot(false); err != nil {
+		return d, err
+	}
+	return c.readServiceDescriptorForOwner(ctx, owner)
 }
 
 // readServiceDescriptor requires a root validated under an operation lock
 // that the caller still holds.
-func (c *Cell) readServiceDescriptor() (ServiceDescriptor, error) {
-	return c.readServiceDescriptorForOwner("")
+func (c *Cell) readServiceDescriptor(ctx context.Context) (ServiceDescriptor, error) {
+	return c.readServiceDescriptorForOwner(ctx, "")
 }
 
-func (c *Cell) readServiceDescriptorForOwner(owner string) (ServiceDescriptor, error) {
+func (c *Cell) readServiceDescriptorForOwner(ctx context.Context, owner string) (ServiceDescriptor, error) {
 	var d ServiceDescriptor
 	if _, err := os.Lstat(c.path("service")); errors.Is(err, os.ErrNotExist) {
 		return d, os.ErrNotExist
@@ -118,7 +135,7 @@ func (c *Cell) readServiceDescriptorForOwner(owner string) (ServiceDescriptor, e
 		return d, err
 	}
 	path := c.path("service", "descriptor.json")
-	if err := readServiceRecordJSON(context.Background(), path, &d); err != nil {
+	if err := readServiceRecordJSON(ctx, path, &d); err != nil {
 		return d, err
 	}
 	if owner == "" {
@@ -128,7 +145,7 @@ func (c *Cell) readServiceDescriptorForOwner(owner string) (ServiceDescriptor, e
 	} else if err := validateServiceDescriptorOwner(d, owner); err != nil {
 		return d, err
 	}
-	m, err := readManifestBy(context.Background(), c.cfg.Root, readManifestJSON)
+	m, err := readManifestBy(ctx, c.cfg.Root, readManifestJSON)
 	if err != nil {
 		return d, err
 	}
@@ -147,14 +164,14 @@ func (c *Cell) PrepareService(ctx context.Context, d ServiceDescriptor) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	lock, err := c.own(context.Background(), false)
+	lock, err := c.own(ctx, false)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = lock.Close() }()
-	m, err := readManifest(context.Background(), c.cfg.Root)
+	m, err := readManifest(ctx, c.cfg.Root)
 	if err != nil || !m.Installed || m.RemovalRetained {
-		return errors.New("service_installation_required")
+		return serviceReadFailure(err, errors.New("service_installation_required"))
 	}
 	uid, err := serviceOwner()
 	if err != nil {
@@ -180,24 +197,24 @@ func (c *Cell) PrepareService(ctx context.Context, d ServiceDescriptor) error {
 	if err := validateServiceDescriptor(d); err != nil {
 		return err
 	}
-	old, err := c.ServiceDescriptor()
+	old, err := c.serviceDescriptor(ctx)
 	if err == nil {
 		if old.Adapter != d.Adapter || old.Runtime != d.Runtime || !reflect.DeepEqual(old.Payload, d.Payload) {
 			return ErrServiceOwnershipConflict
 		}
-		_, err = c.serviceControlSecret()
+		_, err = c.serviceControlSecret(ctx)
 		return err
 	}
 	if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	if err := c.maintenanceFenceAllows(context.Background(), 0); err != nil {
+	if err := c.maintenanceFenceAllows(ctx, 0); err != nil {
 		return err
 	}
 	if err := privateDir(c.path("service"), true); err != nil {
 		return err
 	}
-	if _, err := c.serviceControlSecret(); errors.Is(err, os.ErrNotExist) {
+	if _, err := c.serviceControlSecret(ctx); errors.Is(err, os.ErrNotExist) {
 		var secret [32]byte
 		if _, err := rand.Read(secret[:]); err != nil {
 			return errors.New("service_control_secret_failed")
@@ -211,8 +228,8 @@ func (c *Cell) PrepareService(ctx context.Context, d ServiceDescriptor) error {
 	return c.writeServiceDescriptor(d)
 }
 
-func (c *Cell) serviceControlSecret() (string, error) {
-	return c.serviceControlSecretBy(context.Background(), openServiceRecord)
+func (c *Cell) serviceControlSecret(ctx context.Context) (string, error) {
+	return c.serviceControlSecretBy(ctx, openServiceRecord)
 }
 
 func (c *Cell) serviceControlSecretBy(ctx context.Context, open func(context.Context, string, error) (*os.File, error)) (string, error) {
@@ -263,8 +280,8 @@ func (c *Cell) writeServiceDescriptor(d ServiceDescriptor) (result error) {
 	return nil
 }
 
-func (c *Cell) serviceStartFence() error {
-	d, err := c.ServiceDescriptor()
+func (c *Cell) serviceStartFence(ctx context.Context) error {
+	d, err := c.serviceDescriptor(ctx)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
@@ -288,16 +305,16 @@ func (c *Cell) SetServiceDesiredState(ctx context.Context, state string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	lock, err := c.own(context.Background(), false)
+	lock, err := c.own(ctx, false)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = lock.Close() }()
-	return c.setServiceDesiredStateLocked(state)
+	return c.setServiceDesiredStateLocked(ctx, state)
 }
 
-func (c *Cell) setServiceDesiredStateLocked(state string) error {
-	d, err := c.ServiceDescriptor()
+func (c *Cell) setServiceDesiredStateLocked(ctx context.Context, state string) error {
+	d, err := c.serviceDescriptor(ctx)
 	if err != nil {
 		return err
 	}
@@ -311,7 +328,7 @@ func (c *Cell) setServiceDesiredStateLocked(state string) error {
 		if _, err := os.Lstat(c.path("service", "transition.json")); !errors.Is(err, os.ErrNotExist) {
 			return ErrServiceDesiredState
 		}
-		if err := c.maintenanceFenceAllows(context.Background(), 0); err != nil {
+		if err := c.maintenanceFenceAllows(ctx, 0); err != nil {
 			return err
 		}
 	}
@@ -323,7 +340,7 @@ func (c *Cell) setServiceFaulted(ctx context.Context, faulted bool) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	return c.commitServiceFault(faulted, nil)
+	return c.commitServiceFault(ctx, faulted, nil)
 }
 
 // A receipt belongs to one refused stop on one live supervisor. Only a fully
@@ -334,13 +351,13 @@ type serviceFaultCommit struct {
 	revision       uint64
 }
 
-func (c *Cell) commitServiceFault(faulted bool, prior *serviceFaultCommit) error {
-	lock, err := c.own(context.Background(), false)
+func (c *Cell) commitServiceFault(ctx context.Context, faulted bool, prior *serviceFaultCommit) error {
+	lock, err := c.own(ctx, false)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = lock.Close() }()
-	d, err := c.ServiceDescriptor()
+	d, err := c.serviceDescriptor(ctx)
 	if err != nil {
 		return err
 	}
@@ -377,16 +394,16 @@ func (c *Cell) RepairService(ctx context.Context) error {
 	if err := c.stopServiceChildren(ctx); err != nil {
 		return err
 	}
-	lock, err := c.own(context.Background(), false)
+	lock, err := c.own(ctx, false)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = lock.Close() }()
-	d, err := c.ServiceDescriptor()
+	d, err := c.serviceDescriptor(ctx)
 	if err != nil {
 		return err
 	}
-	if err := c.maintenanceFenceAllows(context.Background(), 0); err != nil {
+	if err := c.maintenanceFenceAllows(ctx, 0); err != nil {
 		return err
 	}
 	d.Faulted, d.Revision, d.RepairRevision = false, d.Revision+1, d.RepairRevision+1
