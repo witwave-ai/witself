@@ -14,6 +14,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -1088,6 +1089,13 @@ func checkpointSourceContract(sources map[string]string) []string {
 	}
 	removals := map[string]int{"checkpoint.go": 0, "lifecycle.go": 0, "drill_root.go": 0}
 	listedReferences, listedUninitialized := 0, false
+	repairNames := map[string]int{}
+	const repair = "checkpoint_journal_repair.go:"
+	repairRefs := map[string]int{
+		repair + "RepairCheckpointJournal:checkpointRootHere": 1, repair + "RepairCheckpointJournal:checkpointCold": 1,
+		repair + "settleCheckpointJournal:checkpointLeftover": 1, repair + "checkpointTailCompatible:checkpointLeftover": 1,
+		repair + "settleCheckpointJournal:syncCheckpointRoot": 2, "checkpoint_journal_binding_unix.go:repairOwnedJournal:checkpointRootHere": 1,
+	}
 	documentReads := map[string]int{}
 	wantedReads := map[string]int{"witness_read:checkpoint.go:checkpointComplete": 1,
 		"witness_read:checkpoint_verify.go:verifyCheckpointDocuments": 1, "inventory_read:checkpoint_verify.go:verifyCheckpointDocuments": 1}
@@ -1185,6 +1193,9 @@ func checkpointSourceContract(sources map[string]string) []string {
 					listedUninitialized = len(value.Values) == 0
 				}
 				if identifier, ok := node.(*ast.Ident); ok {
+					if slices.Contains([]string{"RepairCheckpointJournal", "repairOwnedJournal", "settleCheckpointJournal"}, identifier.Name) {
+						repairNames[name+":"+owner+":"+identifier.Name]++
+					}
 					if identifier.Name == "checkpointTreeListed" {
 						listedReferences++
 					}
@@ -1222,9 +1233,11 @@ func checkpointSourceContract(sources map[string]string) []string {
 					}
 				}
 				if identifier, ok := node.(*ast.Ident); ok && !checkpointFile && declared[identifier.Name] != "" {
-					// (f) checkpoint declarations are reached only from the hook field
-					// and summary type in types.go, and from Inspect.
+					// (f) exact references from inspection, test hooks and dark journal repair.
+					key := name + ":" + owner + ":" + identifier.Name
 					switch {
+					case repairRefs[key] > 0:
+						repairRefs[key]--
 					case name == "types.go" && (identifier.Name == "checkpointOperations" || identifier.Name == "CheckpointSummary"):
 					case name == "types.go" && identifier.Name == "drillRootOperations":
 						drillHooks++
@@ -1445,6 +1458,17 @@ func checkpointSourceContract(sources map[string]string) []string {
 	}
 	for key := range wantedReferences {
 		failures["document_reference:"+key] = documentReferences[key] != wantedReferences[key]
+	}
+	// Count declarations as well as calls and method values, across all build tags.
+	failures["journal_repair_callers"] = !maps.Equal(repairNames, map[string]int{
+		repair + "RepairCheckpointJournal:RepairCheckpointJournal": 1, repair + "RepairCheckpointJournal:repairOwnedJournal": 1,
+		repair + "settleCheckpointJournal:settleCheckpointJournal": 1, "checkpoint_journal_binding_other.go:repairOwnedJournal:repairOwnedJournal": 1,
+		"checkpoint_journal_binding_unix.go:repairOwnedJournal:repairOwnedJournal": 1, "checkpoint_journal_binding_unix.go:repairOwnedJournal:settleCheckpointJournal": 1,
+	})
+	// The package reference contract pins the descriptor truncate to settleCheckpointJournal.
+	failures["journal_repair_truncate"] = strings.Count(sources["checkpoint_journal_repair.go"], "f.Truncate(progress.durableBytes)") != 1
+	for key, remaining := range repairRefs {
+		failures["journal_repair_reference:"+key] = remaining != 0
 	}
 	for key := range documentReferences {
 		failures["document_reference:"+key] = documentReferences[key] != wantedReferences[key]
@@ -2265,4 +2289,17 @@ func TestCheckpointReleasedCallerContract(t *testing.T) {
 			})
 		}
 	})
+}
+
+// Inspect production source across build tags, including method values and
+// interface declarations. Only settlement may truncate the held journal.
+func TestRepairCheckpointJournalDark(t *testing.T) {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		status, err := new(Cell).RepairCheckpointJournal(t.Context())
+		drillAssert(t, ClassifyCheckpointFailure(err).Class == "local_checkpoint_state_unsupported", "unavailable journal repair changed class")
+		drillAssert(t, status == "", "repair reported status on failure")
+	}
+	for _, source := range checkpointWiringSources(t, filepath.Join("..", "..")) {
+		drillAssert(t, !strings.Contains(source, "RepairCheckpointJournal"), "production source reached journal repair")
+	}
 }

@@ -168,3 +168,92 @@ func TestCheckpointFreeSpaceAvailableBlocks(t *testing.T) {
 	}
 	t.Fatal("the free-space probe did not report the blocks available to this user")
 }
+
+func TestRepairCheckpointJournalBinding(t *testing.T) {
+	ioClass, layout := "local_checkpoint_operation_failed", "local_cell_layout_refused"
+	const protected = "repair modified a protected object"
+	for _, tc := range []struct{ name, class, failure, stage string }{
+		{"alias", layout, "repair accepted an aliased journal", "prepare"}, {"privacy", layout, protected, "prepare"},
+		{"unreadable", ioClass, "unreadable history was reported clean", "prepare"}, {"read-only", ioClass, "unreadable history was reported clean", "prepare"},
+		{"fifo", layout, protected, "prepare"}, {"link", layout, protected, "prepare"},
+		{"rebound", ioClass, "repair accepted a different journal", "validated"}, {"metadata", ioClass, "failed metadata was treated as absence", "validated"}, {"read-failure", ioClass, "unreadable history was reported clean", "validated"},
+		{"same-size", ioClass, "repair trusted journal contents changed before the authoritative parse", "validated"},
+		{"extended", ioClass, "repair trusted journal contents changed before the authoritative parse", "validated"},
+		{"cancelled", "local_checkpoint_interrupted", "cancelled repair shortened the log", "validated"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, _ := checkpointFixture(t, "legacy", false)
+			c, outside := f.cell, t.TempDir()+"/other"
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			log, expect := c.path(repairLog), string(f.prefix)+"{"
+			repairSeed(t, c, expect)
+			setup := func(err error) { t.Helper(); drillAssert(t, err == nil, "cannot prepare binding fixture") }
+			c.beforeJournalSettlement = func(stage string, held *os.File) {
+				if tc.stage != stage {
+					return
+				}
+				switch tc.name {
+				case "privacy", "unreadable", "read-only":
+					setup(os.Chmod(log, map[string]os.FileMode{"privacy": 0644, "read-only": 0400, "unreadable": 0}[tc.name]))
+				case "alias":
+					setup(os.Link(log, outside))
+					log = outside
+				case "fifo", "link":
+					setup(checkpointReaderPlant(log, tc.name, nil))
+					log += ".saved"
+				case "metadata":
+					setup(os.Rename(log, outside))
+					log = outside
+				case "read-failure":
+					setup(held.Close())
+				case "rebound":
+					setup(os.Rename(c.path("journal"), c.path("detached-journal")))
+					setup(os.Mkdir(c.path("journal"), 0700))
+					repairSeed(t, c, expect)
+					log = c.path("detached-journal", "operations.jsonl")
+				case "same-size", "extended":
+					expect = string(f.prefix) + "7"
+					if tc.name == "extended" {
+						expect = string(f.prefix) + repairRecord(t, "checkpoint", "operation", "started")
+					}
+					repairSeed(t, c, expect)
+				case "cancelled":
+					cancel()
+				}
+			}
+			c.beforeJournalSettlement("prepare", nil)
+			status, err := c.RepairCheckpointJournal(ctx)
+			drillAssert(t, err != nil, tc.failure)
+			repairDiagnostic(t, err, tc.class, "repair diagnostic class changed")
+			drillAssert(t, status == "", "repair reported status on failure")
+			if tc.name == "unreadable" {
+				setup(os.Chmod(log, 0600))
+			}
+			got, err := os.ReadFile(log)
+			setup(err)
+			drillAssert(t, string(got) == expect, protected)
+		})
+	}
+}
+
+// A same-length LF can commit the final line within one filesystem clock
+// tick. Model indistinguishable metadata while retaining real bytes and IO.
+func TestRepairCheckpointJournalCoarseTime(t *testing.T) {
+	_, _, dir := beneathTree(t)
+	f, err := dir.OpenFile("log", os.O_CREATE|os.O_RDWR, 0600)
+	drillAssert(t, err == nil, "cannot open synthetic journal")
+	record := repairRecord(t, "checkpoint", "operation", "started")
+	_, err = f.WriteAt([]byte(record[:len(record)-1]+"\x00"), 0)
+	drillAssert(t, err == nil, "cannot seed log")
+	c := &Cell{beforeJournalSettlement: func(stage string, f *os.File) {
+		if stage == "validated" {
+			_, writeErr := f.WriteAt([]byte{'\n'}, int64(len(record)-1))
+			drillAssert(t, writeErr == nil, "cannot commit synthetic line")
+		}
+	}}
+	status, err := c.settleCheckpointJournal(t.Context(), dir, dir, f, int64(len(record)), func() error { return nil })
+	drillAssert(t, err != nil, "repair trusted journal contents changed before the authoritative parse")
+	drillAssert(t, status == "", "repair reported status on failure")
+	assertFileBytes(t, filepath.Join(dir.Name(), "log"), []byte(record), "a validated LF-terminated line was shortened")
+}
