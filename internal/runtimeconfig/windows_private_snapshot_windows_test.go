@@ -53,10 +53,13 @@ func TestWindowsPrivateSnapshotContainment(t *testing.T) {
 	// in place to a junction whose target holds a same-named decoy. The open
 	// may be refused or may return the original object; it must never return
 	// another one, with the directory put back before the final check or not.
-	t.Run("converted_parent", func(t *testing.T) { snapshotContainmentProbe(t, false, true) })
-	t.Run("converted_ancestor", func(t *testing.T) { snapshotContainmentProbe(t, true, true) })
-	t.Run("converted_parent_kept", func(t *testing.T) { snapshotContainmentProbe(t, false, false) })
-	t.Run("converted_ancestor_kept", func(t *testing.T) { snapshotContainmentProbe(t, true, false) })
+	t.Run("converted_parent", func(t *testing.T) { snapshotContainmentProbe(t, false, true, false) })
+	t.Run("converted_ancestor", func(t *testing.T) { snapshotContainmentProbe(t, true, true, false) })
+	t.Run("converted_parent_kept", func(t *testing.T) { snapshotContainmentProbe(t, false, false, false) })
+	t.Run("converted_ancestor_kept", func(t *testing.T) { snapshotContainmentProbe(t, true, false, false) })
+	// The same with a directory symbolic link in place of the junction. Where
+	// the account may not create one, the case logs that and proves nothing.
+	t.Run("converted_parent_symlink", func(t *testing.T) { snapshotContainmentProbe(t, false, true, true) })
 	// The open leaf shares delete, so its directory can be emptied and turned
 	// into a junction after the leaf open and before validation. The final
 	// check of the held chain must refuse; nothing else in the suite reaches it.
@@ -143,7 +146,7 @@ func snapshotAttributeWriter(path string) (windows.Handle, error) {
 	if err != nil {
 		return windows.InvalidHandle, err
 	}
-	return windows.CreateFile(pointer, windows.FILE_WRITE_ATTRIBUTES, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+	return windows.CreateFile(pointer, windows.FILE_READ_ATTRIBUTES|windows.FILE_WRITE_ATTRIBUTES, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
 		nil, windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
 }
 
@@ -193,21 +196,63 @@ func snapshotRawOpenClass(parent windows.Handle, name string, decoy windows.ByHa
 		return "name_not_found"
 	case windows.STATUS_OBJECT_PATH_NOT_FOUND:
 		return "path_not_found"
-	case windows.STATUS_REPARSE, windows.STATUS_STOPPED_ON_SYMLINK, windows.STATUS_REPARSE_POINT_ENCOUNTERED,
-		windows.STATUS_IO_REPARSE_TAG_NOT_HANDLED, windows.STATUS_IO_REPARSE_DATA_INVALID, windows.STATUS_REPARSE_POINT_NOT_RESOLVED:
-		return "reparse_status"
+	case windows.STATUS_REPARSE:
+		return "status_reparse"
+	case windows.STATUS_STOPPED_ON_SYMLINK:
+		return "stopped_on_symlink"
+	case windows.STATUS_REPARSE_POINT_ENCOUNTERED:
+		return "reparse_point_encountered"
+	case windows.STATUS_IO_REPARSE_TAG_NOT_HANDLED:
+		return "reparse_tag_not_handled"
+	case windows.STATUS_IO_REPARSE_DATA_INVALID:
+		return "reparse_data_invalid"
+	case windows.STATUS_REPARSE_POINT_NOT_RESOLVED:
+		return "reparse_point_not_resolved"
 	}
 	return "other"
 }
 
+// The reparse data of an absolute directory symbolic link to target.
+func snapshotSymlinkData(t *testing.T, target string) []byte {
+	t.Helper()
+	substitute, err := windows.UTF16FromString(`\??\` + target)
+	if err != nil {
+		t.Fatal("cannot encode the symbolic link target")
+	}
+	printName, err := windows.UTF16FromString(target)
+	if err != nil {
+		t.Fatal("cannot encode the symbolic link target")
+	}
+	substitute, printName = substitute[:len(substitute)-1], printName[:len(printName)-1]
+	buffer := make([]byte, 20+2*(len(substitute)+len(printName)))
+	binary.LittleEndian.PutUint32(buffer[0:4], windows.IO_REPARSE_TAG_SYMLINK)
+	binary.LittleEndian.PutUint16(buffer[4:6], uint16(len(buffer)-8))
+	binary.LittleEndian.PutUint16(buffer[10:12], uint16(2*len(substitute)))
+	binary.LittleEndian.PutUint16(buffer[12:14], uint16(2*len(substitute)))
+	binary.LittleEndian.PutUint16(buffer[14:16], uint16(2*len(printName)))
+	for i, value := range append(substitute, printName...) {
+		binary.LittleEndian.PutUint16(buffer[20+2*i:22+2*i], value)
+	}
+	return buffer
+}
+
+// Removes the reparse point from a converted directory whatever its tag.
 func clearSpoolJunction(handle windows.Handle) error {
 	var buffer [8]byte
-	binary.LittleEndian.PutUint32(buffer[0:4], windows.IO_REPARSE_TAG_MOUNT_POINT)
+	tag := uint32(windows.IO_REPARSE_TAG_MOUNT_POINT)
+	var current struct {
+		FileAttributes uint32
+		ReparseTag     uint32
+	}
+	if windows.GetFileInformationByHandleEx(handle, windows.FileAttributeTagInfo, (*byte)(unsafe.Pointer(&current)), uint32(unsafe.Sizeof(current))) == nil && current.ReparseTag != 0 {
+		tag = current.ReparseTag
+	}
+	binary.LittleEndian.PutUint32(buffer[0:4], tag)
 	var returned uint32
 	return windows.DeviceIoControl(handle, windows.FSCTL_DELETE_REPARSE_POINT, &buffer[0], uint32(len(buffer)), nil, 0, &returned, nil)
 }
 
-func snapshotContainmentProbe(t *testing.T, ancestor, restore bool) {
+func snapshotContainmentProbe(t *testing.T, ancestor, restore, symlink bool) {
 	root := windowsPrivateTestRoot(t)
 	outer, target, aside := filepath.Join(root, "outer"), filepath.Join(root, "target"), filepath.Join(root, "aside")
 	inner := filepath.Join(outer, "inner")
@@ -241,7 +286,10 @@ func snapshotContainmentProbe(t *testing.T, ancestor, restore bool) {
 	}
 	decoy := identify(decoyPath)
 	buffer := spoolJunctionData(t, target)
-	raw := "not_run"
+	if symlink {
+		buffer = snapshotSymlinkData(t, target)
+	}
+	raw, notPermitted := "not_run", false
 	convert := func() bool {
 		// A handle taken before the conversion, as the reader's own is.
 		pointer, err := windows.UTF16PtrFromString(converted)
@@ -263,6 +311,8 @@ func snapshotContainmentProbe(t *testing.T, ancestor, restore bool) {
 		}
 		err = setSpoolJunction(writer, buffer)
 		if windows.CloseHandle(writer) != nil || err != nil {
+			notPermitted = errors.Is(err, windows.ERROR_PRIVILEGE_NOT_HELD)
+			_ = os.Rename(aside, moved)
 			return false
 		}
 		raw = snapshotRawOpenClass(before, filepath.Base(moved), decoy)
@@ -294,6 +344,10 @@ func snapshotContainmentProbe(t *testing.T, ancestor, restore bool) {
 	})
 	if file != nil {
 		defer func() { _ = file.Close() }()
+	}
+	if notPermitted {
+		t.Logf("snapshot conversion class=%s", "not_permitted")
+		return
 	}
 	if !didConvert {
 		t.Fatal("cannot convert the held directory in place")
