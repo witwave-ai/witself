@@ -695,7 +695,7 @@ func (c *Cell) waitServiceHostExit(ctx context.Context, lease serviceLeaseRecord
 			observeCtx, observeCancel := context.WithTimeout(ctx, 100*time.Millisecond)
 			status, statusErr := c.Control(observeCtx, "observe")
 			observeCancel()
-			if serviceLeaseCut(statusErr) {
+			if serviceLeaseCut(statusErr) && ctx.Err() != nil {
 				return hostExitFailure("observe", true, statusErr)
 			}
 			if statusErr == nil && (status.HostExit == "refused" || status.State == "faulted") {

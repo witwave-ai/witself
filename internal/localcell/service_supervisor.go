@@ -118,6 +118,9 @@ func (c *Cell) Run(ctx context.Context, policy SupervisorPolicy) (result error) 
 	}
 	d, err := c.serviceDescriptor(ctx)
 	if err != nil {
+		if serviceLeaseCut(err) && errors.Is(err, ctx.Err()) {
+			return nil
+		}
 		return serviceFailureAt(err, "initial_descriptor")
 	}
 	if err := validateServiceHost(d); err != nil {
@@ -142,6 +145,9 @@ func (c *Cell) Run(ctx context.Context, policy SupervisorPolicy) (result error) 
 	}
 	closeControl, err := c.serveServiceControlForPlatform(ctx, commands, runtime.GOOS, d)
 	if err != nil {
+		if serviceLeaseCut(err) && errors.Is(err, ctx.Err()) {
+			return nil
+		}
 		return serviceFailureFallback(err, "control_transport")
 	}
 	defer closeControl()
@@ -170,7 +176,7 @@ func (c *Cell) Run(ctx context.Context, policy SupervisorPolicy) (result error) 
 				fmt.Fprintf(os.Stderr, "service_shutdown phase=%s operation=%s journal_pending=%t journal_read_ok=%t\n",
 					s.phase, s.operation, progress.pending != nil || progress.tornTail, journalErr == nil)
 			}
-			if !serviceLeaseCut(result) && errors.Is(result, ctx.Err()) {
+			if errors.Is(result, ctx.Err()) {
 				result = nil
 			}
 		}
@@ -507,7 +513,7 @@ func (s *supervisor) call(ctx context.Context, operation string, hook func(conte
 	}
 	err := hook(hookCtx)
 	if serviceLeaseCut(err) {
-		return err
+		return serviceControlLeaseResult(ctx, err)
 	}
 	s.latchServiceShutdownRefusal(ctx, operation, err)
 	if cancellation := serviceControlCancellation(ctx); cancellation != nil {
@@ -821,11 +827,17 @@ func (s *supervisor) fault(ctx context.Context, reason string) error {
 		return err
 	}
 	s.status.State, s.status.Reason, s.status.Healthy = "faulted", reason, false
+	commitCtx := context.WithoutCancel(ctx)
 	var err error
 	if reason == "service_stop_refused" && s.shutdownBlocked {
-		err = s.commitShutdownFault(ctx)
+		// The latch already attempted this write. Preserve its result if the
+		// follow-up was canceled before admission; finish any admitted write.
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		err = s.commitShutdownFault(commitCtx)
 	} else {
-		err = s.cell.setServiceFaulted(ctx, true)
+		err = s.cell.setServiceFaulted(commitCtx, true)
 	}
 	if errors.Is(err, ErrLocked) {
 		return s.busy()
@@ -833,7 +845,17 @@ func (s *supervisor) fault(ctx context.Context, reason string) error {
 	return err
 }
 
-func (s *supervisor) command(ctx context.Context, action string) (ServiceStatus, error) {
+// A disconnected command keeps its typed cut for the Go caller while the
+// receipt writer recognizes the entire branch as an abandoned client.
+func serviceControlLeaseResult(ctx context.Context, err error) error {
+	if abandoned, ok := serviceControlCancellation(ctx).(*serviceControlClientCancellation); ok && serviceLeaseCut(err) {
+		abandoned.cause = err
+		return abandoned
+	}
+	return err
+}
+
+func (s *supervisor) command(ctx context.Context, action string) (_ ServiceStatus, commandErr error) {
 	// Only the host's health bound can produce an unhealthy verdict. A caller
 	// asking to wait less cancels the command instead, preserving the previous
 	// completed status and leaving subsequent decisions to the periodic tick.
@@ -843,6 +865,7 @@ func (s *supervisor) command(ctx context.Context, action string) (ServiceStatus,
 		defer cancel()
 	}
 	ctx = context.WithValue(ctx, serviceControlCommandKey{}, true)
+	defer func() { commandErr = serviceControlLeaseResult(ctx, commandErr) }()
 	if err := serviceControlCancellation(ctx); err != nil {
 		return s.projectedStatus(), err
 	}

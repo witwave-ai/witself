@@ -268,7 +268,17 @@ func maintenanceTransitionContract(sources map[string]string) []string {
 								len(call.Args) == 3 && admissionNodeText(call.Args[2]) == "&s.shutdownFaultCommit"))
 					if valid {
 						argument, ok := call.Args[1].(*ast.Ident)
-						valid = leaseWaitOwnContext(owner, call.Args[0]) && ok && argument.Name == "true" && argument.Obj == nil
+						ownContext := leaseWaitOwnContext(owner, call.Args[0])
+						if method == "setServiceFaulted" {
+							// Both host-owned fault writes share the context detached from their caller.
+							id, bound := call.Args[0].(*ast.Ident)
+							ownContext = false
+							if bound && id.Obj != nil {
+								binding, ok := id.Obj.Decl.(*ast.AssignStmt)
+								ownContext = ok && admissionNodeText(binding) == "commitCtx := context.WithoutCancel(ctx)"
+							}
+						}
+						valid = ownContext && ok && argument.Name == "true" && argument.Obj == nil
 					}
 				}
 			}
@@ -366,9 +376,10 @@ func TestServiceMaintenanceTransitionContractFixtures(t *testing.T) {
 			})
 		}},
 		{"WriterAlias", "service_descriptor.go", "commitServiceFault", "writeServiceDescriptor_caller_shape", replace("if err := c.writeServiceDescriptor(d);", "writer := c.writeServiceDescriptor; if err := writer(d);")},
-		{"FaultFalse", "service_supervisor.go", "fault", "setServiceFaulted_caller_shape", replace("setServiceFaulted(ctx, true)", "setServiceFaulted(ctx, false)")},
+		{"FaultCallerCancel", "service_supervisor.go", "fault", "setServiceFaulted_caller_shape", replace("commitCtx := context.WithoutCancel(ctx)", "commitCtx := ctx")},
+		{"FaultFalse", "service_supervisor.go", "fault", "setServiceFaulted_caller_shape", replace("setServiceFaulted(commitCtx, true)", "setServiceFaulted(commitCtx, false)")},
 		{"FaultVariable", "service_shutdown_supervisor.go", "commitShutdownFault", "commitServiceFault_caller_shape", replace("commitServiceFault(ctx, true,", "commitServiceFault(ctx, faulted,")},
-		{"FaultAlias", "service_supervisor.go", "fault", "setServiceFaulted_caller_shape", replace("err = s.cell.setServiceFaulted(ctx, true)", "fault := s.cell.setServiceFaulted; err = fault(ctx, true)")},
+		{"FaultAlias", "service_supervisor.go", "fault", "setServiceFaulted_caller_shape", replace("err = s.cell.setServiceFaulted(commitCtx, true)", "fault := s.cell.setServiceFaulted; err = fault(commitCtx, true)")},
 		{"GenericFaultOverride", "service_descriptor.go", "setServiceFaulted", "commitServiceFault_caller_shape", replace("commitServiceFault(ctx, faulted, nil)", "commitServiceFault(ctx, false, nil)")},
 		{"RefusalReceiptDropped", "service_shutdown_supervisor.go", "commitShutdownFault", "commitServiceFault_caller_shape", replace("&s.shutdownFaultCommit", "nil")},
 	}
@@ -443,7 +454,7 @@ func TestServiceMaintenanceTransitionCallerInventoryFixtures(t *testing.T) {
 				})
 			case "setServiceFaulted":
 				input["service_supervisor.go"] = admissionMutateFunction(t, input["service_supervisor.go"], "fault", func(source string) string {
-					return strings.Replace(source, "s.cell.setServiceFaulted(ctx, true)", "nil", 1)
+					return strings.Replace(source, "s.cell.setServiceFaulted(commitCtx, true)", "nil", 1)
 				})
 				input["service_shutdown_supervisor.go"] = admissionMutateFunction(t, input["service_shutdown_supervisor.go"], "persistServiceShutdownFault", func(source string) string {
 					return serviceAdmissionInsert(source, 0, "_ = s.cell.setServiceFaulted(ctx, true)")

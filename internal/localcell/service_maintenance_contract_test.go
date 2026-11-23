@@ -1026,6 +1026,9 @@ var maintenanceHostSupervisorPins = map[string]string{
 	}
 	d, err := c.serviceDescriptor(ctx)
 	if err != nil {
+		if serviceLeaseCut(err) && errors.Is(err, ctx.Err()) {
+			return nil
+		}
 		return serviceFailureAt(err, "initial_descriptor")
 	}
 	if err := validateServiceHost(d); err != nil {
@@ -1050,6 +1053,9 @@ var maintenanceHostSupervisorPins = map[string]string{
 	}
 	closeControl, err := c.serveServiceControlForPlatform(ctx, commands, runtime.GOOS, d)
 	if err != nil {
+		if serviceLeaseCut(err) && errors.Is(err, ctx.Err()) {
+			return nil
+		}
 		return serviceFailureFallback(err, "control_transport")
 	}
 	defer closeControl()
@@ -1078,7 +1084,7 @@ var maintenanceHostSupervisorPins = map[string]string{
 				fmt.Fprintf(os.Stderr, "service_shutdown phase=%s operation=%s journal_pending=%t journal_read_ok=%t\n",
 					s.phase, s.operation, progress.pending != nil || progress.tornTail, journalErr == nil)
 			}
-			if !serviceLeaseCut(result) && errors.Is(result, ctx.Err()) {
+			if errors.Is(result, ctx.Err()) {
 				result = nil
 			}
 		}
@@ -1486,7 +1492,7 @@ var maintenanceHostSupervisorPins = map[string]string{
 	s.status.State, s.status.Reason, s.status.Healthy = "busy", "service_operation_in_progress", false
 	return nil
 }`,
-	"command": `func (s *supervisor) command(ctx context.Context, action string) (ServiceStatus, error) {
+	"command": `func (s *supervisor) command(ctx context.Context, action string) (_ ServiceStatus, commandErr error) {
 	// Only the host's health bound can produce an unhealthy verdict. A caller
 	// asking to wait less cancels the command instead, preserving the previous
 	// completed status and leaving subsequent decisions to the periodic tick.
@@ -1496,6 +1502,7 @@ var maintenanceHostSupervisorPins = map[string]string{
 		defer cancel()
 	}
 	ctx = context.WithValue(ctx, serviceControlCommandKey{}, true)
+	defer func() { commandErr = serviceControlLeaseResult(ctx, commandErr) }()
 	if err := serviceControlCancellation(ctx); err != nil {
 		return s.projectedStatus(), err
 	}

@@ -198,9 +198,15 @@ func TestServiceFailureSiteSourceContract(t *testing.T) {
 		"service_supervisor.go": {
 			`d, err := c.serviceDescriptor(ctx)
 	if err != nil {
+		if serviceLeaseCut(err) && errors.Is(err, ctx.Err()) {
+			return nil
+		}
 		return serviceFailureAt(err, "initial_descriptor")`,
 			`closeControl, err := c.serveServiceControlForPlatform(ctx, commands, runtime.GOOS, d)
 	if err != nil {
+		if serviceLeaseCut(err) && errors.Is(err, ctx.Err()) {
+			return nil
+		}
 		return serviceFailureFallback(err, "control_transport")`,
 			`result = errors.Join(result, serviceFailureAt(repairErr, "shutdown_repair"), serviceFailureAt(stopErr, "shutdown_stop"))`,
 			`func (s *supervisor) load(d ServiceDescriptor) (result error) {

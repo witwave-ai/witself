@@ -98,12 +98,14 @@ func TestServiceRunIdleShutdownReceipt(t *testing.T) {
 }
 
 func TestServiceRunInterruptedTickShutdownRepairsBeforeStop(t *testing.T) {
-	for _, failStop := range []bool{false, true} {
-		name := "clean"
-		if failStop {
-			name = "stop_error"
-		}
+	rows := []string{"clean", "stop_error", "windows_fault_lock_busy"}
+	if runtime.GOOS != "windows" {
+		rows = append(rows, "windows_shutdown_policy")
+	}
+	for _, name := range rows {
 		t.Run(name, func(t *testing.T) {
+			failStop := name == "stop_error"
+			blockFault := name == "windows_fault_lock_busy"
 			c, m := unitCell(t)
 			if runtime.GOOS != "windows" {
 				// Long test names exceed the Unix socket path limit under TempDir.
@@ -126,6 +128,7 @@ func TestServiceRunInterruptedTickShutdownRepairsBeforeStop(t *testing.T) {
 			} // Windows endpoint publication must bind to the same native boot as the lease.
 			firstHealth := make(chan struct{})
 			ticks := make(chan time.Time, 2)
+			h.windowsShutdownPolicy = runtime.GOOS == "windows" || name == "windows_shutdown_policy" || blockFault
 			h.ticks = ticks
 			var events []string
 			healths, stops, repairs := 0, 0, 0
@@ -193,6 +196,13 @@ func TestServiceRunInterruptedTickShutdownRepairsBeforeStop(t *testing.T) {
 						t.Fatal("pending journal did not reproduce the old shutdown refusal")
 					}
 					t.Log("reproduction: operation=stop step=stop state=failed pending=true torn_tail=false; direct stop begin refused")
+					if blockFault {
+						lock, lockErr := c.own(t.Context(), false)
+						if lockErr != nil {
+							t.Fatal("cannot hold the fault commit owner lock")
+						}
+						t.Cleanup(func() { _ = lock.Close() })
+					}
 					return err
 				}
 				assertFresh(opCtx)
@@ -250,14 +260,20 @@ func TestServiceRunInterruptedTickShutdownRepairsBeforeStop(t *testing.T) {
 				t.Fatal("interrupted tick did not follow settled healthy startup")
 			}
 			os.Stderr = previous
-			if runtime.GOOS == "windows" {
+			if h.windowsShutdownPolicy {
 				// A canceled Windows app stop is no authority for a second
 				// automatic stop with fresh escalation time. Preserve its
 				// journal and durable fault until explicit repair.
 				descriptor, descriptorErr := c.ServiceDescriptor()
 				progress, journalErr := c.readJournal(context.Background())
-				if !errors.Is(err, context.Canceled) || descriptorErr != nil || !descriptor.Faulted || journalErr != nil || progress.pending == nil {
-					t.Fatal("canceled Windows stop did not preserve fault and journal")
+				if !errors.Is(err, context.Canceled) {
+					t.Fatal("canceled Windows stop lost its interruption")
+				}
+				if descriptorErr != nil || descriptor.Faulted == blockFault {
+					t.Fatal("Windows fault state disagrees with commit availability")
+				}
+				if journalErr != nil || progress.pending == nil {
+					t.Fatal("canceled Windows stop lost its pending journal")
 				}
 				if len(events) != 0 || stops != 2 || healths != 2 {
 					t.Fatal("Windows refusal retried shutdown under a fresh context")
