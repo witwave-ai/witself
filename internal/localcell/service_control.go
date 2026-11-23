@@ -230,16 +230,12 @@ func validServiceAction(action string) bool {
 	return false
 }
 
-func (c *Cell) serveServiceControl(commands chan<- serviceCommand) (func(), error) {
-	return c.serveServiceControlForPlatform(commands, runtime.GOOS)
-}
-
-func (c *Cell) serveServiceControlForPlatform(commands chan<- serviceCommand, platform string) (func(), error) {
+func (c *Cell) serveServiceControlForPlatform(commands chan<- serviceCommand, platform string, initial ServiceDescriptor) (func(), error) {
 	secret, err := c.readServiceControlSecret()
 	if err != nil {
 		return nil, err
 	}
-	listener, err := c.listenServiceControl()
+	listener, err := c.listenRunServiceControl(initial)
 	if err != nil {
 		return nil, err
 	}
@@ -257,7 +253,7 @@ func (c *Cell) serveServiceControlForPlatform(commands chan<- serviceCommand, pl
 			return
 		}
 		if action == "exit-host" {
-			c.serveHostExit(w, r, commands, closed, exitRequests)
+			c.serveHostExit(w, r, commands, closed, exitRequests, listener)
 			return
 		}
 		bound := c.cfg.Timeout

@@ -1,11 +1,13 @@
 package localcell
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"os/exec"
 	"reflect"
-	"runtime"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -80,35 +82,49 @@ func TestServiceWorkerControlClasses(t *testing.T) {
 	}
 }
 
-// On Windows a client that asks while the host publishes its descriptor and its endpoint record is refused at the
-// endpoint record before it reaches the host. That is the same on main, is pinned by the endpoint_refresh row and is
-// recorded as the follow-up LC-HOST-ENDPOINT-1. On other systems the refusal cannot occur here and stays fatal.
-func serviceWorkerEndpointGap(err error) bool {
-	var refusal *serviceControlRefusal
-	return runtime.GOOS == "windows" && errors.As(err, &refusal) && refusal.step == "endpoint:record"
-}
-
-// A client that waits for the host to settle asks again after the Windows publication gap, as this helper does.
-func serviceWorkerSettled(ctx context.Context, t *testing.T, c *Cell) ServiceStatus {
+func serviceWorkerSettled(ctx context.Context, t *testing.T, control func(context.Context, string) (ServiceStatus, error)) ServiceStatus {
 	t.Helper()
 	for {
-		v, err := c.Control(ctx, "observe")
-		gap := serviceWorkerEndpointGap(err)
-		if !gap {
-			serviceWorkerCheckControl(t, err, func() { t.Fatal("could not obtain a settled control observation") })
-			if !v.WorkInFlight {
-				return v
-			}
+		v, err := control(ctx, "observe")
+		serviceWorkerCheckControl(t, err, func() { t.Fatal("could not obtain a settled control observation") })
+		if !v.WorkInFlight {
+			return v
 		}
 		select {
 		case <-ctx.Done():
-			if gap {
-				t.Fatal("host stayed refused at the endpoint record until the deadline")
-			}
 			t.Fatal("worker did not settle before its deadline")
 		case <-time.After(time.Millisecond):
 		}
 	}
+}
+
+func TestServiceSettledHelper(t *testing.T) {
+	t.Run("helper_first_refusal", func(t *testing.T) {
+		const flag = "WITSELF_TEST_SETTLED_HELPER_CHILD"
+		const marker = "settled helper class=attempt"
+		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+		defer cancel()
+		if os.Getenv(flag) == "1" {
+			attempts := 0
+			serviceWorkerSettled(ctx, t, func(context.Context, string) (ServiceStatus, error) {
+				attempts++
+				t.Log(marker)
+				if attempts == 1 {
+					return ServiceStatus{}, serviceEndpointRefused("record")
+				}
+				return ServiceStatus{State: "running", Healthy: true}, nil
+			})
+			return
+		}
+		cmd := exec.CommandContext(ctx, os.Args[0], "-test.v", "-test.run=^TestServiceSettledHelper$/^helper_first_refusal$")
+		cmd.Env = append(cmd.Environ(), flag+"=1", "WITSELF_HOME="+t.TempDir(), "DSH_HOME="+t.TempDir())
+		out, err := cmd.CombinedOutput()
+		var exit *exec.ExitError
+		if !errors.As(err, &exit) || exit.ExitCode() != 1 || ctx.Err() != nil || bytes.Count(out, []byte(marker)) != 1 ||
+			!bytes.Contains(out, []byte("could not obtain a settled control observation")) {
+			t.Fatal("settled helper concealed an admission refusal")
+		}
+	})
 }
 
 func TestServiceWorkerCanceledQueryFault(t *testing.T)    { serviceWorkerCanceledQueries(t, true) }
@@ -161,7 +177,7 @@ func serviceWorkerCanceledQueries(t *testing.T, refusal bool) {
 				case <-ctx.Done():
 					t.Fatal("startup health was not reached")
 				}
-				before := serviceWorkerSettled(ctx, t, c)
+				before := serviceWorkerSettled(ctx, t, c.Control)
 				if before.State != "running" || !before.Healthy {
 					t.Fatal("expected healthy startup")
 				}
@@ -186,7 +202,7 @@ func serviceWorkerCanceledQueries(t *testing.T, refusal bool) {
 				if err := <-request; err == nil {
 					t.Fatal("canceled command succeeded")
 				}
-				after := serviceWorkerSettled(ctx, t, c)
+				after := serviceWorkerSettled(ctx, t, c.Control)
 				want := before
 				text := "canceled query changed its earlier observation"
 				if refusal {

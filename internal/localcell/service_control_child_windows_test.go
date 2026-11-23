@@ -98,27 +98,34 @@ func TestServiceControlChildProcessClient(t *testing.T) {
 			// still makes its first ever connection separately for every action.
 			readyContext, readyCancel := context.WithTimeout(workContext, allowance)
 			defer readyCancel()
+			published := cell.NativeTestEndpointPublished()
 			for {
-				status, controlErr := cell.Control(readyContext, "health")
-				var lastControl string
-				if controlErr != nil {
-					switch serviceControlChildDiagnostic(controlErr) {
-					case "localcell: service_control_unavailable: transport:dial":
-						lastControl = "dial"
-					case "localcell: service_control_unavailable: transport:deadline":
-						lastControl = "deadline"
-					case "localcell: service_control_unavailable: transport:eof":
-						lastControl = "eof"
-					case "localcell: service_control_unavailable: transport:response":
-						lastControl = "response"
-					default:
-						lastControl = "unclassified"
+				lastControl := "unclassified"
+				if published() {
+					status, controlErr := cell.Control(readyContext, "health")
+					if localcell.NativeTestEndpointRecordRefused(controlErr) {
+						logHost()
+						t.Fatal("synthetic host refused its published endpoint record")
 					}
-				} else {
-					if status.Healthy {
-						break
+					if controlErr != nil {
+						switch serviceControlChildDiagnostic(controlErr) {
+						case "localcell: service_control_unavailable: transport:dial":
+							lastControl = "dial"
+						case "localcell: service_control_unavailable: transport:deadline":
+							lastControl = "deadline"
+						case "localcell: service_control_unavailable: transport:eof":
+							lastControl = "eof"
+						case "localcell: service_control_unavailable: transport:response":
+							lastControl = "response"
+						default:
+							lastControl = "unclassified"
+						}
+					} else {
+						if status.Healthy {
+							break
+						}
+						lastControl = "unhealthy"
 					}
-					lastControl = "unhealthy"
 				}
 				select {
 				case <-readyContext.Done():

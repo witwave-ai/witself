@@ -17,6 +17,13 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+// Only an explicitly started Windows host owns ephemeral discovery.
+type serviceControlHostState struct {
+	serviceControlMu       sync.Mutex
+	serviceControlOwned    *serviceControlEndpointRecord
+	serviceControlListener net.Listener
+}
+
 const windowsPipeInstances = 4
 const windowsPipeFullAccess = uint32(0x001f01ff)
 
@@ -39,8 +46,8 @@ func (c *Cell) validateServiceControlEndpoint() error {
 	return err
 }
 
-func (c *Cell) listenServiceControl() (net.Listener, error) {
-	d, err := c.ServiceDescriptor()
+func (c *Cell) listenRunServiceControl(initial ServiceDescriptor) (net.Listener, error) {
+	d, err := c.serviceListenerDescriptor(initial)
 	if err != nil {
 		return nil, serviceFailureAt(windowsControlRefusal("endpoint:record"), "endpoint_descriptor")
 	}
@@ -50,6 +57,10 @@ func (c *Cell) listenServiceControl() (net.Listener, error) {
 	}
 	listener, err := windowsListenPipe(name)
 	if err != nil {
+		return nil, err
+	}
+	if err := c.completeServiceLease(d, name, serviceBootID); err != nil {
+		_ = listener.Close()
 		return nil, err
 	}
 	record, err := c.publishServiceControlEndpoint(name)

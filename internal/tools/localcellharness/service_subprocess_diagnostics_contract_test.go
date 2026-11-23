@@ -123,12 +123,10 @@ func assertForegroundSubprocessDiagnosticSites(t *testing.T, source string) {
 	t.Run("command_loop", func(t *testing.T) {
 		for _, fragment := range []string{
 			`for _, action := range []string{"status", "observe", "stop", "status", "observe"} {`,
-			`class, gaps := windowsStoppedCommand(commandCtx, allowance, action, client.invoke)`,
-			`t.Logf("foreground_exit class=%s", "endpoint_record_retry")`,
-			`t.Logf("foreground endpoint record refusals=%d", gaps)`,
+			`class := windowsStoppedCommand(commandCtx, allowance, action, client.invoke)`,
 		} {
 			if strings.Count(source, fragment) != 1 {
-				t.Fatal("stopped command loop lost its fixed actions, shared allowance or endpoint accounting")
+				t.Fatal("stopped command loop lost its fixed actions or bounded invocation")
 			}
 		}
 	})
@@ -151,7 +149,6 @@ func TestWindowsForegroundSubprocessClassEnrollment(t *testing.T) {
 			rows = append(rows, foregroundClassEnrollment{action + "_" + failure, class, class, stopped, stopped})
 		}
 	}
-	rows = append(rows, foregroundClassEnrollment{"endpoint_record_retry", "endpoint_record_retry", "endpoint_record_retry", stopped, stopped})
 	// The cold install classifier already has a portable truth table. Exercise
 	// its vocabulary through the foreground prefix as well as service_install.
 	for _, class := range []string{"deadline", "parent_budget", "exit_zero", "exit_without_cause", "start_failed"} {
@@ -172,7 +169,7 @@ func TestWindowsForegroundStoppedCommandClassBoundary(t *testing.T) {
 	}{
 		{"service_subprocess_windows_test.go", "invoke", []string{`return classifyWindowsStoppedCommand(ctx.Err(), output, err)`}},
 		{"service_subprocess_command_test.go", "classifyWindowsStoppedCommand", []string{
-			`return ""`, `return "endpoint_record_retry"`, `return "timeout"`, `return "exit_nonzero"`,
+			`return ""`, `return "timeout"`, `return "exit_nonzero"`,
 			`return "command_error"`, `return "bad_json"`, `return "wrong_state"`,
 		}},
 	} {

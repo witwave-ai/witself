@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"reflect"
 	"runtime"
@@ -551,8 +552,16 @@ func serviceMaintenanceHostExitContext(t *testing.T, c *Cell, d ServiceDescripto
 		t.Fatal("Safety exit fixture could not acquire host lease")
 	}
 	t.Cleanup(func() { _ = lease.Close() })
+	var listener net.Listener
+	if runtime.GOOS == "windows" {
+		listener, err = c.listenServiceControl()
+		if err != nil {
+			t.Fatal("Safety exit fixture could not reserve its listener")
+		}
+		t.Cleanup(func() { _ = c.removeServiceControlEndpoint() })
+	}
 	envelope, _, err := c.newHostExitEnvelope()
-	if err != nil || c.validateHostExitEnvelope(envelope) != nil {
+	if err != nil || c.validateHostExitEnvelope(envelope, listener) != nil {
 		t.Fatal("Safety exit fixture could not establish valid envelope")
 	}
 	return context.WithValue(t.Context(), serviceHostExitKey{}, envelope)

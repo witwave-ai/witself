@@ -154,3 +154,20 @@ func readPostgresFile(path string) ([]byte, error) { return readPrivateFile(path
 func (c *Cell) writePostgresConfig(data []byte) error {
 	return writeAtomicBytes(c.path("pg", "postgresql.conf"), data, nil)
 }
+
+// The Windows record codec and ownership comparison have portable fixture
+// coverage. Unix control uses its existing socket removal path exclusively.
+func removeServiceEndpointFile(path string, compared *os.File) error {
+	original, err := compared.Stat()
+	if err != nil {
+		return err
+	}
+	current, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if !os.SameFile(original, current) {
+		return serviceEndpointRefused("host_identity")
+	}
+	return removePrivateFile(path)
+}

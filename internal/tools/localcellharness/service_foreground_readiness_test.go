@@ -76,6 +76,7 @@ func TestWindowsForegroundReadinessWiring(t *testing.T) {
 		{"wait_past_command_deadline", "commandDeadline.Add(-windowsSyntheticTestBudget / 90)", "commandDeadline.Add(windowsSyntheticTestBudget / 90)", "each wait must end one WaitDelay share before the command deadline"},
 		{"wait_from_cold_spawn", "time.NewTimer(time.Until(waitDeadline))", "time.NewTimer(allowance)", "each wait must end one WaitDelay share before the command deadline"},
 		{"wait_deadline_moved", "\t\t\tprobeCancel()\n", "\t\t\tprobeCancel()\n\t\t\twaitDeadline = waitDeadline.Add(allowance)\n", "the wait deadline must be written once"},
+		{"published_refusal", "if errors.Is(probeErr, localcell.ErrServiceControlRefused)", "if false", "a refusal after publication must end the wait"},
 		{"probe_fixed_bound", "context.WithDeadline(ctx, waitDeadline)", "context.WithTimeout(ctx, 100*time.Millisecond)", "each status probe may use the whole wait"},
 		{"kill_not_deferred", "defer func() {\n\t\t\tif !finished {", "go func() {\n\t\t\tif !finished {", "the host kill must be deferred so it runs before t.Context is canceled"},
 	} {
@@ -112,7 +113,8 @@ func foregroundReadinessWiring(source string) string {
 		{"var oldStart, oldBoot string\ncommandDeadline, _ := commandCtx.Deadline()\nfor iteration := 0; iteration < 2; iteration++ {", "each wait must end one WaitDelay share before the command deadline"},
 		{"finished := false\ndefer func() {\nif !finished {\n_ = command.Process.Kill()", "the host kill must be deferred so it runs before t.Context is canceled"},
 		{"waitDeadline := commandDeadline.Add(-windowsSyntheticTestBudget / 90)\ndeadline := time.NewTimer(time.Until(waitDeadline))\nready := false", "each wait must end one WaitDelay share before the command deadline"},
-		{"for !ready {\nprobeCtx, probeCancel := context.WithDeadline(ctx, waitDeadline)\nstatus, probeErr := cell.Control(probeCtx, \"status\")", "each status probe may use the whole wait"},
+		{"for !ready {\nprobeCtx, probeCancel := context.WithDeadline(ctx, waitDeadline)\nvar probeErr error\n_, endpointErr := os.Lstat(filepath.Join(root, \"service\", \"control-endpoint.json\"))\nif endpointErr == nil {\nvar status localcell.ServiceStatus\nstatus, probeErr = cell.Control(probeCtx, \"status\")", "each status probe may use the whole wait"},
+		{"if errors.Is(probeErr, localcell.ErrServiceControlRefused) {\nt.Logf(\"foreground_exit class=%s\", \"probe_refused\")\nt.Fatal(\"foreground readiness refused after endpoint publication\")\n}", "a refusal after publication must end the wait"},
 		{"case <-time.After(20 * time.Millisecond):\n}\n}\ndeadline.Stop()", "each pause must start after its probe and the wait must stop its deadline"},
 	} {
 		if strings.Count(normalized, requirement.fragment) != 1 {

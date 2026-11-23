@@ -107,6 +107,7 @@ func TestServiceControlChildReadinessSourceContract(t *testing.T) {
 		{"outer_bound", "time.Duration(len(rows))*localcell.NativeServiceChildSyntheticBudget", "localcell.NativeServiceChildSyntheticBudget", "whole-test budget must cover every sequential row"},
 		{"old_readiness_site", "serviceControlChildReadinessAllowance(localcell.NativeServiceChildSyntheticBudget, time.Since(prepared))", "max(time.Second, 10*time.Since(prepared))", "readiness must use the portable row-budget allowance"},
 		{"bare_fatal", `t.Fatalf("synthetic host did not reach authenticated readiness: row=%s elapsed_ms=%d allowance_ms=%d work_remaining_ms=%d last_control=%s", row.name, time.Since(readinessStarted).Milliseconds(), allowance.Milliseconds(), max(time.Until(workDeadline).Milliseconds(), 0), lastControl)`, `t.Fatal("synthetic host did not reach authenticated readiness")`, "readiness failure must log the host and bounded timing/class fields"},
+		{"retry_refusal", "localcell.NativeTestEndpointRecordRefused(controlErr)", "false", "readiness must classify the last control result"},
 		{"raw_error", "switch serviceControlChildDiagnostic(controlErr)", "switch controlErr.Error()", "readiness must classify the last control result"},
 		{"startup_seed", "allowance = max(allowance, 10*time.Since(readinessStarted))", "allowance = allowance", "commands must be seeded from this row's measured readiness"},
 		{"mirror_check", "serviceControlChildSyntheticBudgetMirror != localcell.NativeServiceChildSyntheticBudget", "false", "Windows must check the portable budget mirror"},
@@ -171,7 +172,17 @@ case <-ctx.Done():`, "host cleanup must wait within the live row context before 
 		{"case <-ctx.Done():\nt.Fatal(\"synthetic foreground host shutdown exceeded shared budget\")", "shutdown must use the row context"},
 		{"allowance := serviceControlChildReadinessAllowance(localcell.NativeServiceChildSyntheticBudget, time.Since(prepared))", "readiness must use the portable row-budget allowance"},
 		{"readinessStarted := time.Now()\ngo func() { done <- cell.Run(hostContext, policy) }()\nreadyContext, readyCancel := context.WithTimeout(workContext, allowance)", "readiness timing must start before the host and bound its control context"},
-		{"for {\nstatus, controlErr := cell.Control(readyContext, \"health\")\nvar lastControl string\nif controlErr != nil {\nswitch serviceControlChildDiagnostic(controlErr) {", "readiness must classify the last control result"},
+		{`published := cell.NativeTestEndpointPublished()
+for {
+lastControl := "unclassified"
+if published() {
+status, controlErr := cell.Control(readyContext, "health")
+if localcell.NativeTestEndpointRecordRefused(controlErr) {
+logHost()
+t.Fatal("synthetic host refused its published endpoint record")
+}
+if controlErr != nil {
+switch serviceControlChildDiagnostic(controlErr) {`, "readiness must classify the last control result"},
 		{`case "localcell: service_control_unavailable: transport:dial":
 lastControl = "dial"
 case "localcell: service_control_unavailable: transport:deadline":
@@ -188,6 +199,7 @@ if status.Healthy {
 break
 }
 lastControl = "unhealthy"
+}
 }
 select {`, "readiness control classes must stay in the closed vocabulary"},
 		{`case <-readyContext.Done():

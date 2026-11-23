@@ -550,9 +550,17 @@ func TestNativeServiceProgressSourceContract(t *testing.T) {
 			if !ok {
 				continue
 			}
-			positions := []token.Pos{loop.Body.Rbrace}
-			for _, statement := range loop.Body.List {
-				positions = append(positions, statement.Pos())
+			// The published branch contains every real health attempt.
+			probe, ok := loop.Body.List[0].(*ast.IfStmt)
+			if !ok {
+				t.Fatal("readiness loop lost its publication boundary")
+			}
+			var positions []token.Pos
+			for _, block := range []*ast.BlockStmt{loop.Body, probe.Body} {
+				positions = append(positions, block.Rbrace)
+				for _, statement := range block.List {
+					positions = append(positions, statement.Pos())
+				}
 			}
 			for _, position := range positions {
 				offset := int(position) - 1
@@ -565,7 +573,7 @@ func TestNativeServiceProgressSourceContract(t *testing.T) {
 			}
 		}
 	}
-	if insertions != 8 {
+	if insertions != 11 {
 		t.Fatal("readiness contract did not check every loop insertion point")
 	}
 	for _, change := range [][2]string{
@@ -731,12 +739,16 @@ func nativeServiceReadinessCauseContract(ready *ast.FuncDecl) bool {
 		loops++
 		// Retain the newest health result before either success or early-exit
 		// observation. A stale earlier cause is not useful in a ready failure.
-		want := []string{
+		attempt := []string{
 			`attemptStarted := time.Now()`,
 			`status, err := cell.Control(ctx, "health")`,
 			`stats.observe(err, time.Since(waitingStarted), time.Since(attemptStarted))`,
 			`if len(diagnostics) != 0 { diagnostics[0].controlErr = err }`,
 			`if err == nil && status.Healthy { return time.Since(started) }`,
+			`if localcell.NativeTestEndpointRecordRefused(err) { stats.log(t.Logf, time.Since(waitingStarted), budget) t.Fatal("native service authenticated health did not become ready") }`,
+		}
+		want := []string{
+			"if published() { " + strings.Join(attempt, " ") + " }",
 			`if len(diagnostics) != 0 && diagnostics[0].foregroundExit.finished() { stats.log(t.Logf, time.Since(waitingStarted), budget) t.Fatal("native service foreground host exited before readiness") }`,
 			`select { case <-ctx.Done(): stats.log(t.Logf, time.Since(waitingStarted), budget) t.Fatal("native service authenticated health did not become ready") case <-ticker.C: }`,
 		}

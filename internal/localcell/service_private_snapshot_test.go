@@ -5,6 +5,8 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -201,6 +203,7 @@ func TestServicePrivateSnapshot(t *testing.T) {
 		}
 	})
 
+	t.Run("exit_lease", snapshotHostExitLease)
 	snapshotAdmissionRows(t)
 }
 
@@ -227,5 +230,100 @@ func snapshotRecordPath(c *Cell, row string) string {
 		return c.path("service", "lease.json")
 	default:
 		return c.path("service", "control-endpoint.json")
+	}
+}
+
+// This observer represents the separately established process-exit half. The
+// real observer loop still has to read the exact lease, lock and child records.
+type snapshotExitedProcess struct{}
+
+func (snapshotExitedProcess) exited() (bool, error) { return true, nil }
+func (snapshotExitedProcess) close()                {}
+
+func snapshotHostExitLease(t *testing.T) {
+	rows := []string{"identity", "observation"}
+	if runtime.GOOS != "windows" {
+		rows = append(rows, "identity_nonprivate", "observation_nonprivate")
+	}
+	for _, row := range rows {
+		t.Run(row, func(t *testing.T) {
+			c := serviceCancellationReceiptCell(t)
+			d := prepareSupervisorTest(t, c)
+			lock, err := c.acquireServiceLease(d)
+			if err != nil {
+				t.Fatal(snapshotAdmissionLost)
+			}
+			defer func() { _ = lock.Close() }()
+			if runtime.GOOS == "windows" {
+				if _, err := c.listenServiceControl(); err != nil {
+					t.Fatal(snapshotAdmissionLost)
+				}
+				if c.removeServiceControlEndpoint() != nil {
+					t.Fatal(snapshotAdmissionLost)
+				}
+			}
+			_, lease, err := c.serviceHostExitIdentity()
+			if err != nil || lock.Close() != nil {
+				t.Fatal(snapshotAdmissionLost)
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), c.cfg.Timeout)
+			defer cancel()
+			read := func() error {
+				if row == "observation" || row == "observation_nonprivate" {
+					return c.waitServiceHostExit(ctx, lease, snapshotExitedProcess{})
+				}
+				_, got, err := c.serviceHostExitIdentity()
+				if err == nil && got != lease {
+					return ErrServiceControlRefused
+				}
+				return err
+			}
+			path := c.path("service", "lease.json")
+			if row == "identity_nonprivate" || row == "observation_nonprivate" {
+				// Change policy after the tree proof to exercise the lease read
+				// itself. The observation loop has no preceding descriptor walk.
+				if row == "identity_nonprivate" {
+					c.observeRootWalk = func(before bool) {
+						if !before && os.Chmod(path, 0o644) != nil {
+							t.Fatal(snapshotUnproved)
+						}
+					}
+				} else if os.Chmod(path, 0o644) != nil {
+					t.Fatal(snapshotUnproved)
+				}
+				var located *serviceHostExitError
+				if !errors.As(read(), &located) || located.phase != "lease_validate" {
+					t.Fatal(snapshotUnproved)
+				}
+				return
+			}
+			saved := serviceLeasePublishTestHooks
+			defer func() { serviceLeasePublishTestHooks = saved }()
+			writes, reads := 0, 0
+			var readErr error
+			serviceLeasePublishTestHooks.write = func(target string, value any, beforeRename func() error) error {
+				writes++
+				supplied, ok := value.(serviceLeaseRecord)
+				if target != path || !ok || supplied != lease || beforeRename != nil {
+					t.Fatal(snapshotAdmissionLost)
+				}
+				// Match writeAtomicOnce's private JSON staging. On Windows the
+				// callback runs inside the real rename, while it holds the
+				// just-published file open with DELETE access.
+				data, err := json.MarshalIndent(supplied, "", "  ")
+				if err != nil {
+					t.Fatal(snapshotAdmissionLost)
+				}
+				return snapshotRename(snapshotStage(t, target, append(data, '\n')), target, func(after bool) {
+					if after {
+						reads++
+						readErr = read()
+					}
+				})
+			}
+			if err := c.publishServiceLease(path, lease); err != nil || writes != 1 || reads != 1 || readErr != nil {
+				t.Fatal(snapshotAdmissionLost)
+			}
+		})
 	}
 }

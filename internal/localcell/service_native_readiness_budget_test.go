@@ -2,6 +2,10 @@ package localcell
 
 import (
 	"context"
+	"errors"
+	"os"
+	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -12,6 +16,53 @@ import (
 // but cannot raise either readiness wait above the path-derived four host bounds.
 func NativeServiceReadinessBudgetForTest(bound, _ time.Duration) time.Duration {
 	return serviceControlBudget(max(bound, 0), 4)
+}
+
+// NativeTestEndpointPublished lets a cold proof poll for Windows publication
+// before its first Control call. Once present, all later calls go through the
+// normal admission path even if the record disappears. It never admits a peer.
+func (c *Cell) NativeTestEndpointPublished() func() bool {
+	return nativeTestPublicationProbe(runtime.GOOS == "windows", c.path("service", "control-endpoint.json"))
+}
+
+func nativeTestPublicationProbe(windows bool, path string) func() bool {
+	published := !windows
+	return func() bool {
+		if !published {
+			_, err := os.Lstat(path)
+			published = !errors.Is(err, os.ErrNotExist)
+		}
+		return published
+	}
+}
+
+// NativeTestEndpointRecordRefused classifies only this terminal admission
+// result. Deferred health and ordinary startup probes keep their own policy.
+func NativeTestEndpointRecordRefused(err error) bool {
+	var refusal *serviceControlRefusal
+	return errors.As(err, &refusal) && refusal.step == "endpoint:record"
+}
+
+func TestServiceBindingColdProbe(t *testing.T) {
+	t.Run("publication", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "endpoint")
+		seen := nativeTestPublicationProbe(true, path)
+		if seen() || os.WriteFile(path, nil, 0o600) != nil || !seen() || os.Remove(path) != nil || !seen() {
+			t.Fatal("cold probe lost its first publication boundary")
+		}
+	})
+	t.Run("unix", func(t *testing.T) {
+		if !nativeTestPublicationProbe(false, filepath.Join(t.TempDir(), "absent"))() {
+			t.Fatal("cold probe changed Unix readiness")
+		}
+	})
+	t.Run("refusal", func(t *testing.T) {
+		if !NativeTestEndpointRecordRefused(serviceFailureAt(serviceEndpointRefused("record"), "endpoint_read")) ||
+			NativeTestEndpointRecordRefused(serviceEndpointRefused("host_identity")) || NativeTestEndpointRecordRefused(errServiceControlDeferred) ||
+			NativeTestEndpointRecordRefused(errServiceUnhealthy) || NativeTestEndpointRecordRefused(nil) {
+			t.Fatal("cold probe lost its endpoint refusal class")
+		}
+	})
 }
 
 // The reviewer reproduction scales the native host bound to one second and its

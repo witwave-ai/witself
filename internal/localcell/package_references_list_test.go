@@ -74,9 +74,9 @@ golang.org/x/sys/windows.SetVolumeLabel golang.org/x/sys/windows.SetVolumeMountP
 golang.org/x/sys/windows.WriteFile
 golang.org/x/sys/windows.CertOpenStore
 github.com/witwave-ai/witself/internal/runtimeconfig.WindowsPrivateMkdir github.com/witwave-ai/witself/internal/runtimeconfig.WindowsPrivatePostgresMkdir github.com/witwave-ai/witself/internal/runtimeconfig.WindowsPrivatePostgresRename
-github.com/witwave-ai/witself/internal/runtimeconfig.WindowsPrivateRemove github.com/witwave-ai/witself/internal/runtimeconfig.WindowsPrivateRename
-(*Cell).appendUpdateJournalEntry (*Cell).copyCheckpoint (*Cell).deleteDrillLocked (*Cell).discardJournalTail (*Cell).discardOwnCheckpoint (*Cell).finishRemoval (*Cell).journal (*Cell).journalCause (*Cell).listenServiceControl (*Cell).preparePostgresDirectory
-(*Cell).publishServiceLease (*Cell).reconcileOldBoot (*Cell).removeCheckpointHeld (*Cell).removeOwnedServiceControlEndpoint (*Cell).removeServiceControlEndpoint (*Cell).stopChildOutcomeWithBudget (*Cell).sweepPostgresPending (*Cell).unsealCheckpointHeld
+github.com/witwave-ai/witself/internal/runtimeconfig.WindowsPrivateRemoveSameFile github.com/witwave-ai/witself/internal/runtimeconfig.WindowsPrivateRemove github.com/witwave-ai/witself/internal/runtimeconfig.WindowsPrivateRename
+(*Cell).appendUpdateJournalEntry (*Cell).copyCheckpoint (*Cell).deleteDrillLocked (*Cell).discardJournalTail (*Cell).discardOwnCheckpoint (*Cell).finishRemoval (*Cell).journal (*Cell).journalCause (*Cell).listenRunServiceControl (*Cell).listenServiceControl (*Cell).preparePostgresDirectory
+(*Cell).completeServiceLease (*Cell).publishServiceControlEndpoint (*Cell).publishServiceControlEndpointWithBoot (*Cell).publishServiceLease removeServiceEndpointFile (*Cell).reconcileOldBoot (*Cell).removeCheckpointHeld (*Cell).removeOwnedServiceControlEndpoint (*Cell).removeServiceControlEndpoint (*Cell).stopChildOutcomeWithBudget (*Cell).sweepPostgresPending (*Cell).unsealCheckpointHeld
 (*Cell).writePostgresConfig (*Cell).writeServiceDescriptor (*launchdAgentAdapter).inspectDirectories (*launchdAgentAdapter).removePlistIdentity (*systemdUserAdapter).inspectDirectories (*systemdUserAdapter).removeCreatedUnit acquireLock createWindowsTaskRecord
 drillRootSweep makePrivateDir privateDir publishPrivateFile removePrivateFile writeAtomic writeAtomicBytes writeAtomicBytesOnce writeAtomicOnce
 (*Cell).bindServiceProcessBoot (*Cell).bindServiceProcessBootWithReader (*Cell).deleteCheckpointLocked (*Cell).inventoryCheckpoint (*Cell).launchChild (*Cell).launchWindows
@@ -253,21 +253,23 @@ files_other.go
 	readPrivateFile os.ReadFile
 	readServiceRecordJSON readJSON
 	removePrivateFile os.Remove
+	removeServiceEndpointFile removePrivateFile
 files_windows.go
 	import context errors github.com/witwave-ai/witself/internal/runtimeconfig io os path/filepath
 	createPrivateTemp github.com/witwave-ai/witself/internal/runtimeconfig.WindowsPrivateCreateTemp
 	makePrivateDir github.com/witwave-ai/witself/internal/runtimeconfig.WindowsPrivateMkdir
 	openAdmissionRecord openWindowsServiceSnapshot
-	openWindowsServiceSnapshot github.com/witwave-ai/witself/internal/runtimeconfig.WindowsPrivateOpenSnapshot github.com/witwave-ai/witself/internal/runtimeconfig.WindowsPrivateValidateSnapshot
 	openPlainReader os.Open
 	openPrivateFile github.com/witwave-ai/witself/internal/runtimeconfig.WindowsPrivateOpenFile
 	openPrivateReader openPrivateFile
 	openPrivateWriter openPrivateFile
+	openWindowsServiceSnapshot github.com/witwave-ai/witself/internal/runtimeconfig.WindowsPrivateOpenSnapshot github.com/witwave-ai/witself/internal/runtimeconfig.WindowsPrivateValidateSnapshot
 	publishPrivateFile github.com/witwave-ai/witself/internal/runtimeconfig.WindowsPrivateRename
 	readManifestJSON github.com/witwave-ai/witself/internal/runtimeconfig.WindowsPrivateOpenSnapshot openRegularBy
 	readPrivateFile openPrivateFile
 	readServiceRecordJSON openWindowsServiceSnapshot
 	removePrivateFile github.com/witwave-ai/witself/internal/runtimeconfig.WindowsPrivateRemove
+	removeServiceEndpointFile github.com/witwave-ai/witself/internal/runtimeconfig.WindowsPrivateRemoveSameFile
 	validatePrivateTree github.com/witwave-ai/witself/internal/runtimeconfig.WindowsPrivateValidateSnapshot path/filepath.WalkDir
 fixed_cause.go
 installation_identity.go
@@ -427,17 +429,18 @@ service_control.go
 	import context crypto/subtle encoding/json errors fmt io net net/http os runtime strconv sync time
 	(*Cell).Control (*net.UnixListener).Close
 	(*Cell).readServiceControlSecret openAdmissionRecord
-	(*Cell).serveServiceControlForPlatform (*Cell).listenServiceControl (*Cell).removeServiceControlEndpoint (*os.File).Write x3
+	(*Cell).serveServiceControlForPlatform (*Cell).listenRunServiceControl (*Cell).removeServiceControlEndpoint (*os.File).Write x3
 	startServiceControlServer (*os.File).Write
 	writeServiceControlResponse (*os.File).Write
 service_control_endpoint.go
-	import context crypto/rand encoding/base32 encoding/json io os strings
-	(*Cell).publishServiceControlEndpointWithBoot readJSON writeAtomic
+	import context crypto/rand encoding/base32 encoding/json io os reflect strings
+	(*Cell).completeServiceLease (*Cell).publishServiceLease readServiceRecordJSON
+	(*Cell).publishServiceControlEndpoint (*Cell).publishServiceControlEndpointWithBoot
+	(*Cell).publishServiceControlEndpointWithBoot readServiceRecordJSON writeAtomic
 	(*Cell).readServiceControlEndpointRecord openServiceRecord
 	(*Cell).readServiceControlEndpointRecordBy privateDir
 	(*Cell).readServiceControlEndpointWithBoot openAdmissionRecord readServiceRecordJSON
-	(*Cell).refreshOwnedServiceControlEndpoint writeAtomic
-	(*Cell).removeOwnedServiceControlEndpoint removePrivateFile
+	(*Cell).removeOwnedServiceControlEndpointBy openServiceRecord privateDir removeServiceEndpointFile
 service_control_exit.go
 	import bytes context crypto/rand encoding/base32 encoding/json errors fmt io net net/http os runtime strconv strings sync syscall time
 	(*Cell).exitServiceHostForRemoval readJSON
@@ -451,8 +454,12 @@ service_control_exit.go
 service_control_exit_budget.go
 	import context time
 service_control_exit_unix.go
+	import context net
 service_control_exit_windows.go
-	import golang.org/x/sys/windows
+	import context golang.org/x/sys/windows net
+service_control_host_other.go
+	import net
+	(*Cell).listenRunServiceControl (*Cell).listenServiceControl
 service_control_unix.go
 	import context errors net os syscall
 	(*Cell).dialServiceControl (*net.Dialer).DialContext
@@ -462,6 +469,7 @@ service_control_unsupported.go
 	import context net
 service_control_windows.go
 	import context errors fmt golang.org/x/sys/windows io net os runtime sync time unsafe
+	(*Cell).listenRunServiceControl (*Cell).completeServiceLease (*Cell).publishServiceControlEndpoint
 	(*Cell).removeServiceControlEndpoint (*Cell).removeOwnedServiceControlEndpoint (*net.UnixListener).Close
 	(*windowsPipeConn).io golang.org/x/sys/windows.WriteFile
 	(*windowsPipeListener).Accept (*net.UnixListener).Close
@@ -485,8 +493,8 @@ service_descriptor.go
 service_failure_site.go
 	import errors fmt io sync/atomic
 service_foreground.go
-	import context errors os
-	(*Cell).acquireServiceLeaseWithBoot (*Cell).publishServiceLease openLockFile privateDir
+	import context errors os runtime
+	(*Cell).acquireServiceLeaseForPlatform (*Cell).publishServiceLease openLockFile privateDir
 service_health.go
 	import context crypto/rand encoding/base64 encoding/json errors github.com/witwave-ai/witself/internal/runtimeconfig github.com/witwave-ai/witself/internal/store io net/http net/url os time
 	(*Cell).serviceAPICredential readJSON writeAtomic
@@ -586,7 +594,7 @@ stop_windows.go
 	freeConsoleProc (*golang.org/x/sys/windows.LazyDLL).NewProc golang.org/x/sys/windows.NewLazySystemDLL
 	windowsConsoleBreak (*golang.org/x/sys/windows.LazyProc).Call x2
 types.go
-	import context errors github.com/witwave-ai/witself/internal/runtimeconfig net net/http os path/filepath sync time
+	import context errors github.com/witwave-ai/witself/internal/runtimeconfig net/http os path/filepath sync time
 	CanonicalRoot path/filepath.EvalSymlinks
 update_fence.go
 	import bytes context encoding/json errors io os time

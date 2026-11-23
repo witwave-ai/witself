@@ -988,7 +988,14 @@ func serviceMaintenancePublishedHost(t *testing.T, c *Cell, d ServiceDescriptor)
 	if bootErr != nil || identityErr != nil || !alive {
 		t.Fatal("native fixture host identity unavailable")
 	}
-	want := serviceLeaseRecord{Version: 1, BootID: boot, StartIdentity: identity, PID: os.Getpid(), Owner: d.UID, InstallationID: d.InstallationID}
+	want := serviceLeaseRecord{serviceLeaseIdentity: serviceLeaseIdentity{Version: 1, BootID: boot, StartIdentity: identity, PID: os.Getpid(), Owner: d.UID, InstallationID: d.InstallationID}}
+	if runtime.GOOS == "windows" {
+		e, err := c.readServiceControlEndpoint()
+		if err != nil || !validServiceControlPipeName(e.PipeName, d.InstallationID) {
+			t.Fatal("Run did not publish the issued pipe")
+		}
+		want.Version, want.Generation, want.BindingRevision, want.PipeName = 2, d.Payload.Generation, d.Revision, e.PipeName
+	}
 	data := serviceMaintenanceParityJSON(t, want)
 	serviceMaintenanceParityFile(t, c, "service/lease.json", data)
 	if c.validateServiceControlEndpoint() != nil {

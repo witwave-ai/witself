@@ -7,7 +7,9 @@ import (
 	"errors"
 	"io"
 	"net/http/httptest"
+	"os"
 	"reflect"
+	"runtime"
 	"slices"
 	"sync"
 	"testing"
@@ -157,8 +159,20 @@ func (w *serviceWorkerHost) ready(t *testing.T) ServiceStatus {
 	ctx, cancel := context.WithTimeout(t.Context(), serviceControlBudget(w.cell.cfg.Timeout, 3))
 	defer cancel()
 	for {
-		status, err := w.cell.Control(ctx, "observe")
-		if err == nil && !status.WorkInFlight {
+		// A cold host has no discovery yet. Poll for publication before the
+		// first request. Once published, every admission refusal is fatal.
+		published := false
+		if runtime.GOOS == "windows" {
+			_, err := os.Lstat(w.cell.path("service", "control-endpoint.json"))
+			if err != nil && !errors.Is(err, os.ErrNotExist) {
+				t.Fatal("the worker host did not settle within the row bound")
+			}
+			published = err == nil
+		} else {
+			published = w.cell.validateServiceControlEndpoint() == nil
+		}
+		if published {
+			status := serviceWorkerSettled(ctx, t, w.cell.Control)
 			if status.State != "running" || !status.Healthy || status.LastStepOutcome != "ok" {
 				t.Fatal("the first settled worker observation was not healthy running")
 			}

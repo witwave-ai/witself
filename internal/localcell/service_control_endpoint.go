@@ -7,20 +7,21 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+	"reflect"
 	"strings"
 )
 
 // The endpoint is discovery data, never authentication authority. Pipe names
 // are intentionally absent from addresses, errors and diagnostics.
 type serviceControlEndpointRecord struct {
-	Version            int    `json:"version"`
-	InstallationID     string `json:"installation_id"`
-	Generation         string `json:"generation"`
-	DescriptorRevision uint64 `json:"descriptor_revision"`
-	BootID             string `json:"boot_id"`
-	HostPID            int    `json:"host_pid"`
-	HostStartIdentity  string `json:"host_start_identity"`
-	PipeName           string `json:"pipe_name"`
+	Version           int    `json:"version"`
+	InstallationID    string `json:"installation_id"`
+	Generation        string `json:"generation"`
+	BindingRevision   uint64 `json:"binding_revision"`
+	BootID            string `json:"boot_id"`
+	HostPID           int    `json:"host_pid"`
+	HostStartIdentity string `json:"host_start_identity"`
+	PipeName          string `json:"pipe_name"`
 }
 
 const serviceControlPipePrefix = `\\.\pipe\witself-cell-`
@@ -90,12 +91,13 @@ func decodeServiceControlEndpoint(r io.Reader) (serviceControlEndpointRecord, er
 }
 
 func validateServiceControlRecord(record serviceControlEndpointRecord, d ServiceDescriptor, lease serviceLeaseRecord, boot string) error {
-	if record.Version != 1 || record.InstallationID != d.InstallationID || record.Generation != d.Payload.Generation ||
-		record.DescriptorRevision != d.Revision || boot == "" || record.BootID != boot ||
+	if record.Version != 2 || record.InstallationID != d.InstallationID || record.Generation != d.Payload.Generation ||
+		record.BindingRevision == 0 || record.BindingRevision > d.Revision || record.BindingRevision != lease.BindingRevision ||
+		record.PipeName != lease.PipeName || record.Generation != lease.Generation || boot == "" || record.BootID != boot ||
 		!validServiceControlPipeName(record.PipeName, d.InstallationID) {
 		return serviceEndpointRefused("record")
 	}
-	if record.HostPID <= 1 || record.HostStartIdentity == "" || lease.Version != 1 || lease.PID != record.HostPID ||
+	if record.HostPID <= 1 || record.HostStartIdentity == "" || lease.Version != 2 || lease.PID != record.HostPID ||
 		lease.StartIdentity != record.HostStartIdentity || lease.BootID != record.BootID || lease.InstallationID != record.InstallationID || lease.Owner != d.UID {
 		return serviceEndpointRefused("host_identity")
 	}
@@ -128,6 +130,7 @@ func (c *Cell) readServiceControlEndpointWithBoot(readBoot func() (string, error
 	if err != nil {
 		return serviceControlEndpointRecord{}, serviceFailureAt(serviceEndpointRefused("record"), "endpoint_descriptor")
 	}
+	c.serviceDescriptorBoundary("sampled", d)
 	record, err := c.readServiceControlEndpointRecordBy(context.Background(), openAdmissionRecord)
 	if err != nil {
 		return serviceControlEndpointRecord{}, err
@@ -146,7 +149,60 @@ func (c *Cell) readServiceControlEndpointWithBoot(readBoot func() (string, error
 	return record, nil
 }
 
-// Called only after the Windows listener has reserved its first instance.
+// Run checked its executable against initial before taking the lifetime lock.
+// Sample the issue revision under that lock, without adopting a different
+// installation, owner or executable payload during startup.
+func (c *Cell) serviceListenerDescriptor(initial ServiceDescriptor) (ServiceDescriptor, error) {
+	d, err := c.ServiceDescriptor()
+	if err != nil || d.InstallationID != initial.InstallationID || d.UID != initial.UID || !reflect.DeepEqual(d.Payload, initial.Payload) {
+		return ServiceDescriptor{}, serviceEndpointRefused("record")
+	}
+	return d, nil
+}
+
+// The first instance is already reserved. Only a provisional lease belonging
+// to this activation's host may become eligible for discovery.
+func (c *Cell) completeServiceLease(initial ServiceDescriptor, name string, readBoot func() (string, error)) error {
+	// Reservation can overlap a state writer. Issue at the revision of a
+	// current descriptor for the same validated host payload.
+	d, err := c.serviceListenerDescriptor(initial)
+	if err != nil {
+		return serviceFailureAt(err, "endpoint_descriptor")
+	}
+	provisional := serviceLeaseRecord{}
+	path := c.path("service", "lease.json")
+	if err := readServiceRecordJSON(context.Background(), path, &provisional); err != nil {
+		return serviceFailureAt(serviceEndpointRefused("host_identity"), "endpoint_lease")
+	}
+	start, alive, err := processIdentity(os.Getpid())
+	if err != nil || !alive || provisional.PID != os.Getpid() || provisional.StartIdentity != start ||
+		provisional.Version != 2 || provisional.Owner != d.UID || provisional.InstallationID != d.InstallationID ||
+		provisional.Generation != "" || provisional.BindingRevision != 0 || provisional.PipeName != "" {
+		return serviceEndpointRefused("host_identity")
+	}
+	boot, err := readBoot()
+	if err != nil || boot == "" || provisional.BootID != boot || d.Revision == 0 || d.Payload.Generation == "" || !validServiceControlPipeName(name, d.InstallationID) {
+		return serviceEndpointRefused("record")
+	}
+	provisional.PipeName = name
+	provisional.BindingRevision = d.Revision
+	provisional.Generation = d.Payload.Generation
+	if err := c.publishServiceLease(path, provisional); err != nil {
+		return serviceFailureAt(err, "lease_write")
+	}
+	return nil
+}
+
+func serviceEndpointForLease(lease serviceLeaseRecord) serviceControlEndpointRecord {
+	return serviceControlEndpointRecord{
+		Version: lease.Version, InstallationID: lease.InstallationID, Generation: lease.Generation,
+		BindingRevision: lease.BindingRevision, BootID: lease.BootID, HostPID: lease.PID,
+		HostStartIdentity: lease.StartIdentity, PipeName: lease.PipeName,
+	}
+}
+
+// Publication revalidates the descriptor and the completed lease. An
+// intervening state-only write does not change the listener's issue revision.
 func (c *Cell) publishServiceControlEndpoint(pipeName string) (serviceControlEndpointRecord, error) {
 	return c.publishServiceControlEndpointWithBoot(pipeName, serviceBootID)
 }
@@ -158,7 +214,7 @@ func (c *Cell) publishServiceControlEndpointWithBoot(pipeName string, readBoot f
 		return serviceControlEndpointRecord{}, serviceFailureAt(serviceEndpointRefused("record"), "endpoint_descriptor")
 	}
 	var lease serviceLeaseRecord
-	if readJSON(context.Background(), c.path("service", "lease.json"), &lease) != nil || servicePrivateRecord(c.path("service", "lease.json")) != nil {
+	if readServiceRecordJSON(context.Background(), c.path("service", "lease.json"), &lease) != nil {
 		return serviceControlEndpointRecord{}, serviceFailureAt(serviceEndpointRefused("host_identity"), "endpoint_lease")
 	}
 	boot, err := readBoot()
@@ -166,11 +222,13 @@ func (c *Cell) publishServiceControlEndpointWithBoot(pipeName string, readBoot f
 		return serviceControlEndpointRecord{}, serviceEndpointRefused("record")
 	}
 	start, alive, err := processIdentity(os.Getpid())
-	if err != nil || !alive {
+	if err != nil || !alive || lease.PID != os.Getpid() || lease.StartIdentity != start {
 		return serviceControlEndpointRecord{}, serviceEndpointRefused("host_identity")
 	}
-	record := serviceControlEndpointRecord{Version: 1, InstallationID: d.InstallationID, Generation: d.Payload.Generation,
-		DescriptorRevision: d.Revision, BootID: boot, HostPID: os.Getpid(), HostStartIdentity: start, PipeName: pipeName}
+	record := serviceEndpointForLease(lease)
+	if record.PipeName != pipeName {
+		return serviceControlEndpointRecord{}, serviceEndpointRefused("record")
+	}
 	if err := validateServiceControlRecord(record, d, lease, boot); err != nil {
 		return serviceControlEndpointRecord{}, err
 	}
@@ -180,46 +238,33 @@ func (c *Cell) publishServiceControlEndpointWithBoot(pipeName string, readBoot f
 	return record, nil
 }
 
-func sameServiceControlHost(a, b serviceControlEndpointRecord) bool {
-	return a.HostPID == b.HostPID && a.HostStartIdentity == b.HostStartIdentity && a.PipeName == b.PipeName
+func (c *Cell) removeOwnedServiceControlEndpoint(owned serviceControlEndpointRecord) error {
+	return c.removeOwnedServiceControlEndpointBy(owned, nil)
 }
 
-func (c *Cell) removeOwnedServiceControlEndpoint(owned serviceControlEndpointRecord) (result error) {
+func (c *Cell) removeOwnedServiceControlEndpointBy(owned serviceControlEndpointRecord, matched func()) (result error) {
 	defer func() { result = serviceFailureFallback(result, "endpoint_remove") }()
-	record, err := c.readServiceControlEndpointRecord()
+	path := c.path("service", "control-endpoint.json")
+	if privateDir(c.path("service"), false) != nil {
+		return serviceFailureAt(serviceEndpointRefused("host_identity"), "endpoint_read")
+	}
+	f, err := openServiceRecord(context.Background(), path, serviceEndpointRefused("record"))
 	if err != nil {
 		return serviceFailureAt(serviceEndpointRefused("host_identity"), "endpoint_read")
 	}
-	if !sameServiceControlHost(record, owned) {
-		return serviceEndpointRefused("host_identity")
-	}
-	if err := removePrivateFile(c.path("service", "control-endpoint.json")); err != nil {
-		return serviceEndpointRefused("record")
-	}
-	return nil
-}
-
-// An authenticated command may advance the descriptor revision. Only the
-// listener-owning Cell can advance its endpoint, and a replacement is preserved.
-// Unix has no endpoint state, so this introduces no filesystem or API operation.
-func (c *Cell) refreshOwnedServiceControlEndpoint(d ServiceDescriptor) (result error) {
-	defer func() { result = serviceFailureFallback(result, "endpoint_write") }()
-	c.serviceControlMu.Lock()
-	defer c.serviceControlMu.Unlock()
-	if c.serviceControlOwned == nil {
-		return nil
-	}
-	old, err := c.readServiceControlEndpointRecord()
+	defer func() { _ = f.Close() }()
+	record, err := decodeServiceControlEndpoint(f)
 	if err != nil {
 		return serviceFailureAt(serviceEndpointRefused("host_identity"), "endpoint_read")
 	}
-	if !sameServiceControlHost(old, *c.serviceControlOwned) || old.InstallationID != d.InstallationID || old.Generation != d.Payload.Generation {
+	if record != owned {
 		return serviceEndpointRefused("host_identity")
 	}
-	old.DescriptorRevision = d.Revision
-	if writeAtomic(c.path("service", "control-endpoint.json"), old, nil) != nil {
+	if matched != nil {
+		matched()
+	}
+	if err := removeServiceEndpointFile(path, f); err != nil {
 		return serviceEndpointRefused("record")
 	}
-	c.serviceControlOwned = &old
 	return nil
 }

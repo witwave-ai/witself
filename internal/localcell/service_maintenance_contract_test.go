@@ -1046,7 +1046,7 @@ var maintenanceHostSupervisorPins = map[string]string{
 	if commands == nil {
 		commands = make(chan serviceCommand)
 	}
-	closeControl, err := c.serveServiceControl(commands)
+	closeControl, err := c.serveServiceControlForPlatform(commands, runtime.GOOS, d)
 	if err != nil {
 		return serviceFailureFallback(err, "control_transport")
 	}

@@ -35,8 +35,8 @@ func openPrivateReader(_ context.Context, path string) (*os.File, error) {
 	return openPrivateFile(path, os.O_RDONLY, 0)
 }
 
-// Snapshots serve read-only admission. In particular the endpoint owner still
-// uses the ordinary guarded read before it updates or removes its record.
+// Snapshots serve read-only admission. Endpoint retirement uses the ordinary
+// guarded read and disposes of the exact object compared by the owner.
 func openAdmissionRecord(_ context.Context, path string, open error) (*os.File, error) {
 	return openWindowsServiceSnapshot(path, open, true)
 }
@@ -154,3 +154,7 @@ func publishPrivateFile(oldPath, newPath string) error {
 }
 
 func removePrivateFile(path string) error { return runtimeconfig.WindowsPrivateRemove(path) }
+
+func removeServiceEndpointFile(path string, compared *os.File) error {
+	return runtimeconfig.WindowsPrivateRemoveSameFile(path, compared)
+}

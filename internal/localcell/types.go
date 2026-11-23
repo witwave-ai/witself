@@ -3,7 +3,6 @@ package localcell
 import (
 	"context"
 	"errors"
-	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -183,13 +182,10 @@ type Status struct {
 
 // Cell is a handle, not a daemon. Every operation rereads its durable state.
 type Cell struct {
-	// Only an explicitly started Windows control host populates this state.
-	serviceControlMu       sync.Mutex
-	serviceControlOwned    *serviceControlEndpointRecord
-	serviceControlListener net.Listener //nolint:unused // Windows owns listener lifetime; Unix has no endpoint record.
-	cfg                    Config
-	childrenMu             sync.Mutex
-	children               map[string]*childObservation
+	serviceControlHostState
+	cfg        Config
+	childrenMu sync.Mutex
+	children   map[string]*childObservation
 	// Test failpoint between releasing an allocation and probing it. Nil in production.
 	afterPortAllocation func(Ports)
 	// A test can park a publication immediately before or after the real walk.
@@ -206,6 +202,8 @@ type Cell struct {
 	// Test barriers inside Inspect's listing path. Nil in production.
 	inspectCheckpointListing func(string)
 	postgresPendingTest      *postgresPendingOperations
+	// Fixture-scoped observation of durable publication and admission boundaries.
+	observeServiceDescriptor func(string, ServiceDescriptor)
 }
 
 // CanonicalRoot makes two spellings of one directory canonicalize to the same string.

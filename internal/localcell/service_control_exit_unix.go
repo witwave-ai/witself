@@ -2,6 +2,30 @@
 
 package localcell
 
+import (
+	"context"
+	"net"
+)
+
+// Unix keeps its existing wire envelope, socket admission and version-one lease.
+type serviceHostExitBinding struct{}
+
+func validHostExitLease(_ ServiceDescriptor, lease serviceLeaseRecord, _ string) bool {
+	return lease.Version == 1
+}
+func hostExitBindingForLease(serviceLeaseRecord) serviceHostExitBinding {
+	return serviceHostExitBinding{}
+}
+func (*serviceControlHostState) hostExitBindingMatches(serviceHostExitBinding, serviceLeaseRecord, net.Listener) bool {
+	return true
+}
+func (c *Cell) validateHostExitEndpoint(serviceHostExitBinding) error {
+	return c.validateServiceControlEndpoint()
+}
+func (c *Cell) dialHostExitEndpoint(ctx context.Context, _ serviceHostExitBinding) (net.Conn, error) {
+	return c.dialServiceControl(ctx)
+}
+
 // Unix uses the stable lifetime lease as the host-exit fence. Rechecking the
 // creation identity prevents replacement from being mistaken for that host.
 type unixServiceExitHost struct{ lease serviceLeaseRecord }
