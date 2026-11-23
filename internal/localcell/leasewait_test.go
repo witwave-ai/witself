@@ -186,7 +186,7 @@ var leaseWaitPlaceholders = map[string]int{"checkpoint_verify.go:(*Cell).verifyC
 	"service_control_exit.go:(*Cell).waitServiceHostExit": 2, "service_control_exit.go:(*supervisor).finishHostExit": 1,
 	"service_descriptor.go:(*Cell).PrepareService": 3, "service_descriptor.go:(*Cell).RepairService": 2, "service_descriptor.go:(*Cell).readServiceDescriptorForOwner": 2,
 	"service_descriptor.go:(*Cell).SetServiceDesiredState": 1, "service_descriptor.go:(*Cell).serviceControlSecret": 1,
-	"service_descriptor.go:(*Cell).setServiceFaulted": 1, "service_descriptor.go:(*Cell).setServiceDesiredStateLocked": 1, "service_foreground.go:(*Cell).acquireServiceLeaseForPlatform": 1,
+	"service_descriptor.go:(*Cell).commitServiceFault": 1, "service_descriptor.go:(*Cell).setServiceDesiredStateLocked": 1, "service_foreground.go:(*Cell).acquireServiceLeaseForPlatform": 1,
 	"service_health.go:(*Cell).ServiceHealth": 3, "service_health.go:(*Cell).healthPrincipal": 1,
 	"service_health.go:(*Cell).serviceAPICredential": 1, "service_health.go:(*Cell).serviceLiveTree": 2, "service_launchd.go:(*launchdAgentAdapter).Apply": 1,
 	"service_launchd.go:(*launchdAgentAdapter).Remove":     2,

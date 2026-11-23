@@ -482,11 +482,11 @@ service_descriptor.go
 	import context crypto/rand encoding/base64 errors io os os/user path/filepath reflect strconv strings
 	(*Cell).PrepareService (*Cell).writeServiceDescriptor privateDir writeAtomicBytes
 	(*Cell).RepairService (*Cell).writeServiceDescriptor
+	(*Cell).commitServiceFault (*Cell).writeServiceDescriptor
 	(*Cell).readServiceDescriptorForOwner privateDir readManifestBy readManifestJSON readServiceRecordJSON
 	(*Cell).serviceControlSecret openServiceRecord
 	(*Cell).serviceControlSecretBy privateDir
 	(*Cell).setServiceDesiredStateLocked (*Cell).writeServiceDescriptor
-	(*Cell).setServiceFaulted (*Cell).writeServiceDescriptor
 	(*Cell).writeServiceDescriptor removePrivateFile syncDirectory writeAtomic x2
 	openServiceRecord openPrivateReader openRegularBy
 	validateServiceHost path/filepath.EvalSymlinks x2

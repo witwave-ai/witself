@@ -443,12 +443,18 @@ func TestServiceFailureSiteSourceContract(t *testing.T) {
 // new raw filesystem/lifecycle return cannot pass merely because its function
 // still contains the old reviewed wrapper somewhere else.
 func TestServiceFailureSiteProducerInventory(t *testing.T) {
-	producers := strings.Fields(`WindowsPrivateOpenSnapshot WindowsPrivateValidateSnapshot WindowsPrivateRemoveSameFile serviceListenerDescriptor listenRunServiceControl removeServiceEndpointFile acquireServiceLeaseForPlatform completeServiceLease removeOwnedServiceControlEndpointBy readServiceControlEndpointRecordBy serviceControlSecretBy readManifestBy readManifestJSON readServiceRecordJSON openAdmissionRecord decodeLocalRecord privateDir servicePrivateRecord openPrivateFile readPrivateFile openRegular openRegularBy readRegular openServiceRecord readJSON readManifest writeAtomic writeAtomicBytes removePrivateFile validateRoot validatePrivate validatePrivateTree validateRootPath openLockFile serviceControlSecret ServiceDescriptor readServiceDescriptor serviceDescriptorForOwner readServiceDescriptorForOwner PrepareService New readServiceControlSecret readServiceControlEndpointRecord readServiceControlEndpointWithBoot readServiceControlEndpoint publishServiceControlEndpoint publishServiceControlEndpointWithBoot removeOwnedServiceControlEndpoint removeServiceControlEndpoint listenServiceControl dialServiceControl serveServiceControlForPlatform Control Run load save tick step call command Repair Stop Start SetServiceDesiredState RepairService setServiceFaulted bindServiceProcessBoot bindServiceProcessBootWithReader reconcileServiceBoot reconcileServiceBootWithReader reconcileOldBoot writeServiceDescriptor own newSupervisor acquireLease acquireServiceLease acquireServiceLeaseWithBoot stopServiceChildren ServiceHealth hook operation retryServiceContention publishServiceLease serviceMaintenanceObservation observeServiceMaintenance observeServiceMaintenanceInto resumeServiceStartup failAfterMaintenanceObservation projectedStatus holdMaintenance serviceMaintenanceOnly`)
+	producers := strings.Fields(`commitServiceFault commitShutdownFault persistServiceShutdownFault latchServiceShutdownRefusal WindowsPrivateOpenSnapshot WindowsPrivateValidateSnapshot WindowsPrivateRemoveSameFile serviceListenerDescriptor listenRunServiceControl removeServiceEndpointFile acquireServiceLeaseForPlatform completeServiceLease removeOwnedServiceControlEndpointBy readServiceControlEndpointRecordBy serviceControlSecretBy readManifestBy readManifestJSON readServiceRecordJSON openAdmissionRecord decodeLocalRecord privateDir servicePrivateRecord openPrivateFile readPrivateFile openRegular openRegularBy readRegular openServiceRecord readJSON readManifest writeAtomic writeAtomicBytes removePrivateFile validateRoot validatePrivate validatePrivateTree validateRootPath openLockFile serviceControlSecret ServiceDescriptor readServiceDescriptor serviceDescriptorForOwner readServiceDescriptorForOwner PrepareService New readServiceControlSecret readServiceControlEndpointRecord readServiceControlEndpointWithBoot readServiceControlEndpoint publishServiceControlEndpoint publishServiceControlEndpointWithBoot removeOwnedServiceControlEndpoint removeServiceControlEndpoint listenServiceControl dialServiceControl serveServiceControlForPlatform Control Run load save tick step call command Repair Stop Start SetServiceDesiredState RepairService setServiceFaulted bindServiceProcessBoot bindServiceProcessBootWithReader reconcileServiceBoot reconcileServiceBootWithReader reconcileOldBoot writeServiceDescriptor own newSupervisor acquireLease acquireServiceLease acquireServiceLeaseWithBoot stopServiceChildren ServiceHealth hook operation retryServiceContention publishServiceLease serviceMaintenanceObservation observeServiceMaintenance observeServiceMaintenanceInto resumeServiceStartup failAfterMaintenanceObservation projectedStatus holdMaintenance serviceMaintenanceOnly`)
 	selected := make(map[string]bool)
 	for _, producer := range producers {
 		selected[producer] = true
 	}
 	want := map[string]map[string]string{
+		"service_shutdown_supervisor.go": {
+			"commitShutdownFault":         "commitServiceFault",
+			"blockedServiceShutdown":      "persistServiceShutdownFault",
+			"latchServiceShutdownRefusal": "persistServiceShutdownFault",
+			"persistServiceShutdownFault": "commitShutdownFault",
+		},
 		"service_health.go": {
 			"ServiceHealth":        "ServiceDescriptor own readManifest",
 			"serviceAPICredential": "readJSON servicePrivateRecord writeAtomic",
@@ -460,10 +466,10 @@ func TestServiceFailureSiteProducerInventory(t *testing.T) {
 		},
 		"service_supervisor.go": {
 			"Run":                    "ServiceDescriptor acquireLease acquireServiceLeaseWithBoot load newSupervisor projectedStatus projectedStatus retryServiceContention retryServiceContention retryServiceContention serveServiceControlForPlatform serviceMaintenanceOnly tick tick",
-			"call":                   "hook",
+			"call":                   "hook latchServiceShutdownRefusal",
 			"command":                "RepairService ServiceDescriptor SetServiceDesiredState SetServiceDesiredState SetServiceDesiredState call observeServiceMaintenance projectedStatus projectedStatus projectedStatus step step step step",
 			"failed":                 "save",
-			"fault":                  "setServiceFaulted",
+			"fault":                  "commitShutdownFault setServiceFaulted",
 			"load":                   "readJSON servicePrivateRecord",
 			"rememberProcesses":      "readJSON readJSON",
 			"retryServiceContention": "operation",
@@ -521,7 +527,8 @@ func TestServiceFailureSiteProducerInventory(t *testing.T) {
 			"serviceControlSecret":          "openServiceRecord serviceControlSecretBy",
 			"serviceStartFence":             "ServiceDescriptor",
 			"setServiceDesiredStateLocked":  "ServiceDescriptor writeServiceDescriptor",
-			"setServiceFaulted":             "ServiceDescriptor own writeServiceDescriptor",
+			"setServiceFaulted":             "commitServiceFault",
+			"commitServiceFault":            "ServiceDescriptor own writeServiceDescriptor",
 			"writeServiceDescriptor":        "removePrivateFile writeAtomic writeAtomic",
 			"serviceControlSecretBy":        "privateDir",
 		},

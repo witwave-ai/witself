@@ -323,6 +323,18 @@ func (c *Cell) setServiceFaulted(ctx context.Context, faulted bool) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	return c.commitServiceFault(faulted, nil)
+}
+
+// A receipt belongs to one refused stop on one live supervisor. Only a fully
+// retired descriptor transition can issue it.
+type serviceFaultCommit struct {
+	installationID string
+	generation     string
+	revision       uint64
+}
+
+func (c *Cell) commitServiceFault(faulted bool, prior *serviceFaultCommit) error {
 	lock, err := c.own(context.Background(), false)
 	if err != nil {
 		return err
@@ -332,8 +344,25 @@ func (c *Cell) setServiceFaulted(ctx context.Context, faulted bool) error {
 	if err != nil {
 		return err
 	}
+	if prior != nil {
+		if faulted && d.Faulted && prior.revision == d.Revision &&
+			prior.installationID == d.InstallationID && prior.generation == d.Payload.Generation {
+			_, err := os.Lstat(c.path("service", "transition.json"))
+			if errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
+		}
+		// The old receipt cannot survive an interrupted replacement.
+		*prior = serviceFaultCommit{}
+	}
 	d.Faulted, d.Revision = faulted, d.Revision+1
-	return c.writeServiceDescriptor(d)
+	if err := c.writeServiceDescriptor(d); err != nil {
+		return err
+	}
+	if prior != nil {
+		*prior = serviceFaultCommit{installationID: d.InstallationID, generation: d.Payload.Generation, revision: d.Revision}
+	}
+	return nil
 }
 
 // RepairService explicitly acknowledges the fault and converges to stopped.
