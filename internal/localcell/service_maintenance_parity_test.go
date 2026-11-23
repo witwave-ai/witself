@@ -269,10 +269,9 @@ func serviceMaintenanceAbsentRow(t *testing.T, row string) {
 	if row == "cleanup_failure" {
 		stopError = synthetic
 		wantStatus.State, wantStatus.Reason, wantStatus.Healthy = "faulted", "service_stop_refused", false
+		// One fault revision on every system: the Windows latch persists the
+		// refusal and the following fault reuses that commit.
 		wantDescriptor.Faulted, wantDescriptor.Revision = true, d.Revision+1
-		if runtime.GOOS == "windows" {
-			wantDescriptor.Revision++ // The Windows latch persists before fault.
-		}
 	}
 	for _, event := range wantEvents {
 		if event == "start" && row != "start_busy" {
