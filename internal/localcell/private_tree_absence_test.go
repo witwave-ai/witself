@@ -108,7 +108,7 @@ func TestPrivateTreeWalkAbsenceIsNotDescriptorAbsence(t *testing.T) {
 	if c.reinstallServiceFence() == nil {
 		t.Error("the reinstall fence opened on a vanished tree object")
 	}
-	if c.bindServiceProcessBootWithReader("server", func() (string, error) { return "synthetic-boot", nil }) == nil {
+	if c.bindServiceProcessBootWithReader(t.Context(), "server", func() (string, error) { return "synthetic-boot", nil }) == nil {
 		t.Error("the boot binding skipped its descriptor on a vanished tree object")
 	}
 	if c.exitServiceHostForRemoval(t.Context()) == nil {

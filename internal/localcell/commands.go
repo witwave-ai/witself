@@ -342,7 +342,7 @@ func (c *Cell) startChildPrepared(ctx context.Context, m *Manifest, component st
 	if err := c.launchChild(ctx, binary, component, environment, log); err != nil {
 		return err
 	}
-	return c.bindServiceProcessBoot(component)
+	return c.bindServiceProcessBoot(context.Background(), component)
 }
 
 func ready(ctx context.Context, client *http.Client, port int) bool {

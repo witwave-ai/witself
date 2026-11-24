@@ -3,6 +3,7 @@ package localcell
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -311,7 +312,7 @@ func (c *Cell) Start(ctx context.Context) error {
 				if !state.Matches {
 					return errors.New("local cell process identity mismatch")
 				}
-				return c.bindServiceProcessBoot("postgres")
+				return c.bindServiceProcessBoot(context.Background(), "postgres")
 			}
 			before["postgres"] = false
 			if err := c.prepareComponentPorts(context.Background(), m, "postgres", false, false); err != nil {
@@ -360,10 +361,17 @@ func (c *Cell) Start(ctx context.Context) error {
 			}
 			rollbackCtx, rollbackCancel := c.deadline(context.Background())
 			defer rollbackCancel()
+			var cut *leaseWaitCut
 			if rollbackErr := c.stopSelected(rollbackCtx, before); rollbackErr != nil {
+				if errors.As(err, &cut) {
+					return fmt.Errorf("local cell startup failed; rollback incomplete, repair required: %w", cut)
+				}
 				return errors.New("local cell startup failed; rollback incomplete, repair required")
 			}
 			if finishErr := c.finish(context.Background(), m, "start"); finishErr != nil {
+				if errors.As(err, &cut) {
+					return fmt.Errorf("local cell startup failed; rollback completion failed, repair required: %w", cut)
+				}
 				return finishErr
 			}
 			return err

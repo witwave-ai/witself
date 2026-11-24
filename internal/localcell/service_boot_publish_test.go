@@ -39,7 +39,7 @@ func TestServiceBootPublicationRetriesOnlyTransient(t *testing.T) {
 				}
 				return original(f)
 			}
-			err := c.reconcileServiceBoot()
+			err := c.reconcileServiceBoot(t.Context())
 			if attempts != 1 {
 				t.Fatalf("boot publication attempts=%d", attempts)
 			}

@@ -325,7 +325,7 @@ func TestServiceMaintenanceTransitionInterimControl(t *testing.T) {
 				healths, repairs, reconciles := 0, 0, 0
 				h.health = func(context.Context) error { healths++; return nil }
 				h.repair = func(context.Context) error { repairs++; return nil }
-				h.reconcile = func() error { reconciles++; return nil }
+				h.reconcile = func(context.Context) error { reconciles++; return nil }
 				seed := supervisorRecord{Version: 1, RepairRevision: d.RepairRevision, Attempts: 3,
 					Failures: []time.Time{now.Add(-time.Millisecond)}, NextStart: now.Add(h.initialBackoff)}
 				if testWriteFile(c.path("service", "supervisor.json"), serviceMaintenanceParityJSON(t, seed), 0o600) != nil {

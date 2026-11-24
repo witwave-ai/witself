@@ -59,7 +59,7 @@ func TestServiceStoppedTickCancellationReceipt(t *testing.T) {
 			lifecycleCalls := 0
 			forbidden := func(context.Context) error { lifecycleCalls++; return nil }
 			hooks.start, hooks.stop, hooks.repair, hooks.health = forbidden, forbidden, forbidden, forbidden
-			hooks.reconcile = func() error { lifecycleCalls++; return nil }
+			hooks.reconcile = forbidden
 			s := newSupervisor(cell, SupervisorPolicy{hooks: &hooks})
 			if s.load(descriptor) != nil || s.tick(t.Context()) != nil || lifecycleCalls != 0 ||
 				s.status.State != "stopped" || s.running || s.pendingStartup != serviceStartupNone || s.maintenanceHeld ||

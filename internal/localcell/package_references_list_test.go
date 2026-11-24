@@ -302,7 +302,7 @@ launch_windows.go
 	(*Cell).launchChild (*Cell).launchWindows
 	(*Cell).launchWindows os.Open unsafe.Pointer x4 writeAtomic x3
 lifecycle.go
-	import context errors os path/filepath runtime strconv time
+	import context errors fmt os path/filepath runtime strconv time
 	(*Cell).Inspect acquireLock
 	(*Cell).Install (*Cell).preparePostgresDirectory os.ReadDir x2 writeAtomic
 	(*Cell).Remove (*Cell).finishRemoval x2 (*Cell).journal os.RemoveAll x2 writeAtomic x2

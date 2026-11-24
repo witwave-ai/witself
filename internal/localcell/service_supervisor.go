@@ -49,7 +49,7 @@ type SupervisorPolicy struct {
 
 type supervisorHooks struct {
 	start, stop, repair, health               func(context.Context) error
-	reconcile                                 func() error
+	reconcile                                 func(context.Context) error
 	boot                                      func() (string, error)
 	now                                       func() time.Time
 	shutdownContext                           func(context.Context, time.Duration) (context.Context, context.CancelFunc)
@@ -703,6 +703,9 @@ func (s *supervisor) step(ctx context.Context) (result error) {
 		return err
 	}
 	if err := s.call(ctx, "start", s.hooks.start); err != nil {
+		if ctx.Err() != nil && serviceLeaseCut(err) {
+			return err
+		}
 		if serviceControlCancellation(ctx) != nil {
 			return err
 		}

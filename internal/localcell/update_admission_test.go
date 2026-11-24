@@ -776,7 +776,7 @@ func admissionRunShutdownParity(t *testing.T) {
 	})
 	defer healthTimer.Stop()
 	starts, repairs, stops := 0, 0, 0
-	hooks.reconcile = func() error { calls = append(calls, "reconcile"); return nil }
+	hooks.reconcile = func(context.Context) error { calls = append(calls, "reconcile"); return nil }
 	hooks.start = func(opCtx context.Context) error { calls = append(calls, "start"); starts++; return c.Start(opCtx) }
 	hooks.repair = func(opCtx context.Context) error { calls = append(calls, "repair"); repairs++; return c.Repair(opCtx) }
 	hooks.stop = func(opCtx context.Context) error {

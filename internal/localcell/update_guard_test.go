@@ -420,7 +420,7 @@ func updateOrdinaryAdmissions(file string, fn *ast.FuncDecl) map[*ast.SelectorEx
 // Only released checkpoint owners and the context-aware service admissions pass their own context.
 func maintenanceFenceContext(fn *ast.FuncDecl, argument ast.Expr) bool {
 	switch fn.Name.Name {
-	case "Checkpoint", "DeleteCheckpoint", "PrepareService", "RepairService", "setServiceDesiredStateLocked", "serviceMaintenanceObservation":
+	case "Checkpoint", "DeleteCheckpoint", "PrepareService", "RepairService", "reconcileServiceBoot", "setServiceDesiredStateLocked", "serviceMaintenanceObservation":
 		return leaseWaitOwnContext(fn, argument) && admissionNodeText(argument) == "ctx"
 	default:
 		return admissionNodeText(argument) == "context.Background()"

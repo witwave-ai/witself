@@ -73,7 +73,7 @@ func TestServiceMaintenanceControlHoldMatrix(t *testing.T) {
 					d := serviceMaintenanceControlSeed(t, f, state)
 					serviceMaintenanceControlSeed(t, twin, state)
 					reconciles := 0
-					f.s.hooks.reconcile = func() error { reconciles++; return nil }
+					f.s.hooks.reconcile = func(context.Context) error { reconciles++; return nil }
 					serviceMaintenanceHostPlant(t, f.cell, kind)
 					serviceMaintenanceHostPlant(t, twin.cell, kind)
 					before := serviceMaintenanceSnapshot(t, f.cell)
@@ -235,7 +235,7 @@ func TestServiceMaintenanceControlQueryFlagCleared(t *testing.T) {
 			observed := false
 			check := func(context.Context) error { observed = observed || f.s.queryStep; return nil }
 			f.s.hooks.start, f.s.hooks.stop, f.s.hooks.health, f.s.hooks.repair = check, check, check, check
-			f.s.hooks.reconcile = func() error { observed = observed || f.s.queryStep; return nil }
+			f.s.hooks.reconcile = check
 			if _, err := f.s.command(t.Context(), action); err != nil {
 				t.Fatal("Nonquery flag fixture command unexpectedly failed")
 			}

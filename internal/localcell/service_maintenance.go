@@ -88,7 +88,7 @@ func (s *supervisor) projectedStatus() ServiceStatus {
 
 func (s *supervisor) resumeServiceStartup(ctx context.Context) error {
 	if s.pendingStartup == serviceStartupReconcile {
-		if err := s.call(ctx, "reconcile", func(context.Context) error { return s.hooks.reconcile() }); err != nil {
+		if err := s.call(ctx, "reconcile", s.hooks.reconcile); err != nil {
 			if ctx.Err() == nil && errors.Is(err, errMaintenanceFenceActive) {
 				return s.holdMaintenance()
 			}

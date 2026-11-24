@@ -43,7 +43,7 @@ func TestWindowsBootBindingTreeRetry(t *testing.T) {
 			release()
 		}()
 		started := time.Now()
-		err := c.bindServiceProcessBootWithReader("server", readBoot)
+		err := c.bindServiceProcessBootWithReader(t.Context(), "server", readBoot)
 		elapsed := time.Since(started)
 		<-released
 		if err != nil {
@@ -65,7 +65,7 @@ func TestWindowsBootBindingTreeRetry(t *testing.T) {
 			}
 		}()
 		started := time.Now()
-		err := c.bindServiceProcessBootWithReader("server", readBoot)
+		err := c.bindServiceProcessBootWithReader(t.Context(), "server", readBoot)
 		elapsed := time.Since(started)
 		close(done)
 		<-fused
@@ -93,7 +93,7 @@ func TestWindowsBootBindingTreeRetry(t *testing.T) {
 			t.Fatal("cannot install the tree validation refusal fixture")
 		}
 		started := time.Now()
-		err := c.bindServiceProcessBootWithReader("server", readBoot)
+		err := c.bindServiceProcessBootWithReader(t.Context(), "server", readBoot)
 		if runtimeconfig.WindowsPrivateFailureClass(err) != "validation" {
 			t.Fatal("a non-private record did not refuse the boot binding by validation")
 		}

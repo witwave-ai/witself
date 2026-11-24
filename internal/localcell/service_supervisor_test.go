@@ -18,7 +18,7 @@ func TestServiceSupervisorObserveUsesLastSnapshotWithoutHooks(t *testing.T) {
 	healths, repairs, reconciles := 0, 0, 0
 	h.health = func(context.Context) error { healths++; return nil }
 	h.repair = func(context.Context) error { repairs++; return nil }
-	h.reconcile = func() error { reconciles++; return nil }
+	h.reconcile = func(context.Context) error { reconciles++; return nil }
 	known := ProcessRecord{PID: 123, StartTime: "synthetic-start", Root: d.Root, Component: "server"}
 	if err := writeAtomic(c.path("run", "server.json"), known, nil); err != nil {
 		t.Fatal("cannot prepare known identity")
@@ -134,7 +134,7 @@ func supervisorTestHooks() (supervisorHooks, *time.Time, *int, *int, *bool) {
 	h := supervisorHooks{
 		start:  func(context.Context) error { starts++; return nil },
 		stop:   func(context.Context) error { stops++; return nil },
-		repair: func(context.Context) error { return nil }, reconcile: func() error { return nil },
+		repair: func(context.Context) error { return nil }, reconcile: func(context.Context) error { return nil },
 		health: func(context.Context) error {
 			if healthy {
 				return nil
