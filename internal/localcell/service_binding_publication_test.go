@@ -270,17 +270,17 @@ func publicationCrossedRow(t *testing.T, pass int) {
 		}
 		boot := func() (string, error) { return "fixture-boot", nil }
 		lease := serviceLeaseRecord{serviceLeaseIdentity: serviceLeaseIdentity{Version: 2, BootID: "fixture-boot", StartIdentity: start, PID: os.Getpid(), InstallationID: d.InstallationID, Owner: d.UID}}
-		if c.publishServiceLease(c.path("service", "lease.json"), lease) != nil || c.completeServiceLease(d, name, boot) != nil {
+		if c.publishServiceLease(c.path("service", "lease.json"), lease) != nil || c.completeServiceLease(t.Context(), d, name, boot) != nil {
 			t.Fatal(bindingSampleLost)
 		}
-		if _, err := c.publishServiceControlEndpointWithBoot(name, boot); err != nil {
+		if _, err := c.publishServiceControlEndpointWithBoot(t.Context(), name, boot); err != nil {
 			t.Fatal(bindingSampleLost)
 		}
 		writer = c
 		client = publicationClient(t, writer)
 		read = func(context.Context) error {
 			for range 2 {
-				if _, err := client.readServiceControlEndpointWithBoot(boot); err != nil {
+				if _, err := client.readServiceControlEndpointWithBoot(t.Context(), boot); err != nil {
 					return err
 				}
 			}

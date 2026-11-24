@@ -80,7 +80,7 @@ var reader2Rows = []reader2Row{
 		}
 		return path, func() error {
 			plant(path)
-			record, err := c.readServiceControlEndpointRecord()
+			record, err := c.readServiceControlEndpointRecord(t.Context())
 			if err == nil && record.Version != 1 {
 				return errors.New("endpoint content lost")
 			}

@@ -458,7 +458,7 @@ service_control_exit_unix.go
 service_control_exit_windows.go
 	import context golang.org/x/sys/windows net
 service_control_host_other.go
-	import net
+	import context net
 	(*Cell).listenRunServiceControl (*Cell).listenServiceControl
 service_control_unix.go
 	import context errors net os syscall

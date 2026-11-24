@@ -990,7 +990,7 @@ func serviceMaintenancePublishedHost(t *testing.T, c *Cell, d ServiceDescriptor)
 	}
 	want := serviceLeaseRecord{serviceLeaseIdentity: serviceLeaseIdentity{Version: 1, BootID: boot, StartIdentity: identity, PID: os.Getpid(), Owner: d.UID, InstallationID: d.InstallationID}}
 	if runtime.GOOS == "windows" {
-		e, err := c.readServiceControlEndpoint()
+		e, err := c.readServiceControlEndpoint(t.Context())
 		if err != nil || !validServiceControlPipeName(e.PipeName, d.InstallationID) {
 			t.Fatal("Run did not publish the issued pipe")
 		}
@@ -998,7 +998,7 @@ func serviceMaintenancePublishedHost(t *testing.T, c *Cell, d ServiceDescriptor)
 	}
 	data := serviceMaintenanceParityJSON(t, want)
 	serviceMaintenanceParityFile(t, c, "service/lease.json", data)
-	if c.validateServiceControlEndpoint() != nil {
+	if c.validateServiceControlEndpoint(t.Context()) != nil {
 		t.Fatal("Run did not publish control before reconcile")
 	}
 	if lease, err := c.acquireServiceLease(d); err != ErrServiceHostActive {

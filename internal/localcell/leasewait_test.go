@@ -162,13 +162,17 @@ var leaseWaitOpeners = slices.Concat(leaseWaitServiceOpeners, []string{"waitOutL
 // The service entries can call only these lease-aware readers with their own context.
 var leaseWaitServiceOpeners = strings.Fields(`(*Cell).serviceDescriptor (*Cell).serviceDescriptorForOwner (*Cell).readServiceDescriptor (*Cell).readServiceDescriptorForOwner
 (*Cell).serviceControlSecret (*Cell).serviceStartFence (*Cell).setServiceDesiredStateLocked (*Cell).commitServiceFault (*Cell).validateTaskHost
-(*Cell).readServiceControlSecret (*Cell).serveServiceControlForPlatform`)
+(*Cell).readServiceControlSecret (*Cell).serveServiceControlForPlatform
+(*Cell).readServiceControlEndpointRecord (*Cell).readServiceControlEndpoint (*Cell).readServiceControlEndpointWithBoot (*Cell).serviceListenerDescriptor (*Cell).completeServiceLease
+(*Cell).publishServiceControlEndpoint (*Cell).publishServiceControlEndpointWithBoot (*Cell).removeOwnedServiceControlEndpoint (*Cell).removeOwnedServiceControlEndpointBy
+(*Cell).validateHostExitEndpoint (*Cell).readHostExitEndpoint (*Cell).validateServiceControlEndpoint (*Cell).listenRunServiceControl (*Cell).listenServiceControl
+(*Cell).removeServiceControlEndpoint`)
 
 var leaseWaitServiceCalls = map[string]string{
-	"service_control.go:(*Cell).Control":                               "readServiceControlSecret",
+	"service_control.go:(*Cell).Control":                               "readServiceControlSecret validateServiceControlEndpoint",
 	"service_control.go:(*Cell).readServiceControlSecret":              "serviceControlSecretBy",
-	"service_control.go:(*Cell).serveServiceControlForPlatform":        "readServiceControlSecret",
-	"service_control_exit.go:(*Cell).startHostExitRequest":             "readServiceControlSecret",
+	"service_control.go:(*Cell).serveServiceControlForPlatform":        "listenRunServiceControl readServiceControlSecret removeServiceControlEndpoint",
+	"service_control_exit.go:(*Cell).startHostExitRequest":             "readServiceControlSecret validateHostExitEndpoint",
 	"service_descriptor.go:(*Cell).PrepareService":                     "maintenanceFenceAllows own readManifest serviceControlSecret serviceControlSecret serviceDescriptor",
 	"service_descriptor.go:(*Cell).RepairService":                      "maintenanceFenceAllows own serviceDescriptor",
 	"service_descriptor.go:(*Cell).SetServiceDesiredState":             "own setServiceDesiredStateLocked",
@@ -187,6 +191,27 @@ var leaseWaitServiceCalls = map[string]string{
 	"service_supervisor.go:(*supervisor).command":                      "serviceDescriptor",
 	"service_supervisor.go:(*supervisor).step":                         "serviceDescriptor serviceDescriptor",
 	"service_task_host.go:(*Cell).validateTaskHost":                    "serviceDescriptor",
+
+	"service_control_endpoint.go:(*Cell).completeServiceLease":                  "readServiceRecordJSON serviceListenerDescriptor",
+	"service_control_endpoint.go:(*Cell).publishServiceControlEndpoint":         "publishServiceControlEndpointWithBoot",
+	"service_control_endpoint.go:(*Cell).publishServiceControlEndpointWithBoot": "readServiceRecordJSON serviceDescriptor",
+	"service_control_endpoint.go:(*Cell).readServiceControlEndpoint":            "readServiceControlEndpointWithBoot",
+	"service_control_endpoint.go:(*Cell).readServiceControlEndpointRecord":      "readServiceControlEndpointRecordBy",
+	"service_control_endpoint.go:(*Cell).readServiceControlEndpointWithBoot":    "readServiceControlEndpointRecordBy readServiceRecordJSON serviceDescriptor",
+	"service_control_endpoint.go:(*Cell).removeOwnedServiceControlEndpoint":     "removeOwnedServiceControlEndpointBy",
+	"service_control_endpoint.go:(*Cell).removeOwnedServiceControlEndpointBy":   "openServiceRecord",
+	"service_control_endpoint.go:(*Cell).serviceListenerDescriptor":             "serviceDescriptor",
+	"service_control_exit_unix.go:(*Cell).validateHostExitEndpoint":             "validateServiceControlEndpoint",
+	"service_control_exit_windows.go:(*Cell).dialHostExitEndpoint":              "readHostExitEndpoint",
+	"service_control_exit_windows.go:(*Cell).readHostExitEndpoint":              "readServiceControlEndpoint",
+	"service_control_exit_windows.go:(*Cell).validateHostExitEndpoint":          "readHostExitEndpoint",
+	"service_control_host_other.go:(*Cell).listenRunServiceControl":             "listenServiceControl",
+	"service_control_unix.go:(*Cell).listenServiceControl":                      "validateServiceControlEndpoint",
+	"service_control_unix.go:(*Cell).removeServiceControlEndpoint":              "validateServiceControlEndpoint",
+	"service_control_windows.go:(*Cell).dialServiceControl":                     "readServiceControlEndpoint",
+	"service_control_windows.go:(*Cell).listenRunServiceControl":                "completeServiceLease publishServiceControlEndpoint serviceListenerDescriptor",
+	"service_control_windows.go:(*Cell).removeServiceControlEndpoint":           "removeOwnedServiceControlEndpoint",
+	"service_control_windows.go:(*Cell).validateServiceControlEndpoint":         "readServiceControlEndpoint",
 }
 
 // leaseWaitPlaceholders are the non-test calls into leaseWaitOpeners that pass
@@ -209,10 +234,8 @@ var leaseWaitPlaceholders = map[string]int{"checkpoint_verify.go:(*Cell).verifyC
 	"postgres_windows.go:(*Cell).pendingPostmasterPID": 1, "postgres_windows.go:(*Cell).startPostgres": 3,
 	"readiness.go:(*Cell).childReadinessExit": 1, "reinstall.go:(*Cell).Reinstall": 2, "reinstall.go:(*Cell).reinstallLocked": 6,
 	"service_adapter_admission.go:serviceAdapterAdmissionForStep": 2, "service_boot.go:(*Cell).bindServiceProcessBootWithReader": 1, "service_boot.go:(*Cell).reconcileOldBoot": 2, "service_boot.go:(*Cell).reconcileServiceBoot": 3,
-	"service_control_endpoint.go:(*Cell).completeServiceLease": 1, "service_control_endpoint.go:(*Cell).removeOwnedServiceControlEndpointBy": 1,
-	"service_control_endpoint.go:(*Cell).publishServiceControlEndpointWithBoot": 1, "service_control_endpoint.go:(*Cell).readServiceControlEndpointRecord": 1,
-	"service_control_endpoint.go:(*Cell).readServiceControlEndpointWithBoot": 2, "service_control_exit.go:(*Cell).exitServiceHostForRemoval": 3,
-	"service_control_exit.go:(*Cell).serviceHostExitIdentity": 1, "service_control_exit.go:(*Cell).serviceHostLeaseHeld": 1,
+	"service_control_exit.go:(*Cell).exitServiceHostForRemoval": 3,
+	"service_control_exit.go:(*Cell).serviceHostExitIdentity":   1, "service_control_exit.go:(*Cell).serviceHostLeaseHeld": 1,
 	"service_control_exit.go:(*Cell).waitServiceHostExit": 2, "service_control_exit.go:(*supervisor).finishHostExit": 1,
 	"service_task_host.go:(*Cell).ValidateTaskHost": 1, "service_descriptor.go:(*Cell).ServiceDescriptor": 1, "service_foreground.go:(*Cell).acquireServiceLeaseForPlatform": 1,
 	"service_health.go:(*Cell).ServiceHealth": 4, "service_health.go:(*Cell).healthPrincipal": 1,
@@ -365,6 +388,15 @@ func leaseWaitTyped(world *referencesWorld, system string, sources map[string]st
 					use, own, receiver := leaseWaitCall{name + ":" + owner, fset.PositionFor(call.Pos(), false).Offset, referencesIdentifier(call.Fun).Name}, leaseWaitOwnTyped(info, holder, call.Args), (*types.Var)(nil)
 					if !seam {
 						receiver = callee.Signature().Recv()
+					}
+					// Listener retirement is owed even when Run has already stopped.
+					if use.site == "service_control.go:(*Cell).serveServiceControlForPlatform" && use.target == "removeServiceControlEndpoint" && len(call.Args) == 1 {
+						detach, ok := call.Args[0].(*ast.CallExpr)
+						own = false
+						if ok && len(detach.Args) == 1 && leaseWaitOwnTyped(info, holder, detach.Args) {
+							f, _ := referencesNamed(info, detach.Fun).(*types.Func)
+							own = f != nil && f.FullName() == "context.WithoutCancel"
+						}
 					}
 					switch background := (*types.Func)(nil); {
 					case !seam && released[callee.Origin()]:
@@ -736,6 +768,7 @@ func TestLeaseWaitSourceContract(t *testing.T) {
 	const begin, inspect, witness = "\tif err := c.begin(context.Background(), \"start\"); err != nil {\n", "\tinspection, err := c.Inspect(ctx)\n", source + "ctx)\n\tif err != nil {\n\t\treturn errCheckpointWitness\n"
 	const journal, removal = "\tprogress, err := c.readJournal(ctx)\n\tif err != nil {\n\t\treturn result, err\n\t}\n", "func (c *Cell) finishRemoval(ctx context.Context, m *Manifest, purge bool) error {\n"
 	for _, row := range []struct{ name, file, before, after, want string }{
+		{"endpoint_cleanup_attached", "service_control.go", "c.removeServiceControlEndpoint(context.WithoutCancel(ctx))", "c.removeServiceControlEndpoint(ctx)", "lease_wait_live:service_control.go:(*Cell).serveServiceControlForPlatform"},
 		{"wait_any_error", "files_other.go", "!errors.Is(err, syscall.EWOULDBLOCK)", "false", "lease_wait_body"},
 		{"wait_no_lstat", "files_other.go", "info, statErr := lstat(path); statErr != nil || !info.Mode().IsRegular() || ", "", "lease_wait_body"},
 		{"wait_blocking_retry", "files_other.go", "result, err := open()", "result, err := open(); _, _ = os.Open(path)", "lease_wait_body"},

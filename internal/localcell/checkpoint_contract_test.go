@@ -1819,14 +1819,14 @@ func TestCheckpointSourceContract(t *testing.T) {
 		name, want string
 		edits      [][3]string // file, anchor, text put before the anchor
 	}{
-		{"closed_service_endpoint", "callee:checkpointRootSeed:c.removeServiceControlEndpoint", [][3]string{{root[0], root[1], seed + "c *Cell) error { return c.removeServiceControlEndpoint() }"}}},
-		{"closed_owned_endpoint", "callee:checkpointRootSeed:c.removeOwnedServiceControlEndpoint", [][3]string{{root[0], root[1], seed + "c *Cell) error { return c.removeOwnedServiceControlEndpoint(serviceControlEndpointRecord{}) }"}}},
+		{"closed_service_endpoint", "callee:checkpointRootSeed:c.removeServiceControlEndpoint", [][3]string{{root[0], root[1], seed + "c *Cell) error { return c.removeServiceControlEndpoint(nil) }"}}},
+		{"closed_owned_endpoint", "callee:checkpointRootSeed:c.removeOwnedServiceControlEndpoint", [][3]string{{root[0], root[1], seed + "c *Cell) error { return c.removeOwnedServiceControlEndpoint(nil, serviceControlEndpointRecord{}) }"}}},
 		{"closed_spool_import", "import:github.com/witwave-ai/witself/internal/runtimeconfig", [][3]string{{root[0], "\"errors\"", "\"github.com/witwave-ai/witself/internal/runtimeconfig\""}, {root[0], root[1], seed + spool[1:]}}},
 		{"closed_spool_member", "member:checkpointRootSeed:runtimeconfig.OpenSpoolRoot", [][3]string{{root[0], root[1], seed + spool[1:]}}},
 		{"closed_alias_wrapper", "callee:checkpointRootSeed:cell.removeProbe", [][3]string{{files[0], files[1], removeProbe}, {root[0], root[1], seed + "c *Cell) error { cell := c; return cell.removeProbe(c.recoveryDir()) }"}}},
-		{"closed_alias_endpoint", "callee:checkpointRootSeed:cell.removeServiceControlEndpoint", [][3]string{{root[0], root[1], seed + "c *Cell) error { cell := c; return cell.removeServiceControlEndpoint() }"}}},
+		{"closed_alias_endpoint", "callee:checkpointRootSeed:cell.removeServiceControlEndpoint", [][3]string{{root[0], root[1], seed + "c *Cell) error { cell := c; return cell.removeServiceControlEndpoint(nil) }"}}},
 		{"closed_expression_wrapper", "callee:checkpointRootSeed:(*Cell).removeProbe", [][3]string{{files[0], files[1], removeProbe}, {root[0], root[1], seed + "c *Cell) error { return (*Cell).removeProbe(c, c.recoveryDir()) }"}}},
-		{"closed_expression_endpoint", "callee:checkpointRootSeed:(*Cell).removeServiceControlEndpoint", [][3]string{{root[0], root[1], seed + "c *Cell) error { return (*Cell).removeServiceControlEndpoint(c) }"}}},
+		{"closed_expression_endpoint", "callee:checkpointRootSeed:(*Cell).removeServiceControlEndpoint", [][3]string{{root[0], root[1], seed + "c *Cell) error { return (*Cell).removeServiceControlEndpoint(c, nil) }"}}},
 		{"closed_two_level_wrapper", "callee:checkpointRootSeed:c.removeProbe", [][3]string{{files[0], files[1], "func (c *Cell) removeProbe(name string) error { return c.removeProbeInner(name) }\n\nfunc (c *Cell) removeProbeInner(name string) error { return os.Remove(name) }"}, {root[0], root[1], seed + "c *Cell) error { return c.removeProbe(c.recoveryDir()) }"}}},
 		{"closed_variable_elsewhere", "callee:checkpointRootSeed:removeProbe", [][3]string{{files[0], files[1], "var removeProbe = removePrivateFile"}, {root[0], root[1], seed + "c *Cell) error { return removeProbe(c.recoveryDir()) }"}}},
 		{"closed_root_to_helper", "callee:checkpointRootSeed:emptyProbe", [][3]string{{files[0], files[1], "func emptyProbe(root *os.Root) error { return root.RemoveAll(\"pg\") }"}, {root[0], root[1], seed + "recovery *os.Root) error { return emptyProbe(recovery) }"}}},

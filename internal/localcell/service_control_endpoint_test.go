@@ -182,13 +182,13 @@ func TestServiceControlEndpointPrivateReadAndOwnedRemoval(t *testing.T) {
 	c, _ := descriptorTestCell(t)
 	r, _, _ := endpointFixture(t)
 	path := c.path("service", "control-endpoint.json")
-	if _, err := c.readServiceControlEndpointRecord(); !errors.Is(err, ErrServiceControlRefused) {
+	if _, err := c.readServiceControlEndpointRecord(t.Context()); !errors.Is(err, ErrServiceControlRefused) {
 		t.Fatal("missing endpoint accepted")
 	}
 	if err := os.Mkdir(path, 0o700); err != nil {
 		t.Fatal("cannot prepare wrong-type endpoint")
 	}
-	if _, err := c.readServiceControlEndpointRecord(); !errors.Is(err, ErrServiceControlRefused) {
+	if _, err := c.readServiceControlEndpointRecord(t.Context()); !errors.Is(err, ErrServiceControlRefused) {
 		t.Fatal("non-file endpoint accepted")
 	}
 	if err := os.Remove(path); err != nil {
@@ -207,15 +207,15 @@ func TestServiceControlEndpointPrivateReadAndOwnedRemoval(t *testing.T) {
 		if err := writeAtomic(path, replacement, nil); err != nil {
 			t.Fatal("cannot prepare replacement")
 		}
-		if !errors.Is(c.removeOwnedServiceControlEndpoint(r), ErrServiceControlRefused) {
+		if !errors.Is(c.removeOwnedServiceControlEndpoint(t.Context(), r), ErrServiceControlRefused) {
 			t.Fatal("old host accepted replacement endpoint cleanup")
 		}
-		got, err := c.readServiceControlEndpointRecord()
+		got, err := c.readServiceControlEndpointRecord(t.Context())
 		if err != nil || got != replacement {
 			t.Fatal("old host changed replacement endpoint")
 		}
 	}
-	if err := writeAtomic(path, r, nil); err != nil || c.removeOwnedServiceControlEndpoint(r) != nil {
+	if err := writeAtomic(path, r, nil); err != nil || c.removeOwnedServiceControlEndpoint(t.Context(), r) != nil {
 		t.Fatal("owned endpoint cleanup failed")
 	}
 	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
@@ -246,14 +246,14 @@ func endpointTestActivation(t *testing.T, c *Cell, d ServiceDescriptor, boot fun
 	}
 	t.Cleanup(func() { _ = lease.Close() })
 	name, err := newServiceControlPipeName(d.InstallationID)
-	if err != nil || c.completeServiceLease(d, name, boot) != nil {
+	if err != nil || c.completeServiceLease(t.Context(), d, name, boot) != nil {
 		t.Fatal(bindingLiveFailure)
 	}
-	record, err := c.publishServiceControlEndpointWithBoot(name, boot)
+	record, err := c.publishServiceControlEndpointWithBoot(t.Context(), name, boot)
 	if err != nil {
 		t.Fatal(bindingLiveFailure)
 	}
-	fresh, err := c.readServiceControlEndpointWithBoot(boot)
+	fresh, err := c.readServiceControlEndpointWithBoot(t.Context(), boot)
 	if err != nil || fresh != record {
 		t.Fatal(bindingLiveFailure)
 	}
@@ -270,10 +270,10 @@ func TestServiceControlEndpointPublicationAndLiveRead(t *testing.T) {
 				t.Fatal(bindingLiveFailure)
 			}
 			if row == "missing" {
-				if _, err := c.publishServiceControlEndpoint(name); !errors.Is(err, ErrServiceControlRefused) {
+				if _, err := c.publishServiceControlEndpoint(t.Context(), name); !errors.Is(err, ErrServiceControlRefused) {
 					t.Fatal(bindingLiveFailure)
 				}
-				if _, err := c.readServiceControlEndpointWithBoot(boot); !errors.Is(err, ErrServiceControlRefused) {
+				if _, err := c.readServiceControlEndpointWithBoot(t.Context(), boot); !errors.Is(err, ErrServiceControlRefused) {
 					t.Fatal(bindingLiveFailure)
 				}
 				return
@@ -288,10 +288,10 @@ func TestServiceControlEndpointPublicationAndLiveRead(t *testing.T) {
 					t.Fatal(bindingLiveFailure)
 				}
 				defer func() { _ = lock.Close() }()
-				if row == "legacy_bootstrap" && !errors.Is(c.completeServiceLease(d, name, boot), ErrServiceControlRefused) {
+				if row == "legacy_bootstrap" && !errors.Is(c.completeServiceLease(t.Context(), d, name, boot), ErrServiceControlRefused) {
 					t.Fatal(bindingLiveFailure)
 				}
-				if _, err := c.publishServiceControlEndpointWithBoot(name, boot); !errors.Is(err, ErrServiceControlRefused) {
+				if _, err := c.publishServiceControlEndpointWithBoot(t.Context(), name, boot); !errors.Is(err, ErrServiceControlRefused) {
 					t.Fatal(bindingLiveFailure)
 				}
 				return
@@ -322,7 +322,7 @@ func TestServiceControlEndpointPublicationAndLiveRead(t *testing.T) {
 				if err != nil || advanced.Revision <= record.BindingRevision {
 					t.Fatal(bindingLiveFailure)
 				}
-				got, err := c.readServiceControlEndpointWithBoot(boot)
+				got, err := c.readServiceControlEndpointWithBoot(t.Context(), boot)
 				if err != nil || got != record {
 					t.Fatal(bindingLiveFailure)
 				}
@@ -339,7 +339,7 @@ func TestServiceControlEndpointPublicationAndLiveRead(t *testing.T) {
 				if writeAtomic(leasePath, old, nil) != nil {
 					t.Fatal(bindingLiveFailure)
 				}
-				if _, err := c.readServiceControlEndpointWithBoot(boot); !errors.Is(err, ErrServiceControlRefused) {
+				if _, err := c.readServiceControlEndpointWithBoot(t.Context(), boot); !errors.Is(err, ErrServiceControlRefused) {
 					t.Fatal(bindingLiveFailure)
 				}
 				if writeAtomic(leasePath, live, nil) != nil {
@@ -358,7 +358,7 @@ func TestServiceControlEndpointPublicationAndLiveRead(t *testing.T) {
 			if writeAtomic(c.path("service", "control-endpoint.json"), changed, nil) != nil {
 				t.Fatal(bindingLiveFailure)
 			}
-			if _, err := c.readServiceControlEndpointWithBoot(boot); !errors.Is(err, ErrServiceControlRefused) {
+			if _, err := c.readServiceControlEndpointWithBoot(t.Context(), boot); !errors.Is(err, ErrServiceControlRefused) {
 				t.Fatal(bindingLiveFailure)
 			}
 		})
@@ -380,14 +380,14 @@ func TestServiceBindingLifetime(t *testing.T) {
 			t.Fatal(bindingLifetimeFailure)
 		}
 		published := false
-		err = c.removeOwnedServiceControlEndpointBy(record, func() {
+		err = c.removeOwnedServiceControlEndpointBy(t.Context(), record, func() {
 			published = writeAtomic(c.path("service", "control-endpoint.json"), successor, nil) == nil
 		})
-		survivor, readErr := c.readServiceControlEndpointRecord()
+		survivor, readErr := c.readServiceControlEndpointRecord(t.Context())
 		if !published || !errors.Is(err, ErrServiceControlRefused) || readErr != nil || survivor != successor {
 			t.Fatal(bindingLifetimeFailure)
 		}
-		if c.removeOwnedServiceControlEndpoint(successor) != nil {
+		if c.removeOwnedServiceControlEndpoint(t.Context(), successor) != nil {
 			t.Fatal(bindingLifetimeFailure)
 		}
 	})
@@ -432,7 +432,7 @@ func TestServiceBindingLeaseCompletionRefusals(t *testing.T) {
 				if err != nil {
 					t.Fatal("could not read lease before completion")
 				}
-				if !errors.Is(c.completeServiceLease(d, name, boot), ErrServiceControlRefused) {
+				if !errors.Is(c.completeServiceLease(t.Context(), d, name, boot), ErrServiceControlRefused) {
 					t.Fatal("invalid lease completion accepted")
 				}
 				after, err := os.ReadFile(path)
@@ -446,7 +446,7 @@ func TestServiceBindingLeaseCompletionRefusals(t *testing.T) {
 			switch row {
 			case "already_completed":
 				oldName, err := newServiceControlPipeName(d.InstallationID)
-				if err != nil || c.completeServiceLease(d, oldName, boot) != nil {
+				if err != nil || c.completeServiceLease(t.Context(), d, oldName, boot) != nil {
 					t.Fatal("could not complete prior activation")
 				}
 				requireRefusal()
@@ -479,14 +479,14 @@ func TestServiceBindingIssueDescriptor(t *testing.T) {
 				if c.SetServiceDesiredState(t.Context(), "stopped") != nil {
 					t.Fatal(bindingLifetimeFailure)
 				}
-				d, err := c.serviceListenerDescriptor(initial)
+				d, err := c.serviceListenerDescriptor(t.Context(), initial)
 				if err != nil || d.Revision <= initial.Revision || d.DesiredState != "stopped" {
 					t.Fatal(bindingLifetimeFailure)
 				}
 				name, err := newServiceControlPipeName(initial.InstallationID)
 				boot := func() (string, error) { return "fixture-boot", nil }
 				var issued serviceLeaseRecord
-				if err != nil || c.completeServiceLease(initial, name, boot) != nil ||
+				if err != nil || c.completeServiceLease(t.Context(), initial, name, boot) != nil ||
 					readServiceRecordJSON(t.Context(), c.path("service", "lease.json"), &issued) != nil || issued.BindingRevision != d.Revision {
 					t.Fatal(bindingLifetimeFailure)
 				}
@@ -501,9 +501,89 @@ func TestServiceBindingIssueDescriptor(t *testing.T) {
 			if writeAtomic(c.path("service", "descriptor.json"), current, nil) != nil {
 				t.Fatal(bindingLifetimeFailure)
 			}
-			if _, err := c.serviceListenerDescriptor(initial); !errors.Is(err, ErrServiceControlRefused) {
+			if _, err := c.serviceListenerDescriptor(t.Context(), initial); !errors.Is(err, ErrServiceControlRefused) {
 				t.Fatal(bindingLifetimeFailure)
 			}
 		})
+	}
+}
+
+// Reads authorize each mutation. Once authorized, cancellation does not strand
+// a provisional lease, a journaled descriptor or an owned endpoint.
+func TestServiceEndpointCommittedWrites(t *testing.T) {
+	c, d := descriptorTestCell(t)
+	boot := func() (string, error) { return "fixture-boot", nil }
+	lock, err := c.acquireServiceLeaseForPlatform(d, boot, "windows")
+	if err != nil {
+		t.Fatal("cannot acquire provisional host lease")
+	}
+	defer func() { _ = lock.Close() }()
+	name, err := newServiceControlPipeName(d.InstallationID)
+	if err != nil {
+		t.Fatal("cannot name fixture listener")
+	}
+	cancelDuringBoot := func() (context.Context, func() (string, error)) {
+		ctx, cancel := context.WithCancel(t.Context())
+		t.Cleanup(cancel)
+		return ctx, func() (string, error) { cancel(); return boot() }
+	}
+	ctx, cancelAtBoot := cancelDuringBoot()
+	if err := c.completeServiceLease(ctx, d, name, cancelAtBoot); err != nil {
+		t.Fatal("cancellation dropped authorized lease completion")
+	}
+	if ctx.Err() != context.Canceled {
+		t.Fatal("lease completion missed the boot-read cancellation")
+	}
+	ctx, cancelAtBoot = cancelDuringBoot()
+	record, err := c.publishServiceControlEndpointWithBoot(ctx, name, cancelAtBoot)
+	if err != nil {
+		t.Fatal("cancellation dropped authorized endpoint publication")
+	}
+	if ctx.Err() != context.Canceled {
+		t.Fatal("endpoint publication missed the boot-read cancellation")
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	c.observeServiceDescriptor = func(stage string, _ ServiceDescriptor) {
+		if stage == "journal" {
+			cancel()
+		}
+	}
+	if err := c.SetServiceDesiredState(ctx, "stopped"); err != nil {
+		t.Fatal("cancellation stranded the descriptor journal")
+	}
+	if ctx.Err() != context.Canceled {
+		t.Fatal("descriptor write did not cross the cancellation boundary")
+	}
+	current, err := c.ServiceDescriptor()
+	if err != nil {
+		t.Fatal("cannot read the committed descriptor")
+	}
+	if current.Revision != d.Revision+1 {
+		t.Fatal("cancellation lost the committed revision")
+	}
+	if current.DesiredState != "stopped" {
+		t.Fatal("cancellation lost the committed state")
+	}
+	if _, err := os.Lstat(c.path("service", "transition.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("cancellation left an unretired descriptor transition")
+	}
+	got, err := c.readServiceControlEndpointWithBoot(ctx, boot)
+	if err != nil {
+		t.Fatal("cancelled context refused an unleased first read")
+	}
+	if got != record {
+		t.Fatal("descriptor write changed the published activation")
+	}
+	ctx, cancel = context.WithCancel(t.Context())
+	defer cancel()
+	if err := c.removeOwnedServiceControlEndpointBy(ctx, record, cancel); err != nil {
+		t.Fatal("cancellation dropped authorized endpoint removal")
+	}
+	if ctx.Err() != context.Canceled {
+		t.Fatal("endpoint retirement missed the identity-match cancellation")
+	}
+	if _, err := os.Lstat(c.path("service", "control-endpoint.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("cancelled retirement retained the owned endpoint")
 	}
 }

@@ -41,15 +41,15 @@ func serviceControlCapability() error {
 	return nil
 }
 
-func (c *Cell) validateServiceControlEndpoint() error {
-	_, err := c.readServiceControlEndpoint()
+func (c *Cell) validateServiceControlEndpoint(ctx context.Context) error {
+	_, err := c.readServiceControlEndpoint(ctx)
 	return err
 }
 
-func (c *Cell) listenRunServiceControl(initial ServiceDescriptor) (net.Listener, error) {
-	d, err := c.serviceListenerDescriptor(initial)
+func (c *Cell) listenRunServiceControl(ctx context.Context, initial ServiceDescriptor) (net.Listener, error) {
+	d, err := c.serviceListenerDescriptor(ctx, initial)
 	if err != nil {
-		return nil, serviceFailureAt(windowsControlRefusal("endpoint:record"), "endpoint_descriptor")
+		return nil, serviceFailureAt(serviceReadFailure(err, windowsControlRefusal("endpoint:record")), "endpoint_descriptor")
 	}
 	name, err := newServiceControlPipeName(d.InstallationID)
 	if err != nil {
@@ -59,11 +59,11 @@ func (c *Cell) listenRunServiceControl(initial ServiceDescriptor) (net.Listener,
 	if err != nil {
 		return nil, err
 	}
-	if err := c.completeServiceLease(d, name, serviceBootID); err != nil {
+	if err := c.completeServiceLease(ctx, d, name, serviceBootID); err != nil {
 		_ = listener.Close()
 		return nil, err
 	}
-	record, err := c.publishServiceControlEndpoint(name)
+	record, err := c.publishServiceControlEndpoint(ctx, name)
 	if err != nil {
 		_ = listener.Close()
 		return nil, err
@@ -74,7 +74,7 @@ func (c *Cell) listenRunServiceControl(initial ServiceDescriptor) (net.Listener,
 	return listener, nil
 }
 
-func (c *Cell) removeServiceControlEndpoint() error {
+func (c *Cell) removeServiceControlEndpoint(ctx context.Context) error {
 	c.serviceControlMu.Lock()
 	owned, listener := c.serviceControlOwned, c.serviceControlListener
 	c.serviceControlOwned, c.serviceControlListener = nil, nil
@@ -85,11 +85,11 @@ func (c *Cell) removeServiceControlEndpoint() error {
 	if owned == nil {
 		return nil
 	}
-	return c.removeOwnedServiceControlEndpoint(*owned)
+	return c.removeOwnedServiceControlEndpoint(ctx, *owned)
 }
 
 func (c *Cell) dialServiceControl(ctx context.Context) (net.Conn, error) {
-	record, err := c.readServiceControlEndpoint()
+	record, err := c.readServiceControlEndpoint(ctx)
 	if err != nil {
 		return nil, err
 	}

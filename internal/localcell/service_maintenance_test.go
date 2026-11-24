@@ -554,11 +554,11 @@ func serviceMaintenanceHostExitContext(t *testing.T, c *Cell, d ServiceDescripto
 	t.Cleanup(func() { _ = lease.Close() })
 	var listener net.Listener
 	if runtime.GOOS == "windows" {
-		listener, err = c.listenServiceControl()
+		listener, err = c.listenServiceControl(t.Context())
 		if err != nil {
 			t.Fatal("Safety exit fixture could not reserve its listener")
 		}
-		t.Cleanup(func() { _ = c.removeServiceControlEndpoint() })
+		t.Cleanup(func() { _ = c.removeServiceControlEndpoint(context.WithoutCancel(t.Context())) })
 	}
 	envelope, _, err := c.newHostExitEnvelope()
 	if err != nil || c.validateHostExitEnvelope(envelope, listener) != nil {

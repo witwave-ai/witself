@@ -169,7 +169,7 @@ func (w *serviceWorkerHost) ready(t *testing.T) ServiceStatus {
 			}
 			published = err == nil
 		} else {
-			published = w.cell.validateServiceControlEndpoint() == nil
+			published = w.cell.validateServiceControlEndpoint(t.Context()) == nil
 		}
 		if published {
 			status := serviceWorkerSettled(ctx, t, w.cell.Control)

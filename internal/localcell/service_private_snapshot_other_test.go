@@ -69,10 +69,10 @@ func snapshotAdmissionRows(t *testing.T) {
 			if err != nil {
 				t.Fatal("cannot prepare private snapshot endpoint")
 			}
-			if c.completeServiceLease(d, name, boot) != nil {
+			if c.completeServiceLease(t.Context(), d, name, boot) != nil {
 				t.Fatal("cannot complete private snapshot lease")
 			}
-			want, err := c.publishServiceControlEndpointWithBoot(name, boot)
+			want, err := c.publishServiceControlEndpointWithBoot(t.Context(), name, boot)
 			if err != nil {
 				t.Fatal("cannot publish private snapshot endpoint")
 			}
@@ -84,7 +84,7 @@ func snapshotAdmissionRows(t *testing.T) {
 			observed := false
 			err = snapshotRename(snapshotStage(t, path, data), path, func(after bool) {
 				if after {
-					got, readErr := c.readServiceControlEndpointWithBoot(boot)
+					got, readErr := c.readServiceControlEndpointWithBoot(t.Context(), boot)
 					observed = readErr == nil && got == want
 				}
 			})

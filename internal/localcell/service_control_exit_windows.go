@@ -32,21 +32,21 @@ func (c *serviceControlHostState) hostExitBindingMatches(binding serviceHostExit
 		c.serviceControlOwned != nil && binding.matches(*c.serviceControlOwned)
 }
 
-func (c *Cell) readHostExitEndpoint(binding serviceHostExitBinding) (serviceControlEndpointRecord, error) {
-	record, err := c.readServiceControlEndpoint()
+func (c *Cell) readHostExitEndpoint(ctx context.Context, binding serviceHostExitBinding) (serviceControlEndpointRecord, error) {
+	record, err := c.readServiceControlEndpoint(ctx)
 	if err != nil || !binding.matches(record) {
-		return serviceControlEndpointRecord{}, hostExitRefused("envelope")
+		return serviceControlEndpointRecord{}, serviceReadFailure(err, hostExitRefused("envelope"))
 	}
 	return record, nil
 }
 
-func (c *Cell) validateHostExitEndpoint(binding serviceHostExitBinding) error {
-	_, err := c.readHostExitEndpoint(binding)
+func (c *Cell) validateHostExitEndpoint(ctx context.Context, binding serviceHostExitBinding) error {
+	_, err := c.readHostExitEndpoint(ctx, binding)
 	return err
 }
 
 func (c *Cell) dialHostExitEndpoint(ctx context.Context, binding serviceHostExitBinding) (net.Conn, error) {
-	record, err := c.readHostExitEndpoint(binding)
+	record, err := c.readHostExitEndpoint(ctx, binding)
 	if err != nil {
 		return nil, err
 	}

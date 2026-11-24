@@ -15,7 +15,7 @@ func TestServiceControlStopRemovesEndpointUnix(t *testing.T) {
 	if err != nil {
 		t.Fatal("cannot start control endpoint removal fixture")
 	}
-	if err := cell.validateServiceControlEndpoint(); err != nil {
+	if err := cell.validateServiceControlEndpoint(t.Context()); err != nil {
 		stop()
 		t.Fatal("control endpoint was not present before shutdown")
 	}
