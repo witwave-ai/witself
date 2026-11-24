@@ -24,7 +24,9 @@ var (
 		"unix.Openat(dir, last, unix.O_RDONLY | unix.O_NOFOLLOW | unix.O_NONBLOCK | unix.O_NOCTTY | unix.O_CLOEXEC, 0)": 1, "unix.FcntlInt(uintptr(fd), unix.F_DUPFD_CLOEXEC, 0)": 1,
 		"unix.Fstatat(fd, names[index], &stat, unix.AT_SYMLINK_NOFOLLOW)": 1, "unix.Unlinkat(dir, last, 0)": 1, "unix.Unlinkat(dir, last, unix.AT_REMOVEDIR)": 1,
 		"unix.Fstat(fd, &self)": 1, "unix.Fstatat(fd, name, &stat, unix.AT_SYMLINK_NOFOLLOW)": 1, "unix.Unlinkat(fd, name, 0)": 1, "unix.Unlinkat(fd, name, unix.AT_REMOVEDIR)": 1,
-		"privateBeneathSameDevice(uint64(self.Dev), uint64(stat.Dev))": 1, "privateBeneathMadeID(fd, stat)": 1, "dir.Readdirnames(1)": 1, "dir.Sync()": 1}
+		"privateBeneathSameDevice(uint64(self.Dev), uint64(stat.Dev))": 1, "privateBeneathMadeID(fd, stat)": 1, "dir.Readdirnames(1)": 1, "dir.Sync()": 1,
+		// The walk takes a made directory's identity only inside its emptiness guard and syncs the parent once, after it.
+		"privateBeneathIdentity(stat)": 3, "syncParent(dir)": 1}
 	privateBeneathConstants = strings.Fields("AT_REMOVEDIR AT_SYMLINK_NOFOLLOW EBADF EEXIST EINVAL ENOENT ENOTDIR ENOTEMPTY EXDEV F_DUPFD_CLOEXEC O_CLOEXEC O_CREAT O_DIRECTORY O_EXCL O_NOCTTY O_NOFOLLOW O_NONBLOCK O_RDONLY O_RDWR S_IFDIR S_IFIFO S_IFLNK S_IFMT S_IFREG Stat_t")
 	privateBeneathPathname  = strings.Fields("os.Open os.OpenFile os.Lstat os.Stat os.Mkdir os.MkdirAll os.Rename os.Remove os.RemoveAll os.ReadDir os.Create os.CreateTemp os.Chmod os.OpenRoot unix.Fsync")
 	// The walk's declarations the copy's tree (checkpoint_tree_unix.go) may name, by owning declaration (the type

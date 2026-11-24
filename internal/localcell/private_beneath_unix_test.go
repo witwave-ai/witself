@@ -354,6 +354,21 @@ func TestPrivateBeneathMadeID(t *testing.T) {
 	}
 }
 
+// A descriptor whose entries cannot be read is not an empty directory: it is refused and has no identity.
+func TestPrivateBeneathMadeIDReadFails(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "plain")
+	if os.WriteFile(file, nil, 0o600) != nil || os.Chmod(file, 0o700) != nil {
+		t.Fatal("cannot make the file for the identity check")
+	}
+	id, err := openedMadeID(t, file)
+	if err == nil {
+		t.Fatal("a descriptor whose read failed was accepted as an empty directory")
+	}
+	if id != (privateBeneathID{}) {
+		t.Fatal("a descriptor whose read failed returned an identity")
+	}
+}
+
 func TestCheckpointTreeNonemptyMkdirResult(t *testing.T) {
 	for row, name := range map[string]string{"root": ".", "child": "pg"} {
 		t.Run(row, func(t *testing.T) {
