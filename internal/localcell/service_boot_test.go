@@ -48,7 +48,7 @@ func TestServiceWindowsOldBootRecordPermutations(t *testing.T) {
 				if err := writeAtomicBytes(c.path("pg", "postmaster.pid"), pidfile, nil); err != nil {
 					t.Fatal("fixture pidfile unavailable")
 				}
-				err = c.reconcileOldBoot(oldBoot, newBoot)
+				err = c.reconcileOldBoot(t.Context(), oldBoot, newBoot)
 				if kind == "matching" && err != nil {
 					t.Fatal("matching old-boot records refused")
 				}
@@ -88,7 +88,7 @@ func TestServiceProcessBootBindingExplicitLocalOnly(t *testing.T) {
 				t.Fatal("fixture record unavailable")
 			}
 			queries := 0
-			err := c.bindServiceProcessBootWithReader("server", func() (string, error) { queries++; return boot, nil })
+			err := c.bindServiceProcessBootWithReader(t.Context(), "server", func() (string, error) { queries++; return boot, nil })
 			if err != nil {
 				t.Fatal("explicit binding failed")
 			}
@@ -110,7 +110,7 @@ func TestServiceProcessBootBindingExplicitLocalOnly(t *testing.T) {
 	}
 	other, _ := unitCell(t)
 	t.Setenv("WITSELF_RUNTIME", "local")
-	if err := other.bindServiceProcessBootWithReader("server", func() (string, error) { t.Fatal("descriptor-free launch queried boot identity"); return "", nil }); err != nil {
+	if err := other.bindServiceProcessBootWithReader(t.Context(), "server", func() (string, error) { t.Fatal("descriptor-free launch queried boot identity"); return "", nil }); err != nil {
 		t.Fatal("ordinary local launch required a service descriptor")
 	}
 }
@@ -146,7 +146,7 @@ func TestServiceProcessBootBindingRefusesUnprovenRecord(t *testing.T) {
 				}
 				return boot, nil
 			}
-			if c.bindServiceProcessBootWithReader("server", reader) == nil {
+			if c.bindServiceProcessBootWithReader(t.Context(), "server", reader) == nil {
 				t.Fatal("unproven launch acquired boot authority")
 			}
 			var got ProcessRecord

@@ -221,7 +221,7 @@ func TestServiceOldBootPIDReuseDiscardsWithoutSignaling(t *testing.T) {
 	if err := writeAtomicBytes(c.path("pg", "postmaster.pid"), []byte(fmt.Sprintf("%d\n%s\n1\n", pid, c.path("pg"))), nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.reconcileOldBoot("linux:old-boot", "linux:new-boot"); err != nil {
+	if err := c.reconcileOldBoot(t.Context(), "linux:old-boot", "linux:new-boot"); err != nil {
 		t.Fatal(err)
 	}
 	after, alive, err := processIdentity(pid)
@@ -246,7 +246,7 @@ func TestServiceOldBootRejectsMixedOwnershipBeforeMutation(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if !errors.Is(c.reconcileOldBoot("linux:old-boot", "linux:new-boot"), ErrServiceOwnershipConflict) {
+	if !errors.Is(c.reconcileOldBoot(t.Context(), "linux:old-boot", "linux:new-boot"), ErrServiceOwnershipConflict) {
 		t.Fatal("mixed boot set adopted")
 	}
 	if _, err := os.Stat(c.path("run", "postgres.json")); err != nil {

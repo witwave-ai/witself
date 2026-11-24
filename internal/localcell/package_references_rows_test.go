@@ -196,7 +196,7 @@ var packageReferencesRows = []struct {
 		[]string{"ref:lifecycle.go:zzBoxRemove:os.Remove", "ref:lifecycle.go:zzUseBoxed:os.Remove"}},
 	{"generic_interface_parameter", [][4]string{{"lifecycle.go", "before", referencesAtRecover, "type zzGenParam[T any] interface{ Open(T) (*os.File, error) }\n\nfunc zzGenCall(r zzGenParam[string]) { _, _ = r.Open(\".\") }\n\n"}},
 		[]string{"ref:lifecycle.go:zzGenCall:(*os.Root).Open"}},
-	{"wrapper_caller_target", [][4]string{{"lifecycle.go", "after", referencesAtInspect, "\t_ = c.bindServiceProcessBootWithReader(\"postgres\", serviceBootID)\n"}}, []string{"ref:lifecycle.go:(*Cell).Inspect:(*Cell).bindServiceProcessBootWithReader"}},
+	{"wrapper_caller_target", [][4]string{{"lifecycle.go", "after", referencesAtInspect, "\t_ = c.bindServiceProcessBootWithReader(ctx, \"postgres\", serviceBootID)\n"}}, []string{"ref:lifecycle.go:(*Cell).Inspect:(*Cell).bindServiceProcessBootWithReader"}},
 	{"plumbing_copy", [][4]string{{"files.go", "before", referencesAtProgress, "func zzFill(f *os.File, r io.Reader) { _, _ = io.Copy(f, r) }\n\n"}}, []string{"ref:files.go:zzFill:(*os.File).Write"}},
 	{"plumbing_return", [][4]string{{"files.go", "before", referencesAtProgress, "func zzWriter(f *os.File) io.Writer { return f }\n\n"}}, []string{"ref:files.go:zzWriter:(*os.File).Write"}},
 	{"plumbing_send", [][4]string{{"files.go", "before", referencesAtProgress, "func zzSend(f *os.File, out chan<- io.Writer) { out <- f }\n\n"}}, []string{"ref:files.go:zzSend:(*os.File).Write"}},

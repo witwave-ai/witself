@@ -86,7 +86,7 @@ return status
 }`,
 	"resumeServiceStartup": `func (s *supervisor) resumeServiceStartup(ctx context.Context) error {
 if s.pendingStartup == serviceStartupReconcile {
-if err := s.call(ctx, "reconcile", func(context.Context) error { return s.hooks.reconcile() }); err != nil {
+if err := s.call(ctx, "reconcile", s.hooks.reconcile); err != nil {
 if ctx.Err() == nil && errors.Is(err, errMaintenanceFenceActive) { return s.holdMaintenance() }
 return serviceFailureAt(err, "startup_reconcile")
 }
@@ -1427,6 +1427,9 @@ var maintenanceHostSupervisorPins = map[string]string{
 		return err
 	}
 	if err := s.call(ctx, "start", s.hooks.start); err != nil {
+		if ctx.Err() != nil && serviceLeaseCut(err) && errors.Is(err, ctx.Err()) {
+			return err
+		}
 		if serviceControlCancellation(ctx) != nil {
 			return err
 		}

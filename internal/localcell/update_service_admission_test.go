@@ -351,7 +351,7 @@ func TestServiceMaintenanceBootAdmission(t *testing.T) {
 				if err != nil || !alive {
 					t.Fatal("boot admission bystander unavailable")
 				}
-				err = c.reconcileServiceBoot()
+				err = c.reconcileServiceBoot(t.Context())
 				if fence != "Absent" {
 					serviceMaintenanceCause(t, err)
 					serviceMaintenanceUnchanged(t, c, before)
@@ -582,7 +582,7 @@ func TestServiceMaintenanceLegacyOrdering(t *testing.T) {
 				}
 				serviceMaintenanceFence(t, c, fence)
 				before := serviceMaintenanceSnapshot(t, c)
-				serviceMaintenanceExactError(t, c.reconcileServiceBoot(), cause, want)
+				serviceMaintenanceExactError(t, c.reconcileServiceBoot(t.Context()), cause, want)
 				serviceMaintenanceUnchanged(t, c, before)
 				if held != nil && held.Close() != nil {
 					t.Fatal("cannot release earlier operation contender")
@@ -619,7 +619,7 @@ func TestServiceMaintenanceLockLifetime(t *testing.T) {
 				serviceMaintenanceFence(t, c, fence)
 				call := func() error { return c.PrepareService(t.Context(), d) }
 				if owner == "Boot" {
-					call = c.reconcileServiceBoot
+					call = func() error { return c.reconcileServiceBoot(t.Context()) }
 				}
 				other, err := New(c.cfg)
 				if err != nil {
@@ -662,11 +662,11 @@ func TestServiceMaintenanceLockLifetime(t *testing.T) {
 			t.Fatal("cannot hold diagnostic host lifetime lease")
 		}
 		defer func() { _ = lease.Close() }()
-		if err := c.reconcileServiceBoot(); err != nil {
+		if err := c.reconcileServiceBoot(t.Context()); err != nil {
 			t.Fatal("diagnostic host lease blocked operation owner")
 		}
 		serviceMaintenanceFence(t, c, "Valid")
-		serviceMaintenanceCause(t, c.reconcileServiceBoot())
+		serviceMaintenanceCause(t, c.reconcileServiceBoot(t.Context()))
 		second, err := c.acquireServiceLeaseWithBoot(d, func() (string, error) { return serviceMaintenanceNativeBoot(t), nil })
 		if second != nil || err != ErrServiceHostActive {
 			t.Fatal("operation owner released independent host lifetime lease")
@@ -902,7 +902,7 @@ func TestServiceMaintenanceAbsentParity(t *testing.T) {
 					t.Fatal("cannot remove absent parity parent")
 				}
 				before := serviceMaintenanceSnapshot(t, c)
-				err := c.reconcileServiceBoot()
+				err := c.reconcileServiceBoot(t.Context())
 				if kind == "mixed" {
 					if err != ErrServiceOwnershipConflict {
 						t.Fatal("absent mixed boot refusal changed")
@@ -1061,10 +1061,10 @@ func serviceMaintenanceRunParity(t *testing.T, kind string) {
 	var events []string
 	var leaseBytes []byte
 	starts, stops := 0, 0
-	h.reconcile = func() error {
+	h.reconcile = func(opCtx context.Context) error {
 		events = append(events, "reconcile")
 		leaseBytes = serviceMaintenancePublishedHost(t, c, d)
-		return c.reconcileServiceBoot()
+		return c.reconcileServiceBoot(opCtx)
 	}
 	h.repair = func(opCtx context.Context) error { events = append(events, "repair"); return c.Repair(opCtx) }
 	h.stop = func(context.Context) error {
@@ -1140,11 +1140,11 @@ func TestServiceMaintenanceRunStartupBoundary(t *testing.T) {
 			var events []string
 			var leaseBytes []byte
 			ready := make(chan struct{})
-			h.reconcile = func() error {
+			h.reconcile = func(opCtx context.Context) error {
 				events = append(events, "reconcile")
 				leaseBytes = serviceMaintenancePublishedHost(t, c, d)
 				close(ready)
-				return c.reconcileServiceBoot()
+				return c.reconcileServiceBoot(opCtx)
 			}
 			h.repair = func(ctx context.Context) error { events = append(events, "repair"); return c.Repair(ctx) }
 			h.stop = func(context.Context) error { events = append(events, "stop"); return nil }

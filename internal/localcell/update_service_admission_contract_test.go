@@ -50,20 +50,20 @@ d, err := c.serviceDescriptor(ctx)
 if err != nil { return err }
 ` + maintenanceReleasedAdmissionStatement + `
 d.Faulted, d.Revision, d.RepairRevision = false, d.Revision+1, d.RepairRevision+1`,
-	"reconcileServiceBoot": `lock, err := c.own(context.Background(), false)
+	"reconcileServiceBoot": `lock, err := c.own(ctx, false)
 if err != nil { return err }
 defer func() { _ = lock.Close() }()
 boot, err := serviceBootID()
 if err != nil { return err }
-d, err := c.ServiceDescriptor()
+d, err := c.serviceDescriptor(ctx)
 if err != nil { return err }
 var previous serviceBootRecord
-err = readJSON(context.Background(), c.path("service", "boot.json"), &previous)
+err = readJSON(ctx, c.path("service", "boot.json"), &previous)
 if err != nil && !errors.Is(err, os.ErrNotExist) { return err }
 if err == nil && (previous.InstallationID != d.InstallationID || previous.BootID == "") { return ErrServiceOwnershipConflict }
-` + maintenanceAdmissionStatement + `
+` + maintenanceReleasedAdmissionStatement + `
 if previous.BootID != "" && previous.BootID != boot {
- if err := c.reconcileOldBoot(previous.BootID, boot); err != nil { return err }
+ if err := c.reconcileOldBoot(ctx, previous.BootID, boot); err != nil { return err }
 }`,
 	"Reinstall": `lock, err := c.own(context.Background(), false)
 if err != nil { return err }
@@ -88,7 +88,7 @@ return c.deleteCheckpointLocked(ctx, options)`,
 
 // maintenanceOwnerStatement is owner's admission (LC-LEASE-2C2).
 func maintenanceOwnerStatement(owner string) string {
-	return map[bool]string{true: maintenanceReleasedAdmissionStatement, false: maintenanceAdmissionStatement}[owner == "Checkpoint" || owner == "DeleteCheckpoint" || owner == "PrepareService" || owner == "RepairService" || owner == "serviceMaintenanceObservation"]
+	return map[bool]string{true: maintenanceReleasedAdmissionStatement, false: maintenanceAdmissionStatement}[owner == "Checkpoint" || owner == "DeleteCheckpoint" || owner == "PrepareService" || owner == "RepairService" || owner == "serviceMaintenanceObservation" || owner == "reconcileServiceBoot"]
 }
 
 var maintenanceServiceAdmissionFiles = map[string]string{
@@ -103,7 +103,7 @@ var maintenanceServiceAdmissionFiles = map[string]string{
 var maintenanceServiceAdmissionParameters = map[string]string{
 	"PrepareService":       "ctx context.Context, d ServiceDescriptor",
 	"RepairService":        "ctx context.Context",
-	"reconcileServiceBoot": "",
+	"reconcileServiceBoot": "ctx context.Context",
 	"Reinstall":            "ctx context.Context, options ReinstallOptions",
 	"Checkpoint":           "ctx context.Context, options CheckpointOptions",
 	"DeleteCheckpoint":     "ctx context.Context, options DeleteCheckpointOptions",
@@ -629,9 +629,6 @@ func TestServiceMaintenanceAdmissionGuardFixtures(t *testing.T) {
 				{"WrongReceiverBinding", filename, strings.Replace(original, "(c *Cell)", "(other *Cell)", 1), "signature"},
 			}
 			wrongParameters := strings.Replace(original, owner+"(", owner+"(extra int, ", 1)
-			if owner == "reconcileServiceBoot" {
-				wrongParameters = strings.Replace(original, owner+"()", owner+"(extra int)", 1)
-			}
 			fixtures = append(fixtures, predicateFixture{"DropParameterCheck", filename, wrongParameters, "signature"})
 			for _, mutation := range serviceAdmissionMutations(owner) {
 				// Count pins are intentionally independent of the approval predicate.

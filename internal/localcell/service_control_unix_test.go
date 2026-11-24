@@ -209,7 +209,7 @@ func TestServiceRunExplicitForegroundLeaseAndGracefulStop(t *testing.T) {
 			close(started)
 		}
 		return nil
-	}, stop: func(context.Context) error { stops.Add(1); return nil }, repair: func(context.Context) error { return nil }, health: func(context.Context) error { return nil }, reconcile: func() error { return nil }, now: time.Now, ticks: make(chan time.Time), initialBackoff: time.Second, maxBackoff: time.Minute, failureWindow: 10 * time.Minute}
+	}, stop: func(context.Context) error { stops.Add(1); return nil }, repair: func(context.Context) error { return nil }, health: func(context.Context) error { return nil }, reconcile: func(context.Context) error { return nil }, now: time.Now, ticks: make(chan time.Time), initialBackoff: time.Second, maxBackoff: time.Minute, failureWindow: 10 * time.Minute}
 	h.boot = func() (string, error) { return "synthetic-boot", nil }
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan error, 1)

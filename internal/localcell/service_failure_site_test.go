@@ -284,7 +284,7 @@ func TestServiceFailureSiteSourceContract(t *testing.T) {
 	command.reply <- serviceReply{status: status, err: err}`,
 		},
 		"service_maintenance.go": {
-			`if err := s.call(ctx, "reconcile", func(context.Context) error { return s.hooks.reconcile() }); err != nil {
+			`if err := s.call(ctx, "reconcile", s.hooks.reconcile); err != nil {
 			if ctx.Err() == nil && errors.Is(err, errMaintenanceFenceActive) {
 				return s.holdMaintenance()
 			}
@@ -354,7 +354,7 @@ func TestServiceFailureSiteSourceContract(t *testing.T) {
 		}
 	}`,
 		},
-		"service_boot.go": {`func (c *Cell) bindServiceProcessBootWithReader(component string, readBoot func() (string, error)) (result error) {
+		"service_boot.go": {`func (c *Cell) bindServiceProcessBootWithReader(ctx context.Context, component string, readBoot func() (string, error)) (result error) {
 	defer func() { result = serviceFailureFallback(result, "boot_binding") }()`},
 		"service_descriptor.go": {`func (c *Cell) writeServiceDescriptor(d ServiceDescriptor) (result error) {
 	defer func() { result = serviceFailureFallback(result, "descriptor_write") }()`},
@@ -521,9 +521,9 @@ func TestServiceFailureSiteProducerInventory(t *testing.T) {
 		},
 		"service_boot.go": {
 			"bindServiceProcessBoot":           "bindServiceProcessBootWithReader",
-			"bindServiceProcessBootWithReader": "ServiceDescriptor readJSON writeAtomic",
+			"bindServiceProcessBootWithReader": "readJSON serviceDescriptor writeAtomic",
 			"reconcileOldBoot":                 "readJSON removePrivateFile removePrivateFile",
-			"reconcileServiceBoot":             "ServiceDescriptor own readJSON reconcileOldBoot writeAtomic",
+			"reconcileServiceBoot":             "own readJSON reconcileOldBoot serviceDescriptor writeAtomic",
 			"startServicePostgres":             "bindServiceProcessBoot",
 		},
 		"service_descriptor.go": {

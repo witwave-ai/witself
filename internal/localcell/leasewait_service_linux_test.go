@@ -53,6 +53,7 @@ func TestServiceHostExitPreflight(t *testing.T) {
 }
 
 func TestServiceReadLeaseContext(t *testing.T) {
+	t.Run("old_boot", serviceOldBootLeases)
 	for _, row := range []struct {
 		name, file string
 		read       func(context.Context, *Cell) error

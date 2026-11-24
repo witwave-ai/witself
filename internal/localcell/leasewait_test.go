@@ -166,13 +166,18 @@ var leaseWaitServiceOpeners = strings.Fields(`(*Cell).serviceDescriptor (*Cell).
 (*Cell).readServiceControlEndpointRecord (*Cell).readServiceControlEndpoint (*Cell).readServiceControlEndpointWithBoot (*Cell).serviceListenerDescriptor (*Cell).completeServiceLease
 (*Cell).publishServiceControlEndpoint (*Cell).publishServiceControlEndpointWithBoot (*Cell).removeOwnedServiceControlEndpoint (*Cell).removeOwnedServiceControlEndpointBy
 (*Cell).validateHostExitEndpoint (*Cell).readHostExitEndpoint (*Cell).validateServiceControlEndpoint (*Cell).listenRunServiceControl (*Cell).listenServiceControl
-(*Cell).removeServiceControlEndpoint`)
+(*Cell).removeServiceControlEndpoint (*Cell).reconcileServiceBoot (*Cell).reconcileOldBoot (*Cell).bindServiceProcessBoot (*Cell).bindServiceProcessBootWithReader`)
 
 var leaseWaitServiceCalls = map[string]string{
 	// The dark repair has the same per-owner, exact-callee contract as the service entry points.
 	"checkpoint_journal_binding_unix.go:(*Cell).repairOwnedJournal": "waitOutLease",
 	"checkpoint_journal_repair.go:(*Cell).RepairCheckpointJournal":  "acquireLock checkpointCold readManifest repairOwnedJournal",
 
+	"service_boot.go:(*Cell).reconcileServiceBoot":                     "maintenanceFenceAllows own readJSON reconcileOldBoot serviceDescriptor",
+	"service_boot.go:(*Cell).reconcileOldBoot":                         "postmaster readJSON",
+	"service_boot.go:(*Cell).bindServiceProcessBoot":                   "bindServiceProcessBootWithReader",
+	"service_boot.go:(*Cell).bindServiceProcessBootWithReader":         "readJSON serviceDescriptor",
+	"service_boot.go:(*Cell).startServicePostgres":                     "bindServiceProcessBoot",
 	"service_control.go:(*Cell).Control":                               "readServiceControlSecret validateServiceControlEndpoint",
 	"service_control.go:(*Cell).readServiceControlSecret":              "serviceControlSecretBy",
 	"service_control.go:(*Cell).serveServiceControlForPlatform":        "listenRunServiceControl readServiceControlSecret removeServiceControlEndpoint",
@@ -222,7 +227,7 @@ var leaseWaitServiceCalls = map[string]string{
 // context.Background() instead of their declaration's own context, by file and
 // declaration with their counts (R6); it grows until the host's slices (OQ-H).
 var leaseWaitPlaceholders = map[string]int{"checkpoint_verify.go:(*Cell).verifyCheckpoint": 1, "commands.go:(*Cell).databaseCommand": 1,
-	"commands.go:(*Cell).pgCommand": 1, "commands.go:(*Cell).startChildPrepared": 3, "commands.go:(*Cell).waitReady": 2, "drill_reserve.go:(*Cell).reserveDrillLocked": 2,
+	"commands.go:(*Cell).pgCommand": 1, "commands.go:(*Cell).startChildPrepared": 4, "commands.go:(*Cell).waitReady": 2, "drill_reserve.go:(*Cell).reserveDrillLocked": 2,
 	"drill_root.go:(*Cell).deleteDrillLocked": 2, "drill_root.go:(*Cell).drillRootList": 1, "drill_storage.go:(*Cell).admitDrillStorageLocked": 3,
 	"files.go:(*Cell).readUpdateJournal":                3,
 	"installer_principals.go:(*Cell).installPrincipals": 1, "installer_principals.go:(*Cell).installerAdmin": 4,
@@ -231,13 +236,13 @@ var leaseWaitPlaceholders = map[string]int{"checkpoint_verify.go:(*Cell).verifyC
 	"installer_principals.go:(*Cell).runPrincipalMigration": 1, "installer_principals.go:(*Cell).verifyCredentialPurposes": 1,
 	"installer_principals.go:(*Cell).verifyInstallerStartupCatalog": 1, "installer_principals.go:(*Cell).verifyRuntimePrincipalStart": 1,
 	"launch_unix.go:(*Cell).launchChild": 1, "lifecycle.go:(*Cell).Install": 6, "lifecycle.go:(*Cell).Remove": 12, "lifecycle.go:(*Cell).Repair": 11,
-	"lifecycle.go:(*Cell).Start": 16, "lifecycle.go:(*Cell).Status": 1,
+	"lifecycle.go:(*Cell).Start": 17, "lifecycle.go:(*Cell).Status": 1,
 	"lifecycle.go:(*Cell).stopSelected": 4, "lifecycle.go:(*Cell).stopSelectedLegacy": 5, "lifecycle.go:(*Cell).stopWithServiceFence": 7,
 	"lock_contention.go:classifyOwnershipFailure":        1,
 	"port_recovery.go:(*Cell).waitReadyWithPortRecovery": 2, "postgres_unix.go:(*Cell).startPostgres": 3, "postgres_windows.go:(*Cell).pendingPostgresWithoutPID": 1,
 	"postgres_windows.go:(*Cell).pendingPostmasterPID": 1, "postgres_windows.go:(*Cell).startPostgres": 3,
 	"readiness.go:(*Cell).childReadinessExit": 1, "reinstall.go:(*Cell).Reinstall": 2, "reinstall.go:(*Cell).reinstallLocked": 6,
-	"service_adapter_admission.go:serviceAdapterAdmissionForStep": 2, "service_boot.go:(*Cell).bindServiceProcessBootWithReader": 1, "service_boot.go:(*Cell).reconcileOldBoot": 2, "service_boot.go:(*Cell).reconcileServiceBoot": 3,
+	"service_adapter_admission.go:serviceAdapterAdmissionForStep": 2, "reinstall.go:(*Cell).startRetainedPostgres": 1,
 	"service_control_exit.go:(*Cell).exitServiceHostForRemoval": 3,
 	"service_control_exit.go:(*Cell).serviceHostExitIdentity":   1, "service_control_exit.go:(*Cell).serviceHostLeaseHeld": 1,
 	"service_control_exit.go:(*Cell).waitServiceHostExit": 2, "service_control_exit.go:(*supervisor).finishHostExit": 1,
@@ -308,7 +313,8 @@ var leaseWaitDetachedHeld = []string{"checkpoint_unix.go:(*Cell).openCheckpointS
 // file and declaration with their counts; leaseWaitReleasedCallers are the
 // non-test calls into leaseWaitReleased from outside it (G2, G5).
 var leaseWaitValueUses = map[string]int{
-	"files.go:readManifest": 1, "service_control.go:(*Cell).readServiceControlSecret": 1,
+	"service_supervisor.go:newSupervisor": 1,
+	"files.go:readManifest":               1, "service_control.go:(*Cell).readServiceControlSecret": 1,
 	"service_control_endpoint.go:(*Cell).readServiceControlEndpointRecord": 1, "service_control_endpoint.go:(*Cell).readServiceControlEndpointWithBoot": 1,
 	"service_descriptor.go:(*Cell).readServiceDescriptorForOwner": 1, "service_descriptor.go:(*Cell).serviceControlSecret": 1,
 	"checkpoint.go:(*Cell).admitCheckpoint": 1, "commands.go:(*Cell).password": 1, "files.go:openRegular": 1,
@@ -572,6 +578,12 @@ func leaseWaitContract(sources map[string]string) (result []string) {
 			referencesDeclarations(declaration, func(owner string, node ast.Node) {
 				function, _ := node.(*ast.FuncDecl) // G1: a layer declaration that assigns or exposes its own context
 				function = leaseWaitHolder(function, node)
+				// A method-value count alone cannot tell whether repair and reconcile traded hooks.
+				if name == "service_supervisor.go" && owner == "newSupervisor" {
+					failures["lease_wait_value:"+name+":"+owner] = failures["lease_wait_value:"+name+":"+owner] ||
+						function == nil || function.Body == nil || len(function.Body.List) == 0 ||
+						!strings.Contains(leaseWaitPrint(fset, function.Body.List[0]), "reconcile: c.reconcileServiceBoot,")
+				}
 				_, service := leaseWaitServiceCalls[name+":"+owner]
 				layer := function != nil && (service || slices.Contains(leaseWaitOpeners, owner) || slices.Contains(leaseWaitReleased, name+":"+owner))
 				ast.Inspect(node, func(node ast.Node) bool {
@@ -839,6 +851,8 @@ func TestLeaseWaitSourceContract(t *testing.T) {
 			"lease_wait_placeholder:lifecycle.go:(*Cell).Start"},
 		{"seam_live_added", "lifecycle.go", begin, "\tif f, err := openPrincipalCredentialFile(ctx, c.cfg.Root, os.O_RDONLY, 0); err == nil {\n\t\t_ = f.Close()\n\t}\n" + begin,
 			"lease_wait_live:lifecycle.go:(*Cell).Start"},
+		{"reconcile_value_swapped", "service_supervisor.go", "repair: c.Repair, health: c.ServiceHealth,\n\t\treconcile: c.reconcileServiceBoot,",
+			"repair: c.reconcileServiceBoot, health: c.ServiceHealth,\n\t\treconcile: c.Repair,", "lease_wait_value:service_supervisor.go:newSupervisor"},
 		{"seam_value", "lifecycle.go", begin, "\topen := openPrincipalCredentialFile\n\tif f, err := open(context.Background(), c.cfg.Root, os.O_RDONLY, 0); err == nil {\n\t\t_ = f.Close()\n\t}\n" + begin,
 			"lease_wait_value:lifecycle.go:(*Cell).Start"},
 		{"seam_context_reassigned", "installer_principal_credentials.go", "\treturn openPrivateReader(ctx, path)\n}\n", "\tctx = context.WithoutCancel(ctx)\n\treturn openPrivateReader(ctx, path)\n}\n",

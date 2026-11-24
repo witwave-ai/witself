@@ -79,8 +79,7 @@ func serviceWorkerOnCell(t *testing.T, cell *Cell, block string, armed bool) *se
 	}
 	hooks.start, hooks.stop, hooks.repair, hooks.health = hook("start"), hook("stop"), hook("repair"), hook("health")
 	if block == "reconcile" {
-		reconcile := hook("reconcile")
-		hooks.reconcile = func() error { return reconcile(t.Context()) }
+		hooks.reconcile = hook("reconcile")
 	}
 	ctx, cancel := context.WithCancel(t.Context())
 	w.cancel = cancel

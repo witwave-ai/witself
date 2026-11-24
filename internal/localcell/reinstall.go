@@ -234,7 +234,7 @@ func (c *Cell) startRetainedPostgres(ctx context.Context, m *Manifest) error {
 	if err := c.startPostgres(ctx, m); err != nil {
 		return err
 	}
-	return c.bindServiceProcessBoot("postgres")
+	return c.bindServiceProcessBoot(context.Background(), "postgres")
 }
 
 // verifyRetainedIdentity writes nothing, not even the manifest. Selected layouts

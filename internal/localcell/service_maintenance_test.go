@@ -945,12 +945,12 @@ func serviceMaintenanceHostStartup(t *testing.T, kind string, late bool) {
 	entered, done := make(chan struct{}), make(chan struct{})
 	var enteredOnce sync.Once
 	var reconciles, repairs, stops, starts, healths atomic.Int32
-	h.reconcile = func() error {
+	h.reconcile = func(opCtx context.Context) error {
 		reconciles.Add(1)
 		if !late {
 			enteredOnce.Do(func() { close(entered) })
 		}
-		err := c.reconcileServiceBoot()
+		err := c.reconcileServiceBoot(opCtx)
 		if late && err == nil {
 			serviceMaintenanceHostPlant(t, c, kind)
 		}
@@ -1094,7 +1094,10 @@ func TestServiceMaintenanceHostStartupReleaseOrder(t *testing.T) {
 			}
 			f.s.pendingStartup = phase.phase
 			var events []string
-			f.s.hooks.reconcile = func() error { events = append(events, "reconcile"); return f.cell.reconcileServiceBoot() }
+			f.s.hooks.reconcile = func(ctx context.Context) error {
+				events = append(events, "reconcile")
+				return f.cell.reconcileServiceBoot(ctx)
+			}
 			f.s.hooks.repair = func(ctx context.Context) error { events = append(events, "repair"); return f.cell.Repair(ctx) }
 			f.s.hooks.stop = func(ctx context.Context) error {
 				events = append(events, "stop")
@@ -1202,12 +1205,12 @@ func TestServiceMaintenanceHostStartupReleaseOrder(t *testing.T) {
 				}
 				f.s.pendingStartup = serviceStartupReconcile
 				var events []string
-				f.s.hooks.reconcile = func() error {
+				f.s.hooks.reconcile = func(opCtx context.Context) error {
 					events = append(events, "reconcile")
 					if phase == "reconcile" {
 						serviceMaintenanceHostPlant(t, f.cell, kind)
 					}
-					return f.cell.reconcileServiceBoot()
+					return f.cell.reconcileServiceBoot(opCtx)
 				}
 				f.s.hooks.repair = func(ctx context.Context) error {
 					events = append(events, "repair")

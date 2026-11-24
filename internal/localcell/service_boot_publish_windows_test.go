@@ -69,7 +69,7 @@ func TestWindowsServiceBootPublicationValidatorGuard(t *testing.T) {
 				guard.release()
 			}
 		})
-		err := c.reconcileServiceBoot()
+		err := c.reconcileServiceBoot(t.Context())
 		guard.release()
 		if err != nil {
 			t.Fatal("boot reconciliation did not survive a released validator guard on the boot record")
@@ -97,7 +97,7 @@ func TestWindowsServiceBootPublicationValidatorGuard(t *testing.T) {
 				guard.release()
 			}
 		})
-		err := c.reconcileServiceBoot()
+		err := c.reconcileServiceBoot(t.Context())
 		if guard != nil {
 			guard.release()
 		}
@@ -119,7 +119,7 @@ func TestWindowsServiceBootPublicationValidatorGuard(t *testing.T) {
 		guard := holdWindowsBootValidatorGuard(t, path)
 		attempts := observeWindowsBootPublications(t, c, func(int, string) {})
 		started := time.Now()
-		err := c.reconcileServiceBoot()
+		err := c.reconcileServiceBoot(t.Context())
 		elapsed := time.Since(started)
 		guard.release()
 		if !errors.Is(err, windows.ERROR_SHARING_VIOLATION) || runtimeconfig.WindowsPrivateFailureClass(err) != "sharing_violation" {
@@ -143,7 +143,7 @@ func TestWindowsServiceBootPublicationValidatorGuard(t *testing.T) {
 				t.Error("cannot install boot validation refusal fixture")
 			}
 		})
-		err := c.reconcileServiceBoot()
+		err := c.reconcileServiceBoot(t.Context())
 		if err == nil || runtimeconfig.WindowsPrivateFailureClass(err) != "validation" || *attempts != 1 {
 			t.Fatalf("boot validation refusal: failure=%t class=%s attempts=%d", err != nil, runtimeconfig.WindowsPrivateFailureClass(err), *attempts)
 		}
@@ -159,7 +159,7 @@ func TestWindowsServiceBootPublicationValidatorGuard(t *testing.T) {
 func windowsBootPublishRestartFixture(t *testing.T) (*Cell, ServiceDescriptor, string) {
 	t.Helper()
 	c, d := descriptorTestCell(t)
-	if err := c.reconcileServiceBoot(); err != nil {
+	if err := c.reconcileServiceBoot(t.Context()); err != nil {
 		t.Fatal("cannot publish the first boot record fixture")
 	}
 	return c, d, c.path("service", "boot.json")
