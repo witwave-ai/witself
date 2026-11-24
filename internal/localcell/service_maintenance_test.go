@@ -349,7 +349,7 @@ func serviceMaintenanceHostHealthCell(t *testing.T) (*Cell, ServiceDescriptor) {
 		t.Fatal("Health fixture could not read its owned manifest")
 	}
 	m.AccountID = "health_fixture_account"
-	if writeAtomic(c.path("manifest.json"), m, nil) != nil || c.serviceLiveTree() != nil {
+	if writeAtomic(c.path("manifest.json"), m, nil) != nil || c.serviceLiveTree(t.Context()) != nil {
 		t.Fatal("Health fixture did not establish an eligible live tree")
 	}
 	return c, d

@@ -672,6 +672,8 @@ func (s *supervisor) step(ctx context.Context) (result error) {
 		if err := s.call(ctx, "health", s.hooks.health); err == nil {
 			s.status.Healthy = true
 			return nil
+		} else if serviceContextLeaseCut(ctx, err) {
+			return err
 		} else if errors.Is(err, ErrLocked) {
 			return s.busy()
 		} else if serviceControlCancellation(ctx) != nil {
@@ -741,6 +743,10 @@ func (s *supervisor) step(ctx context.Context) (result error) {
 		return s.failAfterMaintenanceObservation(ctx)
 	}
 	if err := s.call(ctx, "health", s.hooks.health); err != nil {
+		if serviceContextLeaseCut(ctx, err) {
+			s.running = true
+			return err
+		}
 		if serviceControlCancellation(ctx) != nil {
 			return err
 		}

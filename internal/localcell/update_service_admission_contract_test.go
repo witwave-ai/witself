@@ -88,7 +88,7 @@ return c.deleteCheckpointLocked(ctx, options)`,
 
 // maintenanceOwnerStatement is owner's admission (LC-LEASE-2C2).
 func maintenanceOwnerStatement(owner string) string {
-	return map[bool]string{true: maintenanceReleasedAdmissionStatement, false: maintenanceAdmissionStatement}[owner == "Checkpoint" || owner == "DeleteCheckpoint" || owner == "PrepareService" || owner == "RepairService" || owner == "serviceMaintenanceObservation" || owner == "reconcileServiceBoot"]
+	return map[bool]string{true: maintenanceReleasedAdmissionStatement, false: maintenanceAdmissionStatement}[owner == "Checkpoint" || owner == "DeleteCheckpoint" || owner == "PrepareService" || owner == "RepairService" || owner == "serviceMaintenanceObservation" || owner == "reconcileServiceBoot" || owner == "ServiceHealth"]
 }
 
 var maintenanceServiceAdmissionFiles = map[string]string{

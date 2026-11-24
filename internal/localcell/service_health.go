@@ -54,40 +54,40 @@ type serviceHealthCredential struct {
 // ServiceHealth requires the existing native process fences, exact database
 // schema/account readiness, and an authenticated loopback API identity response.
 // No credential or underlying connection error is returned to the caller.
-func (c *Cell) ServiceHealth(ctx context.Context) (result error) {
-	ctx, cancel := c.deadline(ctx)
+func (c *Cell) ServiceHealth(parent context.Context) (result error) {
+	ctx, cancel := c.deadline(parent)
 	defer cancel()
 	site := serviceHealthStep(ctx, "health_lock")
 	defer func() { result = serviceFailureAt(result, site) }()
-	lock, err := c.own(context.Background(), false)
+	lock, err := c.own(ctx, false)
 	if errors.Is(err, ErrLocked) {
 		return err
 	}
 	if err != nil {
-		return errServiceHealth
+		return serviceContextReadFailure(ctx, err, errServiceHealth)
 	}
 	defer func() { _ = lock.Close() }()
 	site = serviceHealthStep(ctx, "health_tree")
-	d, err := c.ServiceDescriptor()
+	d, err := c.serviceDescriptor(ctx)
 	if err != nil || d.DesiredState != "running" || d.Faulted {
-		return errServiceHealth
+		return serviceContextReadFailure(ctx, err, errServiceHealth)
 	}
-	if err := c.serviceStartFence(context.Background()); err != nil {
-		return errServiceHealth
+	if err := c.serviceStartFence(ctx); err != nil {
+		return serviceContextReadFailure(ctx, err, errServiceHealth)
 	}
-	if err := c.serviceLiveTree(); err != nil {
-		return errServiceHealth
-	}
-	m, err := readManifest(context.Background(), c.cfg.Root)
-	if err != nil || m.AccountID == "" {
-		return errServiceHealth
-	}
-	if err := c.maintenanceFenceAllows(context.Background(), 0); err != nil {
+	if err := c.serviceLiveTree(ctx); err != nil {
 		return err
 	}
-	role, password, err := c.healthPrincipal(m)
+	m, err := readManifest(ctx, c.cfg.Root)
+	if err != nil || m.AccountID == "" {
+		return serviceContextReadFailure(ctx, err, errServiceHealth)
+	}
+	if err := c.maintenanceFenceAllows(ctx, 0); err != nil {
+		return err
+	}
+	role, password, err := c.healthPrincipal(ctx, m)
 	if err != nil {
-		return errServiceHealth
+		return serviceContextReadFailure(ctx, err, errServiceHealth)
 	}
 	site = serviceHealthStep(ctx, "health_database")
 	dsn := url.URL{Scheme: "postgres", Host: addr(m.Ports.Postgres), Path: "/" + m.Database, User: url.UserPassword(role, password), RawQuery: "sslmode=disable"}
@@ -105,7 +105,7 @@ func (c *Cell) ServiceHealth(ctx context.Context) (result error) {
 	site = serviceHealthStep(ctx, "health_credential")
 	credential, err := c.serviceAPICredential(ctx, st, m)
 	if err != nil {
-		return errServiceHealth
+		return err
 	}
 	site = serviceHealthStep(ctx, "health_probe")
 	client := localHTTPClient()
@@ -118,11 +118,11 @@ func (c *Cell) ServiceHealth(ctx context.Context) (result error) {
 		return errServiceHealth
 	}
 	site = serviceHealthStep(ctx, "health_tree")
-	return c.serviceLiveTree()
+	return c.serviceLiveTree(ctx)
 }
 
-func (c *Cell) healthDSN(m *Manifest) (string, error) {
-	role, password, err := c.healthPrincipal(m)
+func (c *Cell) healthDSN(ctx context.Context, m *Manifest) (string, error) {
+	role, password, err := c.healthPrincipal(ctx, m)
 	if err != nil {
 		return "", err
 	}
@@ -130,12 +130,12 @@ func (c *Cell) healthDSN(m *Manifest) (string, error) {
 	return dsn.String(), nil
 }
 
-func (c *Cell) healthPrincipal(m *Manifest) (string, string, error) {
+func (c *Cell) healthPrincipal(ctx context.Context, m *Manifest) (string, string, error) {
 	purpose := credentialBootstrap
 	if m.PrincipalLayoutVersion != 0 {
 		purpose = credentialMaintenance
 	}
-	password, err := c.credentialPassword(context.Background(), m, purpose)
+	password, err := c.credentialPassword(ctx, m, purpose)
 	if err != nil {
 		return "", "", err
 	}
@@ -144,9 +144,9 @@ func (c *Cell) healthPrincipal(m *Manifest) (string, string, error) {
 }
 
 func (c *Cell) healthStore(ctx context.Context, m *Manifest) (*store.Store, error) {
-	dsn, err := c.healthDSN(m)
+	dsn, err := c.healthDSN(ctx, m)
 	if err != nil {
-		return nil, errServiceHealth
+		return nil, serviceContextReadFailure(ctx, err, errServiceHealth)
 	}
 	st, err := store.Open(ctx, dsn)
 	if err != nil {
@@ -159,14 +159,14 @@ func (c *Cell) healthStore(ctx context.Context, m *Manifest) (*store.Store, erro
 	return st, nil
 }
 
-func (c *Cell) serviceLiveTree() error {
-	if err := c.verifyAll(context.Background()); err != nil {
-		return errServiceHealth
+func (c *Cell) serviceLiveTree(ctx context.Context) error {
+	if err := c.verifyAll(ctx); err != nil {
+		return serviceContextReadFailure(ctx, err, errServiceHealth)
 	}
 	for _, component := range []string{"postgres", "server", "worker"} {
-		s, err := c.processState(context.Background(), component)
+		s, err := c.processState(ctx, component)
 		if err != nil || !s.Alive || !s.Matches {
-			return errServiceHealth
+			return serviceContextReadFailure(ctx, err, errServiceHealth)
 		}
 	}
 	return nil
@@ -186,8 +186,8 @@ func (c *Cell) serviceAPICredential(ctx context.Context, st serviceHealthCredent
 	path := c.path("service", "api.secret")
 	err := servicePrivateRecord(path)
 	if err == nil {
-		if err := readJSON(context.Background(), path, &credential); err != nil {
-			return credential, errServiceHealth
+		if err := readJSON(ctx, path, &credential); err != nil {
+			return credential, serviceContextReadFailure(ctx, err, errServiceHealth)
 		}
 		if credential.InstallationID != m.InstallationID || credential.AccountID != m.AccountID || credential.OperatorID == "" || credential.Bearer == "" {
 			return credential, errServiceHealth

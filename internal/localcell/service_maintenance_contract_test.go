@@ -19,23 +19,23 @@ var maintenanceHostAdmissionFiles = map[string]string{
 // Independent source pins deliberately distinguish the named health result
 // from every ordinary error owner. The observer owns only a negative decision.
 var maintenanceHostAdmissionBoundaries = map[string]string{
-	"ServiceHealth": `ctx, cancel := c.deadline(ctx)
+	"ServiceHealth": `ctx, cancel := c.deadline(parent)
 defer cancel()
 site := serviceHealthStep(ctx, "health_lock")
 defer func() { result = serviceFailureAt(result, site) }()
-lock, err := c.own(context.Background(), false)
+lock, err := c.own(ctx, false)
 if errors.Is(err, ErrLocked) { return err }
-if err != nil { return errServiceHealth }
+if err != nil { return serviceContextReadFailure(ctx, err, errServiceHealth) }
 defer func() { _ = lock.Close() }()
 site = serviceHealthStep(ctx, "health_tree")
-d, err := c.ServiceDescriptor()
-if err != nil || d.DesiredState != "running" || d.Faulted { return errServiceHealth }
-if err := c.serviceStartFence(context.Background()); err != nil { return errServiceHealth }
-if err := c.serviceLiveTree(); err != nil { return errServiceHealth }
-m, err := readManifest(context.Background(), c.cfg.Root)
-if err != nil || m.AccountID == "" { return errServiceHealth }
-` + maintenanceAdmissionStatement + `
-role, password, err := c.healthPrincipal(m)`,
+d, err := c.serviceDescriptor(ctx)
+if err != nil || d.DesiredState != "running" || d.Faulted { return serviceContextReadFailure(ctx, err, errServiceHealth) }
+if err := c.serviceStartFence(ctx); err != nil { return serviceContextReadFailure(ctx, err, errServiceHealth) }
+if err := c.serviceLiveTree(ctx); err != nil { return err }
+m, err := readManifest(ctx, c.cfg.Root)
+if err != nil || m.AccountID == "" { return serviceContextReadFailure(ctx, err, errServiceHealth) }
+` + maintenanceReleasedAdmissionStatement + `
+role, password, err := c.healthPrincipal(ctx, m)`,
 	"serviceMaintenanceObservation": `if err := ctx.Err(); err != nil { return err }
 lock, err := c.own(ctx, false)
 if err != nil { return err }
@@ -298,7 +298,7 @@ func maintenanceHostAdmissionOwner(filename string, fn *ast.FuncDecl) string {
 		return "signature"
 	}
 	typ, typeOK := pointer.X.(*ast.Ident)
-	parameters := "func(ctx context.Context)"
+	parameters := "func(parent context.Context)"
 	if fn.Name.Name == "serviceMaintenanceObservation" {
 		parameters = "func(ctx context.Context, observed *ServiceDescriptor)"
 	}
@@ -931,7 +931,7 @@ func maintenanceHostPredicateFixtures(t *testing.T, owner, filename, original st
 		{"DropFilenameCheck", "other.go", original, "signature"},
 		{"DropReceiverCheck", filename, strings.Replace(original, "*Cell", "*Other", 1), "signature"},
 		{"DropBindingCheck", filename, strings.Replace(original, "(c *Cell)", "(other *Cell)", 1), "signature"},
-		{"DropParameterCheck", filename, strings.Replace(original, "ctx context.Context", "ctx context.Context, extra int", 1), "signature"},
+		{"DropParameterCheck", filename, strings.Replace(original, "context.Context", "context.Context, extra int", 1), "signature"},
 		{"ValueReceiver", filename, strings.Replace(original, "*Cell", "Cell", 1), "signature"},
 	}
 	if owner == "serviceMaintenanceObservation" {
@@ -940,7 +940,7 @@ func maintenanceHostPredicateFixtures(t *testing.T, owner, filename, original st
 			predicateFixture{"ValueObservationParameter", filename, strings.Replace(original, "observed *ServiceDescriptor", "observed ServiceDescriptor", 1), "signature"},
 		)
 	} else {
-		fixtures = append(fixtures, predicateFixture{"HealthObservationParameters", filename, strings.Replace(original, "ctx context.Context", "ctx context.Context, observed *ServiceDescriptor", 1), "signature"})
+		fixtures = append(fixtures, predicateFixture{"HealthObservationParameters", filename, strings.Replace(original, "parent context.Context", "parent context.Context, observed *ServiceDescriptor", 1), "signature"})
 	}
 	for _, fixture := range fixtures {
 		t.Run("Guard_"+fixture.name, func(t *testing.T) {
@@ -1396,6 +1396,8 @@ var maintenanceHostSupervisorPins = map[string]string{
 		if err := s.call(ctx, "health", s.hooks.health); err == nil {
 			s.status.Healthy = true
 			return nil
+		} else if serviceContextLeaseCut(ctx, err) {
+			return err
 		} else if errors.Is(err, ErrLocked) {
 			return s.busy()
 		} else if serviceControlCancellation(ctx) != nil {
@@ -1465,6 +1467,10 @@ var maintenanceHostSupervisorPins = map[string]string{
 		return s.failAfterMaintenanceObservation(ctx)
 	}
 	if err := s.call(ctx, "health", s.hooks.health); err != nil {
+		if serviceContextLeaseCut(ctx, err) {
+			s.running = true
+			return err
+		}
 		if serviceControlCancellation(ctx) != nil {
 			return err
 		}

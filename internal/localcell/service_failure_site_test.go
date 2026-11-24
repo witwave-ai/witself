@@ -152,14 +152,14 @@ func TestServiceFailureSiteJoinedShutdown(t *testing.T) {
 func TestServiceFailureSiteSourceContract(t *testing.T) {
 	contracts := map[string][]string{
 		"service_health.go": {
-			`func (c *Cell) ServiceHealth(ctx context.Context) (result error) {
-	ctx, cancel := c.deadline(ctx)
+			`func (c *Cell) ServiceHealth(parent context.Context) (result error) {
+	ctx, cancel := c.deadline(parent)
 	defer cancel()
 	site := serviceHealthStep(ctx, "health_lock")
 	defer func() { result = serviceFailureAt(result, site) }()
-	lock, err := c.own(context.Background(), false)`,
+	lock, err := c.own(ctx, false)`,
 			`site = serviceHealthStep(ctx, "health_tree")
-	d, err := c.ServiceDescriptor()`,
+	d, err := c.serviceDescriptor(ctx)`,
 			`site = serviceHealthStep(ctx, "health_database")
 	dsn := url.URL`,
 			`site = serviceHealthStep(ctx, "health_credential")
@@ -169,7 +169,24 @@ func TestServiceFailureSiteSourceContract(t *testing.T) {
 			`site = serviceHealthStep(ctx, "health_ready")
 	if !ready(ctx, client, m.Ports.ServerHealth) || !ready(ctx, client, m.Ports.WorkerHealth)`,
 			`site = serviceHealthStep(ctx, "health_tree")
-	return c.serviceLiveTree()`,
+	return c.serviceLiveTree(ctx)`,
+			`role, password, err := c.healthPrincipal(ctx, m)
+	if err != nil {
+		return serviceContextReadFailure(ctx, err, errServiceHealth)`,
+			`credential, err := c.serviceAPICredential(ctx, st, m)
+	if err != nil {
+		return err
+	}`,
+			`dsn, err := c.healthDSN(ctx, m)
+	if err != nil {
+		return nil, serviceContextReadFailure(ctx, err, errServiceHealth)`,
+			`if err := c.verifyAll(ctx); err != nil {
+		return serviceContextReadFailure(ctx, err, errServiceHealth)`,
+			`s, err := c.processState(ctx, component)
+		if err != nil || !s.Alive || !s.Matches {
+			return serviceContextReadFailure(ctx, err, errServiceHealth)`,
+			`if err := readJSON(ctx, path, &credential); err != nil {
+			return credential, serviceContextReadFailure(ctx, err, errServiceHealth)`,
 			`func serviceHealthStep(ctx context.Context, site string) string {
 	site = serviceHealthSite(site)
 	if progress, ok := ctx.Value(serviceHealthProgressKey{}).(*serviceHealthProgress); ok {
@@ -505,7 +522,7 @@ func TestServiceFailureSiteProducerInventory(t *testing.T) {
 			"persistServiceShutdownFault": "commitShutdownFault",
 		},
 		"service_health.go": {
-			"ServiceHealth":        "ServiceDescriptor own readManifest",
+			"ServiceHealth":        "own readManifest serviceDescriptor",
 			"serviceAPICredential": "readJSON servicePrivateRecord writeAtomic",
 		},
 		"service_foreground.go": {

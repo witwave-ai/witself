@@ -423,6 +423,10 @@ func maintenanceFenceContext(fn *ast.FuncDecl, argument ast.Expr) bool {
 		return leaseWaitOwnContext(fn, argument)
 	}
 	switch fn.Name.Name {
+	case "ServiceHealth":
+		// The admission prelude pins the first statement to c.deadline(parent).
+		id, ok := argument.(*ast.Ident)
+		return ok && id.Name == "ctx" && id.Obj != nil && id.Obj.Decl == fn.Body.List[0]
 	case "Checkpoint", "DeleteCheckpoint", "PrepareService", "RepairService", "reconcileServiceBoot", "setServiceDesiredStateLocked", "serviceMaintenanceObservation":
 		return leaseWaitOwnContext(fn, argument) && admissionNodeText(argument) == "ctx"
 	default:
