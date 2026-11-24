@@ -164,6 +164,13 @@ func (c *Cell) serveHostExit(w http.ResponseWriter, r *http.Request, commands ch
 	defer cancel()
 	admissionCtx, admissionCancel := context.WithTimeout(ctx, serviceHostExitPhaseBudget(ctx, budgets.admission))
 	defer admissionCancel()
+	// The admission's own end has one answer wherever it is seen: its deadline
+	// the fixed admission timeout, a cancelled request nothing.
+	answerAdmissionEnd := func() {
+		if admissionCtx.Err() == context.DeadlineExceeded {
+			http.Error(w, serviceHostExitAdmissionTimeout, http.StatusRequestTimeout)
+		}
+	}
 	deadline, _ := ctx.Deadline()
 	if http.NewResponseController(w).SetWriteDeadline(deadline) != nil {
 		http.Error(w, "service_control_refused: host_exit:envelope", http.StatusConflict)
@@ -173,7 +180,16 @@ func (c *Cell) serveHostExit(w http.ResponseWriter, r *http.Request, commands ch
 	decoder := json.NewDecoder(limited)
 	decoder.DisallowUnknownFields()
 	var envelope serviceHostExitEnvelope
-	if decoder.Decode(&envelope) != nil || decoder.Decode(new(any)) != io.EOF || limited.N == 0 || c.validateHostExitEnvelope(admissionCtx, envelope, listener) != nil {
+	if decoder.Decode(&envelope) != nil || decoder.Decode(new(any)) != io.EOF || limited.N == 0 {
+		http.Error(w, "service_control_refused: host_exit:envelope", http.StatusConflict)
+		return
+	}
+	// A validation read cut by the admission's own end is not a refusal of the
+	// envelope, and its challenge is not recorded.
+	if err := c.validateHostExitEnvelope(admissionCtx, envelope, listener); serviceContextLeaseCut(admissionCtx, err) {
+		answerAdmissionEnd()
+		return
+	} else if err != nil {
 		http.Error(w, "service_control_refused: host_exit:envelope", http.StatusConflict)
 		return
 	}
@@ -197,9 +213,7 @@ func (c *Cell) serveHostExit(w http.ResponseWriter, r *http.Request, commands ch
 	select {
 	case commands <- command:
 	case <-admissionCtx.Done():
-		if admissionCtx.Err() == context.DeadlineExceeded {
-			http.Error(w, serviceHostExitAdmissionTimeout, http.StatusRequestTimeout)
-		}
+		answerAdmissionEnd()
 		return
 	case <-closed:
 		return
@@ -250,9 +264,7 @@ func (c *Cell) serveHostExit(w http.ResponseWriter, r *http.Request, commands ch
 		case <-closed:
 		}
 	case <-admissionCtx.Done():
-		if admissionCtx.Err() == context.DeadlineExceeded {
-			http.Error(w, serviceHostExitAdmissionTimeout, http.StatusRequestTimeout)
-		}
+		answerAdmissionEnd()
 	case <-closed:
 	}
 }

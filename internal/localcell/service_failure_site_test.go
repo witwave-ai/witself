@@ -210,6 +210,11 @@ func TestServiceFailureSiteSourceContract(t *testing.T) {
 			`return hostExitFailure("observe", true, serviceContextReadFailure(ctx, err, errors.Join(hostExitRefused("drain"), ctx.Err())))`,
 			`if serviceContextLeaseCut(ctx, statusErr) {
 				return hostExitFailure("observe", true, statusErr)`,
+			`if err := c.validateHostExitEnvelope(admissionCtx, envelope, listener); serviceContextLeaseCut(admissionCtx, err) {
+		answerAdmissionEnd()
+		return
+	} else if err != nil {
+		http.Error(w, "service_control_refused: host_exit:envelope", http.StatusConflict)`,
 		},
 		"service_foreground.go": {
 			`return nil, serviceContextReadFailure(ctx, err, errors.New("localcell: service_lease_unavailable"))`,

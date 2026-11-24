@@ -208,8 +208,10 @@ func TestExitEnvelopeAdmissionLease(t *testing.T) {
 	requireServiceLease(t, h.broken(), "authenticated admission missed the leased identity")
 	h.close()
 	requireServiceLease(t, elapsed < leaseWait.ceiling/2, "authenticated admission outlived its own bound")
-	requireServiceLease(t, code == http.StatusConflict, "admission changed its envelope HTTP status")
-	requireServiceLease(t, detail == "service_control_refused: host_exit:envelope", "admission changed its envelope refusal")
+	// The cut is the admission's own deadline, answered as at the enqueue and
+	// the reply; an invalid envelope keeps its 409 (TestServiceHostExitEnvelopeUnix).
+	requireServiceLease(t, code == http.StatusRequestTimeout, "admission answered its own cut as an envelope refusal")
+	requireServiceLease(t, detail == serviceHostExitAdmissionTimeout, "admission changed its timeout detail")
 	requireServiceLease(t, delivered.Load() == 0, "failed signed admission delivered the exit")
 	code, receipt, _ := hostExitRawRequest(t, c, body)
 	requireServiceLease(t, code == http.StatusOK, "failed validation consumed the signed challenge")
@@ -261,6 +263,58 @@ func TestExitLifetimeForeignCut(t *testing.T) {
 			requireServiceLease(t, c.Run(ctx, SupervisorPolicy{hooks: &h}) == foreign, "host consumed a boot cut from another operation")
 			for _, err := range []error{foreign, context.Canceled, errors.Join(foreign, context.Canceled)} {
 				requireServiceLease(t, serviceContextReadFailure(ctx, err, refusal) == refusal, "exit treated a foreign cut as the operation ending")
+			}
+		})
+	}
+}
+
+// Run stopped at the kernel's break of a lease on its lifetime lock stops
+// cleanly: no flock, no boot read, no tree hook, no record or endpoint written.
+// While Run is live, the lease kept to the ceiling keeps the fixed refusal.
+func TestExitRunLifetimeLease(t *testing.T) {
+	for _, mode := range []string{"cancelled", "live"} {
+		t.Run(mode, func(t *testing.T) {
+			c, d := descriptorTestCell(t)
+			lock, err := c.acquireServiceLease(t.Context(), d)
+			requireServiceLease(t, err == nil, "cannot seed the lifetime lease")
+			requireServiceLease(t, lock.Close() == nil, "cannot release the seeded host")
+			record, err := os.Stat(c.path("service", "lease.json"))
+			requireServiceLease(t, err == nil, "cannot identify the seeded host record")
+			h, _, starts, stops, _ := supervisorTestHooks()
+			boots, repairs := 0, 0
+			h.boot = func() (string, error) { boots++; return serviceBootID() }
+			h.repair = func(context.Context) error { repairs++; return nil }
+			holder := leaseTaken(t, leaseHolder(t, "kept", unix.F_RDLCK), c.path(".service-host.lock"))
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			broken := make(chan time.Time, 1)
+			if mode == "cancelled" {
+				leaseWait.ceiling = 2 * time.Second
+				go func() { at, _ := leaseContextBroken(holder); cancel(); broken <- at }()
+			}
+			err = c.Run(ctx, SupervisorPolicy{hooks: &h})
+			returned := time.Now()
+			requireServiceLease(t, holder.broken(), "host never opened its leased lifetime lock")
+			holder.close()
+			if mode == "cancelled" {
+				requireServiceLease(t, err == nil, "host did not stop cleanly at its own lifetime cut")
+			} else {
+				requireServiceLease(t, err != nil && err.Error() == "localcell: service_lease_unavailable", "live host lost its lifetime refusal")
+			}
+			requireServiceLease(t, boots == 0, "host read its boot without the lifetime lock")
+			requireServiceLease(t, *starts == 0, "host started the tree without the lifetime lock")
+			requireServiceLease(t, *stops == 0, "host stopped the tree without the lifetime lock")
+			requireServiceLease(t, repairs == 0, "host repaired the tree without the lifetime lock")
+			after, err := os.Stat(c.path("service", "lease.json"))
+			requireServiceLease(t, err == nil, "host removed its lease record")
+			requireServiceLease(t, os.SameFile(record, after), "host republished its lease record")
+			_, err = os.Lstat(c.path("service", "control-endpoint.json"))
+			requireServiceLease(t, errors.Is(err, os.ErrNotExist), "host published its control endpoint")
+			held, err := c.serviceHostLeaseHeld(t.Context())
+			requireServiceLease(t, err == nil, "cannot probe the host after Run")
+			requireServiceLease(t, !held, "host kept the lifetime lock")
+			if mode == "cancelled" {
+				requireServiceLease(t, returned.Sub(<-broken) < leaseWait.ceiling/2, "host waited past half the lease ceiling after its stop")
 			}
 		})
 	}

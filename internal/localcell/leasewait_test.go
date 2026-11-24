@@ -168,7 +168,7 @@ var leaseWaitServiceOpeners = strings.Fields(`(*Cell).serviceDescriptor (*Cell).
 (*Cell).validateHostExitEndpoint (*Cell).readHostExitEndpoint (*Cell).validateServiceControlEndpoint (*Cell).listenRunServiceControl (*Cell).listenServiceControl
 (*Cell).removeServiceControlEndpoint (*Cell).reconcileServiceBoot (*Cell).reconcileOldBoot (*Cell).bindServiceProcessBoot (*Cell).bindServiceProcessBootWithReader
 serviceAdapterAdmission serviceAdapterRemovalAdmission serviceAdapterAdmissionForStep (*systemdUserAdapter).ownedUnit (*systemdUserAdapter).cleanupPartial
-(*Cell).serviceHostExitIdentity (*Cell).validateHostExitEnvelope (*Cell).newHostExitEnvelope (*Cell).serviceHostLeaseHeld (*Cell).retainServiceExitHost
+(*Cell).serviceHostExitIdentity (*Cell).validateHostExitEnvelope (*Cell).newHostExitEnvelope (*Cell).serviceHostLeaseHeld (*Cell).retainServiceExitHost (*Cell).exitServiceHostForRemoval
 (*Cell).acquireServiceLease (*Cell).acquireServiceLeaseWithBoot (*Cell).acquireServiceLeaseForPlatform`)
 
 var leaseWaitServiceCalls = map[string]string{
@@ -183,10 +183,13 @@ var leaseWaitServiceCalls = map[string]string{
 	"service_adapter_admission.go:serviceAdapterAdmissionForStep": "own serviceDescriptorForOwner",
 	"service_systemd_adapter.go:(*systemdUserAdapter).Inspect":    "ownedUnit",
 	"service_systemd_adapter.go:(*systemdUserAdapter).Apply":      "cleanupPartial maintenanceFenceAllows ownedUnit serviceAdapterAdmission",
-	"service_systemd_adapter.go:(*systemdUserAdapter).Remove":     "maintenanceFenceAllows ownedUnit serviceAdapterRemovalAdmission serviceAdapterRemovalHostLock",
+	"service_systemd_adapter.go:(*systemdUserAdapter).Remove":     "exitServiceHostForRemoval maintenanceFenceAllows ownedUnit serviceAdapterRemovalAdmission serviceAdapterRemovalHostLock",
 	"service_systemd_adapter.go:(*systemdUserAdapter).ownedUnit":  "openPlainReader",
 	"service_launchd.go:(*launchdAgentAdapter).Apply":             "maintenanceFenceAllows serviceAdapterAdmission",
-	"service_launchd.go:(*launchdAgentAdapter).Remove":            "maintenanceFenceAllows serviceAdapterRemovalAdmission serviceAdapterRemovalHostLock",
+	"service_launchd.go:(*launchdAgentAdapter).Remove":            "exitServiceHostForRemoval maintenanceFenceAllows serviceAdapterRemovalAdmission serviceAdapterRemovalHostLock",
+	// The removal drain's lease waits end with the remover's own context (LC-LEASE-2E2-F1, N9).
+	"service_windows_task.go:(*windowsLogonTaskAdapter).Remove": "exitServiceHostForRemoval",
+	"lifecycle.go:(*Cell).Remove":                               "exitServiceHostForRemoval",
 
 	"service_control_exit.go:(*Cell).ExitServiceHost":              "newHostExitEnvelope retainServiceExitHost",
 	"service_control_exit.go:(*Cell).controlExitHost":              "newHostExitEnvelope retainServiceExitHost",
@@ -757,8 +760,8 @@ func leaseWaitContract(sources map[string]string) (result []string) {
 	}
 	for _, site := range slices.Concat(slices.Collect(maps.Keys(reassigned)), leaseWaitReleased[:3]) {
 		want := map[bool]int{true: 1}[slices.Contains(leaseWaitReleased[:3], site)]
-		if site == "service_control_exit.go:(*Cell).ExitServiceHost" {
-			want = 1 // the transaction deadline derives from the caller
+		if site == "service_control_exit.go:(*Cell).ExitServiceHost" || site == "lifecycle.go:(*Cell).Remove" {
+			want = 1 // the transaction or shutdown deadline derives from the caller
 		}
 		if site == "service_supervisor.go:(*supervisor).command" {
 			// The whole command body is pinned in maintenanceHostSupervisorPins:
@@ -946,6 +949,11 @@ func TestLeaseWaitSourceContract(t *testing.T) {
 			"lease_wait_value:lifecycle.go:(*Cell).Start"},
 		{"seam_context_reassigned", "installer_principal_credentials.go", "\treturn openPrivateReader(ctx, path)\n}\n", "\tctx = context.WithoutCancel(ctx)\n\treturn openPrivateReader(ctx, path)\n}\n",
 			"lease_wait_reassigned:installer_principal_credentials.go:openPrincipalCredentialFile"},
+		// LC-LEASE-2E2-F1 (N9): every remover hands the removal drain its own context.
+		{"drain_systemd_detached", "service_systemd_adapter.go", "cell.exitServiceHostForRemoval(ctx)", "cell.exitServiceHostForRemoval(context.Background())", "lease_wait_placeholder:service_systemd_adapter.go:(*systemdUserAdapter).Remove"},
+		{"drain_launchd_detached", "service_launchd.go", "cell.exitServiceHostForRemoval(ctx)", "cell.exitServiceHostForRemoval(context.WithoutCancel(ctx))", "lease_wait_placeholder:service_launchd.go:(*launchdAgentAdapter).Remove"},
+		{"drain_task_detached", "service_windows_task.go", "cell.exitServiceHostForRemoval(ctx)", "cell.exitServiceHostForRemoval(context.Background())", "lease_wait_placeholder:service_windows_task.go:(*windowsLogonTaskAdapter).Remove"},
+		{"drain_remove_detached", "lifecycle.go", "c.exitServiceHostForRemoval(ctx)", "c.exitServiceHostForRemoval(context.WithoutCancel(ctx))", "lease_wait_placeholder:lifecycle.go:(*Cell).Remove"},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			if strings.Count(sources[row.file], row.before) != 1 {

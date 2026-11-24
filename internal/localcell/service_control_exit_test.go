@@ -267,7 +267,8 @@ func serviceHostExitBudgetContract(source []byte) bool {
 	if strings.Count(client, "serviceHostExitAdmissionCause(ackCtx, ctx, time.Now())") != 4 || strings.Contains(client, "ackCtx.Err()") {
 		return false
 	}
-	if strings.Count(server, "http.Error(w, serviceHostExitAdmissionTimeout, http.StatusRequestTimeout)") != 2 {
+	// One answer for the admission's end: at the validation, the enqueue and the reply.
+	if strings.Count(server, "http.Error(w, serviceHostExitAdmissionTimeout, http.StatusRequestTimeout)") != 1 || strings.Count(server, "answerAdmissionEnd()") != 3 {
 		return false
 	}
 	selector := body("func serviceHostExitAdmissionCause(")
