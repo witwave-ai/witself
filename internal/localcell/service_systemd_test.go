@@ -79,7 +79,11 @@ type systemdFixtureManager struct {
 	stayUnloaded        bool
 }
 
-func (m *systemdFixtureManager) command(_ context.Context, binary string, args ...string) ([]byte, error) {
+func (m *systemdFixtureManager) command(ctx context.Context, binary string, args ...string) ([]byte, error) {
+	// As exec.Cmd.Start in the native runner: a done context starts nothing.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	m.calls = append(m.calls, append([]string{binary}, args...))
 	if m.unavailable {
 		return nil, errors.New("fixture unavailable")

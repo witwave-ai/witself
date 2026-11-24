@@ -460,7 +460,7 @@ func TestUnixServiceArtifactConfinement(t *testing.T) {
 				overlap = false
 			}
 			before := serviceMaintenanceSnapshot(t, m.cell)
-			c, fresh, unlock, err := serviceAdapterAdmission("1001", d, dir)
+			c, fresh, unlock, err := serviceAdapterAdmission(context.Background(), "1001", d, dir)
 			if overlap {
 				unixServiceRequireError(t, err, ErrServiceOwnershipConflict, "apply:confinement", "overlap")
 				if c != nil || unlock != nil || !reflect.DeepEqual(fresh, ServiceDescriptor{}) {

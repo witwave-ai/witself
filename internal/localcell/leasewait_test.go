@@ -166,7 +166,8 @@ var leaseWaitServiceOpeners = strings.Fields(`(*Cell).serviceDescriptor (*Cell).
 (*Cell).readServiceControlEndpointRecord (*Cell).readServiceControlEndpoint (*Cell).readServiceControlEndpointWithBoot (*Cell).serviceListenerDescriptor (*Cell).completeServiceLease
 (*Cell).publishServiceControlEndpoint (*Cell).publishServiceControlEndpointWithBoot (*Cell).removeOwnedServiceControlEndpoint (*Cell).removeOwnedServiceControlEndpointBy
 (*Cell).validateHostExitEndpoint (*Cell).readHostExitEndpoint (*Cell).validateServiceControlEndpoint (*Cell).listenRunServiceControl (*Cell).listenServiceControl
-(*Cell).removeServiceControlEndpoint (*Cell).reconcileServiceBoot (*Cell).reconcileOldBoot (*Cell).bindServiceProcessBoot (*Cell).bindServiceProcessBootWithReader`)
+(*Cell).removeServiceControlEndpoint (*Cell).reconcileServiceBoot (*Cell).reconcileOldBoot (*Cell).bindServiceProcessBoot (*Cell).bindServiceProcessBootWithReader
+serviceAdapterAdmission serviceAdapterRemovalAdmission serviceAdapterAdmissionForStep (*systemdUserAdapter).ownedUnit (*systemdUserAdapter).cleanupPartial`)
 
 var leaseWaitServiceCalls = map[string]string{
 	// The dark repair has the same per-owner, exact-callee contract as the service entry points.
@@ -174,6 +175,16 @@ var leaseWaitServiceCalls = map[string]string{
 	"checkpoint_journal_binding_unix.go:(*Cell).repairOwnedJournal":          "openCheckpointJournalFile",
 	"checkpoint_journal_binding_unix.go:(*Cell).syncCheckpointJournalPrefix": "openCheckpointJournalFile",
 	"checkpoint_journal_repair.go:(*Cell).RepairCheckpointJournal":           "acquireLock checkpointCold readManifest repairOwnedJournal",
+
+	"service_adapter_admission.go:serviceAdapterAdmission":        "serviceAdapterAdmissionForStep",
+	"service_adapter_admission.go:serviceAdapterRemovalAdmission": "serviceAdapterAdmissionForStep",
+	"service_adapter_admission.go:serviceAdapterAdmissionForStep": "own serviceDescriptorForOwner",
+	"service_systemd_adapter.go:(*systemdUserAdapter).Inspect":    "ownedUnit",
+	"service_systemd_adapter.go:(*systemdUserAdapter).Apply":      "cleanupPartial maintenanceFenceAllows ownedUnit serviceAdapterAdmission",
+	"service_systemd_adapter.go:(*systemdUserAdapter).Remove":     "maintenanceFenceAllows ownedUnit serviceAdapterRemovalAdmission serviceAdapterRemovalHostLock",
+	"service_systemd_adapter.go:(*systemdUserAdapter).ownedUnit":  "openPlainReader",
+	"service_launchd.go:(*launchdAgentAdapter).Apply":             "maintenanceFenceAllows serviceAdapterAdmission",
+	"service_launchd.go:(*launchdAgentAdapter).Remove":            "maintenanceFenceAllows serviceAdapterRemovalAdmission serviceAdapterRemovalHostLock",
 
 	"service_boot.go:(*Cell).reconcileServiceBoot":                     "maintenanceFenceAllows own readJSON reconcileOldBoot serviceDescriptor",
 	"service_boot.go:(*Cell).reconcileOldBoot":                         "postmaster readJSON",
@@ -243,21 +254,17 @@ var leaseWaitPlaceholders = map[string]int{"checkpoint_verify.go:(*Cell).verifyC
 	"lock_contention.go:classifyOwnershipFailure":        1,
 	"port_recovery.go:(*Cell).waitReadyWithPortRecovery": 2, "postgres_unix.go:(*Cell).startPostgres": 3, "postgres_windows.go:(*Cell).pendingPostgresWithoutPID": 1,
 	"postgres_windows.go:(*Cell).pendingPostmasterPID": 1, "postgres_windows.go:(*Cell).startPostgres": 3,
-	"readiness.go:(*Cell).childReadinessExit": 1, "reinstall.go:(*Cell).Reinstall": 2, "reinstall.go:(*Cell).reinstallLocked": 6,
-	"service_adapter_admission.go:serviceAdapterAdmissionForStep": 2, "reinstall.go:(*Cell).startRetainedPostgres": 1,
+	"readiness.go:(*Cell).childReadinessExit": 1, "reinstall.go:(*Cell).Reinstall": 2, "reinstall.go:(*Cell).reinstallLocked": 6, "reinstall.go:(*Cell).startRetainedPostgres": 1,
 	"service_control_exit.go:(*Cell).exitServiceHostForRemoval": 3,
 	"service_control_exit.go:(*Cell).serviceHostExitIdentity":   1, "service_control_exit.go:(*Cell).serviceHostLeaseHeld": 1,
 	"service_control_exit.go:(*Cell).waitServiceHostExit": 2, "service_control_exit.go:(*supervisor).finishHostExit": 1,
 	"service_task_host.go:(*Cell).ValidateTaskHost": 1, "service_descriptor.go:(*Cell).ServiceDescriptor": 1, "service_foreground.go:(*Cell).acquireServiceLeaseForPlatform": 1,
 	"service_health.go:(*Cell).ServiceHealth": 4, "service_health.go:(*Cell).healthPrincipal": 1,
-	"service_health.go:(*Cell).serviceAPICredential": 1, "service_health.go:(*Cell).serviceLiveTree": 2, "service_launchd.go:(*launchdAgentAdapter).Apply": 1,
-	"service_launchd.go:(*launchdAgentAdapter).Remove":     2,
+	"service_health.go:(*Cell).serviceAPICredential": 1, "service_health.go:(*Cell).serviceLiveTree": 2,
 	"service_launchd.go:(*launchdAgentAdapter).ownedPlist": 1,
 	"service_shutdown_other.go:(*Cell).stopChildOutcome":   1, "service_shutdown_windows.go:(*Cell).stopChildOutcomeWithBudget": 1,
 	"service_shutdown_windows.go:waitShutdownReady": 1, "service_supervisor.go:(*Cell).Run": 1, "service_supervisor.go:(*supervisor).load": 1,
-	"service_supervisor.go:(*supervisor).rememberProcesses": 2, "service_systemd_adapter.go:(*systemdUserAdapter).Apply": 1,
-	"service_systemd_adapter.go:(*systemdUserAdapter).Remove":    2,
-	"service_systemd_adapter.go:(*systemdUserAdapter).ownedUnit": 1, "service_windows_task.go:(*windowsLogonTaskAdapter).Apply": 1,
+	"service_supervisor.go:(*supervisor).rememberProcesses": 2, "service_windows_task.go:(*windowsLogonTaskAdapter).Apply": 1,
 	"service_windows_task.go:(*windowsLogonTaskAdapter).Remove": 2, "service_windows_task.go:(*windowsLogonTaskAdapter).Start": 1,
 	"service_windows_task.go:(*windowsLogonTaskAdapter).mutationLock": 1, "stop_windows.go:(*Cell).stopPostgres": 1, "stop_windows.go:(*Cell).windowsStopRecord": 1, "update_record.go:(*Cell).authenticateUpdateInstallation": 1,
 	"update_record.go:(*Cell).readDerivedUpdateRecord": 1, "update_record.go:(*Cell).readUpdateIntent": 1}
@@ -786,6 +793,7 @@ func TestLeaseWaitSourceContract(t *testing.T) {
 	const begin, inspect, witness = "\tif err := c.begin(context.Background(), \"start\"); err != nil {\n", "\tinspection, err := c.Inspect(ctx)\n", source + "ctx)\n\tif err != nil {\n\t\treturn errCheckpointWitness\n"
 	const journal, removal = "\tprogress, err := c.readJournal(ctx)\n\tif err != nil {\n\t\treturn result, err\n\t}\n", "func (c *Cell) finishRemoval(ctx context.Context, m *Manifest, purge bool) error {\n"
 	for _, row := range []struct{ name, file, before, after, want string }{
+		{"admission_lock", "service_adapter_admission.go", "lock, err := cell.own(ctx, false)", "lock, err := cell.own(context.Background(), false)", "lease_wait_placeholder:service_adapter_admission.go:serviceAdapterAdmissionForStep"},
 		{"endpoint_cleanup_attached", "service_control.go", "c.removeServiceControlEndpoint(context.WithoutCancel(ctx))", "c.removeServiceControlEndpoint(ctx)", "lease_wait_live:service_control.go:(*Cell).serveServiceControlForPlatform"},
 		{"wait_any_error", "files_other.go", "!errors.Is(err, syscall.EWOULDBLOCK)", "false", "lease_wait_body"},
 		{"wait_no_lstat", "files_other.go", "info, statErr := lstat(path); statErr != nil || !info.Mode().IsRegular() || ", "", "lease_wait_body"},
