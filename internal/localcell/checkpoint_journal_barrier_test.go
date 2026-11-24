@@ -5,6 +5,7 @@ package localcell
 import (
 	"bytes"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -369,5 +370,90 @@ func TestCheckpointJournalBarrierObservation(t *testing.T) {
 			drillAssert(t, len(trace.events) == 0, "a different or unproven journal was synced")
 			drillAssert(t, errors.Is(err, errCheckpointJournalIO), "unproven journal did not return storage failure")
 		})
+	}
+}
+
+// barrierLease gives a kept write-lease holder's take, broken and release
+// (readers6_linux_test.go). Only Linux waits a lease out (waitOutLease).
+var barrierLease = func(t *testing.T) (func(string) bool, func() bool, func()) {
+	t.Skip("rebound fixture needs an open that waits out a lease")
+	return nil, nil, nil
+}
+
+// While the barrier's own open waits out a lease, the journal directory or the
+// root moves and a hard-linked copy takes its name: the same file is reached
+// through held directories no longer at their names. A leftover's manifest
+// read, after its reader closed, is where the lease moves to the journal.
+func TestCheckpointJournalBarrierRebound(t *testing.T) {
+	for _, verb := range []string{"create", "delete"} {
+		for _, moved := range []string{"journal", "root"} {
+			t.Run(verb+"/"+moved, func(t *testing.T) {
+				takeManifest, manifestBroken, releaseManifest := barrierLease(t)
+				takeJournal, journalBroken, releaseJournal := barrierLease(t)
+				// The holder keeps its lease until the row lets go, so nothing here waits for the
+				// ceiling; a long one only leaves a loaded machine room to move the directory.
+				leaseWait.ceiling = 10 * time.Second
+				f, call := barrierFixture(t, verb)
+				c, from := f.cell, f.cell.path("journal")
+				if moved == "root" {
+					from = c.cfg.Root
+				}
+				drillAssert(t, c.begin(t.Context(), "checkpoint") == nil, "cannot prepare open checkpoint")
+				data := retainedRead(t, c, repairLog)
+				first := true // the verb's goroutine only
+				hold := func() {
+					if first {
+						first = false
+						takeManifest(c.path("manifest.json"))
+					}
+				}
+				if verb == "create" {
+					c.checkpointTest.newID = func() (string, error) { hold(); return checkpointNewID() }
+				} else {
+					c.checkpointTest.beforeStep = func(stage, _ string) {
+						if stage == "hold" {
+							hold()
+						}
+					}
+				}
+				trace := traceBarrier(t, c)
+				var refused error
+				finished := make(chan struct{})
+				go func() { defer close(finished); refused = call() }()
+				t.Cleanup(func() { releaseManifest(); releaseJournal(); <-finished })
+				seen := func(broken func() bool) bool {
+					for end := time.Now().Add(leaseWait.ceiling); !broken() && time.Now().Before(end); {
+						time.Sleep(leaseWait.first)
+					}
+					return broken()
+				}
+				drillAssert(t, seen(manifestBroken), "the leftover's manifest read did not meet the lease")
+				drillAssert(t, takeJournal(c.path(repairLog)), "this kernel or sandbox refused the lease the row needs")
+				releaseManifest()
+				drillAssert(t, seen(journalBroken), "barrier open did not meet the lease")
+				broke, aside := time.Now(), filepath.Join(t.TempDir(), "old")
+				drillAssert(t, os.Rename(from, aside) == nil, "cannot move fixture directory aside")
+				copied := filepath.WalkDir(aside, func(path string, entry fs.DirEntry, err error) error {
+					switch rel, relErr := filepath.Rel(aside, path); {
+					case err != nil || relErr != nil:
+						return errors.Join(err, relErr)
+					case entry.IsDir():
+						return os.Mkdir(filepath.Join(from, rel), 0700)
+					default:
+						return os.Link(path, filepath.Join(from, rel))
+					}
+				})
+				drillAssert(t, copied == nil, "cannot copy fixture directory with hard links")
+				drillAssert(t, time.Since(broke) < leaseWait.ceiling/2, "barrier open could reach its lease ceiling before the release")
+				releaseJournal()
+				<-finished
+				drillAssert(t, len(trace.events) == 0, "barrier synced a journal that was no longer at its name")
+				d := ClassifyCheckpointFailure(refused)
+				drillAssert(t, d.Class == "local_checkpoint_operation_failed", "barrier failure changed diagnostic class")
+				drillAssert(t, d.Reason == "", "barrier failure exposed a reason")
+				drillAssert(t, !d.CleanupIncomplete, "barrier failure claimed incomplete cleanup")
+				assertFileBytes(t, c.path(repairLog), data, "refusal wrote journal bytes")
+			})
+		}
 	}
 }

@@ -15,7 +15,7 @@ func TestCheckpointJournalBarrierPlatform(t *testing.T) {
 		want []string
 	}{
 		{"checkpoint_journal_repair.go", []string{
-			`const checkpointJournalSettlementSupported = runtime.GOOS == "linux" || runtime.GOOS == "darwin"`,
+			"\nconst checkpointJournalSettlementSupported = runtime.GOOS == \"linux\" || runtime.GOOS == \"darwin\"\n", // the whole line
 			"func (c *Cell) RepairCheckpointJournal(ctx context.Context) (CheckpointJournalStatus, error) {\n\tif !checkpointJournalSettlementSupported {\n\t\treturn \"\", errCheckpointState\n\t}",
 		}},
 		{"checkpoint.go", []string{
