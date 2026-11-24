@@ -19,8 +19,8 @@ import (
 
 var syncFile = func(f *os.File) error { return f.Sync() }
 
-// syncJournalDirectory syncs journal/ after an ordinary journal append creates
-// operations.jsonl. Tests replace it; production always uses syncDirectory.
+// syncJournalDirectory publishes the directory entries for operations.jsonl
+// and journal/ at the first append. Tests replace it to observe their order.
 var syncJournalDirectory = syncDirectory
 
 // syncPrivateDirParent persists a newly created directory's parent entry after
@@ -439,10 +439,9 @@ func (c *Cell) journal(ctx context.Context, operation, step, state string) error
 }
 
 // journalCause is journal with an optional fixed cause. When the append creates
-// operations.jsonl, journal/ is synced after the record so the new file's
-// directory entry is durable before success; appends to an existing file sync
-// only the file. A failed directory sync leaves the complete, file-synced record
-// in place for Repair, as if the process had stopped right after the append.
+// operations.jsonl, sync journal/ and then the cell root to publish both names.
+// Existing-file appends sync only the file. A failed directory sync leaves
+// the complete, file-synced record in place for Repair.
 func (c *Cell) journalCause(ctx context.Context, operation, step, state, cause string) error {
 	path := c.path("journal", "operations.jsonl")
 	irregular := errors.New("local cell journal must be a regular file")
@@ -473,6 +472,11 @@ func (c *Cell) journalCause(ctx context.Context, operation, step, state, cause s
 	if created {
 		if err := syncJournalDirectory(c.path("journal")); err != nil {
 			return errors.New("cannot sync local cell journal directory")
+		}
+		if runtime.GOOS != "windows" {
+			if err := syncJournalDirectory(c.cfg.Root); err != nil {
+				return errors.New("cannot sync local cell journal directory")
+			}
 		}
 	}
 	return nil

@@ -21,6 +21,9 @@ func TestCheckpointJournalBarrierPlatform(t *testing.T) {
 		{"checkpoint.go", []string{
 			barrier,
 		}},
+		{"lifecycle.go", []string{
+			"if checkpointJournalSettlementSupported && " + barrier + " != nil {",
+		}},
 		{"checkpoint_journal_binding_unix.go", []string{
 			"//go:build linux || darwin\n",
 			"func (c *Cell) syncCheckpointJournalPrefix(",

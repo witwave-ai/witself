@@ -416,8 +416,9 @@ func TestRetainedRemovalCrashRepair(t *testing.T) {
 			original := syncFile
 			t.Cleanup(func() { syncFile = original })
 			armed, fired := false, false
+			armAt := boundary
 			c.cfg.Failpoint = func(op, step string) error {
-				if op == "remove" && step == boundary {
+				if op == "remove" && step == armAt {
 					armed = true
 				}
 				return nil
@@ -436,7 +437,8 @@ func TestRetainedRemovalCrashRepair(t *testing.T) {
 				// Physical operation-done is present, but a returned sync failure
 				// never authorizes clearing Cleanup without a successful retry sync.
 				before := retainedSnapshot(t, c)
-				fired = false
+				// Reach the retained-cleanup sync even when Repair first syncs its prefix.
+				armAt, armed, fired = "cleanup_journal", false, false
 				if err := c.Repair(t.Context()); !fired || err == nil || err.Error() != "cannot sync local cell journal" {
 					t.Fatal("completion retry ignored journal sync failure")
 				}
@@ -513,6 +515,13 @@ func TestRetainedRemovalRepairRollsFailedRemovalForward(t *testing.T) {
 	syncFile = func(file *os.File) error {
 		err := original(file)
 		if !injected && filepath.Base(file.Name()) == "operations.jsonl" {
+			info, statErr := file.Stat()
+			if statErr != nil {
+				t.Fatal("cannot observe the first removal append")
+			}
+			if info.Size() == int64(len(f.prefix)) {
+				return err // the prefix sync precedes the first append
+			}
 			injected = true
 			injectErr = writeAtomic(c.path("run", "server.json"), foreign, nil)
 		}

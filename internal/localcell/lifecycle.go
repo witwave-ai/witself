@@ -46,6 +46,14 @@ func (c *Cell) ownExisting(ctx context.Context) (*operationLock, error) {
 }
 
 var errJournalInterrupted = errors.New("local cell operation interrupted; run repair first")
+var errSyncLifecycleJournal = errors.New("cannot sync local cell journal")
+
+func (c *Cell) syncLifecycleJournalPrefix(ctx context.Context, progress journalProgress) error {
+	if checkpointJournalSettlementSupported && c.syncCheckpointJournalPrefix(ctx, progress) != nil {
+		return errSyncLifecycleJournal
+	}
+	return nil
+}
 
 func (c *Cell) begin(ctx context.Context, operation string) error {
 	progress, err := c.readJournal(ctx)
@@ -54,6 +62,12 @@ func (c *Cell) begin(ctx context.Context, operation string) error {
 	}
 	if progress.pending != nil || progress.tornTail {
 		return errJournalInterrupted
+	}
+	// Checkpoint verbs already settled this prefix before closing any leftover.
+	if operation != "checkpoint" && operation != "checkpoint_delete" {
+		if err := c.syncLifecycleJournalPrefix(ctx, progress); err != nil {
+			return err
+		}
 	}
 	return c.journal(ctx, operation, "operation", "started")
 }
@@ -463,6 +477,10 @@ func (c *Cell) Repair(ctx context.Context) error {
 	pending := progress.pending
 	if pending == nil {
 		return nil
+	}
+	// Recovery may act on a process before it writes its first journal record.
+	if err := c.syncLifecycleJournalPrefix(context.Background(), progress); err != nil {
+		return err
 	}
 	if (pending.Operation == "start" || pending.Operation == "install" || pending.Operation == "reinstall") && pending.Step == "postgres" {
 		if err := c.recoverPostgresRecord(context.Background()); err != nil {

@@ -70,8 +70,12 @@ func traceBarrier(t *testing.T, c *Cell) *barrierTrace {
 		return directory(d)
 	}
 	syncJournalDirectory = func(path string) error {
-		if path == c.path("journal") {
-			if err := visit("publish"); err != nil {
+		stage := "publish"
+		if path == c.cfg.Root {
+			stage = "publish-root"
+		}
+		if path == c.cfg.Root || path == c.path("journal") {
+			if err := visit(stage); err != nil {
 				return err
 			}
 		}
@@ -131,8 +135,9 @@ func TestCheckpointJournalBarrierAdmitted(t *testing.T) {
 				err := call()
 				stages := slices.DeleteFunc(slices.Clone(trace.events), func(s string) bool { return s == "append" })
 				if state == "absent" {
-					drillAssert(t, slices.Equal(stages, []string{"publish"}), "barrier created an absent log")
+					drillAssert(t, slices.Equal(stages, []string{"publish", "publish-root"}), "barrier created an absent log")
 					drillAssert(t, slices.Index(trace.events, "publish") == 1, "first journal name was acknowledged without directory sync")
+					drillAssert(t, slices.Index(trace.events, "publish-root") == 2, "first publication did not sync the root before the next append")
 				} else {
 					drillAssert(t, slices.Equal(stages, []string{"file", "journal", "root"}), "barrier count changed for an existing log")
 					drillAssert(t, slices.Index(trace.events, "append") == 3, "an append preceded the prefix sync")

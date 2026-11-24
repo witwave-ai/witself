@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"reflect"
+	"runtime"
 	"slices"
 	"testing"
 )
@@ -20,8 +21,8 @@ type journalDirectorySyncTrace struct {
 	events            []string
 	directoryPaths    []string
 	directoryContents [][]byte
-	fileErr           error // returned instead of syncing the journal file
-	directoryErr      error // returned instead of syncing the journal directory
+	fileErr           error  // returned instead of syncing the journal file
+	failDirectory     string // directory whose sync fails
 }
 
 // traceJournalDirectorySync replaces both hooks for the rest of the test and
@@ -47,7 +48,11 @@ func traceJournalDirectorySync(t *testing.T, c *Cell) *journalDirectorySyncTrace
 		return nil
 	}
 	syncJournalDirectory = func(path string) error {
-		trace.events = append(trace.events, "directory")
+		stage := "directory"
+		if path == c.cfg.Root {
+			stage = "root"
+		}
+		trace.events = append(trace.events, stage)
 		trace.directoryPaths = append(trace.directoryPaths, path)
 		// Capture the file as it stands when the directory sync starts.
 		data, err := os.ReadFile(journalPath)
@@ -55,8 +60,8 @@ func traceJournalDirectorySync(t *testing.T, c *Cell) *journalDirectorySyncTrace
 			data = nil
 		}
 		trace.directoryContents = append(trace.directoryContents, data)
-		if trace.directoryErr != nil {
-			return trace.directoryErr
+		if path == trace.failDirectory {
+			return os.ErrInvalid
 		}
 		return realDirectorySync(path)
 	}
@@ -101,6 +106,13 @@ func TestJournalDirectorySyncDefaultsToSyncDirectory(t *testing.T) {
 	}
 }
 
+func firstJournalSyncs() []string {
+	if runtime.GOOS == "windows" {
+		return []string{"file", "directory"}
+	}
+	return []string{"file", "directory", "root"}
+}
+
 func TestJournalDirectorySyncFirstAppendAfterFileSync(t *testing.T) {
 	c, _ := unitCell(t)
 	path := c.path("journal", "operations.jsonl")
@@ -111,11 +123,15 @@ func TestJournalDirectorySyncFirstAppendAfterFileSync(t *testing.T) {
 	if err := c.journal(context.Background(), "stop", "operation", "started"); err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(trace.events, []string{"file", "directory"}) {
-		t.Fatalf("first append sync trace = %v; want one completed file sync, then one directory sync", trace.events)
+	if !slices.Equal(trace.events, firstJournalSyncs()) {
+		t.Fatal("first append did not sync file, journal directory and supported root in order")
 	}
-	if !slices.Equal(trace.directoryPaths, []string{c.path("journal")}) {
-		t.Fatal("first append did not sync exactly the journal directory")
+	paths := []string{c.path("journal")}
+	if runtime.GOOS != "windows" {
+		paths = append(paths, c.cfg.Root)
+	}
+	if !slices.Equal(trace.directoryPaths, paths) {
+		t.Fatal("first append synced the wrong directory")
 	}
 	if !journalDirectorySyncSingleRecord(trace.directoryContents[0], "stop", "operation", "started") {
 		t.Fatal("journal directory sync preceded the complete first record")
@@ -132,7 +148,7 @@ func TestJournalDirectorySyncSkipsExistingFile(t *testing.T) {
 		if err := c.journal(context.Background(), "stop", "stop", "started"); err != nil {
 			t.Fatal(err)
 		}
-		if !slices.Equal(trace.events, []string{"file", "directory", "file"}) {
+		if !slices.Equal(trace.events, append(firstJournalSyncs(), "file")) {
 			t.Fatalf("append sync trace = %v; want the directory synced only by the creating append", trace.events)
 		}
 	})
@@ -159,25 +175,39 @@ func TestJournalDirectorySyncSkipsExistingFile(t *testing.T) {
 		if err := c.Stop(t.Context()); err != nil {
 			t.Fatal(err)
 		}
-		if len(trace.events) < 3 || !slices.Equal(trace.events[:2], []string{"file", "directory"}) ||
-			slices.Contains(trace.events[2:], "directory") {
-			t.Fatalf("Stop sync trace = %v; want one directory sync, right after the first file sync only", trace.events)
+		first := firstJournalSyncs()
+		if len(trace.events) <= len(first) || !slices.Equal(trace.events[:len(first)], first) ||
+			slices.ContainsFunc(trace.events[len(first):], func(stage string) bool { return stage != "file" }) {
+			t.Fatal("Stop synced outside the expected publication and append sequence")
 		}
 	})
 }
 
 func TestJournalDirectorySyncFailureKeepsRecordForRepair(t *testing.T) {
+	t.Run("journal", func(t *testing.T) { checkPublicationFailure(t, false) })
+	if runtime.GOOS != "windows" {
+		t.Run("root", func(t *testing.T) { checkPublicationFailure(t, true) })
+	}
+}
+
+func checkPublicationFailure(t *testing.T, failRoot bool) {
+	t.Helper()
 	c, _ := unitCell(t)
 	path := c.path("journal", "operations.jsonl")
 	trace := traceJournalDirectorySync(t, c)
-	trace.directoryErr = errors.New("synthetic private directory sync details")
+	trace.failDirectory = c.path("journal")
+	want := []string{"file", "directory"}
+	if failRoot {
+		trace.failDirectory = c.cfg.Root
+		want = append(want, "root")
+	}
 	// Stop's first append is begin's operation record, written before any step.
 	err := c.Stop(t.Context())
 	if err == nil || err.Error() != "cannot sync local cell journal directory" {
 		t.Fatal("first-append directory sync failure did not return the fixed value-free journal error")
 	}
-	if !slices.Equal(trace.events, []string{"file", "directory"}) {
-		t.Fatalf("failed first append sync trace = %v; want the file sync, then the failed directory sync", trace.events)
+	if !slices.Equal(trace.events, want) {
+		t.Fatal("first publication continued past the failed directory sync")
 	}
 	data, err := os.ReadFile(path)
 	if err != nil || !journalDirectorySyncSingleRecord(data, "stop", "operation", "started") {
@@ -194,11 +224,11 @@ func TestJournalDirectorySyncFailureKeepsRecordForRepair(t *testing.T) {
 	if err := c.Stop(t.Context()); err == nil || err.Error() != "local cell operation interrupted; run repair first" {
 		t.Fatal("a lifecycle call ran on top of the unsettled first record")
 	}
-	if len(trace.events) != 2 {
+	if len(trace.events) != len(want) {
 		t.Fatal("a refused lifecycle call synced the journal")
 	}
 	assertFileBytes(t, path, data, "a refused lifecycle call changed the journal")
-	trace.directoryErr = nil
+	trace.failDirectory = ""
 	if err := c.Repair(t.Context()); err != nil {
 		t.Fatal(err)
 	}
