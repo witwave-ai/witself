@@ -35,7 +35,7 @@ func launchdFixtureError(t *testing.T, code int, detail string) error {
 				return
 			}
 			cmd := exec.CommandContext(t.Context(), host, "-test.run=^TestLaunchdFixtureExit$", "--", "--launchd-fixture-exit", strconv.Itoa(n))
-			cmd.Env = []string{}
+			cmd.Env = []string{"GOCOVERDIR=" + t.TempDir()}
 			var exitErr *exec.ExitError
 			if err := cmd.Run(); !errors.As(err, &exitErr) {
 				launchdFixtureStates.err = errors.New("cannot create synthetic exit status")

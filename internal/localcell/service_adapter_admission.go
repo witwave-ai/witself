@@ -11,15 +11,15 @@ import (
 	"time"
 )
 
-func serviceAdapterAdmission(owner string, d ServiceDescriptor, artifactDir string) (*Cell, ServiceDescriptor, func(), error) {
-	return serviceAdapterAdmissionForStep(owner, d, artifactDir, "apply")
+func serviceAdapterAdmission(ctx context.Context, owner string, d ServiceDescriptor, artifactDir string) (*Cell, ServiceDescriptor, func(), error) {
+	return serviceAdapterAdmissionForStep(ctx, owner, d, artifactDir, "apply")
 }
 
-func serviceAdapterRemovalAdmission(owner string, d ServiceDescriptor, artifactDir string) (*Cell, ServiceDescriptor, func(), error) {
-	return serviceAdapterAdmissionForStep(owner, d, artifactDir, "remove")
+func serviceAdapterRemovalAdmission(ctx context.Context, owner string, d ServiceDescriptor, artifactDir string) (*Cell, ServiceDescriptor, func(), error) {
+	return serviceAdapterAdmissionForStep(ctx, owner, d, artifactDir, "remove")
 }
 
-func serviceAdapterAdmissionForStep(owner string, d ServiceDescriptor, artifactDir, step string) (*Cell, ServiceDescriptor, func(), error) {
+func serviceAdapterAdmissionForStep(ctx context.Context, owner string, d ServiceDescriptor, artifactDir, step string) (*Cell, ServiceDescriptor, func(), error) {
 	if owner == "" {
 		return nil, ServiceDescriptor{}, nil, serviceSystemdError(ErrServiceOwnershipConflict, step+":descriptor", "owner")
 	}
@@ -30,23 +30,33 @@ func serviceAdapterAdmissionForStep(owner string, d ServiceDescriptor, artifactD
 	if err != nil {
 		return nil, ServiceDescriptor{}, nil, serviceSystemdError(ErrServiceOwnershipConflict, step+":root", "unavailable")
 	}
-	lock, err := cell.own(context.Background(), false)
+	lock, err := cell.own(ctx, false)
 	if err != nil {
 		if errors.Is(err, ErrLocked) {
 			return nil, ServiceDescriptor{}, nil, err
 		}
-		return nil, ServiceDescriptor{}, nil, serviceSystemdError(ErrServiceOwnershipConflict, step+":root", "unavailable")
+		return nil, ServiceDescriptor{}, nil, serviceAdapterReadFailure(ctx, err, serviceSystemdError(ErrServiceOwnershipConflict, step+":root", "unavailable"))
 	}
-	fresh, err := cell.serviceDescriptorForOwner(context.Background(), owner)
+	fresh, err := cell.serviceDescriptorForOwner(ctx, owner)
 	if err != nil {
 		_ = lock.Close()
-		return nil, ServiceDescriptor{}, nil, serviceSystemdError(ErrServiceOwnershipConflict, step+":descriptor", "unavailable")
+		return nil, ServiceDescriptor{}, nil, serviceAdapterReadFailure(ctx, err, serviceSystemdError(ErrServiceOwnershipConflict, step+":descriptor", "unavailable"))
 	}
 	if !reflect.DeepEqual(windowsTaskImmutable(fresh), windowsTaskImmutable(d)) {
 		_ = lock.Close()
 		return nil, ServiceDescriptor{}, nil, serviceSystemdError(ErrServiceOwnershipConflict, step+":descriptor", "stale_identity")
 	}
 	return cell, fresh, func() { _ = lock.Close() }, nil
+}
+
+// Preserve the interrupted read and its site only when this operation ended
+// the lease wait. Other failures retain the adapter's existing classification.
+func serviceAdapterReadFailure(ctx context.Context, err, refusal error) error {
+	var cut *leaseWaitCut
+	if ctx.Err() != nil && errors.As(err, &cut) && errors.Is(cut, ctx.Err()) {
+		return err
+	}
+	return refusal
 }
 
 func serviceAdapterConfinementForStep(root, artifactDir, step string) error {

@@ -209,7 +209,7 @@ func (a *systemdUserAdapter) directoryAccessible(path string, write bool) bool {
 	return err == nil && info.Mode().Perm()&mode == mode
 }
 
-func (a *systemdUserAdapter) ownedUnit(d ServiceDescriptor, want []byte) (bool, error) {
+func (a *systemdUserAdapter) ownedUnit(ctx context.Context, d ServiceDescriptor, want []byte) (bool, error) {
 	if err := a.inspectDirectories(false); err != nil {
 		return false, err
 	}
@@ -233,9 +233,9 @@ func (a *systemdUserAdapter) ownedUnit(d ServiceDescriptor, want []byte) (bool, 
 	if a.owned == nil || !a.owned(path, info) {
 		return false, serviceSystemdError(ErrServiceOwnershipConflict, "unit_file:owner", "not_current_uid")
 	}
-	file, err := openPlainReader(context.Background(), path)
+	file, err := openPlainReader(ctx, path)
 	if err != nil {
-		return false, a.commandError(ErrServiceOwnershipConflict, "unit_file:read", err, d.Root)
+		return false, serviceAdapterReadFailure(ctx, err, a.commandError(ErrServiceOwnershipConflict, "unit_file:read", err, d.Root))
 	}
 	defer func() { _ = file.Close() }()
 	if opened, err := file.Stat(); err != nil || !regularFile(opened, nil) {
@@ -312,8 +312,11 @@ func (a *systemdUserAdapter) Inspect(ctx context.Context, d ServiceIdentity) (Se
 		}
 		return serviceUnavailable(err)
 	}
-	exists, err := a.ownedUnit(d, want)
+	exists, err := a.ownedUnit(ctx, d, want)
 	if err != nil {
+		if cut := serviceAdapterReadFailure(ctx, err, nil); cut != nil {
+			return ServiceObservation{}, cut
+		}
 		if errors.Is(err, ErrServiceManagerUnavailable) {
 			return serviceUnavailable(err)
 		}
@@ -465,12 +468,12 @@ func (a *systemdUserAdapter) Apply(ctx context.Context, plan ServicePlan) error 
 		return err
 	}
 	d := plan.Spec
-	cell, fresh, unlock, err := serviceAdapterAdmission(a.uid, d, a.unitDir)
+	cell, fresh, unlock, err := serviceAdapterAdmission(ctx, a.uid, d, a.unitDir)
 	if err != nil {
 		return err
 	}
 	defer unlock()
-	if err := cell.maintenanceFenceAllows(context.Background(), 0); err != nil {
+	if err := cell.maintenanceFenceAllows(ctx, 0); err != nil {
 		return err
 	}
 	if !reflect.DeepEqual(fresh, d) {
@@ -483,7 +486,7 @@ func (a *systemdUserAdapter) Apply(ctx context.Context, plan ServicePlan) error 
 	if err := a.inspectDirectories(true); err != nil {
 		return err
 	}
-	exists, err := a.ownedUnit(d, want)
+	exists, err := a.ownedUnit(ctx, d, want)
 	if err != nil {
 		return err
 	}
@@ -525,28 +528,26 @@ func (a *systemdUserAdapter) Apply(ctx context.Context, plan ServicePlan) error 
 			return a.commandError(ErrServiceRegistrationFailed, "unit_dir:sync_created", err, d.Root)
 		}
 	}
-	enableAttempted := false
-	cleanup := func() {
-		if created != nil && !enableAttempted {
-			a.cleanupPartial(ctx, d, created)
+	cleanup := func(primary error) error {
+		if created != nil {
+			if cleanupErr := a.cleanupPartial(ctx, d, created); cleanupErr != nil && serviceAdapterReadFailure(ctx, primary, nil) == nil {
+				return errors.Join(primary, cleanupErr)
+			}
 		}
+		return primary
 	}
 	if _, err := a.command(ctx, a.systemctl, "--user", "daemon-reload"); err != nil {
-		cleanup()
-		return a.commandError(ErrServiceRegistrationFailed, "daemon_reload", err, d.Root)
+		return cleanup(a.commandError(ErrServiceRegistrationFailed, "daemon_reload", err, d.Root))
 	}
 	// Loading may expose a conflicting registration/drop-in; never enable it.
 	if observation, err := a.Inspect(ctx, d); err != nil || !observation.Owned {
-		cleanup()
-		return serviceRegistrationError("post_reload", err)
+		return cleanup(serviceAdapterReadFailure(ctx, err, serviceRegistrationError("post_reload", err)))
 	}
-	enableAttempted = true
 	if _, err := a.command(ctx, a.systemctl, "--user", "enable", "--now", serviceUnitLabel(d)); err != nil {
-		cleanup()
 		return a.commandError(ErrServiceRegistrationFailed, "enable_now", err, d.Root)
 	}
 	if observation, err := a.Inspect(ctx, d); err != nil || !observation.Owned {
-		return serviceRegistrationError("post_enable", err)
+		return serviceAdapterReadFailure(ctx, err, serviceRegistrationError("post_enable", err))
 	}
 	return nil
 }
@@ -576,15 +577,16 @@ func (a *systemdUserAdapter) removeCreatedUnit(d ServiceDescriptor, identity os.
 	}
 }
 
-func (a *systemdUserAdapter) cleanupPartial(ctx context.Context, d ServiceDescriptor, identity os.FileInfo) {
+func (a *systemdUserAdapter) cleanupPartial(ctx context.Context, d ServiceDescriptor, identity os.FileInfo) error {
 	// Cleanup never removes an unverified registration. A failed ownership check
 	// leaves the partial registration for diagnostics rather than guessing.
 	observation, err := a.Inspect(ctx, d)
 	if err != nil || !observation.Owned {
-		return
+		return serviceAdapterReadFailure(ctx, err, nil)
 	}
 	a.removeCreatedUnit(d, identity)
 	_, _ = a.command(ctx, a.systemctl, "--user", "daemon-reload")
+	return nil
 }
 
 func (a *systemdUserAdapter) Remove(ctx context.Context, d ServiceIdentity) error {
@@ -609,7 +611,7 @@ func (a *systemdUserAdapter) Remove(ctx context.Context, d ServiceIdentity) erro
 			return serviceSystemdError(ErrServiceRemovalFailed, "remove:host_exit", "host_exit_failed")
 		}
 	}
-	cell, fresh, unlock, err := serviceAdapterRemovalAdmission(a.uid, d, a.unitDir)
+	cell, fresh, unlock, err := serviceAdapterRemovalAdmission(ctx, a.uid, d, a.unitDir)
 	if err != nil {
 		return err
 	}
@@ -617,15 +619,18 @@ func (a *systemdUserAdapter) Remove(ctx context.Context, d ServiceIdentity) erro
 	if fresh.DesiredState != "stopped" {
 		return serviceSystemdError(ErrServiceOwnershipConflict, "remove:descriptor", "not_stopped")
 	}
-	releaseHost, err := serviceAdapterRemovalHostLock(context.Background(), cell)
+	releaseHost, err := serviceAdapterRemovalHostLock(ctx, cell)
 	if err != nil {
+		if cut := serviceAdapterReadFailure(ctx, err, nil); cut != nil {
+			return cut
+		}
 		if errors.Is(err, ErrLocked) {
 			return serviceSystemdError(ErrServiceHostActive, "remove:host_lease", "active")
 		}
 		return serviceSystemdError(ErrServiceRemovalFailed, "remove:host_lease", "unavailable")
 	}
 	defer releaseHost()
-	if err := cell.maintenanceFenceAllows(context.Background(), 0); err != nil {
+	if err := cell.maintenanceFenceAllows(ctx, 0); err != nil {
 		return err
 	}
 	observation, err = a.Inspect(ctx, d)
@@ -642,7 +647,7 @@ func (a *systemdUserAdapter) Remove(ctx context.Context, d ServiceIdentity) erro
 	if err != nil {
 		return err
 	}
-	if exists, err := a.ownedUnit(d, want); err != nil {
+	if exists, err := a.ownedUnit(ctx, d, want); err != nil {
 		return err
 	} else if !exists {
 		return serviceSystemdError(ErrServiceOwnershipConflict, "remove:unit_file", "missing")

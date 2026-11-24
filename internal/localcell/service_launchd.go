@@ -468,12 +468,12 @@ func (a *launchdAgentAdapter) Apply(ctx context.Context, plan ServicePlan) error
 		return err
 	}
 	owned := err == nil && obs.Registered && obs.Owned
-	cell, fresh, unlock, err := serviceAdapterAdmission(a.uid, d, a.agentDir)
+	cell, fresh, unlock, err := serviceAdapterAdmission(ctx, a.uid, d, a.agentDir)
 	if err != nil {
 		return err
 	}
 	defer unlock()
-	if err := cell.maintenanceFenceAllows(context.Background(), 0); err != nil {
+	if err := cell.maintenanceFenceAllows(ctx, 0); err != nil {
 		return err
 	}
 	if !reflect.DeepEqual(fresh, d) {
@@ -698,7 +698,7 @@ func (a *launchdAgentAdapter) Remove(ctx context.Context, d ServiceIdentity) err
 			return serviceSystemdError(ErrServiceRemovalFailed, "remove:host_exit", "host_exit_failed")
 		}
 	}
-	cell, fresh, unlock, err := serviceAdapterRemovalAdmission(a.uid, d, a.agentDir)
+	cell, fresh, unlock, err := serviceAdapterRemovalAdmission(ctx, a.uid, d, a.agentDir)
 	if err != nil {
 		return err
 	}
@@ -706,15 +706,18 @@ func (a *launchdAgentAdapter) Remove(ctx context.Context, d ServiceIdentity) err
 	if fresh.DesiredState != "stopped" {
 		return serviceSystemdError(ErrServiceOwnershipConflict, "remove:descriptor", "not_stopped")
 	}
-	releaseHost, err := serviceAdapterRemovalHostLock(context.Background(), cell)
+	releaseHost, err := serviceAdapterRemovalHostLock(ctx, cell)
 	if err != nil {
+		if cut := serviceAdapterReadFailure(ctx, err, nil); cut != nil {
+			return cut
+		}
 		if errors.Is(err, ErrLocked) {
 			return serviceSystemdError(ErrServiceHostActive, "remove:host_lease", "active")
 		}
 		return serviceSystemdError(ErrServiceRemovalFailed, "remove:host_lease", "unavailable")
 	}
 	defer releaseHost()
-	if err := cell.maintenanceFenceAllows(context.Background(), 0); err != nil {
+	if err := cell.maintenanceFenceAllows(ctx, 0); err != nil {
 		return err
 	}
 	obs, err = a.Inspect(ctx, d)

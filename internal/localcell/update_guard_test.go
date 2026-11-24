@@ -419,6 +419,9 @@ func updateOrdinaryAdmissions(file string, fn *ast.FuncDecl) map[*ast.SelectorEx
 
 // Only released checkpoint owners and the context-aware service admissions pass their own context.
 func maintenanceFenceContext(fn *ast.FuncDecl, argument ast.Expr) bool {
+	if _, unixAdapter := maintenanceUnixAdapterFiles[updateReceiverName(fn)]; unixAdapter && (fn.Name.Name == "Apply" || fn.Name.Name == "Remove") {
+		return leaseWaitOwnContext(fn, argument)
+	}
 	switch fn.Name.Name {
 	case "Checkpoint", "DeleteCheckpoint", "PrepareService", "RepairService", "reconcileServiceBoot", "setServiceDesiredStateLocked", "serviceMaintenanceObservation":
 		return leaseWaitOwnContext(fn, argument) && admissionNodeText(argument) == "ctx"

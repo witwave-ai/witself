@@ -56,7 +56,7 @@ var reader2UnixRows = []reader2Row{
 		}
 		a.inspectFile = reader2PlantAfter(a.unitPath(d), plant)
 		return a.unitPath(d), func() error {
-			owned, err := a.ownedUnit(d, want)
+			owned, err := a.ownedUnit(context.Background(), d, want)
 			if err == nil && !owned {
 				return errors.New("unit content lost")
 			}

@@ -48,9 +48,9 @@ func maintenanceRemovalAdmissionOwner(filename string, fn *ast.FuncDecl) string 
 	if maintenanceRemovalFiles[receiver] != filename || fn.Name.Name != "Remove" || fn.Body == nil || admissionNodeText(fn.Type) != "func(ctx context.Context, d ServiceIdentity) error" {
 		return "signature"
 	}
-	lockName := "serviceAdapterRemovalAdmission"
+	lockName, fence := "serviceAdapterRemovalAdmission", maintenanceUnixAdapterFence
 	if receiver == "windowsLogonTaskAdapter" {
-		lockName = "mutationLock"
+		lockName, fence = "mutationLock", maintenanceAdapterAdmissionStatement
 	}
 	var cell, unlock, hostUnlock *ast.Ident
 	var operationPosition, hostPosition, fencePosition, drainPosition token.Pos
@@ -123,7 +123,7 @@ func maintenanceRemovalAdmissionOwner(filename string, fn *ast.FuncDecl) string 
 				lockCalls++
 			case "serviceAdapterRemovalHostLock":
 				hostCalls++
-				if len(node.Args) != 2 || admissionNodeText(node.Args[0]) != "context.Background()" {
+				if len(node.Args) != 2 || !maintenanceFenceContext(fn, node.Args[0]) {
 					invalid = true
 				} else if id, ok := node.Args[1].(*ast.Ident); !ok || id.Obj != cell.Obj {
 					invalid = true
@@ -140,7 +140,7 @@ func maintenanceRemovalAdmissionOwner(filename string, fn *ast.FuncDecl) string 
 				fenceCalls++
 				fencePosition = node.Pos()
 				selector, ok := node.Fun.(*ast.SelectorExpr)
-				if !ok || admissionNodeText(node) != "cell.maintenanceFenceAllows(context.Background(), 0)" {
+				if !ok || len(node.Args) != 2 || !maintenanceFenceContext(fn, node.Args[0]) || admissionNodeText(node.Args[1]) != "0" {
 					invalid = true
 				} else if id, ok := selector.X.(*ast.Ident); !ok || id.Obj != cell.Obj {
 					invalid = true
@@ -169,7 +169,7 @@ func maintenanceRemovalAdmissionOwner(filename string, fn *ast.FuncDecl) string 
 	}
 	gateStatements := 0
 	ast.Inspect(fn.Body, func(node ast.Node) bool {
-		if branch, ok := node.(*ast.IfStmt); ok && admissionNodeText(branch) == admissionStatements(maintenanceAdapterAdmissionStatement)[0] {
+		if branch, ok := node.(*ast.IfStmt); ok && admissionNodeText(branch) == admissionStatements(fence)[0] {
 			gateStatements++
 		}
 		if call, ok := node.(*ast.CallExpr); ok && removalDestructiveCall(call) && call.Pos() < fencePosition {
@@ -211,7 +211,7 @@ func maintenanceRemovalSourceContract(sources map[string]string) []string {
 				if fn.Name.Name == "serviceAdapterRemovalAdmission" {
 					step = "remove"
 				}
-				want := admissionStatements(`return serviceAdapterAdmissionForStep(owner, d, artifactDir, "` + step + `")`)
+				want := admissionStatements(`return serviceAdapterAdmissionForStep(ctx, owner, d, artifactDir, "` + step + `")`)
 				if filename != "service_adapter_admission.go" || fn.Body == nil || len(fn.Body.List) != 1 || admissionNodeText(fn.Body.List[0]) != want[0] {
 					failures = append(failures, "admission_step_binding")
 				}

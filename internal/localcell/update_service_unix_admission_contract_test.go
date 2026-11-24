@@ -9,10 +9,12 @@ import (
 	"testing"
 )
 
-const maintenanceUnixAdapterBlock = `cell, fresh, unlock, err := serviceAdapterAdmission(a.uid, d, a.ARTIFACT)
+const maintenanceUnixAdapterFence = `if err := cell.maintenanceFenceAllows(ctx, 0); err != nil { return err }`
+
+const maintenanceUnixAdapterBlock = `cell, fresh, unlock, err := serviceAdapterAdmission(ctx, a.uid, d, a.ARTIFACT)
 if err != nil { return err }
 defer unlock()
-if err := cell.maintenanceFenceAllows(context.Background(), 0); err != nil { return err }
+` + maintenanceUnixAdapterFence + `
 if !reflect.DeepEqual(fresh, d) { return serviceSystemdError(ErrServiceOwnershipConflict, "apply:descriptor", "stale_plan") }`
 
 var maintenanceUnixAdapterFiles = map[string]string{
@@ -136,15 +138,15 @@ const maintenanceUnixAdapterHelperBody = `if owner == "" { return nil, ServiceDe
 if err := serviceAdapterConfinementForStep(d.Root, artifactDir, step); err != nil { return nil, ServiceDescriptor{}, nil, err }
 cell, err := New(Config{Root: d.Root, Timeout: 60 * time.Second})
 if err != nil { return nil, ServiceDescriptor{}, nil, serviceSystemdError(ErrServiceOwnershipConflict, step+":root", "unavailable") }
-lock, err := cell.own(context.Background(), false)
+lock, err := cell.own(ctx, false)
 if err != nil {
  if errors.Is(err, ErrLocked) { return nil, ServiceDescriptor{}, nil, err }
- return nil, ServiceDescriptor{}, nil, serviceSystemdError(ErrServiceOwnershipConflict, step+":root", "unavailable")
+ return nil, ServiceDescriptor{}, nil, serviceAdapterReadFailure(ctx, err, serviceSystemdError(ErrServiceOwnershipConflict, step+":root", "unavailable"))
 }
-fresh, err := cell.serviceDescriptorForOwner(context.Background(), owner)
+fresh, err := cell.serviceDescriptorForOwner(ctx, owner)
 if err != nil {
  _ = lock.Close()
- return nil, ServiceDescriptor{}, nil, serviceSystemdError(ErrServiceOwnershipConflict, step+":descriptor", "unavailable")
+ return nil, ServiceDescriptor{}, nil, serviceAdapterReadFailure(ctx, err, serviceSystemdError(ErrServiceOwnershipConflict, step+":descriptor", "unavailable"))
 }
 if !reflect.DeepEqual(windowsTaskImmutable(fresh), windowsTaskImmutable(d)) {
  _ = lock.Close()
@@ -250,7 +252,7 @@ func maintenanceUnixAdapterAdmissionContract(sources map[string]string) []string
 			}
 			owners++
 			want := admissionStatements(maintenanceUnixAdapterHelperBody)
-			if fn.Recv != nil || admissionNodeText(fn.Type) != "func(owner string, d ServiceDescriptor, artifactDir, step string) (*Cell, ServiceDescriptor, func(), error)" || fn.Body == nil || len(fn.Body.List) != len(want) {
+			if fn.Recv != nil || admissionNodeText(fn.Type) != "func(ctx context.Context, owner string, d ServiceDescriptor, artifactDir, step string) (*Cell, ServiceDescriptor, func(), error)" || fn.Body == nil || len(fn.Body.List) != len(want) {
 				failures = append(failures, "helper_order")
 				continue
 			}
@@ -339,7 +341,7 @@ return c.readServiceDescriptorForOwner(ctx, owner)`) {
 						if call, ok := node.(*ast.CallExpr); ok {
 							if selector, ok := call.Fun.(*ast.SelectorExpr); ok && selector.Sel.Name == "serviceDescriptorForOwner" {
 								ownerCalls++
-								if filename != "service_adapter_admission.go" || owner != "serviceAdapterAdmissionForStep" || admissionNodeText(call) != "cell.serviceDescriptorForOwner(context.Background(), owner)" {
+								if filename != "service_adapter_admission.go" || owner != "serviceAdapterAdmissionForStep" || admissionNodeText(call) != "cell.serviceDescriptorForOwner(ctx, owner)" {
 									t.Fatal("Owner descriptor call escaped admission")
 								}
 							}
@@ -355,7 +357,7 @@ return c.readServiceDescriptorForOwner(ctx, owner)`) {
 							}
 							if identifier, ok := call.Fun.(*ast.Ident); ok && identifier.Name == "serviceAdapterAdmission" {
 								helperCalls++
-								if fn == nil || maintenanceUnixAdapterAdmissionOwner(filename, fn) != "" || len(call.Args) != 3 || admissionNodeText(call.Args[0]) != "a.uid" {
+								if fn == nil || maintenanceUnixAdapterAdmissionOwner(filename, fn) != "" || len(call.Args) != 4 || !leaseWaitOwnContext(fn, call.Args[0]) || admissionNodeText(call.Args[1]) != "a.uid" {
 									t.Fatal("Adapter owner call escaped Apply")
 								}
 							}
@@ -406,7 +408,7 @@ func TestUnixServiceMaintenanceAdmissionSourceContract(t *testing.T) {
 		})
 	}
 	statement := func(source string) string { return admissionIndent(admissionStatements(source)[0]) }
-	gate := statement(maintenanceAdapterAdmissionStatement)
+	gate := statement(maintenanceUnixAdapterFence)
 	mutable := statement(`if !reflect.DeepEqual(fresh, d) { return serviceSystemdError(ErrServiceOwnershipConflict, "apply:descriptor", "stale_plan") }`)
 	type mutation struct {
 		name, filename, owner, invariant string
@@ -421,12 +423,12 @@ func TestUnixServiceMaintenanceAdmissionSourceContract(t *testing.T) {
 			fixtures = append(fixtures, mutation{receiver + "_" + name, filename, "Apply", receiver + "_" + invariant, change})
 		}
 		appendFixture("missing_fence", "position", replace(gate, ""))
-		appendFixture("positive_generation", "position", replace("(), 0)", "(), 1)"))
-		appendFixture("variable_generation", "position", replace("(), 0)", "(), generation)"))
+		appendFixture("positive_generation", "position", replace("ctx, 0)", "ctx, 1)"))
+		appendFixture("variable_generation", "position", replace("ctx, 0)", "ctx, generation)"))
 		appendFixture("discarded_error", "position", replace(gate, "_ = cell.maintenanceFenceAllows(0)"))
 		appendFixture("cell_receiver", "position", replace("cell.maintenanceFenceAllows", "c.maintenanceFenceAllows"))
-		appendFixture("helper_wrong_owner", "position", replace("serviceAdapterAdmission(a.uid", "serviceAdapterAdmission(other"))
-		appendFixture("helper_wrong_directory", "position", replace("serviceAdapterAdmission(a.uid, d, a.", "serviceAdapterAdmission(a.uid, d, other."))
+		appendFixture("helper_wrong_owner", "position", replace("serviceAdapterAdmission(ctx, a.uid", "serviceAdapterAdmission(ctx, other"))
+		appendFixture("helper_wrong_directory", "position", replace("serviceAdapterAdmission(ctx, a.uid, d, a.", "serviceAdapterAdmission(ctx, a.uid, d, other."))
 		appendFixture("missing_defer", "position", replace("defer unlock()", ""))
 		appendFixture("wrong_receiver", "owner_count", replace("*"+receiver, "*OtherAdapter"))
 		appendFixture("wrong_parameter", "signature", replace("plan ServicePlan", "plan OtherPlan"))
@@ -462,7 +464,7 @@ func TestUnixServiceMaintenanceAdmissionSourceContract(t *testing.T) {
 			{"fresh_alias", "alias := fresh; _ = alias"},
 			{"cell_reassigned", "cell = other"},
 			{"fresh_captured", "_ = func() { _ = fresh }"},
-			{"second_helper", "_, _, _, _ = serviceAdapterAdmission(a.uid, d, outside)"},
+			{"second_helper", "_, _, _, _ = serviceAdapterAdmission(ctx, a.uid, d, outside)"},
 			{"second_lock", "_, _ = other.own(context.Background(), false)"},
 			{"second_cell", "_, _ = New(Config{})"},
 			{"late_fence", "_ = cell.maintenanceFenceAllows(0)"},
@@ -474,7 +476,7 @@ func TestUnixServiceMaintenanceAdmissionSourceContract(t *testing.T) {
 		for _, method := range []string{"Remove", "Plan", "Inspect"} {
 			for _, extra := range []struct{ name, text, invariant string }{
 				{"fence", "_ = cell.maintenanceFenceAllows(0)", "unexpected_fence"},
-				{"helper", "_, _, _, _ = serviceAdapterAdmission(a.uid, d, outside)", "unexpected_helper"},
+				{"helper", "_, _, _, _ = serviceAdapterAdmission(ctx, a.uid, d, outside)", "unexpected_helper"},
 			} {
 				fixtures = append(fixtures, mutation{receiver + "_" + method + "_" + extra.name, filename, method, receiver + "_" + extra.invariant, func(body string) string {
 					return strings.Replace(body, "{", "{\n"+extra.text, 1)
@@ -499,10 +501,10 @@ func TestUnixServiceMaintenanceAdmissionSourceContract(t *testing.T) {
 		{"helper_owner_missing", statement(`if owner == "" { return nil, ServiceDescriptor{}, nil, serviceSystemdError(ErrServiceOwnershipConflict, step+":descriptor", "owner") }`), ""},
 		{"helper_confinement_missing", statement(`if err := serviceAdapterConfinementForStep(d.Root, artifactDir, step); err != nil { return nil, ServiceDescriptor{}, nil, err }`), ""},
 		{"helper_double_new", "cell, err := New", "_, _ = New(Config{})\ncell, err := New"},
-		{"helper_no_lock", "lock, err := cell.own(context.Background(), false)", "lock, err := fakeLock, fakeError"},
-		{"helper_positive_own", "cell.own(context.Background(), false)", "cell.own(context.Background(), true)"},
+		{"helper_no_lock", "lock, err := cell.own(ctx, false)", "lock, err := fakeLock, fakeError"},
+		{"helper_positive_own", "cell.own(ctx, false)", "cell.own(ctx, true)"},
 		{"helper_wrapped_contention", "if errors.Is(err, ErrLocked) {\n\t\t\treturn nil, ServiceDescriptor{}, nil, err", "if errors.Is(err, ErrLocked) {\n\t\t\treturn nil, ServiceDescriptor{}, nil, ErrServiceOwnershipConflict"},
-		{"helper_public_reader", "cell.serviceDescriptorForOwner(context.Background(), owner)", "cell.ServiceDescriptor()"},
+		{"helper_public_reader", "cell.serviceDescriptorForOwner(ctx, owner)", "cell.ServiceDescriptor()"},
 		{"helper_no_immutable", statement(`if !reflect.DeepEqual(windowsTaskImmutable(fresh), windowsTaskImmutable(d)) { _ = lock.Close(); return nil, ServiceDescriptor{}, nil, serviceSystemdError(ErrServiceOwnershipConflict, step+":descriptor", "stale_identity") }`), ""},
 		{"helper_missing_failure_release", "_ = lock.Close()", "_ = lock"},
 		{"helper_return_other_cell", "return cell, fresh, func()", "return other, fresh, func()"},
