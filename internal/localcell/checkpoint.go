@@ -963,13 +963,27 @@ func checkpointLeftover(progress journalProgress) bool {
 // only operation/done to such a leftover; a recorded cleanup refuses unwritten.
 func (c *Cell) closeCheckpointLeftover(ctx context.Context) error {
 	progress, err := c.readJournal(ctx)
-	if err != nil || !checkpointLeftover(progress) {
+	if err != nil {
 		return err
 	}
-	if cleanup, err := c.cleanupInterruption(ctx); err != nil {
-		return err
-	} else if cleanup != nil {
-		return errCheckpointState
+	leftover := checkpointLeftover(progress)
+	if leftover {
+		if cleanup, err := c.cleanupInterruption(ctx); err != nil {
+			return err
+		} else if cleanup != nil {
+			return errCheckpointState
+		}
+	}
+	if checkpointJournalSettlementSupported {
+		if !leftover && (progress.pending != nil || progress.tornTail) {
+			return errJournalInterrupted // same refusal as begin
+		}
+		if err := c.syncCheckpointJournalPrefix(ctx, progress); err != nil {
+			return err
+		}
+	}
+	if !leftover {
+		return nil
 	}
 	return c.journal(ctx, progress.pending.Operation, "operation", "done")
 }

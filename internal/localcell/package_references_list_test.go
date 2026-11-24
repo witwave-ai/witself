@@ -111,7 +111,9 @@ checkpoint_journal_binding_other.go
 checkpoint_journal_binding_unix.go
 	import context errors golang.org/x/sys/unix io os path/filepath syscall
 	(*Cell).journalBindings path/filepath.EvalSymlinks
-	(*Cell).repairOwnedJournal (*os.Root).OpenFile (*os.Root).OpenRoot
+	(*Cell).repairOwnedJournal (*os.Root).OpenRoot
+	(*Cell).syncCheckpointJournalPrefix (*os.Root).OpenRoot os.OpenRoot
+	openCheckpointJournalFile (*os.Root).OpenFile
 checkpoint_journal_repair.go
 	import bytes context crypto/sha256 errors io os runtime
 	(*Cell).RepairCheckpointJournal acquireLock os.OpenRoot

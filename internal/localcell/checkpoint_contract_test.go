@@ -1094,7 +1094,8 @@ func checkpointSourceContract(sources map[string]string) []string {
 	repairRefs := map[string]int{
 		repair + "RepairCheckpointJournal:checkpointRootHere": 1, repair + "RepairCheckpointJournal:checkpointCold": 1,
 		repair + "settleCheckpointJournal:checkpointLeftover": 1, repair + "checkpointTailCompatible:checkpointLeftover": 1,
-		repair + "settleCheckpointJournal:syncCheckpointRoot": 2, "checkpoint_journal_binding_unix.go:repairOwnedJournal:checkpointRootHere": 1,
+		repair + "syncHeldCheckpointJournal:syncCheckpointRoot": 2, "checkpoint_journal_binding_unix.go:repairOwnedJournal:checkpointRootHere": 1,
+		"checkpoint_journal_binding_unix.go:syncCheckpointJournalPrefix:checkpointRootHere": 2,
 	}
 	documentReads := map[string]int{}
 	wantedReads := map[string]int{"witness_read:checkpoint.go:checkpointComplete": 1,

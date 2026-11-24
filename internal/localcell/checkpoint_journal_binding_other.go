@@ -15,3 +15,5 @@ var _ = (*Cell).settleCheckpointJournal
 func (c *Cell) repairOwnedJournal(context.Context, *os.File, *os.Root) (CheckpointJournalStatus, error) {
 	return "", errCheckpointState
 }
+
+func (c *Cell) syncCheckpointJournalPrefix(context.Context, journalProgress) error { return nil }

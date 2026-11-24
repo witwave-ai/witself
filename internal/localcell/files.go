@@ -487,6 +487,7 @@ type journalProgress struct {
 	durableBytes   int64
 	tornTail       bool
 	readFile       os.FileInfo // the read handle's stat; nil (matching no file) when absent or unstatable
+	absent         bool        // openRegular positively observed the name missing
 	updateID       string
 	updateState    updateState
 	updateMaxState updateState
@@ -516,6 +517,7 @@ func (c *Cell) readJournal(ctx context.Context) (journalProgress, error) {
 	if errors.Is(err, os.ErrNotExist) {
 		progress.pending, err = c.cleanupInterruption(ctx)
 		progress.cleanupOnly = progress.pending != nil
+		progress.absent = err == nil
 		return progress, err
 	}
 	if err != nil {

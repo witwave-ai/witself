@@ -86,9 +86,7 @@ func (c *Cell) repairOwnedJournal(ctx context.Context, owner *os.File, root *os.
 	if !info.Mode().IsRegular() {
 		return "", errPrivateLayout
 	}
-	f, err := waitOutLease(ctx, name, dir.Lstat, func() (*os.File, error) {
-		return dir.OpenFile(name, os.O_RDWR|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
-	})
+	f, err := openCheckpointJournalFile(ctx, dir, name, os.O_RDWR)
 	if err != nil {
 		return "", errors.Join(errCheckpointJournalIO, ctx.Err())
 	}
@@ -112,4 +110,66 @@ func (c *Cell) repairOwnedJournal(ctx context.Context, owner *os.File, root *os.
 		return nil
 	}
 	return c.settleCheckpointJournal(ctx, root, dir, f, before.Size, revalidate)
+}
+
+func openCheckpointJournalFile(ctx context.Context, dir *os.Root, name string, access int) (*os.File, error) {
+	return waitOutLease(ctx, name, dir.Lstat, func() (*os.File, error) {
+		return dir.OpenFile(name, access|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
+	})
+}
+
+// An admitted verb may follow a repair that truncated this file but failed
+// to sync it. Settle the observed inode and both names before its first append.
+func (c *Cell) syncCheckpointJournalPrefix(ctx context.Context, progress journalProgress) (err error) {
+	if progress.absent {
+		return nil // first publication owns its own durability
+	}
+	if progress.readFile == nil {
+		return errCheckpointJournalIO
+	}
+	root, err := os.OpenRoot(c.cfg.Root + checkpointRootHere)
+	if err != nil {
+		return errCheckpointJournalIO
+	}
+	defer func() { _ = root.Close() }()
+	dir, err := root.OpenRoot("journal" + checkpointRootHere)
+	if err != nil {
+		return errCheckpointJournalIO
+	}
+	defer func() { _ = dir.Close() }()
+	const name = "operations.jsonl"
+	f, err := openCheckpointJournalFile(ctx, dir, name, os.O_RDONLY)
+	if err != nil {
+		return errCheckpointJournalIO
+	}
+	defer func() {
+		if closeErr := f.Close(); err == nil && closeErr != nil {
+			err = errCheckpointJournalIO
+		}
+	}()
+	info, err := f.Stat()
+	if err != nil || !info.Mode().IsRegular() || !os.SameFile(progress.readFile, info) {
+		return errCheckpointJournalIO
+	}
+	if !journalNamesBound([]journalBinding{
+		{c.cfg.Root, func() (os.FileInfo, error) { return root.Stat(".") }},
+		{c.path("journal"), func() (os.FileInfo, error) { return dir.Stat(".") }},
+		{c.path("journal", name), f.Stat},
+	}) {
+		return errCheckpointJournalIO
+	}
+	return syncHeldCheckpointJournal(root, dir, f)
+}
+
+// Syncing the prefix only requires the names to still identify the held
+// objects. Repair's stricter metadata checks protect its truncation.
+func journalNamesBound(bindings []journalBinding) bool {
+	for _, b := range bindings {
+		current, err := os.Lstat(b.path)
+		held, statErr := b.stat()
+		if err != nil || statErr != nil || !os.SameFile(current, held) {
+			return false
+		}
+	}
+	return true
 }

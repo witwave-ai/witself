@@ -22,11 +22,13 @@ const (
 
 var errCheckpointJournalIO = errors.New("cannot settle local cell checkpoint journal")
 
+const checkpointJournalSettlementSupported = runtime.GOOS == "linux" || runtime.GOOS == "darwin"
+
 // RepairCheckpointJournal durably discards at most one uncommitted suffix on a
 // cold, owned cell. Its writer header limits eligible tears without proving
 // their origin. It leaves a pending operation open and never appends a record.
 func (c *Cell) RepairCheckpointJournal(ctx context.Context) (CheckpointJournalStatus, error) {
-	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+	if !checkpointJournalSettlementSupported {
 		return "", errCheckpointState
 	}
 	if err := ctx.Err(); err != nil {
@@ -116,14 +118,8 @@ func (c *Cell) settleCheckpointJournal(ctx context.Context, rootDir, journalDir 
 		}
 		status = CheckpointJournalTailDiscarded
 	}
-	if err := syncFile(f); err != nil {
-		return "", errCheckpointJournalIO
-	}
-	if err := syncCheckpointRoot(journalDir); err != nil {
-		return "", errCheckpointJournalIO
-	}
-	if err := syncCheckpointRoot(rootDir); err != nil {
-		return "", errCheckpointJournalIO
+	if err := syncHeldCheckpointJournal(rootDir, journalDir, f); err != nil {
+		return "", err
 	}
 	// A writer that ignores the owner lock can still change the held file after
 	// the final check. Report success only for exactly the validated prefix.
@@ -137,6 +133,19 @@ func (c *Cell) settleCheckpointJournal(ctx context.Context, rootDir, journalDir 
 		return "", errCheckpointJournalIO
 	}
 	return status, nil
+}
+
+func syncHeldCheckpointJournal(rootDir, journalDir *os.Root, f *os.File) error {
+	if err := syncFile(f); err != nil {
+		return errCheckpointJournalIO
+	}
+	if err := syncCheckpointRoot(journalDir); err != nil {
+		return errCheckpointJournalIO
+	}
+	if err := syncCheckpointRoot(rootDir); err != nil {
+		return errCheckpointJournalIO
+	}
+	return nil
 }
 
 func (c *Cell) journalSettlementBoundary(stage string, f *os.File) {

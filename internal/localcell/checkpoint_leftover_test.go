@@ -354,7 +354,7 @@ func TestCheckpointLeftover(t *testing.T) {
 		var once sync.Once
 		var syncs atomic.Int32
 		unblock := func() { once.Do(func() { close(release) }) }
-		// The unseal's directory sync is a delete's first: the tree's seam on
+		// Observe the unseal's directory sync through the tree's seam on
 		// Linux and macOS, the held root's on Windows.
 		barrier := func() {
 			if syncs.Add(1) == 1 {
@@ -365,7 +365,12 @@ func TestCheckpointLeftover(t *testing.T) {
 		original, originalRoot := syncCheckpointTreeDirectory, syncCheckpointRoot
 		t.Cleanup(func() { syncCheckpointTreeDirectory, syncCheckpointRoot = original, originalRoot })
 		syncCheckpointTreeDirectory = func(name string, sync func() error) error { barrier(); return original(name, sync) }
-		syncCheckpointRoot = func(held *os.Root) error { barrier(); return originalRoot(held) }
+		syncCheckpointRoot = func(held *os.Root) error {
+			if filepath.Clean(held.Name()) == c.path("recovery", ids[0]) {
+				barrier()
+			}
+			return originalRoot(held)
+		}
 		f.prefix = retainedRead(t, c, "journal/operations.jsonl")
 		result := StartJoinedTestRunForTest(t, unblock, reinstallContentionBound, func() error {
 			return c.DeleteCheckpoint(context.Background(), DeleteCheckpointOptions{CheckpointID: ids[0]})
@@ -446,7 +451,12 @@ func TestCheckpointLeftoverHelperProcess(t *testing.T) {
 			}
 		}
 		syncCheckpointTreeDirectory = func(name string, sync func() error) error { barrier(); return original(name, sync) }
-		syncCheckpointRoot = func(held *os.Root) error { barrier(); return originalRoot(held) }
+		syncCheckpointRoot = func(held *os.Root) error {
+			if filepath.Clean(held.Name()) == c.path("recovery", argument) {
+				barrier()
+			}
+			return originalRoot(held)
+		}
 		_ = c.DeleteCheckpoint(context.Background(), DeleteCheckpointOptions{CheckpointID: argument})
 	default:
 		t.Fatal("the helper mode is neither create nor delete")
