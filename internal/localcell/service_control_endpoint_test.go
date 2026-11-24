@@ -240,7 +240,7 @@ const bindingLiveFailure = "live discovery lost its activation fence"
 
 func endpointTestActivation(t *testing.T, c *Cell, d ServiceDescriptor, boot func() (string, error)) (*operationLock, serviceControlEndpointRecord) {
 	t.Helper()
-	lease, err := c.acquireServiceLeaseForPlatform(d, boot, "windows")
+	lease, err := c.acquireServiceLeaseForPlatform(t.Context(), d, boot, "windows")
 	if err != nil {
 		t.Fatal(bindingLiveFailure)
 	}
@@ -283,7 +283,7 @@ func TestServiceControlEndpointPublicationAndLiveRead(t *testing.T) {
 				if row == "legacy_bootstrap" {
 					platform = "linux"
 				}
-				lock, err := c.acquireServiceLeaseForPlatform(d, boot, platform)
+				lock, err := c.acquireServiceLeaseForPlatform(t.Context(), d, boot, platform)
 				if err != nil {
 					t.Fatal(bindingLiveFailure)
 				}
@@ -412,7 +412,7 @@ func TestServiceBindingLeaseCompletionRefusals(t *testing.T) {
 		t.Run(row, func(t *testing.T) {
 			c, d := descriptorTestCell(t)
 			boot := func() (string, error) { return "fixture-boot", nil }
-			lock, err := c.acquireServiceLeaseForPlatform(d, boot, "windows")
+			lock, err := c.acquireServiceLeaseForPlatform(t.Context(), d, boot, "windows")
 			if err != nil {
 				t.Fatal("could not acquire provisional lease")
 			}
@@ -470,7 +470,7 @@ func TestServiceBindingIssueDescriptor(t *testing.T) {
 	for _, row := range []string{"generation_changed", "host_changed", "state_advanced"} {
 		t.Run(row, func(t *testing.T) {
 			c, initial := descriptorTestCell(t)
-			lock, err := c.acquireServiceLeaseForPlatform(initial, func() (string, error) { return "fixture-boot", nil }, "windows")
+			lock, err := c.acquireServiceLeaseForPlatform(t.Context(), initial, func() (string, error) { return "fixture-boot", nil }, "windows")
 			if err != nil {
 				t.Fatal(bindingLifetimeFailure)
 			}
@@ -513,7 +513,7 @@ func TestServiceBindingIssueDescriptor(t *testing.T) {
 func TestServiceEndpointCommittedWrites(t *testing.T) {
 	c, d := descriptorTestCell(t)
 	boot := func() (string, error) { return "fixture-boot", nil }
-	lock, err := c.acquireServiceLeaseForPlatform(d, boot, "windows")
+	lock, err := c.acquireServiceLeaseForPlatform(t.Context(), d, boot, "windows")
 	if err != nil {
 		t.Fatal("cannot acquire provisional host lease")
 	}

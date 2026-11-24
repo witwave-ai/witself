@@ -39,12 +39,12 @@ func TestServiceControlEndpointUnixPrivateRecord(t *testing.T) {
 
 func TestServiceHostExitUnixLeaseFormat(t *testing.T) {
 	c, d := descriptorTestCell(t)
-	lock, err := c.acquireServiceLease(d)
+	lock, err := c.acquireServiceLease(t.Context(), d)
 	if err != nil {
 		t.Fatal("could not prepare version-one host lease")
 	}
 	defer func() { _ = lock.Close() }()
-	_, original, err := c.serviceHostExitIdentity()
+	_, original, err := c.serviceHostExitIdentity(t.Context())
 	if err != nil || original.Version != 1 {
 		t.Fatal("Unix exit refused its original lease")
 	}
@@ -56,7 +56,7 @@ func TestServiceHostExitUnixLeaseFormat(t *testing.T) {
 	if writeAtomic(c.path("service", "lease.json"), legacy, nil) != nil {
 		t.Fatal("could not publish mixed lease fixture")
 	}
-	if _, _, err := c.serviceHostExitIdentity(); err == nil {
+	if _, _, err := c.serviceHostExitIdentity(t.Context()); err == nil {
 		t.Fatal("Unix exit accepted a field outside its lease format")
 	}
 }

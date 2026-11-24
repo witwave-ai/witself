@@ -60,7 +60,7 @@ func snapshotAdmissionRows(t *testing.T) {
 		t.Run(row, func(t *testing.T) {
 			c, d := descriptorTestCell(t)
 			boot := func() (string, error) { return "fixture-boot", nil }
-			lease, err := c.acquireServiceLeaseForPlatform(d, boot, "windows")
+			lease, err := c.acquireServiceLeaseForPlatform(t.Context(), d, boot, "windows")
 			if err != nil {
 				t.Fatal("cannot prepare private snapshot lease")
 			}

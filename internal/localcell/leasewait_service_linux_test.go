@@ -281,10 +281,10 @@ func TestServiceExitLease(t *testing.T) {
 	for _, row := range []string{"poll", "session", "drain", "envelope"} {
 		t.Run(row, func(t *testing.T) {
 			c := serviceCancellationReceiptCell(t)
-			lock, err := c.acquireServiceLease(prepareSupervisorTest(t, c))
+			lock, err := c.acquireServiceLease(t.Context(), prepareSupervisorTest(t, c))
 			requireServiceLease(t, err == nil, "cannot acquire the host lease for exit")
 			defer func() { _ = lock.Close() }()
-			envelope, lease, err := c.newHostExitEnvelope()
+			envelope, lease, err := c.newHostExitEnvelope(t.Context())
 			requireServiceLease(t, err == nil, "cannot identify the host before exit")
 			if row == "envelope" {
 				listener, err := c.listenServiceControl(t.Context())
@@ -345,7 +345,7 @@ func TestServiceEndpointLeaseWait(t *testing.T) {
 		t.Run(row.operation+"/"+row.file, func(t *testing.T) {
 			c, d := descriptorTestCell(t)
 			boot := func() (string, error) { return "fixture-boot", nil }
-			lock, err := c.acquireServiceLeaseForPlatform(d, boot, "windows")
+			lock, err := c.acquireServiceLeaseForPlatform(t.Context(), d, boot, "windows")
 			requireServiceLease(t, err == nil, "cannot acquire provisional fixture lease")
 			defer func() { _ = lock.Close() }()
 			name, err := newServiceControlPipeName(d.InstallationID)

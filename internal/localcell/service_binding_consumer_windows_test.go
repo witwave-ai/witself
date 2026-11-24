@@ -47,11 +47,11 @@ func bindingOriginalExitActivation(t *testing.T) {
 		if err != nil {
 			t.Fatal(bindingExitFailure)
 		}
-		original, lease, err := client.newHostExitEnvelope()
+		original, lease, err := client.newHostExitEnvelope(t.Context())
 		if err != nil {
 			t.Fatal(bindingExitFailure)
 		}
-		retained, err := client.retainServiceExitHost(lease)
+		retained, err := client.retainServiceExitHost(t.Context(), lease)
 		if err != nil {
 			t.Fatal(bindingExitFailure)
 		}
@@ -90,13 +90,13 @@ func bindingOriginalExitActivation(t *testing.T) {
 			t.Fatal(bindingExitFailure)
 		}
 		client.observeRootWalk = nil
-		fresh, _, err := client.newHostExitEnvelope()
+		fresh, _, err := client.newHostExitEnvelope(t.Context())
 		cell.serviceControlMu.Lock()
 		currentListener := cell.serviceControlListener
 		cell.serviceControlMu.Unlock()
 		if err != nil || currentListener == nil || firstListener == nil || firstListener == currentListener ||
-			cell.validateHostExitEnvelope(original, currentListener) == nil || cell.validateHostExitEnvelope(fresh, firstListener) == nil ||
-			cell.validateHostExitEnvelope(fresh, currentListener) != nil {
+			cell.validateHostExitEnvelope(t.Context(), original, currentListener) == nil || cell.validateHostExitEnvelope(t.Context(), fresh, firstListener) == nil ||
+			cell.validateHostExitEnvelope(t.Context(), fresh, currentListener) != nil {
 			t.Fatal(bindingExitFailure)
 		}
 		session, err = client.startHostExitRequest(ctx, fresh)

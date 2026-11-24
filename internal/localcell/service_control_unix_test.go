@@ -47,12 +47,12 @@ func TestServiceHostLeaseIndependentOfOperationLock(t *testing.T) {
 		t.Fatal(err)
 	}
 	boot := func() (string, error) { return "synthetic-boot", nil }
-	lease, err := c.acquireServiceLeaseWithBoot(d, boot)
+	lease, err := c.acquireServiceLeaseWithBoot(t.Context(), d, boot)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = lease.Close() }()
-	second, err := c.acquireServiceLeaseWithBoot(d, boot)
+	second, err := c.acquireServiceLeaseWithBoot(t.Context(), d, boot)
 	if second != nil || !errors.Is(err, ErrServiceHostActive) {
 		t.Fatal("second host acquired same-root lifetime lease")
 	}
@@ -69,7 +69,7 @@ func TestServiceHostLeaseIndependentOfOperationLock(t *testing.T) {
 	if err := lease.Close(); err != nil {
 		t.Fatal(err)
 	}
-	after, err := c.acquireServiceLeaseWithBoot(d, boot)
+	after, err := c.acquireServiceLeaseWithBoot(t.Context(), d, boot)
 	if err != nil {
 		t.Fatal("released host lease did not permit successor")
 	}
@@ -264,7 +264,7 @@ func TestServiceRunExplicitForegroundLeaseAndGracefulStop(t *testing.T) {
 	assertUnregistered()
 	// The stable lock inode intentionally remains; cleanup means releasing its
 	// OS lock so a successor can acquire the same lifetime lease.
-	lease, err := c.acquireServiceLeaseWithBoot(d, h.boot)
+	lease, err := c.acquireServiceLeaseWithBoot(t.Context(), d, h.boot)
 	if err != nil {
 		t.Fatal("foreground shutdown retained the lifetime lease")
 	}

@@ -167,7 +167,9 @@ var leaseWaitServiceOpeners = strings.Fields(`(*Cell).serviceDescriptor (*Cell).
 (*Cell).publishServiceControlEndpoint (*Cell).publishServiceControlEndpointWithBoot (*Cell).removeOwnedServiceControlEndpoint (*Cell).removeOwnedServiceControlEndpointBy
 (*Cell).validateHostExitEndpoint (*Cell).readHostExitEndpoint (*Cell).validateServiceControlEndpoint (*Cell).listenRunServiceControl (*Cell).listenServiceControl
 (*Cell).removeServiceControlEndpoint (*Cell).reconcileServiceBoot (*Cell).reconcileOldBoot (*Cell).bindServiceProcessBoot (*Cell).bindServiceProcessBootWithReader
-serviceAdapterAdmission serviceAdapterRemovalAdmission serviceAdapterAdmissionForStep (*systemdUserAdapter).ownedUnit (*systemdUserAdapter).cleanupPartial`)
+serviceAdapterAdmission serviceAdapterRemovalAdmission serviceAdapterAdmissionForStep (*systemdUserAdapter).ownedUnit (*systemdUserAdapter).cleanupPartial
+(*Cell).serviceHostExitIdentity (*Cell).validateHostExitEnvelope (*Cell).newHostExitEnvelope (*Cell).serviceHostLeaseHeld (*Cell).retainServiceExitHost
+(*Cell).acquireServiceLease (*Cell).acquireServiceLeaseWithBoot (*Cell).acquireServiceLeaseForPlatform`)
 
 var leaseWaitServiceCalls = map[string]string{
 	// The dark repair has the same per-owner, exact-callee contract as the service entry points.
@@ -185,6 +187,22 @@ var leaseWaitServiceCalls = map[string]string{
 	"service_systemd_adapter.go:(*systemdUserAdapter).ownedUnit":  "openPlainReader",
 	"service_launchd.go:(*launchdAgentAdapter).Apply":             "maintenanceFenceAllows serviceAdapterAdmission",
 	"service_launchd.go:(*launchdAgentAdapter).Remove":            "maintenanceFenceAllows serviceAdapterRemovalAdmission serviceAdapterRemovalHostLock",
+
+	"service_control_exit.go:(*Cell).ExitServiceHost":              "newHostExitEnvelope retainServiceExitHost",
+	"service_control_exit.go:(*Cell).controlExitHost":              "newHostExitEnvelope retainServiceExitHost",
+	"service_control_exit.go:(*Cell).exitServiceHostForRemoval":    "newHostExitEnvelope own postmaster readJSON retainServiceExitHost serviceDescriptor serviceHostLeaseHeld serviceHostLeaseHeld",
+	"service_control_exit.go:(*Cell).newHostExitEnvelope":          "serviceHostExitIdentity",
+	"service_control_exit.go:(*Cell).retainServiceExitHost":        "serviceDescriptor",
+	"service_control_exit.go:(*Cell).serveHostExit":                "validateHostExitEnvelope",
+	"service_control_exit.go:(*Cell).serviceHostExitIdentity":      "readServiceRecordJSON serviceDescriptor",
+	"service_control_exit.go:(*Cell).serviceHostLeaseHeld":         "openLockFile",
+	"service_control_exit.go:(*Cell).validateHostExitEnvelope":     "serviceHostExitIdentity",
+	"service_control_exit.go:(*Cell).waitServiceHostExit":          "readJSON readServiceRecordJSON serviceHostLeaseHeld",
+	"service_control_exit.go:(*supervisor).acceptHostExit":         "validateHostExitEnvelope",
+	"service_control_exit.go:(*supervisor).finishHostExit":         "readJournal",
+	"service_foreground.go:(*Cell).acquireServiceLease":            "acquireServiceLeaseWithBoot",
+	"service_foreground.go:(*Cell).acquireServiceLeaseWithBoot":    "acquireServiceLeaseForPlatform",
+	"service_foreground.go:(*Cell).acquireServiceLeaseForPlatform": "openLockFile",
 
 	"service_boot.go:(*Cell).reconcileServiceBoot":                     "maintenanceFenceAllows own readJSON reconcileOldBoot serviceDescriptor",
 	"service_boot.go:(*Cell).reconcileOldBoot":                         "postmaster readJSON",
@@ -209,7 +227,7 @@ var leaseWaitServiceCalls = map[string]string{
 	"service_descriptor.go:(*Cell).setServiceFaulted":                  "commitServiceFault",
 	"service_maintenance.go:(*Cell).serviceMaintenanceObservation":     "maintenanceFenceAllows own readServiceDescriptor",
 	"service_shutdown_supervisor.go:(*supervisor).commitShutdownFault": "commitServiceFault",
-	"service_supervisor.go:(*Cell).Run":                                "serveServiceControlForPlatform serviceDescriptor",
+	"service_supervisor.go:(*Cell).Run":                                "acquireServiceLeaseWithBoot serveServiceControlForPlatform serviceDescriptor",
 	"service_supervisor.go:(*supervisor).command":                      "serviceDescriptor",
 	"service_supervisor.go:(*supervisor).step":                         "serviceDescriptor serviceDescriptor",
 	"service_task_host.go:(*Cell).validateTaskHost":                    "serviceDescriptor",
@@ -255,10 +273,7 @@ var leaseWaitPlaceholders = map[string]int{"checkpoint_verify.go:(*Cell).verifyC
 	"port_recovery.go:(*Cell).waitReadyWithPortRecovery": 2, "postgres_unix.go:(*Cell).startPostgres": 3, "postgres_windows.go:(*Cell).pendingPostgresWithoutPID": 1,
 	"postgres_windows.go:(*Cell).pendingPostmasterPID": 1, "postgres_windows.go:(*Cell).startPostgres": 3,
 	"readiness.go:(*Cell).childReadinessExit": 1, "reinstall.go:(*Cell).Reinstall": 2, "reinstall.go:(*Cell).reinstallLocked": 6, "reinstall.go:(*Cell).startRetainedPostgres": 1,
-	"service_control_exit.go:(*Cell).exitServiceHostForRemoval": 3,
-	"service_control_exit.go:(*Cell).serviceHostExitIdentity":   1, "service_control_exit.go:(*Cell).serviceHostLeaseHeld": 1,
-	"service_control_exit.go:(*Cell).waitServiceHostExit": 2, "service_control_exit.go:(*supervisor).finishHostExit": 1,
-	"service_task_host.go:(*Cell).ValidateTaskHost": 1, "service_descriptor.go:(*Cell).ServiceDescriptor": 1, "service_foreground.go:(*Cell).acquireServiceLeaseForPlatform": 1,
+	"service_task_host.go:(*Cell).ValidateTaskHost": 1, "service_descriptor.go:(*Cell).ServiceDescriptor": 1,
 	"service_health.go:(*Cell).ServiceHealth": 4, "service_health.go:(*Cell).healthPrincipal": 1,
 	"service_health.go:(*Cell).serviceAPICredential": 1, "service_health.go:(*Cell).serviceLiveTree": 2,
 	"service_launchd.go:(*launchdAgentAdapter).ownedPlist": 1,
@@ -322,8 +337,8 @@ var leaseWaitDetachedHeld = []string{"checkpoint_unix.go:(*Cell).openCheckpointS
 // file and declaration with their counts; leaseWaitReleasedCallers are the
 // non-test calls into leaseWaitReleased from outside it (G2, G5).
 var leaseWaitValueUses = map[string]int{
-	"service_supervisor.go:newSupervisor": 1,
-	"files.go:readManifest":               1, "service_control.go:(*Cell).readServiceControlSecret": 1,
+	"service_supervisor.go:newSupervisor": 1, "service_supervisor.go:(*Cell).Run": 1,
+	"files.go:readManifest": 1, "service_control.go:(*Cell).readServiceControlSecret": 1,
 	"service_control_endpoint.go:(*Cell).readServiceControlEndpointRecord": 1, "service_control_endpoint.go:(*Cell).readServiceControlEndpointWithBoot": 1,
 	"service_descriptor.go:(*Cell).readServiceDescriptorForOwner": 1, "service_descriptor.go:(*Cell).serviceControlSecret": 1,
 	"checkpoint.go:(*Cell).admitCheckpoint": 1, "commands.go:(*Cell).password": 1, "files.go:openRegular": 1,
@@ -407,6 +422,25 @@ func leaseWaitTyped(world *referencesWorld, system string, sources map[string]st
 					use, own, receiver := leaseWaitCall{name + ":" + owner, fset.PositionFor(call.Pos(), false).Offset, referencesIdentifier(call.Fun).Name}, leaseWaitOwnTyped(info, holder, call.Args), (*types.Var)(nil)
 					if !seam {
 						receiver = callee.Signature().Recv()
+						if !targets[callee.Origin()] && !released[callee.Origin()] && (receiver == nil || !types.IsInterface(receiver.Type()) || !types.Identical(callee.Type(), methods[callee.Name()])) {
+							return true
+						}
+					}
+					switch use.site + "/" + use.target {
+					case "service_control_exit.go:(*Cell).serveHostExit/validateHostExitEnvelope":
+						own = leaseWaitBoundContext(info, holder, call, "admissionCtx, admissionCancel := context.WithTimeout(ctx, serviceHostExitPhaseBudget(ctx, budgets.admission))")
+					case "service_control_exit.go:(*supervisor).finishHostExit/readJournal":
+						own = leaseWaitBoundContext(info, holder, call, "drainCtx, cancel := s.hooks.shutdownContext(ctx, serviceHostExitPhaseBudget(ctx, ServiceShutdownTimeout))")
+					case "service_supervisor.go:(*Cell).Run/acquireServiceLeaseWithBoot":
+						// Run's exact closure and its dispatch with Run's own ctx are also pinned in maintenanceHostSupervisorPins.
+						own = false
+						ast.Inspect(holder.Body, func(node ast.Node) bool {
+							lit, ok := node.(*ast.FuncLit)
+							if ok && lit.Pos() < call.Pos() && call.End() < lit.End() {
+								own = leaseWaitOwnTyped(info, &ast.FuncDecl{Type: lit.Type}, call.Args)
+							}
+							return true
+						})
 					}
 					// Listener retirement is owed even when Run has already stopped.
 					if use.site == "service_control.go:(*Cell).serveServiceControlForPlatform" && use.target == "removeServiceControlEndpoint" && len(call.Args) == 1 {
@@ -420,7 +454,6 @@ func leaseWaitTyped(world *referencesWorld, system string, sources map[string]st
 					switch background := (*types.Func)(nil); {
 					case !seam && released[callee.Origin()]:
 						calls[use] = map[bool]string{true: "released", false: "released_other"}[own]
-					case !seam && !targets[callee.Origin()] && (receiver == nil || !types.IsInterface(receiver.Type()) || !types.Identical(callee.Type(), methods[callee.Name()])):
 					case own:
 						calls[use] = "live"
 					default: // a placeholder by its text and by its object (G2)
@@ -435,6 +468,46 @@ func leaseWaitTyped(world *referencesWorld, system string, sources map[string]st
 		}
 	}
 	return calls, resolved, failed
+}
+
+// The exit reads use one reviewed top-level timeout binding. Its context object
+// must reach the call directly, without reassignment or exposure by address.
+func leaseWaitBoundContext(info *types.Info, function *ast.FuncDecl, call *ast.CallExpr, definition string) bool {
+	if function == nil || function.Body == nil || len(call.Args) == 0 {
+		return false
+	}
+	arg, ok := call.Args[0].(*ast.Ident)
+	if !ok || info.Uses[arg] == nil {
+		return false
+	}
+	bound, overwritten := false, false
+	for _, stmt := range function.Body.List {
+		assign, ok := stmt.(*ast.AssignStmt)
+		if ok && leaseWaitPrint(token.NewFileSet(), assign) == definition {
+			id, ok := assign.Lhs[0].(*ast.Ident)
+			bound = bound || ok && info.Defs[id] == info.Uses[arg]
+		}
+	}
+	ast.Inspect(function.Body, func(node ast.Node) bool {
+		var targets []ast.Expr
+		switch n := node.(type) {
+		case *ast.AssignStmt:
+			targets = n.Lhs
+		case *ast.RangeStmt:
+			targets = []ast.Expr{n.Key, n.Value}
+		case *ast.UnaryExpr:
+			if n.Op == token.AND {
+				targets = []ast.Expr{n.X}
+			}
+		}
+		for _, target := range targets {
+			if id, ok := ast.Unparen(target).(*ast.Ident); ok && info.Uses[id] == info.Uses[arg] {
+				overwritten = true
+			}
+		}
+		return !overwritten
+	})
+	return bound && !overwritten
 }
 
 // leaseWaitHolder is the declaration whose context parameters are a call's
@@ -684,6 +757,9 @@ func leaseWaitContract(sources map[string]string) (result []string) {
 	}
 	for _, site := range slices.Concat(slices.Collect(maps.Keys(reassigned)), leaseWaitReleased[:3]) {
 		want := map[bool]int{true: 1}[slices.Contains(leaseWaitReleased[:3], site)]
+		if site == "service_control_exit.go:(*Cell).ExitServiceHost" {
+			want = 1 // the transaction deadline derives from the caller
+		}
 		if site == "service_supervisor.go:(*supervisor).command" {
 			// The whole command body is pinned in maintenanceHostSupervisorPins:
 			// its optional health timeout and command marker both derive from ctx.
@@ -793,6 +869,9 @@ func TestLeaseWaitSourceContract(t *testing.T) {
 	const begin, inspect, witness = "\tif err := c.begin(context.Background(), \"start\"); err != nil {\n", "\tinspection, err := c.Inspect(ctx)\n", source + "ctx)\n\tif err != nil {\n\t\treturn errCheckpointWitness\n"
 	const journal, removal = "\tprogress, err := c.readJournal(ctx)\n\tif err != nil {\n\t\treturn result, err\n\t}\n", "func (c *Cell) finishRemoval(ctx context.Context, m *Manifest, purge bool) error {\n"
 	for _, row := range []struct{ name, file, before, after, want string }{
+		{"exit_admission_transaction", "service_control_exit.go", "c.validateHostExitEnvelope(admissionCtx, envelope, listener)", "c.validateHostExitEnvelope(ctx, envelope, listener)", "lease_wait_live:service_control_exit.go:(*Cell).serveHostExit"},
+		{"exit_drain_reassigned", "service_control_exit.go", "defer cancel()\n\terr := retryServiceContention(drainCtx", "defer cancel()\n\tdrainCtx = ctx\n\terr := retryServiceContention(drainCtx", "lease_wait_live:service_control_exit.go:(*supervisor).finishHostExit"},
+		{"boot_closure_detached", "service_supervisor.go", "c.acquireServiceLeaseWithBoot(ctx, d, s.hooks.boot)", "c.acquireServiceLeaseWithBoot(context.Background(), d, s.hooks.boot)", "lease_wait_live:service_supervisor.go:(*Cell).Run"},
 		{"admission_lock", "service_adapter_admission.go", "lock, err := cell.own(ctx, false)", "lock, err := cell.own(context.Background(), false)", "lease_wait_placeholder:service_adapter_admission.go:serviceAdapterAdmissionForStep"},
 		{"endpoint_cleanup_attached", "service_control.go", "c.removeServiceControlEndpoint(context.WithoutCancel(ctx))", "c.removeServiceControlEndpoint(ctx)", "lease_wait_live:service_control.go:(*Cell).serveServiceControlForPlatform"},
 		{"wait_any_error", "files_other.go", "!errors.Is(err, syscall.EWOULDBLOCK)", "false", "lease_wait_body"},

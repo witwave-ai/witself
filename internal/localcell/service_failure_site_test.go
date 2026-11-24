@@ -186,7 +186,33 @@ func TestServiceFailureSiteSourceContract(t *testing.T) {
 	}
 }`,
 		},
+		"service_control_exit.go": {
+			`ctx, cancel := context.WithTimeout(ctx, serviceHostExitPhaseBudget(ctx, ServiceHostExitBudget(c.cfg.Timeout)))`,
+			`ctx, cancel := context.WithTimeout(r.Context(), serviceHostExitPhaseBudget(r.Context(), budgets.transaction))`,
+			`return d, serviceLeaseRecord{}, hostExitFailure("identity_tree", false, serviceContextReadFailure(ctx, err, errors.Join(hostExitRefused("envelope"), err)))`,
+			`return d, lease, hostExitFailure("lease_validate", false, serviceContextReadFailure(ctx, err, errors.Join(hostExitRefused("envelope"), err)))`,
+			`return s.status, serviceContextReadFailure(ctx, err, hostExitRefused("envelope"))`,
+			`return false, serviceContextReadFailure(ctx, err, hostExitRefused("envelope"))`,
+			`return serviceContextReadFailure(ctx, err, hostExitRefused("envelope"))`,
+			`lock, err := c.own(ctx, false)
+		if err != nil {
+			return serviceContextReadFailure(ctx, err, hostExitRefused("child_tree_unknown"))`,
+			`if held, err := c.serviceHostLeaseHeld(ctx); err != nil || held {
+			return serviceContextReadFailure(ctx, err, hostExitRefused("child_tree_unknown"))`,
+			`if err := readJSON(ctx, c.path("run", component+".json"), &record); errors.Is(err, os.ErrNotExist) {
+				continue
+			} else if err != nil {
+				return serviceContextReadFailure(ctx, err, hostExitRefused("child_tree_unknown"))`,
+			`pid, err := c.postmaster(ctx)
+		if err != nil {
+			return serviceContextReadFailure(ctx, err, hostExitRefused("child_tree_unknown"))`,
+			`return hostExitFailure("lease_validate", true, serviceContextReadFailure(ctx, err, errors.Join(hostExitRefused("envelope"), err)))`,
+			`return hostExitFailure("observe", true, serviceContextReadFailure(ctx, err, errors.Join(hostExitRefused("drain"), ctx.Err())))`,
+			`if serviceContextLeaseCut(ctx, statusErr) {
+				return hostExitFailure("observe", true, statusErr)`,
+		},
 		"service_foreground.go": {
+			`return nil, serviceContextReadFailure(ctx, err, errors.New("localcell: service_lease_unavailable"))`,
 			`if err := privateDir(c.path("service"), false); err != nil {
 		return nil, serviceFailureAt(err, "lease_directory")`,
 			`if err := servicePrivateRecord(c.path(".service-host.lock")); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -356,7 +382,14 @@ func TestServiceFailureSiteSourceContract(t *testing.T) {
 		},
 		"service_boot.go": {`func (c *Cell) bindServiceProcessBootWithReader(ctx context.Context, component string, readBoot func() (string, error)) (result error) {
 	defer func() { result = serviceFailureFallback(result, "boot_binding") }()`},
-		"service_descriptor.go": {`func (c *Cell) writeServiceDescriptor(d ServiceDescriptor) (result error) {
+		"service_descriptor.go": {`return ctx.Err() != nil && errors.As(err, &cut) && errors.Is(cut, ctx.Err())`,
+			`func serviceContextReadFailure(ctx context.Context, err, refusal error) error {
+	if serviceContextLeaseCut(ctx, err) {
+		return err
+	}
+	return refusal
+}`,
+			`func (c *Cell) writeServiceDescriptor(d ServiceDescriptor) (result error) {
 	defer func() { result = serviceFailureFallback(result, "descriptor_write") }()`},
 		"../tools/localcellharness/service.go": {
 			`defer func() {

@@ -18,7 +18,7 @@ func testBindingLifetimePhases(t *testing.T) {
 	for _, row := range []string{"pre_reserve", "issue_after_reserve", "reserve_failure", "no_publication", "closed_mapped", "removed"} {
 		t.Run(row, func(t *testing.T) {
 			c, d := descriptorTestCell(t)
-			lease, err := c.acquireServiceLease(d)
+			lease, err := c.acquireServiceLease(t.Context(), d)
 			if err != nil {
 				t.Fatal(bindingLifetimeFailure)
 			}
@@ -134,7 +134,7 @@ func testBindingLifetimePhases(t *testing.T) {
 				if _, err := c.readServiceControlEndpoint(t.Context()); !errors.Is(err, ErrServiceControlRefused) {
 					t.Fatal(bindingLifetimeFailure)
 				}
-				other, err := c.acquireServiceLease(d)
+				other, err := c.acquireServiceLease(t.Context(), d)
 				if other != nil {
 					_ = other.Close()
 				}

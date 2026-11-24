@@ -515,7 +515,7 @@ func TestServiceWorkerPairedExit(t *testing.T) {
 	}
 	acks := make(chan reply, 2)
 	for range 2 {
-		envelope, _, err := w.cell.newHostExitEnvelope()
+		envelope, _, err := w.cell.newHostExitEnvelope(t.Context())
 		if err != nil {
 			t.Fatal(fail)
 		}
@@ -626,7 +626,7 @@ func TestServiceWorkerExitWhileBusy(t *testing.T) {
 			_ = w.boundaryCommand(t, "observe") // The first exit has been parked.
 			abandon()
 			if stage == "abandoned_retry" {
-				envelope, _, err := w.cell.newHostExitEnvelope()
+				envelope, _, err := w.cell.newHostExitEnvelope(t.Context())
 				if err != nil {
 					t.Fatal("could not prepare the retry envelope")
 				}

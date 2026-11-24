@@ -22,7 +22,7 @@ func TestServiceShutdownControlResponseDeadline(t *testing.T) {
 			if err != nil {
 				t.Fatal("descriptor unavailable")
 			}
-			lease, err := c.acquireServiceLease(descriptor)
+			lease, err := c.acquireServiceLease(t.Context(), descriptor)
 			if err != nil {
 				t.Fatal("lease unavailable")
 			}

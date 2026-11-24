@@ -124,7 +124,7 @@ func TestServiceRunRestartAfterIdleShutdown(t *testing.T) {
 			case <-time.After(time.Millisecond):
 			}
 		}
-		lease, leaseErr := c.acquireServiceLease(d)
+		lease, leaseErr := c.acquireServiceLease(t.Context(), d)
 		if lease != nil {
 			_ = lease.Close()
 		}

@@ -24,7 +24,7 @@ func testBindingLifetimePhases(t *testing.T) {
 				}
 				return
 			}
-			lease, err := c.acquireServiceLeaseForPlatform(d, boot, "windows")
+			lease, err := c.acquireServiceLeaseForPlatform(t.Context(), d, boot, "windows")
 			if err != nil {
 				t.Fatal(bindingLifetimeFailure)
 			}

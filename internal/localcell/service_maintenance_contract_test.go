@@ -1037,12 +1037,15 @@ var maintenanceHostSupervisorPins = map[string]string{
 	s := newSupervisor(c, policy)
 	acquireLease := c.acquireServiceLease
 	if policy.hooks != nil {
-		acquireLease = func(d ServiceDescriptor) (*operationLock, error) {
-			return c.acquireServiceLeaseWithBoot(d, s.hooks.boot)
+		acquireLease = func(ctx context.Context, d ServiceDescriptor) (*operationLock, error) {
+			return c.acquireServiceLeaseWithBoot(ctx, d, s.hooks.boot)
 		}
 	}
-	lease, err := acquireLease(d)
+	lease, err := acquireLease(ctx, d)
 	if err != nil {
+		if serviceContextLeaseCut(ctx, err) {
+			return nil
+		}
 		return err
 	}
 	defer func() { _ = lease.Close() }()

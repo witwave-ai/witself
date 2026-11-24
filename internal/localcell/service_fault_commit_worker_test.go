@@ -165,7 +165,7 @@ func serviceFaultCommitWorker(t *testing.T, row string) {
 			start = w.boundaryCommand(t, "start")
 			wantRevision += 2 // stopped, running
 		case "delivered_exit":
-			envelope, _, err := c.newHostExitEnvelope()
+			envelope, _, err := c.newHostExitEnvelope(t.Context())
 			if err != nil {
 				t.Fatal(failure)
 			}

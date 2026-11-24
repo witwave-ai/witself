@@ -174,7 +174,7 @@ func windowsTaskRetainedIdentityContract(sources map[string]string) bool {
 	ast.Inspect(wrapper.Body, func(node ast.Node) bool {
 		branch, ok := node.(*ast.IfStmt)
 		if ok && windowsTaskContractText(branch.Cond) == `err != nil || verifier.validateHost(d) != nil` && len(branch.Body.List) == 2 &&
-			windowsTaskContractText(branch.Body.List[0]) == `observer.close()` && windowsTaskContractText(branch.Body.List[1]) == `return nil, hostExitRefused("envelope")` {
+			windowsTaskContractText(branch.Body.List[0]) == `observer.close()` && windowsTaskContractText(branch.Body.List[1]) == `return nil, serviceContextReadFailure(ctx, err, hostExitRefused("envelope"))` {
 			verified = true
 		}
 		return true
@@ -184,7 +184,7 @@ func windowsTaskRetainedIdentityContract(sources map[string]string) bool {
 	}
 	for _, name := range []string{"controlExitHost", "ExitServiceHost", "exitServiceHostForRemoval"} {
 		entry := windowsTaskContractFunction(sources["service_control_exit.go"], name, true)
-		if !windowsTaskContractOrdered(entry, `observer, err := c.retainServiceExitHost(lease)`) {
+		if !windowsTaskContractOrdered(entry, `observer, err := c.retainServiceExitHost(ctx, lease)`) {
 			return false
 		}
 	}

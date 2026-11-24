@@ -77,7 +77,7 @@ func TestServiceRemovalRetriesDeferredStop(t *testing.T) {
 	if wait() != nil {
 		t.Fatal("removal did not leave a cleanly exited host process")
 	}
-	if held, err := c.serviceHostLeaseHeld(); err != nil || held {
+	if held, err := c.serviceHostLeaseHeld(t.Context()); err != nil || held {
 		t.Fatal("removal completed with the host lease still held")
 	}
 }
