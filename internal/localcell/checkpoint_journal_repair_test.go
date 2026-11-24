@@ -178,6 +178,8 @@ func TestRepairCheckpointJournalRefusals(t *testing.T) {
 		{"cleanup", "", state, gate}, {"cleanup-masked", start, state, gate}, {"malformed-manifest", "{", bad, "unreadable history was reported clean"},
 		{"foreign-tail", strings.TrimSuffix(foreign, "\n"), state, header}, {"scalar", "42", state, header},
 		{"conflict", start + strings.TrimSuffix(deleteStep, "\n"), state, header}, {"closed-step", strings.TrimSuffix(deleteStep, "\n"), state, header},
+		{"open-ineligible-step", start + `{"operation":"checkpoint","step":"unseal",`, state, header},
+		{"open-second-begin", start + `{"operation":"checkpoint","step":"operation","state":"started","at":`, state, header},
 		{"malformed", "{\n", bad, corrupt}, {"unknown", repairRecord(t, "invalid", "operation", "started"), bad, corrupt},
 		{"mismatched", start + deleteStep, bad, corrupt}, {"unfenced", deleteStep, bad, corrupt},
 		{"oversized", strings.Repeat("x", 65537), bad, corrupt}, {"two-values", "{}{}", bad, corrupt},
@@ -297,7 +299,7 @@ func TestRepairCheckpointJournalIO(t *testing.T) {
 		t.Fatal("cut did not reach its file boundary")
 	}
 	for _, mode := range []string{"fault", "cut"} {
-		for _, boundary := range []string{"truncate", "file", "journal", "root", "close"} {
+		for _, boundary := range []string{"truncate", "file", "journal", "root", "settled", "close"} {
 			t.Run(mode+"/"+boundary, func(t *testing.T) {
 				f, _ := checkpointFixture(t, "legacy", false)
 				c, prefix := f.cell, repairRecord(t, "checkpoint", "operation", "started")
@@ -325,9 +327,9 @@ func TestRepairCheckpointJournalIO(t *testing.T) {
 					repairDiagnostic(t, err, "local_checkpoint_operation_failed", failure)
 					drillAssert(t, s == "", "repair reported status on failure")
 				}
-				want, visible, sequence := CheckpointJournalClean, prefix, "validated file journal root close "
+				want, visible, sequence := CheckpointJournalClean, prefix, "validated file journal root settled close "
 				if boundary == "truncate" {
-					want, visible, sequence = CheckpointJournalTailDiscarded, prefix+"{", "validated truncate file journal root close "
+					want, visible, sequence = CheckpointJournalTailDiscarded, prefix+"{", "validated truncate file journal root settled close "
 				}
 				assertFileBytes(t, c.path(repairLog), []byte(visible), "retry lost a validated record")
 				fault, calls = false, ""

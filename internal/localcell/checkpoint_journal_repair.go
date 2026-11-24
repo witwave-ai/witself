@@ -92,8 +92,13 @@ func (c *Cell) settleCheckpointJournal(ctx context.Context, rootDir, journalDir 
 	c.journalSettlementBoundary("validated", f)
 	// On a filesystem with coarse timestamps a same-size edit can commit a
 	// whole line without changing the observed metadata. Compare every byte.
-	second := sha256.New()
-	n, err := io.Copy(second, io.NewSectionReader(f, 0, size))
+	// The same pass hashes the validated prefix for the check after settlement.
+	second, validated := sha256.New(), sha256.New()
+	body := io.NewSectionReader(f, 0, size)
+	n, err := io.Copy(io.MultiWriter(second, validated), io.LimitReader(body, progress.durableBytes))
+	if rest, restErr := io.Copy(second, body); err == nil {
+		n, err = n+rest, restErr
+	}
 	if err != nil || n != size || !bytes.Equal(first.Sum(nil), second.Sum(nil)) {
 		return "", errCheckpointJournalIO
 	}
@@ -118,6 +123,17 @@ func (c *Cell) settleCheckpointJournal(ctx context.Context, rootDir, journalDir 
 		return "", errCheckpointJournalIO
 	}
 	if err := syncCheckpointRoot(rootDir); err != nil {
+		return "", errCheckpointJournalIO
+	}
+	// A writer that ignores the owner lock can still change the held file after
+	// the final check. Report success only for exactly the validated prefix.
+	c.journalSettlementBoundary("settled", f)
+	info, err := f.Stat()
+	if err != nil || info.Size() != progress.durableBytes {
+		return "", errCheckpointJournalIO
+	}
+	settled := sha256.New()
+	if n, err := io.Copy(settled, io.NewSectionReader(f, 0, progress.durableBytes)); err != nil || n != progress.durableBytes || !bytes.Equal(settled.Sum(nil), validated.Sum(nil)) {
 		return "", errCheckpointJournalIO
 	}
 	return status, nil

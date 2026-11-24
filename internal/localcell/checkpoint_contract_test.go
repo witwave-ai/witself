@@ -1193,7 +1193,7 @@ func checkpointSourceContract(sources map[string]string) []string {
 					listedUninitialized = len(value.Values) == 0
 				}
 				if identifier, ok := node.(*ast.Ident); ok {
-					if slices.Contains([]string{"RepairCheckpointJournal", "repairOwnedJournal", "settleCheckpointJournal"}, identifier.Name) {
+					if slices.Contains([]string{"RepairCheckpointJournal", "repairOwnedJournal", "settleCheckpointJournal", "beforeJournalSettlement"}, identifier.Name) {
 						repairNames[name+":"+owner+":"+identifier.Name]++
 					}
 					if identifier.Name == "checkpointTreeListed" {
@@ -1464,6 +1464,8 @@ func checkpointSourceContract(sources map[string]string) []string {
 		repair + "RepairCheckpointJournal:RepairCheckpointJournal": 1, repair + "RepairCheckpointJournal:repairOwnedJournal": 1,
 		repair + "settleCheckpointJournal:settleCheckpointJournal": 1, "checkpoint_journal_binding_other.go:repairOwnedJournal:repairOwnedJournal": 1,
 		"checkpoint_journal_binding_unix.go:repairOwnedJournal:repairOwnedJournal": 1, "checkpoint_journal_binding_unix.go:repairOwnedJournal:settleCheckpointJournal": 1,
+		// The test hook: its field and the one boundary that reads it. Production assigns it nowhere.
+		"types.go::beforeJournalSettlement": 1, repair + "journalSettlementBoundary:beforeJournalSettlement": 2,
 	})
 	// The package reference contract pins the descriptor truncate to settleCheckpointJournal.
 	failures["journal_repair_truncate"] = strings.Count(sources["checkpoint_journal_repair.go"], "f.Truncate(progress.durableBytes)") != 1
@@ -1798,6 +1800,8 @@ func TestCheckpointSourceContract(t *testing.T) {
 	for _, method := range drillRootMutators {
 		mutations = append(mutations, mutation{"drill_method_value_" + method, "drill_root.go", drillTail, "func drillRootMethodProbe(r *os.Root) { _ = r." + method + " }\n\n" + drillTail, "drill_selector:drillRootMethodProbe:r." + method})
 	}
+	const pathFunc = "func (c *Cell) path(parts ...string) string {\n"
+	mutations = append(mutations, mutation{"journal_hook_assigned", "types.go", pathFunc, pathFunc + "\tc.beforeJournalSettlement = func(string, *os.File) {}\n", "journal_repair_callers"})
 	for _, row := range mutations {
 		t.Run(row.name, func(t *testing.T) {
 			input, source := maps.Clone(sources), strings.ReplaceAll(sources[row.file], "\r\n", "\n")

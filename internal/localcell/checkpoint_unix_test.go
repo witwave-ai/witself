@@ -7,9 +7,12 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 func TestCheckpointSourceOpenRefusesLinks(t *testing.T) {
@@ -180,6 +183,10 @@ func TestRepairCheckpointJournalBinding(t *testing.T) {
 		{"same-size", ioClass, "repair trusted journal contents changed before the authoritative parse", "validated"},
 		{"extended", ioClass, "repair trusted journal contents changed before the authoritative parse", "validated"},
 		{"cancelled", "local_checkpoint_interrupted", "cancelled repair shortened the log", "validated"},
+		{"owner-replaced", ioClass, "repair accepted a different journal", "validated"}, {"owner-alias", layout, "repair accepted an aliased journal", "validated"},
+		{"metadata-only", ioClass, "repair trusted journal contents changed before the authoritative parse", "validated"},
+		{"read-only-held", ioClass, protected, "validated"}, {"parent-link", ioClass, "repair accepted a different journal", "validated"},
+		{"absent-owner-alias", layout, "failed metadata was treated as absence", "prepare"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f, _ := checkpointFixture(t, "legacy", false)
@@ -194,8 +201,32 @@ func TestRepairCheckpointJournalBinding(t *testing.T) {
 					return
 				}
 				switch tc.name {
-				case "privacy", "unreadable", "read-only":
-					setup(os.Chmod(log, map[string]os.FileMode{"privacy": 0644, "read-only": 0400, "unreadable": 0}[tc.name]))
+				case "privacy", "unreadable", "read-only", "read-only-held":
+					setup(os.Chmod(log, map[string]os.FileMode{"privacy": 0644, "read-only": 0400, "read-only-held": 0400, "unreadable": 0}[tc.name]))
+				case "owner-replaced", "owner-alias", "absent-owner-alias":
+					if tc.name == "absent-owner-alias" {
+						setup(os.Remove(log))
+					}
+					setup(os.Link(c.path(".owner.lock"), outside))
+					if tc.name == "owner-replaced" {
+						setup(errors.Join(os.Remove(c.path(".owner.lock")), testWriteFile(c.path(".owner.lock"), nil, 0600)))
+					}
+				case "metadata-only": // the same mode, size and bytes; only the change time moves
+					var observed unix.Stat_t
+					setup(unix.Fstat(int(held.Fd()), &observed))
+					for now, deadline := observed, time.Now().Add(5*time.Second); now.Ctim == observed.Ctim; time.Sleep(time.Millisecond) {
+						drillAssert(t, time.Now().Before(deadline), "cannot prepare binding fixture")
+						setup(errors.Join(os.Chmod(log, 0600), unix.Fstat(int(held.Fd()), &now)))
+					}
+				case "parent-link":
+					parent := filepath.Dir(c.cfg.Root)
+					setup(os.Rename(parent, parent+".moved"))
+					t.Cleanup(func() {
+						if os.Remove(parent) == nil {
+							_ = os.Rename(parent+".moved", parent)
+						}
+					})
+					setup(os.Symlink(parent+".moved", parent))
 				case "alias":
 					setup(os.Link(log, outside))
 					log = outside
@@ -230,6 +261,10 @@ func TestRepairCheckpointJournalBinding(t *testing.T) {
 			if tc.name == "unreadable" {
 				setup(os.Chmod(log, 0600))
 			}
+			if _, err := os.Lstat(log); tc.name == "absent-owner-alias" {
+				drillAssert(t, errors.Is(err, os.ErrNotExist), protected)
+				return
+			}
 			got, err := os.ReadFile(log)
 			setup(err)
 			drillAssert(t, string(got) == expect, protected)
@@ -256,4 +291,48 @@ func TestRepairCheckpointJournalCoarseTime(t *testing.T) {
 	drillAssert(t, err != nil, "repair trusted journal contents changed before the authoritative parse")
 	drillAssert(t, status == "", "repair reported status on failure")
 	assertFileBytes(t, filepath.Join(dir.Name(), "log"), []byte(record), "a validated LF-terminated line was shortened")
+}
+
+// Faults the sync seams cannot model: a truncate refused on a descriptor that
+// still syncs, and writes after the final check by a descriptor that ignores
+// the owner lock. None may end in a success status.
+func TestRepairCheckpointJournalSettlement(t *testing.T) {
+	const claimed = "failed settlement claimed success"
+	for _, row := range []struct{ name, stage, calls string }{
+		{"truncate-fault/zero", "truncate", "validated truncate close "}, {"truncate-fault/pending", "truncate", "validated truncate close "},
+		{"emptied/pending", "truncate", "validated truncate settled close "}, {"appended/pending", "settled", "validated truncate settled close "},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			f, _ := checkpointFixture(t, "legacy", false)
+			c, log, prefix, calls := f.cell, f.cell.path(repairLog), "", ""
+			if strings.HasSuffix(row.name, "/pending") {
+				prefix = repairRecord(t, "checkpoint", "operation", "started")
+			}
+			repairSeed(t, c, prefix+"{")
+			setup := func(err error) { t.Helper(); drillAssert(t, err == nil, "cannot prepare settlement fixture") }
+			c.beforeJournalSettlement = func(stage string, held *os.File) {
+				if calls += stage + " "; stage != row.stage {
+					return
+				}
+				switch name, _, _ := strings.Cut(row.name, "/"); name {
+				case "truncate-fault": // ftruncate fails; fsync on the same number works
+					readOnly, err := os.Open(log)
+					setup(err)
+					setup(errors.Join(unix.Dup2(int(readOnly.Fd()), int(held.Fd())), readOnly.Close()))
+				case "emptied", "appended":
+					other, err := os.OpenFile(log, map[string]int{"emptied": os.O_WRONLY | os.O_TRUNC, "appended": os.O_WRONLY | os.O_APPEND}[name], 0)
+					setup(err)
+					_, err = other.WriteString(map[string]string{"appended": "{"}[name])
+					setup(errors.Join(err, other.Close()))
+				}
+			}
+			status, err := c.RepairCheckpointJournal(t.Context())
+			drillAssert(t, status == "", claimed)
+			repairDiagnostic(t, err, "local_checkpoint_operation_failed", claimed)
+			drillAssert(t, calls == row.calls, claimed)
+			if strings.HasPrefix(row.name, "truncate-fault/") {
+				assertFileBytes(t, log, []byte(prefix+"{"), claimed)
+			}
+		})
+	}
 }
