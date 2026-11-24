@@ -5,6 +5,7 @@ package localcell
 import (
 	"errors"
 	"os"
+	"path/filepath"
 	"syscall"
 	"testing"
 	"time"
@@ -133,6 +134,9 @@ func init() {
 			t.Cleanup(func() { syncCheckpointRoot = original })
 			c, failure := heldDiscard(t, func(c *Cell) {
 				syncCheckpointRoot = func(held *os.Root) error {
+					if filepath.Clean(held.Name()) != c.recoveryDir() {
+						return original(held)
+					}
 					err := original(held)
 					if syncCheckpointRoot = original; errors.Join(err, os.Rename(c.recoveryDir(), c.path("moved")), testMkdir(c.recoveryDir(), 0o700)) != nil {
 						t.Fatal("cannot replace the recovery directory")

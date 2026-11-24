@@ -319,6 +319,9 @@ func TestDeleteCheckpointHeld(t *testing.T) {
 					return
 				}
 				syncCheckpointRoot = func(held *os.Root) error {
+					if filepath.Clean(held.Name()) != c.recoveryDir() {
+						return original(held)
+					}
 					err := original(held)
 					if syncCheckpointRoot = original; err == nil && at == "synced" {
 						heldMove(t, c.path("pg"), name)

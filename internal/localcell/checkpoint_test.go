@@ -1112,6 +1112,10 @@ func TestCheckpointDirectorySyncOrder(t *testing.T) {
 			return record("path:", filepath.Join(f.cell.recoveryDir(), filepath.FromSlash(name)), func() error { return original(name, sync) })
 		}
 		syncCheckpointRoot = func(held *os.Root) error {
+			rel, err := filepath.Rel(f.cell.recoveryDir(), held.Name())
+			if err != nil || !filepath.IsLocal(rel) {
+				return originalRoot(held)
+			}
 			return record("root:", filepath.Clean(held.Name()), func() error { return originalRoot(held) })
 		}
 		return f, r, synced

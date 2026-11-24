@@ -45,13 +45,15 @@ func (c *Cell) ownExisting(ctx context.Context) (*operationLock, error) {
 	return lock, nil
 }
 
+var errJournalInterrupted = errors.New("local cell operation interrupted; run repair first")
+
 func (c *Cell) begin(ctx context.Context, operation string) error {
 	progress, err := c.readJournal(ctx)
 	if err != nil {
 		return err
 	}
 	if progress.pending != nil || progress.tornTail {
-		return errors.New("local cell operation interrupted; run repair first")
+		return errJournalInterrupted
 	}
 	return c.journal(ctx, operation, "operation", "started")
 }
