@@ -1463,6 +1463,8 @@ func checkpointSourceContract(sources map[string]string) []string {
 	failures["journal_repair_callers"] = !maps.Equal(repairNames, map[string]int{
 		repair + "RepairCheckpointJournal:RepairCheckpointJournal": 1, repair + "RepairCheckpointJournal:repairOwnedJournal": 1,
 		repair + "settleCheckpointJournal:settleCheckpointJournal": 1, "checkpoint_journal_binding_other.go:repairOwnedJournal:repairOwnedJournal": 1,
+		// A system without a native binding keeps the shared settlement referenced; it calls nothing.
+		"checkpoint_journal_binding_other.go::settleCheckpointJournal":             1,
 		"checkpoint_journal_binding_unix.go:repairOwnedJournal:repairOwnedJournal": 1, "checkpoint_journal_binding_unix.go:repairOwnedJournal:settleCheckpointJournal": 1,
 		// The test hook: its field and the one boundary that reads it. Production assigns it nowhere.
 		"types.go::beforeJournalSettlement": 1, repair + "journalSettlementBoundary:beforeJournalSettlement": 2,
