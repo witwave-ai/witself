@@ -13,6 +13,45 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+func TestServiceHostExitPreflight(t *testing.T) {
+	for _, row := range []string{"plain_refusal", "leased_secret"} {
+		t.Run(row, func(t *testing.T) {
+			c, _ := descriptorTestCell(t) // Local runtime, control secret present, no socket.
+			var holder *writerLease
+			if row == "leased_secret" {
+				holder = leaseTaken(t, leaseHolder(t, "kept", unix.F_WRLCK), c.path("service", "control.secret"))
+			}
+
+			session, err := c.startHostExitRequest(t.Context(), serviceHostExitEnvelope{})
+			if session != nil {
+				session.cancel()
+				t.Fatal("missing control socket opened a host-exit session")
+			}
+			if holder != nil {
+				var state int
+				var leaseErr error
+				holder.do(func(fd uintptr) { state, leaseErr = unix.FcntlInt(fd, unix.F_GETLEASE, 0) })
+				if leaseErr != nil {
+					t.Fatal("cannot inspect the control secret lease after host-exit preflight")
+				}
+				if state != unix.F_WRLCK {
+					t.Fatal("host-exit preflight broke the control secret lease before refusing the endpoint")
+				}
+			}
+			var refusal *serviceControlRefusal
+			if !errors.As(err, &refusal) {
+				t.Fatal("missing control socket lost the host-exit refusal")
+			}
+			if refusal.step != "host_exit:envelope" {
+				t.Fatal("missing control socket changed the host-exit refusal step")
+			}
+			if err.Error() != "localcell: service_control_refused: host_exit:envelope" {
+				t.Fatal("missing control socket changed the host-exit refusal text")
+			}
+		})
+	}
+}
+
 func TestServiceReadLeaseContext(t *testing.T) {
 	for _, row := range []struct {
 		name, file string

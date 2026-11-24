@@ -305,7 +305,7 @@ func runServiceFaultGuardPaths(t *testing.T) {
 					case "fault_cleared":
 						d.Faulted = false
 					}
-					if writer.writeServiceDescriptor(t.Context(), d) != nil {
+					if writer.writeServiceDescriptor(d) != nil {
 						t.Fatal(faultPersistenceLost)
 					}
 				case "transition_pending":

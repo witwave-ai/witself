@@ -199,7 +199,7 @@ func serviceMaintenanceAbsentRow(t *testing.T, row string) {
 	case "exit_envelope":
 		action = "exit-host"
 	}
-	if c.writeServiceDescriptor(t.Context(), d) != nil {
+	if c.writeServiceDescriptor(d) != nil {
 		t.Fatal("Cannot seed absent parity descriptor")
 	}
 	wantDescriptor := d

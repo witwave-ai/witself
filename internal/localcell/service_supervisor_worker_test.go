@@ -369,7 +369,7 @@ func serviceWorkerCold(t *testing.T, plant string, faulted bool) {
 			r := supervisorRecord{Version: 1, RepairRevision: d.RepairRevision, Failures: make([]time.Time, 5)}
 			if plant == "wrong_revision" {
 				d.RepairRevision++
-				if c.writeServiceDescriptor(t.Context(), d) != nil {
+				if c.writeServiceDescriptor(d) != nil {
 					t.Fatal("could not supersede the failure record")
 				}
 			}

@@ -17,6 +17,32 @@ import (
 	"time"
 )
 
+func TestServiceEndpointValidationWithoutSocket(t *testing.T) {
+	c, _ := descriptorTestCell(t)
+	for _, row := range []struct {
+		name     string
+		validate func(context.Context) error
+	}{
+		{"endpoint", c.validateServiceControlEndpoint},
+		{"host_exit", func(ctx context.Context) error { return c.validateHostExitEndpoint(ctx, serviceHostExitBinding{}) }},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			live := row.validate(t.Context())
+			if live != ErrServiceControlRefused {
+				t.Fatal("live validation of a missing control socket lost the plain refusal")
+			}
+			if live.Error() != "localcell: service_control_refused" {
+				t.Fatal("live validation of a missing control socket changed the refusal text")
+			}
+			ctx, cancel := context.WithCancel(t.Context())
+			cancel()
+			if row.validate(ctx) != live {
+				t.Fatal("cancellation changed validation of a missing control socket")
+			}
+		})
+	}
+}
+
 func hostExitSocketFixture(t *testing.T, bounds ...time.Duration) (*Cell, chan serviceCommand) {
 	t.Helper()
 	t.Setenv("WITSELF_HOME", t.TempDir())

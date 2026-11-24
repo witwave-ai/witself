@@ -166,24 +166,24 @@ var leaseWaitServiceOpeners = strings.Fields(`(*Cell).serviceDescriptor (*Cell).
 (*Cell).readServiceControlEndpointRecord (*Cell).readServiceControlEndpoint (*Cell).readServiceControlEndpointWithBoot (*Cell).serviceListenerDescriptor (*Cell).completeServiceLease
 (*Cell).publishServiceControlEndpoint (*Cell).publishServiceControlEndpointWithBoot (*Cell).removeOwnedServiceControlEndpoint (*Cell).removeOwnedServiceControlEndpointBy
 (*Cell).validateHostExitEndpoint (*Cell).readHostExitEndpoint (*Cell).validateServiceControlEndpoint (*Cell).listenRunServiceControl (*Cell).listenServiceControl
-(*Cell).removeServiceControlEndpoint (*Cell).writeServiceDescriptor`)
+(*Cell).removeServiceControlEndpoint`)
 
 var leaseWaitServiceCalls = map[string]string{
 	"service_control.go:(*Cell).Control":                               "readServiceControlSecret validateServiceControlEndpoint",
 	"service_control.go:(*Cell).readServiceControlSecret":              "serviceControlSecretBy",
 	"service_control.go:(*Cell).serveServiceControlForPlatform":        "listenRunServiceControl readServiceControlSecret removeServiceControlEndpoint",
 	"service_control_exit.go:(*Cell).startHostExitRequest":             "readServiceControlSecret validateHostExitEndpoint",
-	"service_descriptor.go:(*Cell).PrepareService":                     "maintenanceFenceAllows own readManifest serviceControlSecret serviceControlSecret serviceDescriptor writeServiceDescriptor",
-	"service_descriptor.go:(*Cell).RepairService":                      "maintenanceFenceAllows own serviceDescriptor writeServiceDescriptor",
+	"service_descriptor.go:(*Cell).PrepareService":                     "maintenanceFenceAllows own readManifest serviceControlSecret serviceControlSecret serviceDescriptor",
+	"service_descriptor.go:(*Cell).RepairService":                      "maintenanceFenceAllows own serviceDescriptor",
 	"service_descriptor.go:(*Cell).SetServiceDesiredState":             "own setServiceDesiredStateLocked",
-	"service_descriptor.go:(*Cell).commitServiceFault":                 "own serviceDescriptor writeServiceDescriptor",
+	"service_descriptor.go:(*Cell).commitServiceFault":                 "own serviceDescriptor",
 	"service_descriptor.go:(*Cell).readServiceDescriptor":              "readServiceDescriptorForOwner",
 	"service_descriptor.go:(*Cell).readServiceDescriptorForOwner":      "readManifestBy readServiceRecordJSON",
 	"service_descriptor.go:(*Cell).serviceControlSecret":               "serviceControlSecretBy",
 	"service_descriptor.go:(*Cell).serviceDescriptor":                  "readServiceDescriptor",
 	"service_descriptor.go:(*Cell).serviceDescriptorForOwner":          "readServiceDescriptorForOwner",
 	"service_descriptor.go:(*Cell).serviceStartFence":                  "serviceDescriptor",
-	"service_descriptor.go:(*Cell).setServiceDesiredStateLocked":       "maintenanceFenceAllows serviceDescriptor writeServiceDescriptor",
+	"service_descriptor.go:(*Cell).setServiceDesiredStateLocked":       "maintenanceFenceAllows serviceDescriptor",
 	"service_descriptor.go:(*Cell).setServiceFaulted":                  "commitServiceFault",
 	"service_maintenance.go:(*Cell).serviceMaintenanceObservation":     "maintenanceFenceAllows own readServiceDescriptor",
 	"service_shutdown_supervisor.go:(*supervisor).commitShutdownFault": "commitServiceFault",

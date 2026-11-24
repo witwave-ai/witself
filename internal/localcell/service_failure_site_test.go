@@ -340,6 +340,11 @@ func TestServiceFailureSiteSourceContract(t *testing.T) {
 	if err != nil {
 		return nil, serviceFailureAt(serviceReadFailure(err, windowsControlRefusal("endpoint:record")), "endpoint_descriptor")`,
 		},
+		"service_control_exit_windows.go": {
+			`record, err := c.readServiceControlEndpoint(ctx)
+	if err != nil || !binding.matches(record) {
+		return serviceControlEndpointRecord{}, serviceReadFailure(err, hostExitRefused("envelope"))`,
+		},
 		"service_native_diagnostics_test.go": {
 			`var sites strings.Builder
 	localcell.WriteServiceHostFailure(&sites, d.controlErr, "control_transport")
@@ -351,7 +356,7 @@ func TestServiceFailureSiteSourceContract(t *testing.T) {
 		},
 		"service_boot.go": {`func (c *Cell) bindServiceProcessBootWithReader(component string, readBoot func() (string, error)) (result error) {
 	defer func() { result = serviceFailureFallback(result, "boot_binding") }()`},
-		"service_descriptor.go": {`func (c *Cell) writeServiceDescriptor(_ context.Context, d ServiceDescriptor) (result error) {
+		"service_descriptor.go": {`func (c *Cell) writeServiceDescriptor(d ServiceDescriptor) (result error) {
 	defer func() { result = serviceFailureFallback(result, "descriptor_write") }()`},
 		"../tools/localcellharness/service.go": {
 			`defer func() {
