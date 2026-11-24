@@ -46,10 +46,19 @@ func (c *Cell) ownExisting(ctx context.Context) (*operationLock, error) {
 }
 
 var errJournalInterrupted = errors.New("local cell operation interrupted; run repair first")
-var errSyncLifecycleJournal = errors.New("cannot sync local cell journal")
+var errSyncLifecycleJournal = errors.New("cannot make local cell journal durable")
 
+// Nothing was written when this fails, so a plain retry is right; a lease
+// wait its context ended stays a cut.
 func (c *Cell) syncLifecycleJournalPrefix(ctx context.Context, progress journalProgress) error {
-	if checkpointJournalSettlementSupported && c.syncCheckpointJournalPrefix(ctx, progress) != nil {
+	if !checkpointJournalSettlementSupported {
+		return nil
+	}
+	err := c.syncCheckpointJournalPrefix(ctx, progress)
+	if cut := (*leaseWaitCut)(nil); errors.As(err, &cut) {
+		return cut
+	}
+	if err != nil {
 		return errSyncLifecycleJournal
 	}
 	return nil

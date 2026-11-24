@@ -71,7 +71,7 @@ func TestLifecycleJournalBarrier(t *testing.T) {
 
 func checkLifecycleWriterBarrier(t *testing.T, op string, binaries Binaries) {
 	t.Helper()
-	for _, state := range []string{"healthy", "second-name", "mode-0640", "retry-file", "retry-journal", "pending", "torn", "file", "journal", "root"} {
+	for _, state := range []string{"healthy", "second-name", "mode-0640", "retry-file", "retry-journal", "retry-empty", "pending", "torn", "file", "journal", "root"} {
 		t.Run(state, func(t *testing.T) {
 			f, call := lifecycleWriterFixture(t, op, binaries)
 			c := f.cell
@@ -79,6 +79,9 @@ func checkLifecycleWriterBarrier(t *testing.T, op string, binaries Binaries) {
 			switch state {
 			case "retry-file", "retry-journal":
 				cutCheckpointSettlement(t, f, trace, strings.TrimPrefix(state, "retry-"))
+			case "retry-empty": // a torn first record, truncated to byte zero, its file sync failed
+				f.prefix = nil
+				cutCheckpointSettlement(t, f, trace, "file")
 			case "second-name":
 				drillAssert(t, os.Link(c.path(repairLog), filepath.Join(t.TempDir(), "alias")) == nil, "cannot link writer journal")
 			case "mode-0640":
@@ -105,7 +108,7 @@ func checkLifecycleWriterBarrier(t *testing.T, op string, binaries Binaries) {
 				before := retainedSnapshot(t, c)
 				err := call()
 				stages := []string{"file", "journal", "root"}
-				drillAssert(t, checkpointSameError(err, "cannot sync local cell journal"), "writer prefix failure changed storage error")
+				drillAssert(t, checkpointSameError(err, "cannot make local cell journal durable"), "writer prefix failure changed storage error")
 				drillAssert(t, slices.Equal(trace.events, stages[:slices.Index(stages, state)+1]), "writer continued past a failed prefix sync")
 				drillAssert(t, maps.Equal(before, retainedSnapshot(t, c)), "writer prefix failure changed the cell")
 				drillAssert(t, len(f.launches) == 0, "writer prefix failure ran a process operation")
@@ -181,4 +184,27 @@ func TestCheckpointJournalBarrierRetryBeforeDirectorySync(t *testing.T) {
 			checkBarrierRecords(t, f, verb, false)
 		})
 	}
+}
+
+// A lease wait that its context ends stays a cut through both barrier
+// functions, nothing synced or written; released, a live context settles all three.
+func TestLifecycleJournalBarrierLeaseCut(t *testing.T) {
+	take, _, release := barrierLease(t)
+	leaseWait.ceiling = 10 * time.Second // the context ends the wait, never the ceiling
+	f := retainedRemovalFixture(t, "legacy", false)
+	progress, err := f.cell.readJournal(t.Context())
+	drillAssert(t, err == nil, "cannot read the lifecycle journal before its lease")
+	trace := traceBarrier(t, f.cell)
+	drillAssert(t, take(f.cell.path(repairLog)), "cannot lease the lifecycle journal")
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	defer cancel()
+	err = f.cell.syncLifecycleJournalPrefix(ctx, progress)
+	cut, typed := err.(*leaseWaitCut)
+	drillAssert(t, typed, "lifecycle barrier did not return the lease-wait cut unchanged")
+	drillAssert(t, cut.cause == ctx.Err() && errors.Is(err, context.DeadlineExceeded), "lease-wait cut lost its context's cause")
+	drillAssert(t, len(trace.events) == 0, "lifecycle barrier synced after a lease-wait cut")
+	release() // before the blocking read below, which would wait out the kernel's break
+	assertFileBytes(t, f.cell.path(repairLog), f.prefix, "lifecycle barrier wrote after a lease-wait cut")
+	drillAssert(t, f.cell.syncLifecycleJournalPrefix(t.Context(), progress) == nil, "lifecycle barrier failed after its lease was released")
+	drillAssert(t, slices.Equal(trace.events, []string{"file", "journal", "root"}), "released lifecycle barrier did not settle the three prefix objects")
 }
