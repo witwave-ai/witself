@@ -1427,7 +1427,7 @@ var maintenanceHostSupervisorPins = map[string]string{
 		return err
 	}
 	if err := s.call(ctx, "start", s.hooks.start); err != nil {
-		if ctx.Err() != nil && serviceLeaseCut(err) {
+		if ctx.Err() != nil && serviceLeaseCut(err) && errors.Is(err, ctx.Err()) {
 			return err
 		}
 		if serviceControlCancellation(ctx) != nil {

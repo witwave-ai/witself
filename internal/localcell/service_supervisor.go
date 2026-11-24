@@ -703,7 +703,7 @@ func (s *supervisor) step(ctx context.Context) (result error) {
 		return err
 	}
 	if err := s.call(ctx, "start", s.hooks.start); err != nil {
-		if ctx.Err() != nil && serviceLeaseCut(err) {
+		if ctx.Err() != nil && serviceLeaseCut(err) && errors.Is(err, ctx.Err()) {
 			return err
 		}
 		if serviceControlCancellation(ctx) != nil {
