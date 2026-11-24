@@ -529,8 +529,9 @@ func (a *systemdUserAdapter) Apply(ctx context.Context, plan ServicePlan) error 
 		}
 	}
 	cleanup := func(primary error) error {
-		if created != nil {
-			if cleanupErr := a.cleanupPartial(ctx, d, created); cleanupErr != nil && serviceAdapterReadFailure(ctx, primary, nil) == nil {
+		// The operation's own cut leaves the state as read; its owner retries.
+		if created != nil && serviceAdapterReadFailure(ctx, primary, nil) == nil {
+			if cleanupErr := a.cleanupPartial(ctx, d, created); cleanupErr != nil {
 				return errors.Join(primary, cleanupErr)
 			}
 		}

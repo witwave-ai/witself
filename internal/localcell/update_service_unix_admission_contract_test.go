@@ -550,3 +550,92 @@ func TestUnixServiceMaintenanceAdmissionSourceContract(t *testing.T) {
 		})
 	}
 }
+
+// The guards that keep a lease cut ask the helper whether the cut is the
+// operation's own: a guard on the cut's type alone fails this pin.
+var serviceAdapterCutGuards = map[string]string{
+	"service_systemd_adapter.go:systemdUserAdapter.Inspect": `if cut := serviceAdapterReadFailure(ctx, err, nil); cut != nil { return ServiceObservation{}, cut }`,
+	"service_systemd_adapter.go:systemdUserAdapter.Apply": `if created != nil && serviceAdapterReadFailure(ctx, primary, nil) == nil {
+ if cleanupErr := a.cleanupPartial(ctx, d, created); cleanupErr != nil { return errors.Join(primary, cleanupErr) }
+}`,
+	"service_systemd_adapter.go:systemdUserAdapter.Remove": `if cut := serviceAdapterReadFailure(ctx, err, nil); cut != nil { return cut }`,
+	"service_launchd.go:launchdAgentAdapter.Remove":        `if cut := serviceAdapterReadFailure(ctx, err, nil); cut != nil { return cut }`,
+}
+
+func serviceAdapterCutGuardContract(sources map[string]string) []string {
+	sites := map[string][]string{}
+	for _, filename := range maintenanceUnixAdapterFiles {
+		file, err := parser.ParseFile(token.NewFileSet(), filename, strings.ReplaceAll(sources[filename], "\r\n", "\n"), 0)
+		if err != nil {
+			return []string{filename + ":parse"}
+		}
+		for _, declaration := range file.Decls {
+			if fn, ok := declaration.(*ast.FuncDecl); ok {
+				ast.Inspect(fn, func(node ast.Node) bool {
+					if guard, ok := node.(*ast.IfStmt); ok {
+						condition := admissionNodeText(guard.Cond)
+						if guard.Init != nil {
+							condition = admissionNodeText(guard.Init) + "; " + condition
+						}
+						if strings.Contains(condition, "serviceAdapterReadFailure(") {
+							key := filename + ":" + updateReceiverName(fn) + "." + fn.Name.Name
+							sites[key] = append(sites[key], admissionNodeText(guard))
+						}
+					}
+					return true
+				})
+			}
+		}
+	}
+	var failures []string
+	for key, want := range serviceAdapterCutGuards {
+		if got := sites[key]; len(got) != 1 || got[0] != admissionStatements(want)[0] {
+			failures = append(failures, key)
+		}
+		delete(sites, key)
+	}
+	for key := range sites {
+		failures = append(failures, key)
+	}
+	sort.Strings(failures)
+	return failures
+}
+
+func TestServiceAdapterCutGuardSourceContract(t *testing.T) {
+	sources := admissionReadSources(t)
+	for _, fixture := range []struct{ name, filename, old, replacement, invariant string }{
+		{"none", "", "", "", ""},
+		{"inspect_type_only", "service_systemd_adapter.go", "if cut := serviceAdapterReadFailure(ctx, err, nil); cut != nil {\n\t\t\treturn ServiceObservation{}, cut\n\t\t}", "if serviceLeaseCut(err) {\n\t\t\treturn ServiceObservation{}, err\n\t\t}", "systemdUserAdapter.Inspect"},
+		{"cleanup_type_only", "service_systemd_adapter.go", "created != nil && serviceAdapterReadFailure(ctx, primary, nil) == nil {", "created != nil && !serviceLeaseCut(primary) {", "systemdUserAdapter.Apply"},
+		{"cleanup_on_own_cut", "service_systemd_adapter.go", "created != nil && serviceAdapterReadFailure(ctx, primary, nil) == nil {", "created != nil {", "systemdUserAdapter.Apply"},
+		{"systemd_host_type_only", "service_systemd_adapter.go", "if cut := serviceAdapterReadFailure(ctx, err, nil); cut != nil {\n\t\t\treturn cut\n\t\t}", "if serviceLeaseCut(err) {\n\t\t\treturn err\n\t\t}", "systemdUserAdapter.Remove"},
+		{"launchd_host_type_only", "service_launchd.go", "if cut := serviceAdapterReadFailure(ctx, err, nil); cut != nil {\n\t\t\treturn cut\n\t\t}", "if serviceLeaseCut(err) {\n\t\t\treturn err\n\t\t}", "launchdAgentAdapter.Remove"},
+	} {
+		for _, ending := range []string{"LF", "CRLF"} {
+			t.Run(fixture.name+"/"+ending, func(t *testing.T) {
+				input := serviceAdmissionClone(sources)
+				for name, source := range input {
+					input[name] = strings.ReplaceAll(source, "\r\n", "\n")
+				}
+				if fixture.filename != "" {
+					if strings.Count(input[fixture.filename], fixture.old) != 1 {
+						t.Fatal("adapter cut guard mutation missed its raising site")
+					}
+					input[fixture.filename] = strings.Replace(input[fixture.filename], fixture.old, fixture.replacement, 1)
+				}
+				for name, source := range input {
+					if ending == "CRLF" {
+						input[name] = strings.ReplaceAll(source, "\n", "\r\n")
+					}
+				}
+				failures := serviceAdapterCutGuardContract(input)
+				if fixture.invariant == "" && len(failures) != 0 {
+					t.Fatalf("adapter cut guards changed %v", failures)
+				}
+				if fixture.invariant != "" && (len(failures) != 1 || failures[0] != fixture.filename+":"+fixture.invariant) {
+					t.Fatalf("adapter cut guard mutation escaped %v", failures)
+				}
+			})
+		}
+	}
+}

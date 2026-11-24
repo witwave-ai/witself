@@ -186,14 +186,11 @@ func TestLeaseWaitSystemdRegistration(t *testing.T) {
 					after = "enable"
 					effects = append(effects, after)
 				}
-				if row == "post_reload_released" {
-					effects = append(effects, "daemon-reload")
-				}
 				inspections := 0
 				a.command = func(ctx context.Context, binary string, args ...string) ([]byte, error) {
 					if row == "post_reload_released" && original != nil && args[1] == "show" && args[2] == "--property=Version" {
 						inspections++
-						if inspections == 2 { // The compensating Inspect can now verify the original file.
+						if inspections == 2 { // Any compensation after the cut would find the lease released.
 							finish()
 						}
 					}
@@ -230,15 +227,10 @@ func TestLeaseWaitSystemdRegistration(t *testing.T) {
 				requireServiceLease(t, strings.Contains(pair[0].Error(), "daemon_reload"), "cleanup lost the manager failure site")
 				requireServiceLease(t, serviceLeaseCut(pair[1]), "cleanup moved its lease cut")
 			}
-			if row == "post_reload_released" {
-				_, err := os.Lstat(path)
-				requireServiceLease(t, errors.Is(err, os.ErrNotExist), "verified compensation retained its partial unit")
-			} else {
-				requireSystemdUnit(t, path, original)
-			}
+			requireSystemdUnit(t, path, original)
 			requireServiceLease(t, slices.Equal(systemdLeaseEffects(m), effects), "manager cut changed the effect trace")
 			requireServiceLease(t, m.active == (row == "registered"), "manager cut changed active state")
-			requireServiceLease(t, m.loaded == (row != "cleanup" && row != "post_reload_released"), "manager cut changed loaded state")
+			requireServiceLease(t, m.loaded == (row != "cleanup"), "manager cut changed loaded state")
 			requireServiceLease(t, !m.disabled, "manager cut disabled the unit")
 			serviceMaintenanceUnchanged(t, m.cell, before)
 			a.command, m.failReload = m.command, false
@@ -257,9 +249,7 @@ func TestLeaseWaitSystemdRegistration(t *testing.T) {
 				requireServiceLease(t, a.Apply(t.Context(), plan) == nil, "registration retry failed")
 				requireServiceLease(t, m.active, "registration retry left the unit inactive")
 			}
-			if row != "post_reload_released" {
-				requireSystemdUnit(t, path, original)
-			}
+			requireSystemdUnit(t, path, original)
 		})
 	}
 }
