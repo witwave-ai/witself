@@ -824,7 +824,7 @@ func admissionRunShutdownParity(t *testing.T) {
 	if err != nil || d.DesiredState != "running" {
 		t.Fatal("host cancellation changed durable running intent")
 	}
-	if held, err := c.serviceHostLeaseHeld(); err != nil || held {
+	if held, err := c.serviceHostLeaseHeld(t.Context()); err != nil || held {
 		t.Fatal("Run did not release the host lease after shutdown")
 	}
 }

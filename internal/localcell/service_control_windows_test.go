@@ -567,7 +567,7 @@ func TestWindowsServiceControlAuthentication(t *testing.T) {
 	ctx := windowsSyntheticTestContext(t)
 	c, _ := unitCell(t)
 	d := prepareSupervisorTest(t, c)
-	lease, err := c.acquireServiceLease(d)
+	lease, err := c.acquireServiceLease(t.Context(), d)
 	if err != nil {
 		t.Fatal("cannot acquire control fixture lease")
 	}
@@ -767,7 +767,7 @@ func TestWindowsPrivatePipeDecoyServer(t *testing.T) {
 	ctx := windowsSyntheticTestContext(t)
 	c, _ := unitCell(t)
 	descriptor := prepareSupervisorTest(t, c) // Generates the fixture bearer; never print it.
-	lease, err := c.acquireServiceLease(descriptor)
+	lease, err := c.acquireServiceLease(t.Context(), descriptor)
 	if err != nil {
 		t.Fatal("cannot acquire decoy fixture lease")
 	}
@@ -995,7 +995,7 @@ func TestWindowsServiceControlEndpointCleanup(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			c, _ := unitCell(t)
 			descriptor := prepareSupervisorTest(t, c)
-			lease, err := c.acquireServiceLease(descriptor)
+			lease, err := c.acquireServiceLease(t.Context(), descriptor)
 			if err != nil {
 				t.Fatal("cannot acquire cleanup fixture lease")
 			}
@@ -1132,7 +1132,7 @@ func TestWindowsServiceControlPublicationAfterFirstInstance(t *testing.T) {
 	ctx := windowsSyntheticTestContext(t)
 	c, _ := unitCell(t)
 	descriptor := prepareSupervisorTest(t, c)
-	lease, err := c.acquireServiceLease(descriptor)
+	lease, err := c.acquireServiceLease(t.Context(), descriptor)
 	if err != nil {
 		t.Fatal("cannot acquire publication fixture lease")
 	}

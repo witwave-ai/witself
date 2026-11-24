@@ -547,7 +547,7 @@ func TestServiceMaintenanceHostUnhealthyStopThenHold(t *testing.T) {
 
 func serviceMaintenanceHostExitContext(t *testing.T, c *Cell, d ServiceDescriptor) context.Context {
 	t.Helper()
-	lease, err := c.acquireServiceLease(d)
+	lease, err := c.acquireServiceLease(t.Context(), d)
 	if err != nil {
 		t.Fatal("Safety exit fixture could not acquire host lease")
 	}
@@ -560,8 +560,8 @@ func serviceMaintenanceHostExitContext(t *testing.T, c *Cell, d ServiceDescripto
 		}
 		t.Cleanup(func() { _ = c.removeServiceControlEndpoint(context.WithoutCancel(t.Context())) })
 	}
-	envelope, _, err := c.newHostExitEnvelope()
-	if err != nil || c.validateHostExitEnvelope(envelope, listener) != nil {
+	envelope, _, err := c.newHostExitEnvelope(t.Context())
+	if err != nil || c.validateHostExitEnvelope(t.Context(), envelope, listener) != nil {
 		t.Fatal("Safety exit fixture could not establish valid envelope")
 	}
 	return context.WithValue(t.Context(), serviceHostExitKey{}, envelope)
@@ -987,7 +987,7 @@ func serviceMaintenanceHostStartup(t *testing.T, kind string, late bool) {
 	if err != nil || status.State != "maintenance" || status.Healthy || status.LastStepOutcome != "ok" {
 		t.Fatal("Held startup did not retain a responsive observation endpoint")
 	}
-	if lease, err := c.acquireServiceLease(d); err != ErrServiceHostActive {
+	if lease, err := c.acquireServiceLease(t.Context(), d); err != ErrServiceHostActive {
 		if lease != nil {
 			_ = lease.Close()
 		}

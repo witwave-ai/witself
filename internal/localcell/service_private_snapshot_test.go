@@ -170,7 +170,7 @@ func TestServicePrivateSnapshot(t *testing.T) {
 	t.Run("already_cancelled", func(t *testing.T) {
 		c := serviceCancellationReceiptCell(t)
 		d := prepareSupervisorTest(t, c)
-		lease, err := c.acquireServiceLease(d)
+		lease, err := c.acquireServiceLease(t.Context(), d)
 		if err != nil {
 			t.Fatal("cannot acquire private snapshot control fixture")
 		}
@@ -249,7 +249,7 @@ func snapshotHostExitLease(t *testing.T) {
 		t.Run(row, func(t *testing.T) {
 			c := serviceCancellationReceiptCell(t)
 			d := prepareSupervisorTest(t, c)
-			lock, err := c.acquireServiceLease(d)
+			lock, err := c.acquireServiceLease(t.Context(), d)
 			if err != nil {
 				t.Fatal(snapshotAdmissionLost)
 			}
@@ -262,7 +262,7 @@ func snapshotHostExitLease(t *testing.T) {
 					t.Fatal(snapshotAdmissionLost)
 				}
 			}
-			_, lease, err := c.serviceHostExitIdentity()
+			_, lease, err := c.serviceHostExitIdentity(t.Context())
 			if err != nil || lock.Close() != nil {
 				t.Fatal(snapshotAdmissionLost)
 			}
@@ -272,7 +272,7 @@ func snapshotHostExitLease(t *testing.T) {
 				if row == "observation" || row == "observation_nonprivate" {
 					return c.waitServiceHostExit(ctx, lease, snapshotExitedProcess{})
 				}
-				_, got, err := c.serviceHostExitIdentity()
+				_, got, err := c.serviceHostExitIdentity(t.Context())
 				if err == nil && got != lease {
 					return ErrServiceControlRefused
 				}

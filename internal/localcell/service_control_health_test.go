@@ -288,7 +288,7 @@ func serviceHealthControlFixture(t *testing.T, bound time.Duration) (*Cell, chan
 	if runtime.GOOS != "windows" {
 		boot = func() (string, error) { return "synthetic-boot", nil }
 	}
-	lease, err := cell.acquireServiceLeaseWithBoot(d, boot)
+	lease, err := cell.acquireServiceLeaseWithBoot(t.Context(), d, boot)
 	if err != nil {
 		t.Fatal("cannot hold control fixture lease")
 	}

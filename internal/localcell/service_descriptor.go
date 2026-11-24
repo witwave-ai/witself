@@ -96,6 +96,20 @@ func serviceLeaseCut(err error) bool {
 	return errors.As(err, &cut)
 }
 
+// Match the selected lease cut itself. A sibling in a joined error may carry
+// the operation's cancellation even when a different deadline ended the read.
+func serviceContextLeaseCut(ctx context.Context, err error) bool {
+	var cut *leaseWaitCut
+	return ctx.Err() != nil && errors.As(err, &cut) && errors.Is(cut, ctx.Err())
+}
+
+func serviceContextReadFailure(ctx context.Context, err, refusal error) error {
+	if serviceContextLeaseCut(ctx, err) {
+		return err
+	}
+	return refusal
+}
+
 // Keep the full cause and its site when a lease wait was interrupted.
 func serviceReadFailure(err, refusal error) error {
 	if serviceLeaseCut(err) {

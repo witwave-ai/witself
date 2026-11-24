@@ -55,7 +55,7 @@ func hostExitSocketFixture(t *testing.T, bounds ...time.Duration) (*Cell, chan s
 	if err != nil {
 		t.Fatal("descriptor unavailable")
 	}
-	lease, err := c.acquireServiceLease(d)
+	lease, err := c.acquireServiceLease(t.Context(), d)
 	if err != nil {
 		t.Fatal("lease unavailable")
 	}
@@ -135,7 +135,7 @@ func TestServiceHostExitEnvelopeUnix(t *testing.T) {
 		t.Run(site, func(t *testing.T) {
 			c, commands := hostExitSocketFixture(t)
 			deliveries := hostExitHealthyResponder(t, commands)
-			envelope, _, err := c.newHostExitEnvelope()
+			envelope, _, err := c.newHostExitEnvelope(t.Context())
 			if err != nil {
 				t.Fatal("cannot prepare envelope")
 			}
@@ -181,7 +181,7 @@ func TestServiceHostExitEnvelopeUnix(t *testing.T) {
 
 func TestServiceHostExitReplayedNonceUnix(t *testing.T) {
 	c, commands := hostExitSocketFixture(t)
-	envelope, _, err := c.newHostExitEnvelope()
+	envelope, _, err := c.newHostExitEnvelope(t.Context())
 	if err != nil {
 		t.Fatal("cannot prepare envelope")
 	}
@@ -264,7 +264,7 @@ func TestServiceHostExitAcceptedThenExitedUnix(t *testing.T) {
 		}
 	})
 	defer cancel()
-	envelope, lease, err := c.newHostExitEnvelope()
+	envelope, lease, err := c.newHostExitEnvelope(t.Context())
 	if err != nil {
 		t.Fatal("cannot prepare exit envelope")
 	}
@@ -286,7 +286,7 @@ func TestServiceHostExitAcceptedThenExitedUnix(t *testing.T) {
 		t.Fatal("ACK was confused with exited")
 	default:
 	}
-	held, err := c.serviceHostLeaseHeld()
+	held, err := c.serviceHostLeaseHeld(t.Context())
 	if err != nil || !held {
 		t.Fatal("lease released before child drain")
 	}
@@ -680,7 +680,7 @@ func TestServiceHostExitAdmissionDeadlineUnix(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			// An unconsumed command queue models a busy supervisor without a sleep.
 			c, _ := hostExitSocketFixture(t, bound)
-			envelope, _, err := c.newHostExitEnvelope()
+			envelope, _, err := c.newHostExitEnvelope(t.Context())
 			if err != nil {
 				t.Fatal("cannot prepare admission-deadline envelope")
 			}
@@ -740,7 +740,7 @@ func TestServiceHostExitAdmissionTimeoutResponseUnix(t *testing.T) {
 					}
 				}()
 			}
-			envelope, _, err := clientCell.newHostExitEnvelope()
+			envelope, _, err := clientCell.newHostExitEnvelope(t.Context())
 			if err != nil {
 				t.Fatal("cannot prepare timeout response envelope")
 			}
@@ -752,7 +752,7 @@ func TestServiceHostExitAdmissionTimeoutResponseUnix(t *testing.T) {
 			if status != http.StatusRequestTimeout || detail != serviceHostExitAdmissionTimeout {
 				t.Fatal("server admission timeout omitted its explicit closed result")
 			}
-			envelope, _, err = clientCell.newHostExitEnvelope()
+			envelope, _, err = clientCell.newHostExitEnvelope(t.Context())
 			if err != nil {
 				t.Fatal("cannot prepare timeout round-trip envelope")
 			}
@@ -798,7 +798,7 @@ func TestServiceHostExitAdmissionEarlyRefusalUnix(t *testing.T) {
 			if err != nil {
 				t.Fatal("refusal fixture descriptor unavailable")
 			}
-			lease, err := c.acquireServiceLease(d)
+			lease, err := c.acquireServiceLease(t.Context(), d)
 			if err != nil {
 				t.Fatal("refusal fixture lease unavailable")
 			}
@@ -814,7 +814,7 @@ func TestServiceHostExitAdmissionEarlyRefusalUnix(t *testing.T) {
 			done := make(chan struct{})
 			go func() { defer close(done); _ = server.Serve(listener) }()
 			t.Cleanup(func() { _ = server.Close(); <-done })
-			envelope, _, err := c.newHostExitEnvelope()
+			envelope, _, err := c.newHostExitEnvelope(t.Context())
 			if err != nil {
 				t.Fatal("refusal fixture envelope unavailable")
 			}

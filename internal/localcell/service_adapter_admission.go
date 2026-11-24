@@ -52,11 +52,7 @@ func serviceAdapterAdmissionForStep(ctx context.Context, owner string, d Service
 // Preserve the interrupted read and its site only when this operation ended
 // the lease wait. Other failures retain the adapter's existing classification.
 func serviceAdapterReadFailure(ctx context.Context, err, refusal error) error {
-	var cut *leaseWaitCut
-	if ctx.Err() != nil && errors.As(err, &cut) && errors.Is(cut, ctx.Err()) {
-		return err
-	}
-	return refusal
+	return serviceContextReadFailure(ctx, err, refusal)
 }
 
 func serviceAdapterConfinementForStep(root, artifactDir, step string) error {

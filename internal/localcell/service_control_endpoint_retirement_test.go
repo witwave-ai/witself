@@ -24,7 +24,7 @@ func TestServiceControlEndpointRetirement(t *testing.T) {
 	if lock.Close() != nil {
 		t.Fatal("cannot release the retired host lease")
 	}
-	next, err := c.acquireServiceLeaseForPlatform(d, boot, "windows")
+	next, err := c.acquireServiceLeaseForPlatform(t.Context(), d, boot, "windows")
 	if err != nil {
 		t.Fatal("cannot acquire the successor host lease")
 	}

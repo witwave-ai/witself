@@ -20,7 +20,7 @@ func TestServiceBindingConsumer(t *testing.T) {
 		t.Run(row, func(t *testing.T) {
 			host := serviceCancellationReceiptCell(t)
 			d := prepareSupervisorTest(t, host)
-			lock, err := host.acquireServiceLease(d)
+			lock, err := host.acquireServiceLease(t.Context(), d)
 			if err != nil {
 				t.Fatal(bindingConsumerFailure)
 			}

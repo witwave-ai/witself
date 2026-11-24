@@ -657,7 +657,7 @@ func TestServiceMaintenanceLockLifetime(t *testing.T) {
 	}
 	t.Run("host_lease_independent", func(t *testing.T) {
 		c, d := serviceMaintenanceCell(t, true)
-		lease, err := c.acquireServiceLeaseWithBoot(d, func() (string, error) { return serviceMaintenanceNativeBoot(t), nil })
+		lease, err := c.acquireServiceLeaseWithBoot(t.Context(), d, func() (string, error) { return serviceMaintenanceNativeBoot(t), nil })
 		if err != nil {
 			t.Fatal("cannot hold diagnostic host lifetime lease")
 		}
@@ -667,7 +667,7 @@ func TestServiceMaintenanceLockLifetime(t *testing.T) {
 		}
 		serviceMaintenanceFence(t, c, "Valid")
 		serviceMaintenanceCause(t, c.reconcileServiceBoot(t.Context()))
-		second, err := c.acquireServiceLeaseWithBoot(d, func() (string, error) { return serviceMaintenanceNativeBoot(t), nil })
+		second, err := c.acquireServiceLeaseWithBoot(t.Context(), d, func() (string, error) { return serviceMaintenanceNativeBoot(t), nil })
 		if second != nil || err != ErrServiceHostActive {
 			t.Fatal("operation owner released independent host lifetime lease")
 		}
@@ -1001,7 +1001,7 @@ func serviceMaintenancePublishedHost(t *testing.T, c *Cell, d ServiceDescriptor)
 	if c.validateServiceControlEndpoint(t.Context()) != nil {
 		t.Fatal("Run did not publish control before reconcile")
 	}
-	if lease, err := c.acquireServiceLease(d); err != ErrServiceHostActive {
+	if lease, err := c.acquireServiceLease(t.Context(), d); err != ErrServiceHostActive {
 		if lease != nil {
 			_ = lease.Close()
 		}

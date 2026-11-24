@@ -34,24 +34,24 @@ func (r *serviceLeaseRecord) hostFields() any {
 
 // The stable file is never unlinked: unlinking a held lease permits two hosts
 // to own different inodes. The record is diagnostic; the OS lock is the fence.
-func (c *Cell) acquireServiceLease(d ServiceDescriptor) (*operationLock, error) {
-	return c.acquireServiceLeaseWithBoot(d, serviceBootID)
+func (c *Cell) acquireServiceLease(ctx context.Context, d ServiceDescriptor) (*operationLock, error) {
+	return c.acquireServiceLeaseWithBoot(ctx, d, serviceBootID)
 }
 
-func (c *Cell) acquireServiceLeaseWithBoot(d ServiceDescriptor, readBoot func() (string, error)) (*operationLock, error) {
-	return c.acquireServiceLeaseForPlatform(d, readBoot, runtime.GOOS)
+func (c *Cell) acquireServiceLeaseWithBoot(ctx context.Context, d ServiceDescriptor, readBoot func() (string, error)) (*operationLock, error) {
+	return c.acquireServiceLeaseForPlatform(ctx, d, readBoot, runtime.GOOS)
 }
 
-func (c *Cell) acquireServiceLeaseForPlatform(d ServiceDescriptor, readBoot func() (string, error), platform string) (*operationLock, error) {
+func (c *Cell) acquireServiceLeaseForPlatform(ctx context.Context, d ServiceDescriptor, readBoot func() (string, error), platform string) (*operationLock, error) {
 	if err := privateDir(c.path("service"), false); err != nil {
 		return nil, serviceFailureAt(err, "lease_directory")
 	}
 	if err := servicePrivateRecord(c.path(".service-host.lock")); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, serviceFailureAt(err, "lease_record")
 	}
-	f, err := openLockFile(context.Background(), c.path(".service-host.lock"), true)
+	f, err := openLockFile(ctx, c.path(".service-host.lock"), true)
 	if err != nil {
-		return nil, errors.New("localcell: service_lease_unavailable")
+		return nil, serviceContextReadFailure(ctx, err, errors.New("localcell: service_lease_unavailable"))
 	}
 	lock := &operationLock{files: []*os.File{f}}
 	if err := lockFile(f); err != nil {

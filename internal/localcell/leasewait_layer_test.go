@@ -606,6 +606,8 @@ func TestLeaseWaitLayerSourceContract(t *testing.T) {
 		{"placeholder_added", "lifecycle.go", start, start + "\t_ = readMaintenanceFenceJSON(context.Background(), c.path(\"journal\", \"maintenance.json\"), new(maintenanceFence))\n",
 			"lease_wait_placeholder:lifecycle.go:(*Cell).Start"},
 		{"field_call_counted", "service_supervisor.go", load, load + "\t_, _ = s.cell.readMaintenanceFence(context.Background())\n", "lease_wait_placeholder:service_supervisor.go:(*supervisor).load"},
+		{"drain_other_receiver_ignored", "service_control_exit.go", "func (s *supervisor) finishHostExit(ctx context.Context, delivered <-chan struct{}) bool {",
+			"func (s *supervisor) readJournal() {}\nfunc (s *supervisor) finishHostExit(ctx context.Context, delivered <-chan struct{}) bool {\n\ts.readJournal()", ""},
 		{"other_receiver_ignored", "service_supervisor.go", load, "func (s *supervisor) readMaintenanceFence(context.Context) {}\n\n" + load + "\ts.readMaintenanceFence(context.Background())\n", ""},
 		// LC-LEASE-2C1: step keeps its cut, the append passes its own context, and
 		// (*supervisor).step is not (*Cell).step (no key at all).
