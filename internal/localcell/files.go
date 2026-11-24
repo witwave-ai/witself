@@ -522,8 +522,21 @@ func (c *Cell) readJournal(ctx context.Context) (journalProgress, error) {
 		return progress, err
 	}
 	defer func() { _ = f.Close() }()
-	progress.readFile, _ = f.Stat()
-	reader := bufio.NewReaderSize(f, 64*1024)
+	observed, _ := f.Stat()
+	progress, err = parseJournalFile(f, nil)
+	progress.readFile = observed
+	if err == nil && progress.pending == nil {
+		progress.pending, err = c.cleanupInterruption(ctx)
+		progress.cleanupOnly = progress.pending != nil
+	}
+	return progress, err
+}
+
+// parseJournalFile validates committed records. A caller may further restrict
+// a crash-shaped tail before it is discarded.
+func parseJournalFile(r io.Reader, acceptTail func(*Interruption, []byte) bool) (journalProgress, error) {
+	var progress journalProgress
+	reader := bufio.NewReaderSize(r, 64*1024)
 	for {
 		line, readErr := reader.ReadSlice('\n')
 		if len(line) == 0 && errors.Is(readErr, io.EOF) {
@@ -551,6 +564,9 @@ func (c *Cell) readJournal(ctx context.Context) (journalProgress, error) {
 			if len(tail) != 0 && !errors.Is(decodeErr, io.ErrUnexpectedEOF) &&
 				(decodeErr != nil || decoder.Decode(new(any)) != io.EOF) {
 				return progress, errors.New("invalid local cell journal; manual recovery required")
+			}
+			if acceptTail != nil && !acceptTail(progress.pending, tail) {
+				return progress, errCheckpointState
 			}
 			progress.tornTail = true
 			break
@@ -583,11 +599,7 @@ func (c *Cell) readJournal(ctx context.Context) (journalProgress, error) {
 		}
 		progress.durableBytes += int64(len(line))
 	}
-	if progress.pending == nil {
-		progress.pending, err = c.cleanupInterruption(ctx)
-		progress.cleanupOnly = progress.pending != nil
-	}
-	return progress, err
+	return progress, nil
 }
 
 // discardJournalTail requires the operation lock. Sync the truncation before

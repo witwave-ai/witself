@@ -23,7 +23,7 @@ import (
 // drill record open is excluded (OQ9). The checkpoint tree's open reaches it
 // through the private beneath walk (LC-CKPT-WALK-1C1).
 var leaseWaitSites = []string{"files_other.go:openPrivateReader", "files_other.go:openPrivateWriter", "checkpoint_unix.go:openCheckpointSource", "lock_unix.go:openLockFile",
-	"checkpoint_tree_unix.go:open"}
+	"checkpoint_tree_unix.go:open", "checkpoint_journal_binding_unix.go:repairOwnedJournal"}
 
 // leaseWaitExcluded: the dark drill record open (OQ9); leaseWaitPlain: the one
 // plain open in a file holding a site, pinned to pass its caller's flags only.
@@ -148,7 +148,7 @@ func leaseWaitOwnContext(function *ast.FuncDecl, argument ast.Expr) bool {
 // leaseWaitOpeners are the declarations that take the operation's context first
 // (LC-LEASE-2A, 2B, 2C1, 2C2, 2D R5, 2D2 and 2D3; 2D's seam), in the package reference contract's notation.
 var leaseWaitOpeners = slices.Concat(leaseWaitServiceOpeners, []string{"waitOutLease", "openPrivateReader", "openPrivateWriter", "openPostgresReader", "openPlainReader", "openLockFile",
-	"(*Cell).openCheckpointSource", "openRegularBy", "readRegular", "openRegular", "openRegularWriter", "openServiceRecord", "checkpointComplete",
+	"(*Cell).openCheckpointSource", "(*Cell).repairOwnedJournal", "openRegularBy", "readRegular", "openRegular", "openRegularWriter", "openServiceRecord", "checkpointComplete",
 	"readMaintenanceFenceJSON", "(*Cell).readMaintenanceFence", "acquireLock", "(*Cell).readJournal", "(*Cell).journal", "(*Cell).journalCause",
 	"(*Cell).step", "(*Cell).begin", "(*Cell).finish", "(*Cell).discardJournalTail", "(*Cell).finishRemoval", "(*Cell).finishRetainedRemoval",
 	"(*Cell).postmaster", "(*Cell).maintenanceFenceAllows", "(*Cell).refuseBeforeLockNames", "(*Cell).password", "(*Cell).logFile", "(*Cell).childEnvironment",
@@ -169,6 +169,10 @@ var leaseWaitServiceOpeners = strings.Fields(`(*Cell).serviceDescriptor (*Cell).
 (*Cell).removeServiceControlEndpoint`)
 
 var leaseWaitServiceCalls = map[string]string{
+	// The dark repair has the same per-owner, exact-callee contract as the service entry points.
+	"checkpoint_journal_binding_unix.go:(*Cell).repairOwnedJournal": "waitOutLease",
+	"checkpoint_journal_repair.go:(*Cell).RepairCheckpointJournal":  "acquireLock checkpointCold readManifest repairOwnedJournal",
+
 	"service_control.go:(*Cell).Control":                               "readServiceControlSecret validateServiceControlEndpoint",
 	"service_control.go:(*Cell).readServiceControlSecret":              "serviceControlSecretBy",
 	"service_control.go:(*Cell).serveServiceControlForPlatform":        "listenRunServiceControl readServiceControlSecret removeServiceControlEndpoint",

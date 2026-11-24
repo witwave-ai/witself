@@ -204,6 +204,8 @@ type Cell struct {
 	postgresPendingTest      *postgresPendingOperations
 	// Fixture-scoped observation of durable publication and admission boundaries.
 	observeServiceDescriptor func(string, ServiceDescriptor)
+	// Test cuts on the held journal descriptor. Nil in production.
+	beforeJournalSettlement func(string, *os.File)
 }
 
 // CanonicalRoot makes two spellings of one directory canonicalize to the same string.

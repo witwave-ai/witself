@@ -106,6 +106,16 @@ checkpoint.go
 	(*Cell).validateRecovery os.ReadDir privateDir
 	(*Cell).witnessCheckpoint (*Cell).openCheckpointSource
 	checkpointComplete openRegular
+checkpoint_journal_binding_other.go
+	import context os
+checkpoint_journal_binding_unix.go
+	import context errors golang.org/x/sys/unix io os path/filepath syscall
+	(*Cell).journalBindings path/filepath.EvalSymlinks
+	(*Cell).repairOwnedJournal (*os.Root).OpenFile (*os.Root).OpenRoot
+checkpoint_journal_repair.go
+	import bytes context crypto/sha256 errors io os runtime
+	(*Cell).RepairCheckpointJournal acquireLock os.OpenRoot
+	(*Cell).settleCheckpointJournal (*os.File).Truncate
 checkpoint_other.go
 	import context os
 checkpoint_root.go
