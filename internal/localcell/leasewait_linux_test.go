@@ -306,18 +306,22 @@ func TestLeaseWaitRepairSwap(t *testing.T) {
 					syncs += map[bool]int{true: 1}[filepath.Base(f.Name()) == "operations.jsonl"]
 					return savedSync(f)
 				}
-				switch {
-				case size == "plain":
-					swapped <- time.Time{}
-				case site == "torn":
-					leaseTaken(t, l, name)
-				default:
+				prefixSyncs := 0
+				if site == "retained" {
 					c.cfg.Failpoint = func(op, step string) error {
 						if op == "remove" && step == "cleanup_journal" {
-							l.take(name)
+							prefixSyncs, syncs = syncs, 0
+							if size != "plain" {
+								l.take(name)
+							}
 						}
 						return nil
 					}
+				}
+				if size == "plain" {
+					swapped <- time.Time{}
+				} else if site == "torn" {
+					leaseTaken(t, l, name)
 				}
 				if size != "plain" {
 					go func() {
@@ -332,6 +336,9 @@ func TestLeaseWaitRepairSwap(t *testing.T) {
 				err = readerWatchdog(t, func() error { return c.Repair(t.Context()) }, l.release)
 				returned, at := time.Now(), <-swapped
 				m, manifestErr := readManifest(t.Context(), c.cfg.Root)
+				if site == "retained" && checkpointJournalSettlementSupported && prefixSyncs != 1 {
+					t.Fatal("retained Repair did not sync the prefix before the lease boundary")
+				}
 				if size == "plain" {
 					if err != nil || syncs != 1 || manifestErr != nil || m.Cleanup != nil || site == "torn" && writerSize(name) != int64(len(durable)) {
 						t.Fatal("repair without a lease or a swap did not succeed as before")

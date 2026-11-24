@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -77,22 +78,27 @@ func TestJournalTailTruncationSync(t *testing.T) {
 				{"operation", "started"}, {"revert_stop", "started"},
 				{"revert_stop", "done"}, {"operation", "done"},
 			}
+			prefixSyncs := 1 // discard sync
+			if checkpointJournalSettlementSupported {
+				prefixSyncs++ // admitted Repair syncs its prefix before recovery
+			}
 			calls := 0
 			syncFile = func(f *os.File) error {
-				if f.Name() != path {
+				if filepath.Clean(f.Name()) != path {
 					return originalSync(f) // Atomic manifest publication shares the seam.
 				}
 				calls++
+				records := max(1, calls-prefixSyncs+1)
 				data, err := os.ReadFile(path)
-				if err != nil || calls > len(want) || bytes.Count(data, []byte{'\n'}) != calls {
-					t.Fatal("Repair did not sync the truncation once before syncing each recovery append")
+				if err != nil || records > len(want) || bytes.Count(data, []byte{'\n'}) != records {
+					t.Fatal("Repair did not sync the prefix before syncing each recovery append")
 				}
-				if calls == 1 && !bytes.Equal(data, prefix) {
+				if records == 1 && !bytes.Equal(data, prefix) {
 					t.Fatal("first recovery sync did not cover exactly the truncated durable prefix")
 				}
 				lines := bytes.Split(bytes.TrimSuffix(data, []byte{'\n'}), []byte{'\n'})
 				var entry journalEntry
-				if err := json.Unmarshal(lines[len(lines)-1], &entry); err != nil || entry.Operation != "stop" || entry.Step != want[calls-1].step || entry.State != want[calls-1].state {
+				if err := json.Unmarshal(lines[len(lines)-1], &entry); err != nil || entry.Operation != "stop" || entry.Step != want[records-1].step || entry.State != want[records-1].state {
 					t.Fatal("recovery journal sync order changed")
 				}
 				if outcome == "failure" {
@@ -111,10 +117,10 @@ func TestJournalTailTruncationSync(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if calls != len(want) {
-				t.Fatalf("Repair synced journal %d times; want one truncation and three appends", calls)
+			if calls != prefixSyncs+len(want)-1 {
+				t.Fatal("Repair performed the wrong number of journal syncs")
 			}
-			if err := c.Repair(t.Context()); err != nil || calls != len(want) {
+			if err := c.Repair(t.Context()); err != nil || calls != prefixSyncs+len(want)-1 {
 				t.Fatal("repeated Repair performed another journal sync")
 			}
 		})

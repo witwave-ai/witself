@@ -2310,3 +2310,33 @@ func TestRepairCheckpointJournalDark(t *testing.T) {
 		drillAssert(t, !strings.Contains(source, "RepairCheckpointJournal"), "production source reached journal repair")
 	}
 }
+
+// begin exempts exactly the two checkpoint verbs from its barrier; theirs runs in
+// closeCheckpointLeftover, which must precede every begin naming them (or a computed name).
+func TestCheckpointJournalBarrierExemptCallers(t *testing.T) {
+	exempt, exempted, calls := []string{`"checkpoint"`, `"checkpoint_delete"`}, []string{}, 0
+	sources, _ := filepath.Glob("*.go")
+	for _, name := range slices.DeleteFunc(sources, func(s string) bool { return strings.HasSuffix(s, "_test.go") }) {
+		file, err := parser.ParseFile(token.NewFileSet(), name, nil, parser.SkipObjectResolution)
+		drillAssert(t, err == nil, "cannot parse a journal writer source")
+		for _, decl := range file.Decls {
+			fn, _ := decl.(*ast.FuncDecl)
+			closed := decl.End()
+			ast.Inspect(decl, func(n ast.Node) bool {
+				if cmp, ok := n.(*ast.BinaryExpr); ok && fn != nil && fn.Recv != nil && fn.Name.Name == "begin" && types.ExprString(cmp.X) == "operation" {
+					exempted = append(exempted, types.ExprString(cmp.Y))
+				} else if call, ok := n.(*ast.CallExpr); ok && strings.HasSuffix(types.ExprString(call.Fun), ".closeCheckpointLeftover") {
+					closed = min(closed, call.Pos())
+				} else if ok && strings.HasSuffix(types.ExprString(call.Fun), ".begin") && len(call.Args) == 2 {
+					if op := types.ExprString(call.Args[1]); slices.Contains(exempt, op) || !strings.HasPrefix(op, `"`) {
+						calls++
+						drillAssert(t, closed < call.Pos(), "an exempted begin call does not follow the leftover close")
+					}
+				}
+				return true
+			})
+		}
+	}
+	drillAssert(t, slices.Equal(exempted, exempt), "begin's barrier exemption names changed")
+	drillAssert(t, calls >= len(exempt), "the exempted begin calls were not found")
+}

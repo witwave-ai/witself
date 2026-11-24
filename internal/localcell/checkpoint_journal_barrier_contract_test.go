@@ -21,6 +21,12 @@ func TestCheckpointJournalBarrierPlatform(t *testing.T) {
 		{"checkpoint.go", []string{
 			barrier,
 		}},
+		{"lifecycle.go", []string{
+			"\tif !checkpointJournalSettlementSupported {\n\t\treturn nil\n\t}\n\terr := " + barrier + "\n",
+		}},
+		{"files.go", []string{ // first publication syncs the root only off Windows
+			"\t\tif runtime.GOOS != \"windows\" {\n\t\t\tif err := syncJournalDirectory(c.cfg.Root); err != nil {\n",
+		}},
 		{"checkpoint_journal_binding_unix.go", []string{
 			"//go:build linux || darwin\n",
 			"func (c *Cell) syncCheckpointJournalPrefix(",

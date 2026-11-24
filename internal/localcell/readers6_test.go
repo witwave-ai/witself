@@ -386,8 +386,8 @@ func TestJournalWritersStillWrite(t *testing.T) {
 	}
 	t.Run("absent", func(t *testing.T) {
 		c, _ := unitCell(t)
-		if calls := syncs(t); c.journal(context.Background(), "stop", "operation", "started") != nil || writerRecords(c) != 1 || *calls != 1 {
-			t.Fatal("an absent journal was not created with one whole record and one directory sync")
+		if calls := syncs(t); c.journal(context.Background(), "stop", "operation", "started") != nil || writerRecords(c) != 1 || *calls != len(firstJournalSyncs())-1 {
+			t.Fatal("an absent journal was not created with one whole record and all publication syncs")
 		}
 	})
 	t.Run("complete", func(t *testing.T) {
@@ -417,9 +417,13 @@ func TestJournalWritersStillWrite(t *testing.T) {
 			}
 			return saved(f)
 		}
+		want := 1 // the retained-cleanup sync
+		if checkpointJournalSettlementSupported {
+			want++ // settle the prefix before recovery
+		}
 		err := c.Repair(t.Context())
-		if m, manifestErr := readManifest(t.Context(), c.cfg.Root); err != nil || journalSyncs != 1 || manifestErr != nil || m.Cleanup != nil {
-			t.Fatal("repair did not sync the retained journal once and clear the cleanup checkpoint")
+		if m, manifestErr := readManifest(t.Context(), c.cfg.Root); err != nil || journalSyncs != want || manifestErr != nil || m.Cleanup != nil {
+			t.Fatal("repair did not settle the retained journal and clear the cleanup checkpoint")
 		}
 	})
 	// P3 on every platform: a regular file put at the journal's name after the
@@ -442,7 +446,17 @@ func TestJournalWritersStillWrite(t *testing.T) {
 			}
 			name := readerJournalPath(c)
 			before, err := os.ReadFile(name)
-			replace := func() { err = errors.Join(err, os.Rename(name, name+".moved"), testWriteFile(name, bystander, 0o600)) }
+			replace := func() {
+				want := 0
+				if site == "retained" && checkpointJournalSettlementSupported {
+					want = 1
+				}
+				if syncs != want {
+					t.Fatal("unexpected journal sync count before name replacement")
+				}
+				syncs = 0
+				err = errors.Join(err, os.Rename(name, name+".moved"), testWriteFile(name, bystander, 0o600))
+			}
 			got, want := error(nil), "cannot open torn local cell journal"
 			if site == "torn" {
 				replace()

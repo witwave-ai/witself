@@ -139,6 +139,9 @@ func (c *Cell) syncCheckpointJournalPrefix(ctx context.Context, progress journal
 	defer func() { _ = dir.Close() }()
 	const name = "operations.jsonl"
 	f, err := openCheckpointJournalFile(ctx, dir, name, os.O_RDONLY)
+	if cut := (*leaseWaitCut)(nil); errors.As(err, &cut) {
+		return cut
+	}
 	if err != nil {
 		return errCheckpointJournalIO
 	}

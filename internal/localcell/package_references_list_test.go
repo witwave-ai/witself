@@ -228,7 +228,7 @@ files.go
 	import bufio bytes context encoding/json errors fmt github.com/witwave-ai/witself/internal/runtimeconfig io os path/filepath runtime strings time
 	(*Cell).discardJournalTail (*os.File).Truncate openRegularWriter
 	(*Cell).journal (*Cell).journalCause
-	(*Cell).journalCause (*os.File).Write openRegularWriter syncDirectory
+	(*Cell).journalCause (*os.File).Write openRegularWriter syncDirectory x2
 	(*Cell).layout privateDir
 	(*Cell).readJournal openRegular
 	(*Cell).readUpdateJournal openRegular
