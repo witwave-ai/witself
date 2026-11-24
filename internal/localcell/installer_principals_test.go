@@ -718,6 +718,8 @@ func (w *installerCatalogWire) sendCatalogRow(backend *pgproto3.Backend, query s
 // This fixture keeps authenticated sessions independently of SET ROLE, so the
 // production pg_stat_activity usesysid query can distinguish login from role.
 type installerMaintenanceWire struct {
+	healthAccount         string
+	healthReads           int
 	mu                    sync.Mutex
 	sessions              map[net.Conn]string
 	current               map[net.Conn]string
@@ -846,7 +848,7 @@ func (w *installerMaintenanceWire) respond(backend *pgproto3.Backend, conn net.C
 		backend.Send(&pgproto3.CommandComplete{CommandTag: []byte("SELECT 1")})
 	}
 	switch {
-	case query == "":
+	case query == "", w.healthAccount != "" && query == "-- ping":
 		backend.Send(&pgproto3.EmptyQueryResponse{})
 	case query == "SET ROLE witself_sync_owner":
 		w.current[conn] = string(store.SyncPrincipalOwner)
@@ -882,6 +884,9 @@ func (w *installerMaintenanceWire) respond(backend *pgproto3.Backend, conn net.C
 		row(role, "f", "f", "f", "f", "f", "f", login, "f", "f")
 	case strings.HasPrefix(query, "SELECT rolcanlogin FROM pg_roles"):
 		row("f")
+	case w.healthAccount != "" && query == "SELECT id FROM accounts WHERE is_default AND status = 'active'":
+		w.healthReads++
+		row(w.healthAccount)
 	case strings.Contains(query, "SELECT to_regclass('witself_sync_schema_version')"):
 		row("t", "t")
 	case strings.Contains(query, "SELECT DISTINCT ON (version_id)"):

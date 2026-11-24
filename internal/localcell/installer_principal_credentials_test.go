@@ -397,7 +397,7 @@ func (s *installerHealthStore) RevokeToken(_ context.Context, account, operator,
 func TestInstallerPrincipalsServiceHealthIdentity(t *testing.T) {
 	t.Run("maintenance-and-legacy-custody", func(t *testing.T) {
 		c, m, values := selectedCredentialFixture(t)
-		raw, err := c.healthDSN(m)
+		raw, err := c.healthDSN(t.Context(), m)
 		if err != nil {
 			t.Fatal("health identity selector refused selected maintenance fixture")
 		}
@@ -413,11 +413,11 @@ func TestInstallerPrincipalsServiceHealthIdentity(t *testing.T) {
 		if removePrivateFile(path) != nil {
 			t.Fatal("health identity fixture could not remove maintenance credential")
 		}
-		if _, err := c.healthDSN(m); err == nil {
+		if _, err := c.healthDSN(t.Context(), m); err == nil {
 			t.Fatal("health identity selector retried a missing maintenance credential with bootstrap")
 		}
 		m.PrincipalLayoutVersion, m.PrincipalRoles = 0, nil
-		raw, err = c.healthDSN(m)
+		raw, err = c.healthDSN(t.Context(), m)
 		if err != nil {
 			t.Fatal("health identity selector changed legacy bootstrap behavior")
 		}
