@@ -716,7 +716,7 @@ var checkpointSystemSelectors = map[string][]string{"checkpoint_unix.go": {"sysc
 	"drill_reserve_windows.go": {"windows.Handle", "windows.ERROR_INVALID_NAME", "windows.ERROR_DISK_FULL", "windows.ERROR_HANDLE_DISK_FULL",
 		"windows.ERROR_DISK_QUOTA_EXCEEDED", "windows.ERROR_FILE_TOO_LARGE", "windows.ByHandleFileInformation", "windows.FileStandardInfo"},
 	"checkpoint_tree_unix.go": {"unix.EINVAL", "unix.Stat_t", "unix.Fstatat", "unix.AT_SYMLINK_NOFOLLOW", "unix.S_IFMT", "unix.S_IFDIR", "unix.Unlinkat", "unix.AT_REMOVEDIR",
-		"unix.Close", "unix.ELOOP", "unix.ENOENT", "unix.ENOTDIR", "unix.EXDEV", "unix.F_DUPFD_CLOEXEC", "unix.FcntlInt", "unix.Fstat", "unix.S_IFREG"}}
+		"unix.Close", "unix.ELOOP", "unix.ENOENT", "unix.ENOTDIR", "unix.ENOTEMPTY", "unix.EXDEV", "unix.F_DUPFD_CLOEXEC", "unix.FcntlInt", "unix.Fstat", "unix.S_IFREG"}}
 
 // drillReserveCalls are the reservation files' system, runtimeconfig and name-resolving calls by file, exact
 // text and count: rule (d) admits a system function there only as the function

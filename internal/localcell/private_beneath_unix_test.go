@@ -305,6 +305,126 @@ func TestPrivateBeneathMkdirMode(t *testing.T) {
 	}
 }
 
+func openedMadeID(t *testing.T, name string) (privateBeneathID, error) {
+	t.Helper()
+	dir, err := os.Open(name)
+	if err != nil {
+		t.Fatal("cannot open the directory for the identity check")
+	}
+	defer func() { _ = dir.Close() }()
+	fd := int(dir.Fd())
+	var stat unix.Stat_t
+	if unix.Fstat(fd, &stat) != nil {
+		t.Fatal("cannot stat the directory for the identity check")
+	}
+	return privateBeneathMadeID(fd, &stat)
+}
+
+func TestPrivateBeneathMadeID(t *testing.T) {
+	for _, kind := range []string{"empty", "file", "directory"} {
+		t.Run(kind, func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), "made")
+			if os.Mkdir(dir, 0o700) != nil {
+				t.Fatal("cannot make the directory for the identity check")
+			}
+			if kind != "empty" {
+				beneathPlant(t, filepath.Join(dir, "entry"), "", kind)
+			}
+			id, err := openedMadeID(t, dir)
+			if kind == "empty" {
+				var stat unix.Stat_t
+				if unix.Stat(dir, &stat) != nil {
+					t.Fatal("cannot identify the empty directory")
+				}
+				if err != nil {
+					t.Fatal("the empty directory was refused")
+				}
+				if id != privateBeneathIdentity(&stat) {
+					t.Fatal("the empty directory did not return its identity")
+				}
+				return
+			}
+			if !errors.Is(err, unix.ENOTEMPTY) {
+				t.Fatal("the populated directory did not return the nonempty refusal")
+			}
+			if id != (privateBeneathID{}) {
+				t.Fatal("the populated directory returned an identity")
+			}
+		})
+	}
+}
+
+// A descriptor whose entries cannot be read is not an empty directory: it is refused and has no identity.
+func TestPrivateBeneathMadeIDReadFails(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "plain")
+	if os.WriteFile(file, nil, 0o600) != nil || os.Chmod(file, 0o700) != nil {
+		t.Fatal("cannot make the file for the identity check")
+	}
+	id, err := openedMadeID(t, file)
+	if err == nil {
+		t.Fatal("a descriptor whose read failed was accepted as an empty directory")
+	}
+	if id != (privateBeneathID{}) {
+		t.Fatal("a descriptor whose read failed returned an identity")
+	}
+}
+
+func TestCheckpointTreeNonemptyMkdirResult(t *testing.T) {
+	for row, name := range map[string]string{"root": ".", "child": "pg"} {
+		t.Run(row, func(t *testing.T) {
+			f, _ := checkpointFixture(t, "legacy", false)
+			tree := f.cell.checkpointTree(heldTarget)
+			defer tree.close()
+			if privateDir(f.cell.recoveryDir(), true) != nil || tree.hold() != nil {
+				t.Fatal("cannot hold the checkpoint parent")
+			}
+			if name != "." && tree.mkdir(".") != nil {
+				t.Fatal("cannot record the checkpoint root")
+			}
+			dir := f.cell.path("recovery", tree.name(name))
+			if os.MkdirAll(filepath.Join(dir, "nested"), 0o700) != nil {
+				t.Fatal("cannot prepare the populated checkpoint directory")
+			}
+			files := []string{"leaf", filepath.Join("nested", "child")}
+			for _, file := range files {
+				if os.WriteFile(filepath.Join(dir, file), []byte(file), 0o600) != nil {
+					t.Fatal("cannot prepare a file in the checkpoint directory")
+				}
+			}
+			before, err := os.Stat(dir)
+			if err != nil {
+				t.Fatal("cannot identify the populated checkpoint directory")
+			}
+			id, err := openedMadeID(t, dir)
+			if !errors.Is(tree.recordMkdir(name, id, err), unix.ENOTEMPTY) {
+				t.Fatal("the tree lost the nonempty mkdir refusal")
+			}
+			if _, recorded := tree.want(tree.name(name)); recorded {
+				t.Fatal("the tree recorded the refused directory")
+			}
+			if tree.discard() != errCheckpointCopy {
+				t.Fatal("discard did not report incomplete cleanup")
+			}
+			after, err := os.Stat(dir)
+			if err != nil {
+				t.Fatal("discard removed the refused directory")
+			}
+			if !os.SameFile(before, after) {
+				t.Fatal("discard changed the identity of the refused directory")
+			}
+			for _, file := range files {
+				data, err := os.ReadFile(filepath.Join(dir, file))
+				if err != nil {
+					t.Fatal("discard removed an entry from the refused directory")
+				}
+				if string(data) != file {
+					t.Fatal("discard changed the bytes of a refused directory entry")
+				}
+			}
+		})
+	}
+}
+
 // Malformed names, from and to are EINVAL before any system call: the root is closed, so a call would give EBADF.
 func TestPrivateBeneathNames(t *testing.T) {
 	_, _, root := beneathTree(t)

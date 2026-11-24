@@ -4,6 +4,7 @@ package localcell
 
 import (
 	"errors"
+	"io"
 	"io/fs"
 	"math/rand/v2"
 	"os"
@@ -123,21 +124,43 @@ func privateBeneathOpened(dir int, last string, fn func(fd int, stat *unix.Stat_
 	return fn(fd, &stat)
 }
 
-// privateBeneathMkdir makes name a directory on its parent's device, owned by the effective user with permission bits
-// 0700 (as privateOwnedDir), then has syncParent sync the parent; its identity is returned, a privacy refusal's too.
+// privateBeneathMkdir makes name on its parent's device and takes its identity only if the reopened directory is empty.
+// It checks effective ownership and mode 0700 before syncing the parent. A privacy or sync failure retains the identity.
 func privateBeneathMkdir(root *os.Root, name string, want privateBeneathWant, syncParent func(fd int) error) (id privateBeneathID, err error) {
 	err = privateBeneathAt(root, name, want, func(dir int, last string) error {
 		if err := unix.Mkdirat(dir, last, 0o700); err != nil {
 			return err
 		}
-		return privateBeneathOpened(dir, last, func(_ int, stat *unix.Stat_t) error {
-			if id = privateBeneathIdentity(stat); stat.Uid != uint32(unix.Geteuid()) || stat.Mode&0o777 != 0o700 {
-				return errLocalDirectoryPrivate
+		return privateBeneathOpened(dir, last, func(fd int, stat *unix.Stat_t) error {
+			if id, err = privateBeneathMadeID(fd, stat); err != nil {
+				return err
 			}
 			return syncParent(dir)
 		})
 	})
 	return id, err
+}
+
+// privateBeneathMadeID checks the freshly opened directory before claiming its identity.
+func privateBeneathMadeID(fd int, stat *unix.Stat_t) (privateBeneathID, error) {
+	err := privateBeneathDup(fd, func(dir *os.File) error {
+		names, err := dir.Readdirnames(1)
+		if len(names) != 0 {
+			return unix.ENOTEMPTY
+		}
+		if err == io.EOF {
+			return nil
+		}
+		return err
+	})
+	if err != nil {
+		return privateBeneathID{}, err
+	}
+	id := privateBeneathIdentity(stat)
+	if stat.Uid != uint32(unix.Geteuid()) || stat.Mode&0o777 != 0o700 {
+		return id, errLocalDirectoryPrivate
+	}
+	return id, nil
 }
 
 // privateBeneathCreateTemp makes an exclusive 0600 ".pending-<decimal>" file in dir, never through a link, with

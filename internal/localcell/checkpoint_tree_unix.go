@@ -31,6 +31,8 @@ type checkpointTree struct {
 	recovery *os.Root
 	made     map[string]privateBeneathID
 	held     []int // keep listed and adopted checkpoint inodes alive until close
+
+	mkdirRefusedNonempty bool
 }
 
 func (c *Cell) checkpointTree(checkpointID string) *checkpointTree {
@@ -238,10 +240,9 @@ func (t *checkpointTree) lstat(name string) (fs.FileInfo, error) {
 	return privateBeneathLstat(t.recovery, t.name(name), t.want)
 }
 
-// mkdir makes name and records its identity, a refused one's too once its
-// re-open succeeded (its privacy check or parent sync failed), so the discard
-// can remove it. A directory whose re-open failed has no identity and is not
-// recorded: at the checkpoint's own name the discard leaves it, incomplete.
+// mkdir records the reopened directory only after the walk finds it empty,
+// including on privacy or parent sync failure. A nonempty refusal makes
+// discard incomplete even below a recorded root, where a sweep would remove it.
 func (t *checkpointTree) mkdir(name string) error {
 	if err := t.bound(); err != nil {
 		return err
@@ -249,8 +250,14 @@ func (t *checkpointTree) mkdir(name string) error {
 	id, err := privateBeneathMkdir(t.recovery, t.name(name), t.want, func(fd int) error {
 		return syncCheckpointTreeParent(t.name(name), func() error { return privateBeneathSync(fd) })
 	})
+	return t.recordMkdir(name, id, err)
+}
+
+func (t *checkpointTree) recordMkdir(name string, id privateBeneathID, err error) error {
 	if id != (privateBeneathID{}) {
 		t.made[t.name(name)] = id
+	} else if errors.Is(err, unix.ENOTEMPTY) {
+		t.mkdirRefusedNonempty = true
 	}
 	return err
 }
@@ -472,7 +479,7 @@ func (t *checkpointTree) sweep() error {
 // the name (it may survive wherever it was moved): incomplete.
 func (t *checkpointTree) discard() error {
 	t.c.checkpointStage("hold")
-	if t.bound() != nil {
+	if t.mkdirRefusedNonempty || t.bound() != nil {
 		return errCheckpointCopy
 	}
 	recorded, made := t.made[t.id]
