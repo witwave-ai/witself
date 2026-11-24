@@ -3,6 +3,7 @@ package localcell
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -11,7 +12,9 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -25,8 +28,9 @@ import (
 // refusal at the ceiling; a released lease completes the ordinary read. The
 // credential and final-tree reads are held after database (and API) authorisation.
 // The manifest row meets the descriptor's identity read, the first open of that
-// file; the start fence, the second manifest read and the tree's record loop
-// reopen files already read and are pinned by the lease contract instead.
+// file. The start fence, ServiceHealth's own manifest read and the tree's record
+// loop reopen files already read: their rows reach the site's own read with
+// healthSeamFreeLease, the first wait widened to 50 ms (test-adjustable only).
 func TestServiceHealthLease(t *testing.T) {
 	for _, row := range []struct {
 		name, file string
@@ -38,6 +42,8 @@ func TestServiceHealthLease(t *testing.T) {
 		{"maintenance", "journal/maintenance.json", 0, 0, errMaintenanceFenceActive}, {"principal", "run/postgres.password", 0, 0, errServiceHealth},
 		{"credential", "service/api.secret", 1, 0, errServiceHealth}, {"final_tree", "pg/postmaster.pid", 1, 1, errServiceHealth},
 		{"installer_principal", "run/postgres.password", 0, 0, errServiceHealth}, {"installer_credential", "service/api.secret", 1, 0, errServiceHealth},
+		{"start_fence", "service/descriptor.json", 0, 0, errServiceHealth}, {"manifest", "manifest.json", 0, 0, errServiceHealth},
+		{"tree_process", "run/postgres.json", 0, 0, errServiceHealth},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			c, _ := serviceMaintenanceHostHealthCell(t)
@@ -57,18 +63,25 @@ func TestServiceHealthLease(t *testing.T) {
 				released = errMaintenanceFenceActive
 			}
 			snapshot := healthLeaseFiles(t, c)
-			arm := func() {
-				if row.name == "final_tree" {
+			trigger, seamFree := healthSeamFree[row.name]
+			arm := func() func() bool {
+				if seamFree {
+					return healthSeamFreeLease(t, holder, c.path(trigger), c.path(row.file))
+				} else if row.name == "final_tree" {
 					f.arm.Store(true)
 				} else {
 					leaseTaken(t, holder, c.path(row.file))
 				}
+				return func() bool { return true }
 			}
 			c.cfg.Timeout = 4 * time.Second
+			if seamFree {
+				leaseWait.first = 50 * time.Millisecond
+			}
 
 			leaseWait.ceiling = 2 * time.Second
 			reads, api := f.counts()
-			arm()
+			primed := arm()
 			ctx, cancel := context.WithCancel(t.Context())
 			done := make(chan error, 1)
 			go func() { done <- run(ctx) }()
@@ -78,6 +91,7 @@ func TestServiceHealthLease(t *testing.T) {
 			returned := time.Since(at)
 			holder.close()
 			requireServiceLease(t, broken, "health never broke the selected lease")
+			requireServiceLease(t, primed(), "health never read the file before the site")
 			requireExitLeaseCut(t, err, context.Canceled)
 			requireServiceLease(t, !errors.Is(err, errServiceHealth), "interrupted health reported a verdict")
 			requireServiceLease(t, !errors.Is(err, errMaintenanceFenceActive), "interrupted health reported maintenance")
@@ -89,11 +103,12 @@ func TestServiceHealthLease(t *testing.T) {
 
 			leaseWait.ceiling = 200 * time.Millisecond
 			reads, api = f.counts()
-			arm()
+			primed = arm()
 			started := time.Now()
 			err = run(t.Context())
 			elapsed := time.Since(started)
 			holder.close()
+			requireServiceLease(t, primed(), "live health never read the file before the site")
 			requireServiceLease(t, errors.Is(err, row.live), "live health lost the parent's ceiling refusal")
 			requireServiceLease(t, !serviceLeaseCut(err), "live health reported a cut")
 			requireServiceLease(t, elapsed >= leaseWait.ceiling/2, "live health refused before its lease budget")
@@ -105,6 +120,27 @@ func TestServiceHealthLease(t *testing.T) {
 			requireServiceLease(t, errors.Is(run(t.Context()), released), "released lease did not complete the ordinary health read")
 		})
 	}
+}
+
+// healthSeamFree names, for each site that rereads a file, the file ServiceHealth
+// reads after that file's earlier read and before the site (m1).
+var healthSeamFree = map[string]string{"start_fence": "manifest.json", "manifest": "pg/postmaster.pid", "tree_process": "run/worker.json"}
+
+// healthSeamFreeLease lets go a lease on trigger at its break, while target is
+// closed, and only then takes holder on target, so that the site's own read
+// meets it. The result reports both, joined at the latest by the row's cleanup.
+func healthSeamFreeLease(t *testing.T, holder *writerLease, trigger, target string) func() bool {
+	lets, took := leaseTaken(t, leaseHolder(t, "lets_go", unix.F_WRLCK), trigger), make(chan bool, 1)
+	go func() {
+		_, saw := leaseContextBroken(lets)
+		if lets.close(); saw {
+			holder.take(target)
+		}
+		took <- saw && holder.do(func(uintptr) {})
+	}()
+	joined := sync.OnceValue(func() bool { return <-took })
+	t.Cleanup(func() { joined() })
+	return joined
 }
 
 type healthLeaseFixture struct {
@@ -261,4 +297,101 @@ func TestSupervisorHealthLeaseCut(t *testing.T) {
 			})
 		}
 	}
+}
+
+// Start's account step (m2), its context cancelled at the kernel's break of a
+// lease kept on the health credential: the step returns the typed cut, and Start
+// fails through its ordinary path with the cut kept, its rollback and finish done
+// after its context ended. The account operation is verifyStartAccount's tail
+// after its psql reads; the recorded children are this process, which the
+// stubbed launch never prepares, so the rollback keeps them.
+func TestStartAccountLeaseCut(t *testing.T) {
+	c, _ := serviceMaintenanceHostHealthCell(t)
+	holder := leaseHolder(t, "kept", unix.F_WRLCK)
+	f := plantHealthLease(t, c, holder, false)
+	leaseWait.ceiling, c.cfg.Timeout = 2*time.Second, 4*time.Second
+	var accountErr error
+	wrote := false
+	c.installerStart = &installerStartOperations{
+		postgres: func(context.Context, *Manifest) error { return nil },
+		verify:   func(context.Context, *Manifest) error { return nil },
+		launch:   func(context.Context, *Manifest, string, func() error) error { return nil },
+		ready: func(_ context.Context, _ *Manifest, component string, _ bool) error {
+			if component == "server" {
+				holder.take(c.path("run", "postgres.password"))
+			}
+			return nil
+		},
+		account: func(ctx context.Context, m *Manifest) error {
+			if accountErr = c.prepareSelectedHealthCredential(ctx, m); accountErr != nil {
+				return accountErr
+			}
+			wrote = true
+			return writeAtomic(c.path("manifest.json"), m, nil)
+		},
+	}
+	reads, _ := f.counts()
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- c.Start(ctx) }()
+	at, broken := leaseContextBroken(holder)
+	cancel()
+	err := <-done
+	returned := time.Since(at)
+	holder.close()
+	requireServiceLease(t, broken, "Start never broke the account step's lease")
+	requireExitLeaseCut(t, accountErr, context.Canceled)
+	requireServiceLease(t, serviceLeaseCut(err), "Start lost the account step's cut")
+	requireServiceLease(t, errors.Is(err, context.Canceled), "Start lost the account cut's cause")
+	requireServiceLease(t, strings.HasPrefix(err.Error(), "local cell start: account failed: "), "Start's rollback or finish failed after its context ended")
+	requireServiceLease(t, returned < leaseWait.ceiling/2, "Start waited to the lease ceiling after cancellation")
+	requireServiceLease(t, !wrote, "cut account step wrote the manifest")
+	nowReads, _ := f.counts()
+	requireServiceLease(t, nowReads == reads, "cut account step authorised the database before its credential read")
+	progress, readErr := c.readJournal(t.Context())
+	requireServiceLease(t, readErr == nil && progress.pending == nil && !progress.tornTail, "failed Start left its journal open")
+	data, readErr := os.ReadFile(c.path("journal", "operations.jsonl"))
+	requireServiceLease(t, readErr == nil, "cannot read the Start journal")
+	var tail []string
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		var entry journalEntry
+		requireServiceLease(t, json.Unmarshal([]byte(line), &entry) == nil, "cannot decode the Start journal")
+		tail = append(tail, entry.Operation+":"+entry.Step+":"+entry.State)
+	}
+	requireServiceLease(t, len(tail) >= 3 && slices.Equal(tail[len(tail)-3:], []string{"start:account:started", "start:account:failed", "start:operation:done"}),
+		"failed Start did not close its account step as the parent does")
+}
+
+// The maintenance credential a layout-1 cell's health store reads (n4) through
+// prepareSelectedHealthCredential, the read production makes: cut by the
+// operation's own context at the break with nothing written, refused when live.
+func TestHealthMaintenanceCredentialLease(t *testing.T) {
+	c, m, _ := selectedCredentialFixture(t)
+	path, err := c.credentialPath(credentialMaintenance)
+	requireServiceLease(t, err == nil, "cannot locate the maintenance credential")
+	before, err := os.ReadFile(path)
+	requireServiceLease(t, err == nil, "cannot read the maintenance credential fixture")
+	holder := leaseTaken(t, leaseHolder(t, "kept", unix.F_WRLCK), path)
+	leaseWait.ceiling = 2 * time.Second
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- c.prepareSelectedHealthCredential(ctx, m) }()
+	at, broken := leaseContextBroken(holder)
+	cancel()
+	err = <-done
+	returned := time.Since(at)
+	holder.close()
+	requireServiceLease(t, broken, "health never broke the maintenance credential's lease")
+	requireExitLeaseCut(t, err, context.Canceled)
+	requireServiceLease(t, !errors.Is(err, errServiceHealth), "interrupted maintenance credential read reported a verdict")
+	requireServiceLease(t, returned < leaseWait.ceiling/2, "maintenance credential read waited to the lease ceiling after cancellation")
+	after, readErr := os.ReadFile(path)
+	requireServiceLease(t, readErr == nil && bytes.Equal(after, before), "cut maintenance credential read changed the credential")
+	_, statErr := os.Lstat(c.path("service", "api.secret"))
+	requireServiceLease(t, errors.Is(statErr, os.ErrNotExist), "cut maintenance credential read created the health identity")
+	leaseWait.ceiling = 200 * time.Millisecond
+	leaseTaken(t, holder, path)
+	err = c.prepareSelectedHealthCredential(t.Context(), m)
+	holder.close()
+	requireServiceLease(t, errors.Is(err, errServiceHealth) && !serviceLeaseCut(err), "live maintenance credential read lost the parent's ceiling refusal")
 }

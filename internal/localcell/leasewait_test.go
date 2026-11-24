@@ -170,7 +170,8 @@ var leaseWaitServiceOpeners = strings.Fields(`(*Cell).serviceDescriptor (*Cell).
 serviceAdapterAdmission serviceAdapterRemovalAdmission serviceAdapterAdmissionForStep (*systemdUserAdapter).ownedUnit (*systemdUserAdapter).cleanupPartial
 (*Cell).serviceHostExitIdentity (*Cell).validateHostExitEnvelope (*Cell).newHostExitEnvelope (*Cell).serviceHostLeaseHeld (*Cell).retainServiceExitHost (*Cell).exitServiceHostForRemoval
 (*Cell).acquireServiceLease (*Cell).acquireServiceLeaseWithBoot (*Cell).acquireServiceLeaseForPlatform
-(*Cell).ServiceHealth (*Cell).healthPrincipal (*Cell).healthDSN (*Cell).healthStore (*Cell).serviceAPICredential (*Cell).serviceLiveTree`)
+(*Cell).ServiceHealth (*Cell).healthPrincipal (*Cell).healthDSN (*Cell).healthStore (*Cell).serviceAPICredential (*Cell).serviceLiveTree
+(*Cell).prepareSelectedHealthCredential (*Cell).verifyStartAccount`)
 
 var leaseWaitServiceCalls = map[string]string{
 	// The dark repair has the same per-owner, exact-callee contract as the service entry points.
@@ -217,6 +218,9 @@ var leaseWaitServiceCalls = map[string]string{
 	"service_health.go:(*Cell).healthStore":                           "healthDSN",
 	"service_health.go:(*Cell).serviceAPICredential":                  "readJSON",
 	"service_health.go:(*Cell).serviceLiveTree":                       "processState verifyAll",
+	// Start's account step hands verifyStartAccount, through its field, the step's own context (LC-LEASE-2E3-F1, m2).
+	"lifecycle.go:(*Cell).Start":              "account",
+	"lifecycle.go:(*Cell).verifyStartAccount": "prepareSelectedHealthCredential",
 
 	"service_boot.go:(*Cell).reconcileServiceBoot":                     "maintenanceFenceAllows own readJSON reconcileOldBoot serviceDescriptor",
 	"service_boot.go:(*Cell).reconcileOldBoot":                         "postmaster readJSON",
@@ -349,7 +353,8 @@ var leaseWaitDetachedHeld = []string{"checkpoint_unix.go:(*Cell).openCheckpointS
 // file and declaration with their counts; leaseWaitReleasedCallers are the
 // non-test calls into leaseWaitReleased from outside it (G2, G5).
 var leaseWaitValueUses = map[string]int{
-	"service_supervisor.go:newSupervisor": 2, "service_supervisor.go:(*Cell).Run": 1,
+	// LC-LEASE-2E3-F1 (m2): principalStartOperations, the account field's key and the method value c.verifyStartAccount.
+	"service_supervisor.go:newSupervisor": 2, "service_supervisor.go:(*Cell).Run": 1, "lifecycle.go:(*Cell).principalStartOperations": 2,
 	"files.go:readManifest": 1, "service_control.go:(*Cell).readServiceControlSecret": 1,
 	"service_control_endpoint.go:(*Cell).readServiceControlEndpointRecord": 1, "service_control_endpoint.go:(*Cell).readServiceControlEndpointWithBoot": 1,
 	"service_descriptor.go:(*Cell).readServiceDescriptorForOwner": 1, "service_descriptor.go:(*Cell).serviceControlSecret": 1,
@@ -404,6 +409,12 @@ func leaseWaitTyped(world *referencesWorld, system string, sources map[string]st
 			targets[object], resolved[name], methods[object.Name()] = true, true, object.Type()
 		}
 	}
+	// LC-LEASE-2E3-F1 (m2): Start's account step reaches verifyStartAccount through this field.
+	if operations, ok := self.Scope().Lookup("installerStartOperations").(*types.TypeName); ok {
+		if field, _, _ := types.LookupFieldOrMethod(operations.Type(), false, self, "account"); field != nil {
+			targets[field] = true
+		}
+	}
 	for _, site := range leaseWaitReleased {
 		if _, name, _ := strings.Cut(site, ":"); world.resolve(self, name) != nil {
 			released[world.resolve(self, name)] = true
@@ -446,8 +457,9 @@ func leaseWaitTyped(world *referencesWorld, system string, sources map[string]st
 						own = leaseWaitBoundContext(info, holder, call, "admissionCtx, admissionCancel := context.WithTimeout(ctx, serviceHostExitPhaseBudget(ctx, budgets.admission))")
 					case "service_control_exit.go:(*supervisor).finishHostExit/readJournal":
 						own = leaseWaitBoundContext(info, holder, call, "drainCtx, cancel := s.hooks.shutdownContext(ctx, serviceHostExitPhaseBudget(ctx, ServiceShutdownTimeout))")
-					case "service_supervisor.go:(*Cell).Run/acquireServiceLeaseWithBoot":
-						// Run's exact closure and its dispatch with Run's own ctx are also pinned in maintenanceHostSupervisorPins.
+					case "service_supervisor.go:(*Cell).Run/acquireServiceLeaseWithBoot", "lifecycle.go:(*Cell).Start/account":
+						// Run's exact closure and its dispatch with Run's own ctx are also pinned in maintenanceHostSupervisorPins;
+						// Start's account step passes the step's own context, its innermost literal's.
 						own = false
 						ast.Inspect(holder.Body, func(node ast.Node) bool {
 							lit, ok := node.(*ast.FuncLit)
@@ -970,6 +982,12 @@ func TestLeaseWaitSourceContract(t *testing.T) {
 		{"drain_launchd_detached", "service_launchd.go", "cell.exitServiceHostForRemoval(ctx)", "cell.exitServiceHostForRemoval(context.WithoutCancel(ctx))", "lease_wait_placeholder:service_launchd.go:(*launchdAgentAdapter).Remove"},
 		{"drain_task_detached", "service_windows_task.go", "cell.exitServiceHostForRemoval(ctx)", "cell.exitServiceHostForRemoval(context.Background())", "lease_wait_placeholder:service_windows_task.go:(*windowsLogonTaskAdapter).Remove"},
 		{"drain_remove_detached", "lifecycle.go", "c.exitServiceHostForRemoval(ctx)", "c.exitServiceHostForRemoval(context.WithoutCancel(ctx))", "lease_wait_placeholder:lifecycle.go:(*Cell).Remove"},
+		// LC-LEASE-2E3-F1 (m2): the review's R17 and R18, and the step's context swapped for Start's own.
+		{"account_credential_detached", "lifecycle.go", "c.prepareSelectedHealthCredential(ctx, m)", "c.prepareSelectedHealthCredential(context.Background(), m)", "lease_wait_placeholder:lifecycle.go:(*Cell).verifyStartAccount"},
+		{"account_step_detached", "lifecycle.go", "return ops.account(ctx, m)", "return ops.account(context.Background(), m)", "lease_wait_placeholder:lifecycle.go:(*Cell).Start"},
+		{"account_step_outer", "lifecycle.go", "func(ctx context.Context) error { return ops.account(ctx, m) }", "func(context.Context) error { return ops.account(ctx, m) }", "lease_wait_live:lifecycle.go:(*Cell).Start"},
+		{"account_value_wrapped", "lifecycle.go", "account: c.verifyStartAccount,", "account: func(_ context.Context, m *Manifest) error { return c.verifyStartAccount(context.Background(), m) },",
+			"lease_wait_value:lifecycle.go:(*Cell).principalStartOperations"},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			if strings.Count(sources[row.file], row.before) != 1 {
