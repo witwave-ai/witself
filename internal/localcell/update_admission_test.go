@@ -693,7 +693,7 @@ func TestMaintenanceFenceAbsentServiceDelegation(t *testing.T) {
 			hooks.stop = func(ctx context.Context) error { stops++; return f.cell.stopServiceChildren(ctx) }
 			hooks.repair = func(ctx context.Context) error { repairs++; return f.cell.Repair(ctx) }
 			s := newSupervisor(f.cell, SupervisorPolicy{hooks: &hooks})
-			if s.load(d) != nil {
+			if s.load(t.Context(), d) != nil {
 				t.Fatal("cannot load recording supervisor")
 			}
 			switch action {

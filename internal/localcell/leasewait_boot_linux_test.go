@@ -321,7 +321,7 @@ func TestSupervisorStartLeaseCut(t *testing.T) {
 			stops := 0
 			hooks.stop = func(context.Context) error { stops++; return errors.New("synthetic stop refusal") }
 			s := newSupervisor(c, SupervisorPolicy{hooks: &hooks})
-			requireServiceLease(t, s.load(d) == nil, "cannot load the supervisor cut fixture")
+			requireServiceLease(t, s.load(t.Context(), d) == nil, "cannot load the supervisor cut fixture")
 			capture, err := os.CreateTemp(t.TempDir(), "receipt")
 			requireServiceLease(t, err == nil, "cannot capture the supervisor receipts")
 			previous := os.Stderr

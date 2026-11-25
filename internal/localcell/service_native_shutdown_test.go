@@ -313,7 +313,7 @@ func TestServiceSupervisorCanceledTickDoesNotSchedule(t *testing.T) {
 	work := 0
 	h.now = func() time.Time { work++; return time.Now() }
 	s := newSupervisor(c, SupervisorPolicy{hooks: &h})
-	if err := s.load(d); err != nil {
+	if err := s.load(t.Context(), d); err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(t.Context())
@@ -342,7 +342,7 @@ func TestServiceSupervisorCancellationBetweenTickHooks(t *testing.T) {
 			h.health = func(context.Context) error { healths++; cancel(); return context.Canceled }
 			h.stop = func(context.Context) error { stops++; return nil }
 			s := newSupervisor(c, SupervisorPolicy{hooks: &h})
-			if err := s.load(d); err != nil {
+			if err := s.load(t.Context(), d); err != nil {
 				t.Fatal(err)
 			}
 			if err := s.tick(ctx); err != nil && !errors.Is(err, context.Canceled) {

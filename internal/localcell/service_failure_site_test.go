@@ -246,19 +246,33 @@ func TestServiceFailureSiteSourceContract(t *testing.T) {
 		"service_supervisor.go": {
 			`d, err := c.serviceDescriptor(ctx)
 	if err != nil {
-		if serviceLeaseCut(err) && errors.Is(err, ctx.Err()) {
+		if serviceContextLeaseCut(ctx, err) {
 			return nil
 		}
 		return serviceFailureAt(err, "initial_descriptor")`,
 			`closeControl, err := c.serveServiceControlForPlatform(ctx, commands, runtime.GOOS, d)
 	if err != nil {
-		if serviceLeaseCut(err) && errors.Is(err, ctx.Err()) {
+		if serviceContextLeaseCut(ctx, err) {
 			return nil
 		}
 		return serviceFailureFallback(err, "control_transport")`,
 			`result = errors.Join(result, serviceFailureAt(repairErr, "shutdown_repair"), serviceFailureAt(stopErr, "shutdown_stop"))`,
-			`func (s *supervisor) load(d ServiceDescriptor) (result error) {
+			`func (s *supervisor) load(ctx context.Context, d ServiceDescriptor) (result error) {
 	defer func() { result = serviceFailureFallback(result, "supervisor_load") }()`,
+			`if err := s.load(ctx, d); err != nil {
+		if serviceContextLeaseCut(ctx, err) {
+			return nil
+		}
+		return err
+	}`,
+			`err := readJSON(ctx, s.cell.path("run", component+".json"), &record)
+		if serviceContextLeaseCut(ctx, err) {
+			return err
+		}`,
+			`err := readJSON(ctx, s.cell.path("service", "lease.json"), lease.hostFields())
+	if serviceContextLeaseCut(ctx, err) {
+		return err
+	}`,
 			`return serviceFailureAt(writeAtomic(s.cell.path("service", "supervisor.json"), s.record, nil), "supervisor_save")`,
 			`func (s *supervisor) call(ctx context.Context, operation string, hook func(context.Context) error) (result error) {
 	// No operation receipt may claim a hook which never ran.
@@ -317,7 +331,7 @@ func TestServiceFailureSiteSourceContract(t *testing.T) {
 			if err != nil {
 				return serviceFailureAt(err, "supervisor_traversal")
 			}
-			defer s.rememberProcesses(d)
+			defer func() { _ = s.rememberProcesses(ctx, d) }()
 			return s.busy()
 		}
 		if err != nil {
@@ -509,7 +523,7 @@ func TestServiceFailureSiteSourceContract(t *testing.T) {
 // new raw filesystem/lifecycle return cannot pass merely because its function
 // still contains the old reviewed wrapper somewhere else.
 func TestServiceFailureSiteProducerInventory(t *testing.T) {
-	producers := strings.Fields(`commitServiceFault commitShutdownFault persistServiceShutdownFault latchServiceShutdownRefusal WindowsPrivateOpenSnapshot WindowsPrivateValidateSnapshot WindowsPrivateRemoveSameFile serviceListenerDescriptor listenRunServiceControl removeServiceEndpointFile acquireServiceLeaseForPlatform completeServiceLease removeOwnedServiceControlEndpointBy readServiceControlEndpointRecordBy serviceControlSecretBy readManifestBy readManifestJSON readServiceRecordJSON openAdmissionRecord decodeLocalRecord privateDir servicePrivateRecord openPrivateFile readPrivateFile openRegular openRegularBy readRegular openServiceRecord readJSON readManifest writeAtomic writeAtomicBytes removePrivateFile validateRoot validatePrivate validatePrivateTree validateRootPath openLockFile serviceControlSecret ServiceDescriptor serviceDescriptor readServiceDescriptor serviceDescriptorForOwner readServiceDescriptorForOwner PrepareService New readServiceControlSecret readServiceControlEndpointRecord readServiceControlEndpointWithBoot readServiceControlEndpoint publishServiceControlEndpoint publishServiceControlEndpointWithBoot removeOwnedServiceControlEndpoint removeServiceControlEndpoint listenServiceControl dialServiceControl serveServiceControlForPlatform Control Run load save tick step call command Repair Stop Start SetServiceDesiredState RepairService setServiceFaulted bindServiceProcessBoot bindServiceProcessBootWithReader reconcileServiceBoot reconcileServiceBootWithReader reconcileOldBoot writeServiceDescriptor own newSupervisor acquireLease acquireServiceLease acquireServiceLeaseWithBoot stopServiceChildren ServiceHealth hook operation retryServiceContention publishServiceLease serviceMaintenanceObservation observeServiceMaintenance observeServiceMaintenanceInto resumeServiceStartup failAfterMaintenanceObservation projectedStatus holdMaintenance serviceMaintenanceOnly`)
+	producers := strings.Fields(`commitServiceFault commitShutdownFault persistServiceShutdownFault latchServiceShutdownRefusal WindowsPrivateOpenSnapshot WindowsPrivateValidateSnapshot WindowsPrivateRemoveSameFile serviceListenerDescriptor listenRunServiceControl removeServiceEndpointFile acquireServiceLeaseForPlatform completeServiceLease removeOwnedServiceControlEndpointBy readServiceControlEndpointRecordBy serviceControlSecretBy readManifestBy readManifestJSON readServiceRecordJSON openAdmissionRecord decodeLocalRecord privateDir servicePrivateRecord openPrivateFile readPrivateFile openRegular openRegularBy readRegular openServiceRecord readJSON readManifest writeAtomic writeAtomicBytes removePrivateFile validateRoot validatePrivate validatePrivateTree validateRootPath openLockFile serviceControlSecret ServiceDescriptor serviceDescriptor readServiceDescriptor serviceDescriptorForOwner readServiceDescriptorForOwner PrepareService New readServiceControlSecret readServiceControlEndpointRecord readServiceControlEndpointWithBoot readServiceControlEndpoint publishServiceControlEndpoint publishServiceControlEndpointWithBoot removeOwnedServiceControlEndpoint removeServiceControlEndpoint listenServiceControl dialServiceControl serveServiceControlForPlatform Control Run load rememberProcesses save tick step call command Repair Stop Start SetServiceDesiredState RepairService setServiceFaulted bindServiceProcessBoot bindServiceProcessBootWithReader reconcileServiceBoot reconcileServiceBootWithReader reconcileOldBoot writeServiceDescriptor own newSupervisor acquireLease acquireServiceLease acquireServiceLeaseWithBoot stopServiceChildren ServiceHealth hook operation retryServiceContention publishServiceLease serviceMaintenanceObservation observeServiceMaintenance observeServiceMaintenanceInto resumeServiceStartup failAfterMaintenanceObservation projectedStatus holdMaintenance serviceMaintenanceOnly`)
 	selected := make(map[string]bool)
 	for _, producer := range producers {
 		selected[producer] = true
@@ -536,12 +550,12 @@ func TestServiceFailureSiteProducerInventory(t *testing.T) {
 			"command":                "RepairService SetServiceDesiredState SetServiceDesiredState SetServiceDesiredState call observeServiceMaintenance projectedStatus projectedStatus projectedStatus serviceDescriptor step step step step",
 			"failed":                 "save",
 			"fault":                  "commitShutdownFault setServiceFaulted",
-			"load":                   "readJSON servicePrivateRecord",
+			"load":                   "readJSON rememberProcesses servicePrivateRecord",
 			"rememberProcesses":      "readJSON readJSON",
 			"retryServiceContention": "operation",
 			"save":                   "writeAtomic",
 			"serveCommand":           "command",
-			"step":                   "call call call call call call call failAfterMaintenanceObservation failAfterMaintenanceObservation failAfterMaintenanceObservation holdMaintenance holdMaintenance holdMaintenance holdMaintenance holdMaintenance observeServiceMaintenanceInto save save save save save serviceDescriptor serviceDescriptor",
+			"step":                   "call call call call call call call failAfterMaintenanceObservation failAfterMaintenanceObservation failAfterMaintenanceObservation holdMaintenance holdMaintenance holdMaintenance holdMaintenance holdMaintenance observeServiceMaintenanceInto rememberProcesses rememberProcesses save save save save save serviceDescriptor serviceDescriptor",
 			"tick":                   "observeServiceMaintenance resumeServiceStartup step",
 		},
 		"service_maintenance.go": {

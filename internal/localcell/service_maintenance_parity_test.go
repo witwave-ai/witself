@@ -27,7 +27,7 @@ func TestServiceMaintenanceHostFenceBaselineProbe(t *testing.T) {
 			healths := 0
 			h.health = func(context.Context) error { healths++; return nil }
 			s := newSupervisor(c, SupervisorPolicy{hooks: &h})
-			if s.load(d) != nil {
+			if s.load(t.Context(), d) != nil {
 				t.Fatal("Cannot load baseline compatible fence probe")
 			}
 			serviceMaintenanceFence(t, c, kind)
@@ -87,7 +87,7 @@ func serviceMaintenanceAbsentLifecycle(t *testing.T, action string) {
 	h.health = func(context.Context) error { events = append(events, "health"); return nil }
 	h.stop = func(ctx context.Context) error { events = append(events, "stop"); return c.stopServiceChildren(ctx) }
 	s := newSupervisor(c, SupervisorPolicy{hooks: &h})
-	if s.load(d) != nil {
+	if s.load(t.Context(), d) != nil {
 		t.Fatal("Cannot load absent lifecycle supervisor")
 	}
 	before := serviceMaintenanceSnapshot(t, c)
@@ -291,7 +291,7 @@ func serviceMaintenanceAbsentRow(t *testing.T, row string) {
 			t.Fatal("Cannot seed initial absent safety observation")
 		}
 	}
-	if s.load(d) != nil {
+	if s.load(t.Context(), d) != nil {
 		t.Fatal("Cannot load absent parity supervisor")
 	}
 	if row == "host_exit_accepted" {
@@ -358,7 +358,7 @@ func serviceMaintenanceAbsentCancellation(t *testing.T, row string) {
 	c, d := serviceMaintenanceCell(t, true)
 	h, _, _, _, _ := supervisorTestHooks()
 	s := newSupervisor(c, SupervisorPolicy{hooks: &h})
-	if s.load(d) != nil {
+	if s.load(t.Context(), d) != nil {
 		t.Fatal("Cannot load absent cancellation supervisor")
 	}
 	if row == "running_health_canceled" {
@@ -444,7 +444,7 @@ func serviceMaintenanceAbsentRecord(t *testing.T, row string) {
 	}
 	s := newSupervisor(c, SupervisorPolicy{hooks: &h})
 	before := serviceMaintenanceSnapshot(t, c)
-	err := s.load(d)
+	err := s.load(t.Context(), d)
 	if row == "version" || row == "attempts" || row == "failures" || row == "malformed" {
 		var located *serviceFailure
 		if err == nil || !errors.As(err, &located) || located.site != "supervisor_load" {

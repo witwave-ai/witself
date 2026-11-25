@@ -18,7 +18,7 @@ func TestServiceSupervisorWindowsStopRefusalLatch(t *testing.T) {
 			h, _, starts, stops, _ := supervisorTestHooks()
 			h.windowsShutdownPolicy = kind != "unix-unchanged"
 			s := newSupervisor(c, SupervisorPolicy{hooks: &h})
-			if s.load(d) != nil {
+			if s.load(t.Context(), d) != nil {
 				t.Fatal("cannot load stop fault fixture")
 			}
 			s.running = true

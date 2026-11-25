@@ -118,7 +118,7 @@ func (c *Cell) Run(ctx context.Context, policy SupervisorPolicy) (result error) 
 	}
 	d, err := c.serviceDescriptor(ctx)
 	if err != nil {
-		if serviceLeaseCut(err) && errors.Is(err, ctx.Err()) {
+		if serviceContextLeaseCut(ctx, err) {
 			return nil
 		}
 		return serviceFailureAt(err, "initial_descriptor")
@@ -148,13 +148,17 @@ func (c *Cell) Run(ctx context.Context, policy SupervisorPolicy) (result error) 
 	}
 	closeControl, err := c.serveServiceControlForPlatform(ctx, commands, runtime.GOOS, d)
 	if err != nil {
-		if serviceLeaseCut(err) && errors.Is(err, ctx.Err()) {
+		if serviceContextLeaseCut(ctx, err) {
 			return nil
 		}
 		return serviceFailureFallback(err, "control_transport")
 	}
 	defer closeControl()
-	if err := s.load(d); err != nil {
+	// A stop that cuts the record reads is a clean stop: nothing has started.
+	if err := s.load(ctx, d); err != nil {
+		if serviceContextLeaseCut(ctx, err) {
+			return nil
+		}
 		return err
 	}
 	shutdown := policy.ShutdownTimeout
@@ -428,27 +432,36 @@ func newSupervisor(c *Cell, policy SupervisorPolicy) *supervisor {
 	return &supervisor{cell: c, hooks: h, phase: "startup", operation: "none"}
 }
 
-func (s *supervisor) load(d ServiceDescriptor) (result error) {
+// load reads and validates a copy of the held record (an absent file keeps it,
+// as before), then the process snapshot; the record, the status and the
+// snapshot are installed only after every read, so a cut or a refusal leaves
+// the supervisor as it was.
+func (s *supervisor) load(ctx context.Context, d ServiceDescriptor) (result error) {
 	defer func() { result = serviceFailureFallback(result, "supervisor_load") }()
 	if err := servicePrivateRecord(s.cell.path("service", "supervisor.json")); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	if err := readJSON(context.Background(), s.cell.path("service", "supervisor.json"), &s.record); err != nil && !errors.Is(err, os.ErrNotExist) {
+	record := s.record
+	record.Failures = slices.Clone(record.Failures)
+	if err := readJSON(ctx, s.cell.path("service", "supervisor.json"), &record); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	if s.record.Version != 0 && s.record.Version != 1 {
+	if record.Version != 0 && record.Version != 1 {
 		return errors.New("localcell: invalid_supervisor_record")
 	}
-	if s.record.Attempts < 0 || len(s.record.Failures) > 5 {
+	if record.Attempts < 0 || len(record.Failures) > 5 {
 		return errors.New("localcell: invalid_supervisor_record")
 	}
-	if s.record.RepairRevision != d.RepairRevision {
-		s.record = supervisorRecord{RepairRevision: d.RepairRevision}
+	if record.RepairRevision != d.RepairRevision {
+		record = supervisorRecord{RepairRevision: d.RepairRevision}
 	}
-	s.record.Version = 1
-	s.status = ServiceStatus{DesiredState: d.DesiredState, State: d.DesiredState, Generation: d.Payload.Generation, LastStepOutcome: "not_run"}
-	s.startupFaulted = d.Faulted || len(s.record.Failures) >= 5
-	s.rememberProcesses(d)
+	if err := s.rememberProcesses(ctx, d); err != nil {
+		return err
+	}
+	record.Version = 1
+	s.record = record
+	s.status = ServiceStatus{DesiredState: d.DesiredState, State: d.DesiredState, Generation: d.Payload.Generation, LastStepOutcome: "not_run", Processes: s.status.Processes}
+	s.startupFaulted = d.Faulted || len(record.Failures) >= 5
 	return nil
 }
 
@@ -590,14 +603,16 @@ func (s *supervisor) step(ctx context.Context) (result error) {
 			if err != nil {
 				return serviceFailureAt(err, "supervisor_traversal")
 			}
-			defer s.rememberProcesses(d)
+			defer func() { _ = s.rememberProcesses(ctx, d) }()
 			return s.busy()
 		}
 		if err != nil {
 			return serviceFailureAt(err, "supervisor_traversal")
 		}
 	}
-	defer s.rememberProcesses(d)
+	// The snapshot refresh is bookkeeping: the step returns its own result,
+	// and a refresh that was cut keeps the last coherent snapshot.
+	defer func() { _ = s.rememberProcesses(ctx, d) }()
 	frozen := held || s.pendingStartup != serviceStartupNone
 	if !frozen && s.record.RepairRevision != d.RepairRevision {
 		s.record = supervisorRecord{Version: 1, RepairRevision: d.RepairRevision}
@@ -617,7 +632,7 @@ func (s *supervisor) step(ctx context.Context) (result error) {
 			return err
 		}
 	}
-	s.status = ServiceStatus{DesiredState: d.DesiredState, State: d.DesiredState, Restarts: max(0, s.record.Attempts-1), Generation: d.Payload.Generation}
+	s.status = ServiceStatus{DesiredState: d.DesiredState, State: d.DesiredState, Restarts: max(0, s.record.Attempts-1), Generation: d.Payload.Generation, Processes: s.status.Processes}
 	if held {
 		defer func() {
 			if result == nil && s.status.State != "busy" && !s.maintenanceBusy {
@@ -774,18 +789,30 @@ func (s *supervisor) step(ctx context.Context) (result error) {
 
 // Cache only identities already recorded by the owned lifecycle. In particular,
 // observe never reads files, probes a process, or invokes a lifecycle hook.
-func (s *supervisor) rememberProcesses(d ServiceDescriptor) {
-	s.status.Processes = nil
+// The list is built apart and published only once every read has finished: a
+// cut is never an absent component and publishes nothing.
+func (s *supervisor) rememberProcesses(ctx context.Context, d ServiceDescriptor) error {
+	var processes []ServiceProcessIdentity
 	for _, component := range []string{"postgres", "server", "worker"} {
 		var record ProcessRecord
-		if readJSON(context.Background(), s.cell.path("run", component+".json"), &record) == nil && record.PID > 1 && record.StartTime != "" && record.Root == d.Root && record.Component == component {
-			s.status.Processes = append(s.status.Processes, ServiceProcessIdentity{Component: component, PID: record.PID, StartTime: record.StartTime})
+		err := readJSON(ctx, s.cell.path("run", component+".json"), &record)
+		if serviceContextLeaseCut(ctx, err) {
+			return err
+		}
+		if err == nil && record.PID > 1 && record.StartTime != "" && record.Root == d.Root && record.Component == component {
+			processes = append(processes, ServiceProcessIdentity{Component: component, PID: record.PID, StartTime: record.StartTime})
 		}
 	}
 	var lease serviceLeaseRecord
-	if readJSON(context.Background(), s.cell.path("service", "lease.json"), lease.hostFields()) == nil && lease.PID > 1 && lease.StartIdentity != "" && lease.InstallationID == d.InstallationID && lease.Owner == d.UID {
-		s.status.Processes = append(s.status.Processes, ServiceProcessIdentity{Component: "service-host", PID: lease.PID, StartTime: lease.StartIdentity})
+	err := readJSON(ctx, s.cell.path("service", "lease.json"), lease.hostFields())
+	if serviceContextLeaseCut(ctx, err) {
+		return err
 	}
+	if err == nil && lease.PID > 1 && lease.StartIdentity != "" && lease.InstallationID == d.InstallationID && lease.Owner == d.UID {
+		processes = append(processes, ServiceProcessIdentity{Component: "service-host", PID: lease.PID, StartTime: lease.StartIdentity})
+	}
+	s.status.Processes = processes
+	return nil
 }
 
 func (s *supervisor) failed(ctx context.Context) error {

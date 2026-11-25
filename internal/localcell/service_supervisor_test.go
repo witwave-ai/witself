@@ -24,7 +24,7 @@ func TestServiceSupervisorObserveUsesLastSnapshotWithoutHooks(t *testing.T) {
 		t.Fatal("cannot prepare known identity")
 	}
 	s := newSupervisor(c, SupervisorPolicy{hooks: &h})
-	if err := s.load(d); err != nil {
+	if err := s.load(t.Context(), d); err != nil {
 		t.Fatal(err)
 	}
 	before := supervisorSnapshotInventory(t, c.cfg.Root)
@@ -99,7 +99,7 @@ func TestServiceSupervisorStatusAndHealthKeepStartingBehavior(t *testing.T) {
 			d := prepareSupervisorTest(t, c)
 			h, _, starts, _, _ := supervisorTestHooks()
 			s := newSupervisor(c, SupervisorPolicy{hooks: &h})
-			if err := s.load(d); err != nil {
+			if err := s.load(t.Context(), d); err != nil {
 				t.Fatal(err)
 			}
 			status, err := s.command(t.Context(), action)
@@ -152,7 +152,7 @@ func TestServiceSupervisorBackoffCapAndDurableCircuit(t *testing.T) {
 	h, now, starts, _, healthy := supervisorTestHooks()
 	*healthy = false
 	s := newSupervisor(c, SupervisorPolicy{hooks: &h})
-	if err := s.load(d); err != nil {
+	if err := s.load(t.Context(), d); err != nil {
 		t.Fatal(err)
 	}
 	for failure := 1; failure <= 5; failure++ {
@@ -180,7 +180,7 @@ func TestServiceSupervisorBackoffCapAndDurableCircuit(t *testing.T) {
 	}
 	*now = now.Add(time.Hour)
 	restarted := newSupervisor(c, SupervisorPolicy{hooks: &h})
-	if err := restarted.load(d); err != nil {
+	if err := restarted.load(t.Context(), d); err != nil {
 		t.Fatal(err)
 	}
 	if err := restarted.step(t.Context()); err != nil {
@@ -216,7 +216,7 @@ func TestServiceSupervisorStopAndMaintenanceSurviveHostCrash(t *testing.T) {
 			d := prepareSupervisorTest(t, c)
 			h, _, starts, stops, _ := supervisorTestHooks()
 			s := newSupervisor(c, SupervisorPolicy{hooks: &h})
-			if err := s.load(d); err != nil {
+			if err := s.load(t.Context(), d); err != nil {
 				t.Fatal(err)
 			}
 			if err := s.step(t.Context()); err != nil {
@@ -236,7 +236,7 @@ func TestServiceSupervisorStopAndMaintenanceSurviveHostCrash(t *testing.T) {
 				t.Fatal(err)
 			}
 			crashed := newSupervisor(c, SupervisorPolicy{hooks: &h})
-			if err := crashed.load(d); err != nil {
+			if err := crashed.load(t.Context(), d); err != nil {
 				t.Fatal(err)
 			}
 			if err := crashed.step(t.Context()); err != nil {
@@ -254,7 +254,7 @@ func TestServiceSupervisorChildFailureRestartsOneTree(t *testing.T) {
 	d := prepareSupervisorTest(t, c)
 	h, now, starts, stops, healthy := supervisorTestHooks()
 	s := newSupervisor(c, SupervisorPolicy{hooks: &h})
-	if err := s.load(d); err != nil {
+	if err := s.load(t.Context(), d); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.step(t.Context()); err != nil {
@@ -283,7 +283,7 @@ func TestServiceSupervisorFailureWindowAndRestartRecordValidation(t *testing.T) 
 	h, now, _, _, healthy := supervisorTestHooks()
 	*healthy = false
 	s := newSupervisor(c, SupervisorPolicy{hooks: &h})
-	if err := s.load(d); err != nil {
+	if err := s.load(t.Context(), d); err != nil {
 		t.Fatal(err)
 	}
 	for range 6 {
@@ -298,7 +298,7 @@ func TestServiceSupervisorFailureWindowAndRestartRecordValidation(t *testing.T) 
 	if err := writeAtomic(c.path("service", "supervisor.json"), supervisorRecord{Version: 99}, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.load(d); err == nil {
+	if err := s.load(t.Context(), d); err == nil {
 		t.Fatal("unknown durable restart record accepted")
 	}
 }
@@ -316,7 +316,7 @@ func TestServiceSupervisorCrashBeforeFaultDescriptorRemainsFenced(t *testing.T) 
 	}
 	*now = now.Add(time.Hour)
 	s := newSupervisor(c, SupervisorPolicy{hooks: &h})
-	if err := s.load(d); err != nil {
+	if err := s.load(t.Context(), d); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.step(t.Context()); err != nil {
@@ -334,7 +334,7 @@ func TestServiceSupervisorOperationContentionDoesNotTripCircuit(t *testing.T) {
 	start := h.start
 	h.start = func(context.Context) error { return ErrLocked }
 	s := newSupervisor(c, SupervisorPolicy{hooks: &h})
-	if err := s.load(d); err != nil {
+	if err := s.load(t.Context(), d); err != nil {
 		t.Fatal(err)
 	}
 	for range 6 {
@@ -381,7 +381,7 @@ func TestServiceSupervisorControlStopContentionRetriesOwnedTree(t *testing.T) {
 	d := prepareSupervisorTest(t, c)
 	h, _, _, stops, _ := supervisorTestHooks()
 	s := newSupervisor(c, SupervisorPolicy{hooks: &h})
-	if err := s.load(d); err != nil {
+	if err := s.load(t.Context(), d); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.step(t.Context()); err != nil {
@@ -414,7 +414,7 @@ func TestServiceSupervisorClockRollbackCapsPersistedRetry(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := newSupervisor(c, SupervisorPolicy{hooks: &h})
-	if err := s.load(d); err != nil {
+	if err := s.load(t.Context(), d); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.step(t.Context()); err != nil {

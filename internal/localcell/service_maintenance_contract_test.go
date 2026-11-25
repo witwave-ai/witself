@@ -1026,7 +1026,7 @@ var maintenanceHostSupervisorPins = map[string]string{
 	}
 	d, err := c.serviceDescriptor(ctx)
 	if err != nil {
-		if serviceLeaseCut(err) && errors.Is(err, ctx.Err()) {
+		if serviceContextLeaseCut(ctx, err) {
 			return nil
 		}
 		return serviceFailureAt(err, "initial_descriptor")
@@ -1056,13 +1056,16 @@ var maintenanceHostSupervisorPins = map[string]string{
 	}
 	closeControl, err := c.serveServiceControlForPlatform(ctx, commands, runtime.GOOS, d)
 	if err != nil {
-		if serviceLeaseCut(err) && errors.Is(err, ctx.Err()) {
+		if serviceContextLeaseCut(ctx, err) {
 			return nil
 		}
 		return serviceFailureFallback(err, "control_transport")
 	}
 	defer closeControl()
-	if err := s.load(d); err != nil {
+	if err := s.load(ctx, d); err != nil {
+		if serviceContextLeaseCut(ctx, err) {
+			return nil
+		}
 		return err
 	}
 	shutdown := policy.ShutdownTimeout
@@ -1206,27 +1209,32 @@ var maintenanceHostSupervisorPins = map[string]string{
 		}
 	}
 }`,
-	"load": `func (s *supervisor) load(d ServiceDescriptor) (result error) {
+	"load": `func (s *supervisor) load(ctx context.Context, d ServiceDescriptor) (result error) {
 	defer func() { result = serviceFailureFallback(result, "supervisor_load") }()
 	if err := servicePrivateRecord(s.cell.path("service", "supervisor.json")); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	if err := readJSON(context.Background(), s.cell.path("service", "supervisor.json"), &s.record); err != nil && !errors.Is(err, os.ErrNotExist) {
+	record := s.record
+	record.Failures = slices.Clone(record.Failures)
+	if err := readJSON(ctx, s.cell.path("service", "supervisor.json"), &record); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	if s.record.Version != 0 && s.record.Version != 1 {
+	if record.Version != 0 && record.Version != 1 {
 		return errors.New("localcell: invalid_supervisor_record")
 	}
-	if s.record.Attempts < 0 || len(s.record.Failures) > 5 {
+	if record.Attempts < 0 || len(record.Failures) > 5 {
 		return errors.New("localcell: invalid_supervisor_record")
 	}
-	if s.record.RepairRevision != d.RepairRevision {
-		s.record = supervisorRecord{RepairRevision: d.RepairRevision}
+	if record.RepairRevision != d.RepairRevision {
+		record = supervisorRecord{RepairRevision: d.RepairRevision}
 	}
-	s.record.Version = 1
-	s.status = ServiceStatus{DesiredState: d.DesiredState, State: d.DesiredState, Generation: d.Payload.Generation, LastStepOutcome: "not_run"}
-	s.startupFaulted = d.Faulted || len(s.record.Failures) >= 5
-	s.rememberProcesses(d)
+	if err := s.rememberProcesses(ctx, d); err != nil {
+		return err
+	}
+	record.Version = 1
+	s.record = record
+	s.status = ServiceStatus{DesiredState: d.DesiredState, State: d.DesiredState, Generation: d.Payload.Generation, LastStepOutcome: "not_run", Processes: s.status.Processes}
+	s.startupFaulted = d.Faulted || len(record.Failures) >= 5
 	return nil
 }`,
 	"tick": `func (s *supervisor) tick(ctx context.Context) error {
@@ -1314,14 +1322,14 @@ var maintenanceHostSupervisorPins = map[string]string{
 			if err != nil {
 				return serviceFailureAt(err, "supervisor_traversal")
 			}
-			defer s.rememberProcesses(d)
+			defer func() { _ = s.rememberProcesses(ctx, d) }()
 			return s.busy()
 		}
 		if err != nil {
 			return serviceFailureAt(err, "supervisor_traversal")
 		}
 	}
-	defer s.rememberProcesses(d)
+	defer func() { _ = s.rememberProcesses(ctx, d) }()
 	frozen := held || s.pendingStartup != serviceStartupNone
 	if !frozen && s.record.RepairRevision != d.RepairRevision {
 		s.record = supervisorRecord{Version: 1, RepairRevision: d.RepairRevision}
@@ -1341,7 +1349,7 @@ var maintenanceHostSupervisorPins = map[string]string{
 			return err
 		}
 	}
-	s.status = ServiceStatus{DesiredState: d.DesiredState, State: d.DesiredState, Restarts: max(0, s.record.Attempts-1), Generation: d.Payload.Generation}
+	s.status = ServiceStatus{DesiredState: d.DesiredState, State: d.DesiredState, Restarts: max(0, s.record.Attempts-1), Generation: d.Payload.Generation, Processes: s.status.Processes}
 	if held {
 		defer func() {
 			if result == nil && s.status.State != "busy" && !s.maintenanceBusy {

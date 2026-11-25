@@ -278,7 +278,7 @@ func TestLeaseSupervisorFault(t *testing.T) {
 				d := prepareSupervisorTest(t, c)
 				h, _, _, _, healthy := supervisorTestHooks()
 				s := newSupervisor(c, SupervisorPolicy{hooks: &h})
-				requireServiceLease(t, s.load(d) == nil, "cannot load fault fixture")
+				requireServiceLease(t, s.load(t.Context(), d) == nil, "cannot load fault fixture")
 				requireServiceLease(t, s.step(t.Context()) == nil, "fault fixture startup failed")
 				requireServiceLease(t, s.running, "fault fixture did not start a child")
 				path, kind := c.path("service", "descriptor.json"), unix.F_WRLCK
@@ -299,7 +299,7 @@ func TestLeaseSupervisorFault(t *testing.T) {
 				requireServiceLease(t, after.Revision == d.Revision+1, "supervisor fault did not advance exactly one revision")
 				nextHooks, _, starts, _, _ := supervisorTestHooks()
 				next := newSupervisor(c, SupervisorPolicy{hooks: &nextHooks})
-				requireServiceLease(t, next.load(after) == nil, "fresh supervisor could not load the faulted cell")
+				requireServiceLease(t, next.load(t.Context(), after) == nil, "fresh supervisor could not load the faulted cell")
 				requireServiceLease(t, next.step(t.Context()) == nil, "fresh supervisor could not observe the faulted cell")
 				requireServiceLease(t, next.status.State == "faulted", "fresh supervisor lost the faulted state")
 				requireServiceLease(t, next.status.Reason == "service_circuit_open", "fresh supervisor lost the open circuit reason")
@@ -327,7 +327,7 @@ func TestLeaseSupervisorObservation(t *testing.T) {
 			}
 			h, _, _, _, _ := supervisorTestHooks()
 			s := newSupervisor(c, SupervisorPolicy{hooks: &h})
-			requireServiceLease(t, s.load(d) == nil, "cannot load status observation fixture")
+			requireServiceLease(t, s.load(t.Context(), d) == nil, "cannot load status observation fixture")
 			leaseTaken(t, l, c.path("service", "descriptor.json"))
 			err := interruptedSupervisorStep(t, l, s, origin)
 			requireServiceLease(t, serviceLeaseCut(err), "abandoned status observation lost its typed cut")

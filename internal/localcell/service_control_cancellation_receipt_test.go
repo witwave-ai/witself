@@ -29,7 +29,7 @@ func TestServiceStoppedStatusCancellationReceipt(t *testing.T) {
 		return *now
 	}
 	s := newSupervisor(cell, SupervisorPolicy{hooks: &hooks})
-	if err != nil || s.load(descriptor) != nil {
+	if err != nil || s.load(t.Context(), descriptor) != nil {
 		t.Fatal("cannot load stopped cancellation fixture")
 	}
 	before := s.status

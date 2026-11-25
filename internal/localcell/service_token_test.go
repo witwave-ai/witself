@@ -80,7 +80,7 @@ func TestServiceRenderedUnitAndOutputsExcludeControlToken(t *testing.T) {
 	// a hand-built sample of their schemas. The Unix sibling checks wire bytes.
 	hooks, _, _, _, _ := supervisorTestHooks()
 	supervisor := newSupervisor(c, SupervisorPolicy{hooks: &hooks})
-	if err := supervisor.load(descriptor); err != nil {
+	if err := supervisor.load(t.Context(), descriptor); err != nil {
 		t.Fatal("cannot load synthetic supervisor")
 	}
 	status, err := supervisor.command(t.Context(), "status")
