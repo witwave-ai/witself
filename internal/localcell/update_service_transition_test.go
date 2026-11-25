@@ -332,7 +332,7 @@ func TestServiceMaintenanceTransitionInterimControl(t *testing.T) {
 					t.Fatal("cannot seed supervisor transition circuit")
 				}
 				s := newSupervisor(c, SupervisorPolicy{hooks: &h})
-				if s.load(d) != nil {
+				if s.load(t.Context(), d) != nil {
 					t.Fatal("cannot load child-free transition supervisor")
 				}
 				if action == "repair" {

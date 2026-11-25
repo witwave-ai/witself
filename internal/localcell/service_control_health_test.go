@@ -18,7 +18,7 @@ func TestServiceSupervisorControlHealthCancellation(t *testing.T) {
 			d := prepareSupervisorTest(t, c)
 			h, _, _, stops, _ := supervisorTestHooks()
 			s := newSupervisor(c, SupervisorPolicy{hooks: &h})
-			if err := s.load(d); err != nil || s.step(t.Context()) != nil {
+			if err := s.load(t.Context(), d); err != nil || s.step(t.Context()) != nil {
 				t.Fatal("cannot prepare running supervisor")
 			}
 			beforeStatus, beforeRecord := s.status, s.record
@@ -88,7 +88,7 @@ func TestServiceSupervisorPreCanceledControlDoesNoWork(t *testing.T) {
 			d := prepareSupervisorTest(t, c)
 			h, _, starts, stops, _ := supervisorTestHooks()
 			s := newSupervisor(c, SupervisorPolicy{hooks: &h})
-			if s.load(d) != nil {
+			if s.load(t.Context(), d) != nil {
 				t.Fatal("cannot load synthetic supervisor")
 			}
 			before := supervisorSnapshotInventory(t, c.cfg.Root)
@@ -125,7 +125,7 @@ func TestServiceSupervisorControlCancellationBeforeBookkeeping(t *testing.T) {
 			d := prepareSupervisorTest(t, c)
 			h, _, starts, stops, _ := supervisorTestHooks()
 			s := newSupervisor(c, SupervisorPolicy{hooks: &h})
-			if s.load(d) != nil {
+			if s.load(t.Context(), d) != nil {
 				t.Fatal("cannot load cancellation bookkeeping fixture")
 			}
 			if stage == "clamp" {
@@ -160,7 +160,7 @@ func TestServiceSupervisorHealthBoundIsNotClientCancellation(t *testing.T) {
 	d := prepareSupervisorTest(t, c)
 	h, _, _, stops, _ := supervisorTestHooks()
 	s := newSupervisor(c, SupervisorPolicy{hooks: &h})
-	if s.load(d) != nil || s.step(t.Context()) != nil {
+	if s.load(t.Context(), d) != nil || s.step(t.Context()) != nil {
 		t.Fatal("cannot start health bound fixture")
 	}
 	s.hooks.health = func(context.Context) error { return nil }
@@ -313,7 +313,7 @@ func serviceHealthMeasuredBound(t *testing.T, floor time.Duration) time.Duration
 	h, _, _, _, _ := supervisorTestHooks()
 	h.health = func(context.Context) error { return nil }
 	s := newSupervisor(cell, SupervisorPolicy{hooks: &h})
-	if err != nil || s.load(d) != nil || s.step(t.Context()) != nil {
+	if err != nil || s.load(t.Context(), d) != nil || s.step(t.Context()) != nil {
 		t.Fatal("cannot prepare health round trip calibration")
 	}
 	healthCalls := 0
@@ -367,7 +367,7 @@ func TestServiceControlCallerBoundYieldsActualHost(t *testing.T) {
 			d, err := cell.ServiceDescriptor()
 			h, _, _, stops, _ := supervisorTestHooks()
 			s := newSupervisor(cell, SupervisorPolicy{hooks: &h})
-			if err != nil || s.load(d) != nil || s.step(t.Context()) != nil {
+			if err != nil || s.load(t.Context(), d) != nil || s.step(t.Context()) != nil {
 				t.Fatal("cannot start caller bound fixture")
 			}
 			beforeStatus, beforeRecord := s.status, s.record
@@ -521,7 +521,7 @@ func TestServiceControlBusyHealthIsDeferred(t *testing.T) {
 	d, err := cell.ServiceDescriptor()
 	h, _, _, stops, _ := supervisorTestHooks()
 	s := newSupervisor(cell, SupervisorPolicy{hooks: &h})
-	if err != nil || s.load(d) != nil || s.step(t.Context()) != nil {
+	if err != nil || s.load(t.Context(), d) != nil || s.step(t.Context()) != nil {
 		t.Fatal("cannot start contention fixture")
 	}
 	beforeRecord := s.record

@@ -32,7 +32,7 @@ func newServiceMaintenanceHostFixture(t *testing.T) serviceMaintenanceHostFixtur
 	h.health = func(context.Context) error { healths++; return nil }
 	h.repair = func(context.Context) error { repairs++; return nil }
 	s := newSupervisor(c, SupervisorPolicy{hooks: &h})
-	if s.load(d) != nil {
+	if s.load(t.Context(), d) != nil {
 		t.Fatal("Host fixture could not load supervisor")
 	}
 	return serviceMaintenanceHostFixture{c, d, s, now, starts, stops, &healths, &repairs}
@@ -142,7 +142,9 @@ func TestServiceMaintenanceHostRunningHold(t *testing.T) {
 			if writeAtomic(f.cell.path("run", "server.json"), known, nil) != nil {
 				t.Fatal("Running hold could not seed known identity")
 			}
-			f.s.rememberProcesses(f.d)
+			if err := f.s.rememberProcesses(t.Context(), f.d); err != nil {
+				t.Fatal("Running hold could not load process identities")
+			}
 			processes := slices.Clone(f.s.status.Processes)
 			serviceMaintenanceHostPlant(t, f.cell, kind)
 			before := serviceMaintenanceSnapshot(t, f.cell)
@@ -317,7 +319,7 @@ func TestServiceMaintenanceHostRollbackCrashWindow(t *testing.T) {
 				t.Fatal("Crash image could not persist a supervisor record")
 			}
 			before := serviceMaintenanceSnapshot(t, f.cell)
-			if f.s.load(f.d) != nil || !reflect.DeepEqual(f.s.record, want) {
+			if f.s.load(t.Context(), f.d) != nil || !reflect.DeepEqual(f.s.record, want) {
 				t.Fatal("Crash image invented attempt recovery or failure bookkeeping")
 			}
 			serviceMaintenanceUnchanged(t, f.cell, before)
@@ -656,7 +658,7 @@ func TestServiceMaintenanceHostProtectiveCircuit(t *testing.T) {
 				f.d.Faulted = true
 			}
 			f.s.record = seed
-			if f.s.save() != nil || f.s.load(f.d) != nil {
+			if f.s.save() != nil || f.s.load(t.Context(), f.d) != nil {
 				t.Fatal("Protective circuit could not load seed record")
 			}
 			serviceMaintenanceHostPlant(t, f.cell, "Valid")

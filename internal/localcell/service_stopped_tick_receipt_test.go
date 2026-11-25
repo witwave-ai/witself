@@ -61,7 +61,7 @@ func TestServiceStoppedTickCancellationReceipt(t *testing.T) {
 			hooks.start, hooks.stop, hooks.repair, hooks.health = forbidden, forbidden, forbidden, forbidden
 			hooks.reconcile = forbidden
 			s := newSupervisor(cell, SupervisorPolicy{hooks: &hooks})
-			if s.load(descriptor) != nil || s.tick(t.Context()) != nil || lifecycleCalls != 0 ||
+			if s.load(t.Context(), descriptor) != nil || s.tick(t.Context()) != nil || lifecycleCalls != 0 ||
 				s.status.State != "stopped" || s.running || s.pendingStartup != serviceStartupNone || s.maintenanceHeld ||
 				s.phase != "idle" || s.operation != "none" {
 				t.Fatal("stopped tick receipt fixture did not settle idle without lifecycle work")

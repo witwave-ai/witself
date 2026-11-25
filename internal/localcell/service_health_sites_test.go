@@ -130,7 +130,7 @@ func serviceHealthTickMeasuredBound(t *testing.T, floor time.Duration) time.Dura
 	d := prepareSupervisorTest(t, c)
 	hooks, _, _, _, _ := supervisorTestHooks()
 	s := newSupervisor(c, SupervisorPolicy{hooks: &hooks})
-	if s.load(d) != nil || s.step(t.Context()) != nil {
+	if s.load(t.Context(), d) != nil || s.step(t.Context()) != nil {
 		t.Fatal("cannot prepare no-op health tick calibration")
 	}
 	healthCalls := 0

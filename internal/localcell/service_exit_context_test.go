@@ -359,7 +359,7 @@ func TestExitRemovalAfterStopLease(t *testing.T) {
 	requireServiceLease(t, err == nil, "cannot read removal intent")
 	h, _, _, stops, _ := supervisorTestHooks()
 	s := newSupervisor(c, SupervisorPolicy{hooks: &h})
-	requireServiceLease(t, s.load(initial) == nil, "cannot load the removal supervisor")
+	requireServiceLease(t, s.load(t.Context(), initial) == nil, "cannot load the removal supervisor")
 	ctx, hold, finish := adapterOperationLease(t, "kept", unix.F_WRLCK, false)
 	client, cancel := context.WithCancel(ctx)
 	done := StartJoinedTestRunForTest(t, cancel, c.cfg.Timeout, func() error { return c.exitServiceHostForRemoval(client) })

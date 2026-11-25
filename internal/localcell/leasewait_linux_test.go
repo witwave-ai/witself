@@ -168,7 +168,7 @@ func leaseSupervisor(t *testing.T, c *Cell) *supervisor {
 	h, _, _, _, _ := supervisorTestHooks()
 	h.start, h.stop = c.Start, c.stopServiceChildren
 	s := newSupervisor(c, SupervisorPolicy{hooks: &h})
-	if s.load(d) != nil {
+	if s.load(t.Context(), d) != nil {
 		t.Fatal("cannot load the lease row supervisor")
 	}
 	return s

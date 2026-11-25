@@ -38,7 +38,7 @@ func TestServiceHostExitDrainDoesNotCancelBeforeStop(t *testing.T) {
 		}
 	}
 	s := newSupervisor(c, SupervisorPolicy{hooks: &h})
-	if s.load(d) != nil {
+	if s.load(t.Context(), d) != nil {
 		t.Fatal("cannot load exit fixture")
 	}
 	delivered := make(chan struct{})
@@ -72,7 +72,7 @@ func TestServiceHostExitDrainRefusalFaults(t *testing.T) {
 	h, _, starts, _, _ := supervisorTestHooks()
 	h.stop = func(context.Context) error { return errors.New("fixture unknown stop") }
 	s := newSupervisor(c, SupervisorPolicy{hooks: &h})
-	if s.load(d) != nil {
+	if s.load(t.Context(), d) != nil {
 		t.Fatal("cannot load exit refusal fixture")
 	}
 	delivered := make(chan struct{})

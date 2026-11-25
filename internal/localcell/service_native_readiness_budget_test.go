@@ -75,7 +75,7 @@ func TestNativeServiceReadinessQueuedBoundedHooks(t *testing.T) {
 	descriptor, err := cell.ServiceDescriptor()
 	hooks, _, _, _, _ := supervisorTestHooks()
 	supervisor := newSupervisor(cell, SupervisorPolicy{hooks: &hooks})
-	if err != nil || supervisor.load(descriptor) != nil || supervisor.step(t.Context()) != nil {
+	if err != nil || supervisor.load(t.Context(), descriptor) != nil || supervisor.step(t.Context()) != nil {
 		t.Fatal("cannot start queued readiness fixture")
 	}
 	entered := make(chan struct{})

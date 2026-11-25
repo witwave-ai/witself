@@ -21,7 +21,7 @@ func TestServiceSupervisorControlOutputsExcludeControlToken(t *testing.T) {
 	}
 	hooks, _, _, _, _ := supervisorTestHooks()
 	supervisor := newSupervisor(c, SupervisorPolicy{hooks: &hooks})
-	if err := supervisor.load(descriptor); err != nil {
+	if err := supervisor.load(t.Context(), descriptor); err != nil {
 		t.Fatal("cannot load synthetic supervisor")
 	}
 	commands := make(chan serviceCommand)

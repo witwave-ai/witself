@@ -729,7 +729,7 @@ func TestServiceMaintenanceProtectivePathsRemainUsable(t *testing.T) {
 			h.start = func(context.Context) error { *starts++; trace = append(trace, "start"); return nil }
 			h.health = func(context.Context) error { trace = append(trace, "health"); return nil }
 			s := newSupervisor(c, SupervisorPolicy{hooks: &h})
-			if s.load(d) != nil {
+			if s.load(t.Context(), d) != nil {
 				t.Fatal("cannot load healthy synthetic supervisor")
 			}
 			before := serviceMaintenanceSnapshot(t, c)

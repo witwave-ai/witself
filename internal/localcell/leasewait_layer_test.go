@@ -594,7 +594,7 @@ func TestLeaseWaitLayerSourceContract(t *testing.T) {
 	for name, source := range admissionReadSources(t) {
 		sources[name] = strings.ReplaceAll(source, "\r\n", "\n")
 	}
-	const writer, load = "\tf, err := openPrivateWriter(ctx, path, flags, mode)\n", "func (s *supervisor) load(d ServiceDescriptor) (result error) {\n"
+	const writer, load = "\tf, err := openPrivateWriter(ctx, path, flags, mode)\n", "func (s *supervisor) load(ctx context.Context, d ServiceDescriptor) (result error) {\n"
 	const start, regular = "func (c *Cell) Start(ctx context.Context) error {\n", "openPrivateReader, nil, path, inspect, irregular, open)\n"
 	for _, row := range []struct{ name, file, before, after, want string }{
 		{"writer_cut_dropped", "files.go", writer + "\tif cut := (*leaseWaitCut)(nil); errors.As(err, &cut) {\n\t\treturn nil, cut\n\t}\n", writer, "lease_wait_cut:files.go"},

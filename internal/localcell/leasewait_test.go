@@ -171,7 +171,7 @@ serviceAdapterAdmission serviceAdapterRemovalAdmission serviceAdapterAdmissionFo
 (*Cell).serviceHostExitIdentity (*Cell).validateHostExitEnvelope (*Cell).newHostExitEnvelope (*Cell).serviceHostLeaseHeld (*Cell).retainServiceExitHost (*Cell).exitServiceHostForRemoval
 (*Cell).acquireServiceLease (*Cell).acquireServiceLeaseWithBoot (*Cell).acquireServiceLeaseForPlatform
 (*Cell).ServiceHealth (*Cell).healthPrincipal (*Cell).healthDSN (*Cell).healthStore (*Cell).serviceAPICredential (*Cell).serviceLiveTree
-(*Cell).prepareSelectedHealthCredential (*Cell).verifyStartAccount`)
+(*Cell).prepareSelectedHealthCredential (*Cell).verifyStartAccount (*supervisor).load (*supervisor).rememberProcesses`)
 
 var leaseWaitServiceCalls = map[string]string{
 	// The dark repair has the same per-owner, exact-callee contract as the service entry points.
@@ -245,9 +245,11 @@ var leaseWaitServiceCalls = map[string]string{
 	"service_descriptor.go:(*Cell).setServiceFaulted":                  "commitServiceFault",
 	"service_maintenance.go:(*Cell).serviceMaintenanceObservation":     "maintenanceFenceAllows own readServiceDescriptor",
 	"service_shutdown_supervisor.go:(*supervisor).commitShutdownFault": "commitServiceFault",
-	"service_supervisor.go:(*Cell).Run":                                "acquireServiceLeaseWithBoot serveServiceControlForPlatform serviceDescriptor",
+	"service_supervisor.go:(*Cell).Run":                                "acquireServiceLeaseWithBoot load serveServiceControlForPlatform serviceDescriptor",
 	"service_supervisor.go:(*supervisor).command":                      "serviceDescriptor",
-	"service_supervisor.go:(*supervisor).step":                         "serviceDescriptor serviceDescriptor",
+	"service_supervisor.go:(*supervisor).step":                         "rememberProcesses rememberProcesses serviceDescriptor serviceDescriptor",
+	"service_supervisor.go:(*supervisor).load":                         "readJSON rememberProcesses",
+	"service_supervisor.go:(*supervisor).rememberProcesses":            "readJSON readJSON",
 	"service_task_host.go:(*Cell).validateTaskHost":                    "serviceDescriptor",
 
 	"service_control_endpoint.go:(*Cell).completeServiceLease":                  "readServiceRecordJSON serviceListenerDescriptor",
@@ -294,8 +296,7 @@ var leaseWaitPlaceholders = map[string]int{"checkpoint_verify.go:(*Cell).verifyC
 	"service_task_host.go:(*Cell).ValidateTaskHost": 1, "service_descriptor.go:(*Cell).ServiceDescriptor": 1,
 	"service_launchd.go:(*launchdAgentAdapter).ownedPlist": 1,
 	"service_shutdown_other.go:(*Cell).stopChildOutcome":   1, "service_shutdown_windows.go:(*Cell).stopChildOutcomeWithBudget": 1,
-	"service_shutdown_windows.go:waitShutdownReady": 1, "service_supervisor.go:(*Cell).Run": 1, "service_supervisor.go:(*supervisor).load": 1,
-	"service_supervisor.go:(*supervisor).rememberProcesses": 2, "service_windows_task.go:(*windowsLogonTaskAdapter).Apply": 1,
+	"service_shutdown_windows.go:waitShutdownReady": 1, "service_supervisor.go:(*Cell).Run": 1, "service_windows_task.go:(*windowsLogonTaskAdapter).Apply": 1,
 	"service_windows_task.go:(*windowsLogonTaskAdapter).Remove": 2, "service_windows_task.go:(*windowsLogonTaskAdapter).Start": 1,
 	"service_windows_task.go:(*windowsLogonTaskAdapter).mutationLock": 1, "stop_windows.go:(*Cell).stopPostgres": 1, "stop_windows.go:(*Cell).windowsStopRecord": 1, "update_record.go:(*Cell).authenticateUpdateInstallation": 1,
 	"update_record.go:(*Cell).readDerivedUpdateRecord": 1, "update_record.go:(*Cell).readUpdateIntent": 1}
@@ -988,6 +989,14 @@ func TestLeaseWaitSourceContract(t *testing.T) {
 		{"account_step_outer", "lifecycle.go", "func(ctx context.Context) error { return ops.account(ctx, m) }", "func(context.Context) error { return ops.account(ctx, m) }", "lease_wait_live:lifecycle.go:(*Cell).Start"},
 		{"account_value_wrapped", "lifecycle.go", "account: c.verifyStartAccount,", "account: func(_ context.Context, m *Manifest) error { return c.verifyStartAccount(context.Background(), m) },",
 			"lease_wait_value:lifecycle.go:(*Cell).principalStartOperations"},
+		// LC-LEASE-2E4: Run's record load, its reads and the step's two refreshes each keep the operation's own context.
+		{"load_call_detached", "service_supervisor.go", "s.load(ctx, d)", "s.load(context.Background(), d)", "lease_wait_placeholder:service_supervisor.go:(*Cell).Run"},
+		{"load_record_detached", "service_supervisor.go", "readJSON(ctx, s.cell.path(\"service\", \"supervisor.json\")", "readJSON(context.Background(), s.cell.path(\"service\", \"supervisor.json\")", "lease_wait_placeholder:service_supervisor.go:(*supervisor).load"},
+		{"load_snapshot_detached", "service_supervisor.go", "if err := s.rememberProcesses(ctx, d);", "if err := s.rememberProcesses(context.Background(), d);", "lease_wait_placeholder:service_supervisor.go:(*supervisor).load"},
+		{"remember_component_detached", "service_supervisor.go", "readJSON(ctx, s.cell.path(\"run\", component+\".json\")", "readJSON(context.Background(), s.cell.path(\"run\", component+\".json\")", "lease_wait_placeholder:service_supervisor.go:(*supervisor).rememberProcesses"},
+		{"remember_host_detached", "service_supervisor.go", "readJSON(ctx, s.cell.path(\"service\", \"lease.json\")", "readJSON(context.Background(), s.cell.path(\"service\", \"lease.json\")", "lease_wait_placeholder:service_supervisor.go:(*supervisor).rememberProcesses"},
+		{"refresh_busy_detached", "service_supervisor.go", "_ = s.rememberProcesses(ctx, d) }()\n\t\t\treturn s.busy()", "_ = s.rememberProcesses(context.Background(), d) }()\n\t\t\treturn s.busy()", "lease_wait_placeholder:service_supervisor.go:(*supervisor).step"},
+		{"refresh_step_detached", "service_supervisor.go", "snapshot.\n\tdefer func() { _ = s.rememberProcesses(ctx, d) }()", "snapshot.\n\tdefer func() { _ = s.rememberProcesses(context.Background(), d) }()", "lease_wait_placeholder:service_supervisor.go:(*supervisor).step"},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			if strings.Count(sources[row.file], row.before) != 1 {
