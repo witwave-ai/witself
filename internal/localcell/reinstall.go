@@ -3,6 +3,7 @@ package localcell
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -87,10 +88,15 @@ func (c *Cell) reinstallLocked(ctx context.Context, options ReinstallOptions) er
 		}},
 	}
 	for _, step := range steps {
+		// The step's own cut is told apart before the deferred cancel, after
+		// which the step's context is always done.
+		own := false
 		err := c.step(context.Background(), "reinstall", step.name, func() error {
 			stepCtx, cancel := context.WithTimeout(ctx, c.cfg.Timeout)
 			defer cancel()
-			return step.run(stepCtx)
+			runErr := step.run(stepCtx)
+			own = serviceContextLeaseCut(stepCtx, runErr)
+			return runErr
 		})
 		if err == nil {
 			continue
@@ -101,10 +107,18 @@ func (c *Cell) reinstallLocked(ctx context.Context, options ReinstallOptions) er
 		}
 		rollbackCtx, rollbackCancel := c.deadline(context.Background())
 		defer rollbackCancel()
+		// As Start's, a failed rollback or finish keeps the step's own cut.
+		var cut *leaseWaitCut
 		if ops.stop(rollbackCtx) != nil {
+			if own && errors.As(err, &cut) {
+				return fmt.Errorf("local cell reinstall failed; rollback incomplete, repair required: %w", cut)
+			}
 			return errors.New("local cell reinstall failed; rollback incomplete, repair required")
 		}
 		if finishErr := c.finishReinstall(context.Background(), m); finishErr != nil {
+			if own && errors.As(err, &cut) {
+				return fmt.Errorf("local cell reinstall failed; rollback completion failed, repair required: %w", cut)
+			}
 			return finishErr
 		}
 		return err
@@ -234,7 +248,7 @@ func (c *Cell) startRetainedPostgres(ctx context.Context, m *Manifest) error {
 	if err := c.startPostgres(ctx, m); err != nil {
 		return err
 	}
-	return c.bindServiceProcessBoot(context.Background(), "postgres")
+	return c.bindServiceProcessBoot(ctx, "postgres")
 }
 
 // verifyRetainedIdentity writes nothing, not even the manifest. Selected layouts

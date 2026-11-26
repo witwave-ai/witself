@@ -337,7 +337,7 @@ func (c *Cell) Start(ctx context.Context) error {
 				if !state.Matches {
 					return errors.New("local cell process identity mismatch")
 				}
-				return c.bindServiceProcessBoot(context.Background(), "postgres")
+				return c.bindServiceProcessBoot(ctx, "postgres")
 			}
 			before["postgres"] = false
 			if err := c.prepareComponentPorts(context.Background(), m, "postgres", false, false); err != nil {

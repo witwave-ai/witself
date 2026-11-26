@@ -404,7 +404,7 @@ readiness.go
 	import context errors fmt io os strings time
 	(*Cell).lastValueFreeDiagnostic openPrivateReader
 reinstall.go
-	import context errors github.com/witwave-ai/witself/internal/store os path/filepath strconv strings
+	import context errors fmt github.com/witwave-ai/witself/internal/store os path/filepath strconv strings
 	(*Cell).finishReinstall (*Cell).journal writeAtomic
 	(*Cell).reinstallAvailable openPostgresReader readRegular
 	(*Cell).reinstallLocked writeAtomic
