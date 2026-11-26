@@ -38,6 +38,10 @@ func adapterOperationLease(t *testing.T, kind string, mode int, atDisable bool) 
 		go func() {
 			at, broken := leaseContextBroken(holder)
 			cancel()
+			if kind == "released_after_cancel" { // A holder that lets go shortly after the cancellation.
+				time.Sleep(50 * time.Millisecond)
+				holder.release()
+			}
 			if !broken {
 				at = time.Time{}
 			}

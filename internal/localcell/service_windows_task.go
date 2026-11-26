@@ -419,14 +419,18 @@ func (a *windowsLogonTaskAdapter) Remove(ctx context.Context, d ServiceIdentity)
 	}
 	// This existing transaction persists stopped intent, authenticates the child
 	// drain and exit-host request, and observes the exact retained host and lease.
+	// The operation's own cut stays typed; every other failure is refused.
 	if a.drain != nil {
 		if err := a.drain(ctx, d); err != nil {
-			return windowsTaskError(ErrServiceRemovalFailed, "remove:host_exit", 0, "host_exit_failed")
+			return serviceAdapterReadFailure(ctx, err, windowsTaskError(ErrServiceRemovalFailed, "remove:host_exit", 0, "host_exit_failed"))
 		}
 	} else {
 		cell, err := a.cellForRemoval(d)
-		if err != nil || cell == nil || cell.exitServiceHostForRemoval(ctx) != nil {
+		if err != nil || cell == nil {
 			return windowsTaskError(ErrServiceRemovalFailed, "remove:host_exit", 0, "host_exit_failed")
+		}
+		if err := cell.exitServiceHostForRemoval(ctx); err != nil {
+			return serviceAdapterReadFailure(ctx, err, windowsTaskError(ErrServiceRemovalFailed, "remove:host_exit", 0, "host_exit_failed"))
 		}
 	}
 	// The drain itself needs this operation lock, so acquire it only afterwards.

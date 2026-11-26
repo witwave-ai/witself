@@ -196,7 +196,7 @@ func (a *launchdAgentAdapter) capability(ctx context.Context, root string) error
 	return nil
 }
 
-func (a *launchdAgentAdapter) ownedPlist(d ServiceDescriptor, want []byte) (os.FileInfo, error) {
+func (a *launchdAgentAdapter) ownedPlist(ctx context.Context, d ServiceDescriptor, want []byte) (os.FileInfo, error) {
 	if err := a.inspectDirectories(false); err != nil {
 		return nil, err
 	}
@@ -217,9 +217,9 @@ func (a *launchdAgentAdapter) ownedPlist(d ServiceDescriptor, want []byte) (os.F
 	if a.owned == nil || !a.owned(path, info) {
 		return nil, serviceSystemdError(ErrServiceOwnershipConflict, "plist_file:owner", "not_current_uid")
 	}
-	file, err := openPlainReader(context.Background(), path)
+	file, err := openPlainReader(ctx, path)
 	if err != nil {
-		return nil, a.commandError(ErrServiceOwnershipConflict, "plist_file:open", err, d.Root)
+		return nil, serviceAdapterReadFailure(ctx, err, a.commandError(ErrServiceOwnershipConflict, "plist_file:open", err, d.Root))
 	}
 	defer func() { _ = file.Close() }()
 	opened, err := file.Stat()
@@ -412,8 +412,11 @@ func (a *launchdAgentAdapter) Inspect(ctx context.Context, d ServiceIdentity) (S
 		}
 		return serviceUnavailable(err)
 	}
-	file, err := a.ownedPlist(d, want)
+	file, err := a.ownedPlist(ctx, d, want)
 	if err != nil {
+		if cut := serviceAdapterReadFailure(ctx, err, nil); cut != nil {
+			return ServiceObservation{}, cut
+		}
 		return conflict, err
 	}
 	raw, err := a.command(ctx, a.launchctl, "print", a.target(d))
@@ -489,7 +492,7 @@ func (a *launchdAgentAdapter) Apply(ctx context.Context, plan ServicePlan) error
 	if err := a.inspectDirectories(true); err != nil {
 		return err
 	}
-	identity, err := a.ownedPlist(d, want)
+	identity, err := a.ownedPlist(ctx, d, want)
 	if err != nil {
 		return err
 	}
@@ -528,13 +531,16 @@ func (a *launchdAgentAdapter) Apply(ctx context.Context, plan ServicePlan) error
 	}
 	enableAttempted := false
 	fail := func(step string, err error) error {
+		failure := fmt.Errorf("%w: %s: %w", ErrServiceRegistrationFailed, step, err)
 		if created != nil && !enableAttempted {
-			a.cleanupPartial(ctx, d, created)
+			if cut := a.cleanupPartial(ctx, d, created); cut != nil {
+				return errors.Join(failure, cut)
+			}
 		}
-		return fmt.Errorf("%w: %s: %w", ErrServiceRegistrationFailed, step, err)
+		return failure
 	}
 	checkIdentity := func(step string) error {
-		current, err := a.ownedPlist(d, want)
+		current, err := a.ownedPlist(ctx, d, want)
 		if err == nil && (current == nil || !os.SameFile(identity, current)) {
 			err = serviceSystemdError(ErrServiceOwnershipConflict, step, "plist_changed")
 		}
@@ -609,19 +615,24 @@ func (a *launchdAgentAdapter) removePlistIdentity(d ServiceDescriptor, identity 
 	return nil
 }
 
-func (a *launchdAgentAdapter) cleanupPartial(ctx context.Context, d ServiceDescriptor, created os.FileInfo) {
+func (a *launchdAgentAdapter) cleanupPartial(ctx context.Context, d ServiceDescriptor, created os.FileInfo) error {
 	// Before any enabling attempt, remove only the original file identity when
 	// the manager can establish that no owned registration needs its record.
 	obs, err := a.Inspect(ctx, d)
+	if cut := serviceAdapterReadFailure(ctx, err, nil); cut != nil {
+		// Nor can the operation's own cut: keep the record, and the cut.
+		return cut
+	}
 	if errors.Is(err, ErrServiceManagerUnavailable) {
 		// Cancellation or a lost manager cannot establish absence. Keep the
 		// private record so a partially loaded job remains explicitly removable.
-		return
+		return nil
 	}
 	if err == nil && obs.Registered && obs.Owned {
-		return
+		return nil
 	}
 	_ = a.removePlistIdentity(d, created)
+	return nil
 }
 
 func (a *launchdAgentAdapter) bootout(ctx context.Context, d ServiceDescriptor) error {
@@ -688,14 +699,18 @@ func (a *launchdAgentAdapter) Remove(ctx context.Context, d ServiceIdentity) err
 		return serviceSystemdError(ErrServiceOwnershipConflict, "remove:ownership", "not_owned")
 	}
 	// Draining needs the operation lock and must finish before either lock.
+	// The operation's own cut stays typed; every other failure is refused.
 	if a.drain != nil {
 		if err := a.drain(ctx, d); err != nil {
-			return serviceSystemdError(ErrServiceRemovalFailed, "remove:host_exit", "host_exit_failed")
+			return serviceAdapterReadFailure(ctx, err, serviceSystemdError(ErrServiceRemovalFailed, "remove:host_exit", "host_exit_failed"))
 		}
 	} else {
 		cell, err := New(Config{Root: d.Root, Timeout: 60 * time.Second})
-		if err != nil || cell.exitServiceHostForRemoval(ctx) != nil {
+		if err != nil {
 			return serviceSystemdError(ErrServiceRemovalFailed, "remove:host_exit", "host_exit_failed")
+		}
+		if err := cell.exitServiceHostForRemoval(ctx); err != nil {
+			return serviceAdapterReadFailure(ctx, err, serviceSystemdError(ErrServiceRemovalFailed, "remove:host_exit", "host_exit_failed"))
 		}
 	}
 	cell, fresh, unlock, err := serviceAdapterRemovalAdmission(ctx, a.uid, d, a.agentDir)
@@ -735,7 +750,10 @@ func (a *launchdAgentAdapter) Remove(ctx context.Context, d ServiceIdentity) err
 	if err != nil {
 		return err
 	}
-	identity, err := a.ownedPlist(d, want)
+	identity, err := a.ownedPlist(ctx, d, want)
+	if cut := serviceAdapterReadFailure(ctx, err, nil); cut != nil {
+		return cut
+	}
 	if err != nil || identity == nil {
 		return serviceSystemdError(ErrServiceOwnershipConflict, "remove:ownership", "plist_changed")
 	}

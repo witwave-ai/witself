@@ -46,7 +46,7 @@ var reader2UnixRows = []reader2Row{
 			t.Fatal("cannot prepare the reader plist")
 		}
 		a.inspectFile = reader2PlantAfter(a.plistPath(d), plant)
-		return a.plistPath(d), func() error { _, err := a.ownedPlist(d, want); return err }
+		return a.plistPath(d), func() error { _, err := a.ownedPlist(context.Background(), d, want); return err }
 	}},
 	{"systemdUnit", "unit_file:type", "unit_file:read", "unit_file:content", func(t *testing.T, plant func(string)) (string, func() error) {
 		a, d, _ := systemdFixture(t)
