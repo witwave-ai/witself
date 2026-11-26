@@ -268,7 +268,7 @@ function assertLocalcellUnixJob(ci) {
   assert.equal(job['runs-on'], '${{ matrix.runner }}');
   assert.deepEqual(job.strategy, {'fail-fast': false, matrix: {include: unixPlatforms}});
   assert.deepEqual(job.permissions, {contents: 'read'});
-  assert.equal(job['timeout-minutes'], 45);
+  assert.equal(job['timeout-minutes'], 60);
   for (const key of ['continue-on-error', 'environment', 'env', 'services', 'secrets', 'defaults']) {
     assert.equal(job[key], undefined, `${label}: no ${key}`);
   }
