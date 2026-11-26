@@ -168,6 +168,7 @@ var leaseWaitServiceOpeners = strings.Fields(`(*Cell).serviceDescriptor (*Cell).
 (*Cell).validateHostExitEndpoint (*Cell).readHostExitEndpoint (*Cell).validateServiceControlEndpoint (*Cell).listenRunServiceControl (*Cell).listenServiceControl
 (*Cell).removeServiceControlEndpoint (*Cell).reconcileServiceBoot (*Cell).reconcileOldBoot (*Cell).bindServiceProcessBoot (*Cell).bindServiceProcessBootWithReader
 serviceAdapterAdmission serviceAdapterRemovalAdmission serviceAdapterAdmissionForStep (*systemdUserAdapter).ownedUnit (*systemdUserAdapter).cleanupPartial
+(*launchdAgentAdapter).ownedPlist (*launchdAgentAdapter).cleanupPartial
 (*Cell).serviceHostExitIdentity (*Cell).validateHostExitEnvelope (*Cell).newHostExitEnvelope (*Cell).serviceHostLeaseHeld (*Cell).retainServiceExitHost (*Cell).exitServiceHostForRemoval
 (*Cell).acquireServiceLease (*Cell).acquireServiceLeaseWithBoot (*Cell).acquireServiceLeaseForPlatform
 (*Cell).ServiceHealth (*Cell).healthPrincipal (*Cell).healthDSN (*Cell).healthStore (*Cell).serviceAPICredential (*Cell).serviceLiveTree
@@ -189,8 +190,10 @@ var leaseWaitServiceCalls = map[string]string{
 	"service_systemd_adapter.go:(*systemdUserAdapter).Apply":      "cleanupPartial maintenanceFenceAllows ownedUnit serviceAdapterAdmission",
 	"service_systemd_adapter.go:(*systemdUserAdapter).Remove":     "exitServiceHostForRemoval maintenanceFenceAllows ownedUnit serviceAdapterRemovalAdmission serviceAdapterRemovalHostLock",
 	"service_systemd_adapter.go:(*systemdUserAdapter).ownedUnit":  "openPlainReader",
-	"service_launchd.go:(*launchdAgentAdapter).Apply":             "maintenanceFenceAllows serviceAdapterAdmission",
-	"service_launchd.go:(*launchdAgentAdapter).Remove":            "exitServiceHostForRemoval maintenanceFenceAllows serviceAdapterRemovalAdmission serviceAdapterRemovalHostLock",
+	"service_launchd.go:(*launchdAgentAdapter).Inspect":           "ownedPlist",
+	"service_launchd.go:(*launchdAgentAdapter).Apply":             "cleanupPartial maintenanceFenceAllows ownedPlist ownedPlist serviceAdapterAdmission",
+	"service_launchd.go:(*launchdAgentAdapter).Remove":            "exitServiceHostForRemoval maintenanceFenceAllows ownedPlist serviceAdapterRemovalAdmission serviceAdapterRemovalHostLock",
+	"service_launchd.go:(*launchdAgentAdapter).ownedPlist":        "openPlainReader",
 	// The removal drain's lease waits end with the remover's own context (LC-LEASE-2E2-F1, N9).
 	"service_windows_task.go:(*windowsLogonTaskAdapter).Remove": "exitServiceHostForRemoval",
 	"lifecycle.go:(*Cell).Remove":                               "exitServiceHostForRemoval",
@@ -294,8 +297,7 @@ var leaseWaitPlaceholders = map[string]int{"checkpoint_verify.go:(*Cell).verifyC
 	"postgres_windows.go:(*Cell).pendingPostmasterPID": 1, "postgres_windows.go:(*Cell).startPostgres": 3,
 	"readiness.go:(*Cell).childReadinessExit": 1, "reinstall.go:(*Cell).Reinstall": 2, "reinstall.go:(*Cell).reinstallLocked": 6, "reinstall.go:(*Cell).startRetainedPostgres": 1,
 	"service_task_host.go:(*Cell).ValidateTaskHost": 1, "service_descriptor.go:(*Cell).ServiceDescriptor": 1,
-	"service_launchd.go:(*launchdAgentAdapter).ownedPlist": 1,
-	"service_shutdown_other.go:(*Cell).stopChildOutcome":   1, "service_shutdown_windows.go:(*Cell).stopChildOutcomeWithBudget": 1,
+	"service_shutdown_other.go:(*Cell).stopChildOutcome": 1, "service_shutdown_windows.go:(*Cell).stopChildOutcomeWithBudget": 1,
 	"service_shutdown_windows.go:waitShutdownReady": 1, "service_supervisor.go:(*Cell).Run": 1, "service_windows_task.go:(*windowsLogonTaskAdapter).Apply": 1,
 	"service_windows_task.go:(*windowsLogonTaskAdapter).Remove": 2, "service_windows_task.go:(*windowsLogonTaskAdapter).Start": 1,
 	"service_windows_task.go:(*windowsLogonTaskAdapter).mutationLock": 1, "stop_windows.go:(*Cell).stopPostgres": 1, "stop_windows.go:(*Cell).windowsStopRecord": 1, "update_record.go:(*Cell).authenticateUpdateInstallation": 1,
@@ -983,6 +985,12 @@ func TestLeaseWaitSourceContract(t *testing.T) {
 		{"drain_launchd_detached", "service_launchd.go", "cell.exitServiceHostForRemoval(ctx)", "cell.exitServiceHostForRemoval(context.WithoutCancel(ctx))", "lease_wait_placeholder:service_launchd.go:(*launchdAgentAdapter).Remove"},
 		{"drain_task_detached", "service_windows_task.go", "cell.exitServiceHostForRemoval(ctx)", "cell.exitServiceHostForRemoval(context.Background())", "lease_wait_placeholder:service_windows_task.go:(*windowsLogonTaskAdapter).Remove"},
 		{"drain_remove_detached", "lifecycle.go", "c.exitServiceHostForRemoval(ctx)", "c.exitServiceHostForRemoval(context.WithoutCancel(ctx))", "lease_wait_placeholder:lifecycle.go:(*Cell).Remove"},
+		// LC-LEASE-2E5: launchd's plist reads, and the cleanup that reads it again, take the operation's own context.
+		{"plist_open_detached", "service_launchd.go", "openPlainReader(ctx, path)", "openPlainReader(context.Background(), path)", "lease_wait_placeholder:service_launchd.go:(*launchdAgentAdapter).ownedPlist"},
+		{"plist_inspect_detached", "service_launchd.go", "file, err := a.ownedPlist(ctx, d, want)", "file, err := a.ownedPlist(context.Background(), d, want)", "lease_wait_placeholder:service_launchd.go:(*launchdAgentAdapter).Inspect"},
+		{"plist_identity_detached", "service_launchd.go", "current, err := a.ownedPlist(ctx, d, want)", "current, err := a.ownedPlist(context.Background(), d, want)", "lease_wait_placeholder:service_launchd.go:(*launchdAgentAdapter).Apply"},
+		{"plist_remove_detached", "service_launchd.go", "a.ownedPlist(ctx, d, want)\n\tif cut", "a.ownedPlist(context.Background(), d, want)\n\tif cut", "lease_wait_placeholder:service_launchd.go:(*launchdAgentAdapter).Remove"},
+		{"plist_cleanup_detached", "service_launchd.go", "a.cleanupPartial(ctx, d, created)", "a.cleanupPartial(context.Background(), d, created)", "lease_wait_placeholder:service_launchd.go:(*launchdAgentAdapter).Apply"},
 		// LC-LEASE-2E3-F1 (m2): the review's R17 and R18, and the step's context swapped for Start's own.
 		{"account_credential_detached", "lifecycle.go", "c.prepareSelectedHealthCredential(ctx, m)", "c.prepareSelectedHealthCredential(context.Background(), m)", "lease_wait_placeholder:lifecycle.go:(*Cell).verifyStartAccount"},
 		{"account_step_detached", "lifecycle.go", "return ops.account(ctx, m)", "return ops.account(context.Background(), m)", "lease_wait_placeholder:lifecycle.go:(*Cell).Start"},

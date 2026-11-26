@@ -4,6 +4,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -552,14 +553,19 @@ func TestUnixServiceMaintenanceAdmissionSourceContract(t *testing.T) {
 }
 
 // The guards that keep a lease cut ask the helper whether the cut is the
-// operation's own: a guard on the cut's type alone fails this pin.
+// operation's own: a guard on the cut's type alone fails this pin. A
+// declaration's guards are listed in source order.
 var serviceAdapterCutGuards = map[string]string{
 	"service_systemd_adapter.go:systemdUserAdapter.Inspect": `if cut := serviceAdapterReadFailure(ctx, err, nil); cut != nil { return ServiceObservation{}, cut }`,
 	"service_systemd_adapter.go:systemdUserAdapter.Apply": `if created != nil && serviceAdapterReadFailure(ctx, primary, nil) == nil {
  if cleanupErr := a.cleanupPartial(ctx, d, created); cleanupErr != nil { return errors.Join(primary, cleanupErr) }
 }`,
 	"service_systemd_adapter.go:systemdUserAdapter.Remove": `if cut := serviceAdapterReadFailure(ctx, err, nil); cut != nil { return cut }`,
-	"service_launchd.go:launchdAgentAdapter.Remove":        `if cut := serviceAdapterReadFailure(ctx, err, nil); cut != nil { return cut }`,
+	"service_launchd.go:launchdAgentAdapter.Remove": `if cut := serviceAdapterReadFailure(ctx, err, nil); cut != nil { return cut }
+if cut := serviceAdapterReadFailure(ctx, err, nil); cut != nil { return cut }`,
+	// LC-LEASE-2E5: launchd's plist reads; a cut is never an observation or evidence of absence.
+	"service_launchd.go:launchdAgentAdapter.Inspect":        `if cut := serviceAdapterReadFailure(ctx, err, nil); cut != nil { return ServiceObservation{}, cut }`,
+	"service_launchd.go:launchdAgentAdapter.cleanupPartial": `if cut := serviceAdapterReadFailure(ctx, err, nil); cut != nil { return cut }`,
 }
 
 func serviceAdapterCutGuardContract(sources map[string]string) []string {
@@ -589,7 +595,8 @@ func serviceAdapterCutGuardContract(sources map[string]string) []string {
 	}
 	var failures []string
 	for key, want := range serviceAdapterCutGuards {
-		if got := sites[key]; len(got) != 1 || got[0] != admissionStatements(want)[0] {
+		// A pin that does not parse lists nothing and must not match a declaration without guards.
+		if expected := admissionStatements(want); len(expected) == 0 || !slices.Equal(sites[key], expected) {
 			failures = append(failures, key)
 		}
 		delete(sites, key)
@@ -609,6 +616,9 @@ func TestServiceAdapterCutGuardSourceContract(t *testing.T) {
 		{"cleanup_type_only", "service_systemd_adapter.go", "created != nil && serviceAdapterReadFailure(ctx, primary, nil) == nil {", "created != nil && !serviceLeaseCut(primary) {", "systemdUserAdapter.Apply"},
 		{"cleanup_on_own_cut", "service_systemd_adapter.go", "created != nil && serviceAdapterReadFailure(ctx, primary, nil) == nil {", "created != nil {", "systemdUserAdapter.Apply"},
 		{"systemd_host_type_only", "service_systemd_adapter.go", "if cut := serviceAdapterReadFailure(ctx, err, nil); cut != nil {\n\t\t\treturn cut\n\t\t}", "if serviceLeaseCut(err) {\n\t\t\treturn err\n\t\t}", "systemdUserAdapter.Remove"},
+		{"launchd_plist_type_only", "service_launchd.go", "if cut := serviceAdapterReadFailure(ctx, err, nil); cut != nil {\n\t\treturn cut\n\t}\n\tif err != nil || identity == nil", "if serviceLeaseCut(err) {\n\t\treturn err\n\t}\n\tif err != nil || identity == nil", "launchdAgentAdapter.Remove"},
+		{"launchd_inspect_type_only", "service_launchd.go", "if cut := serviceAdapterReadFailure(ctx, err, nil); cut != nil {\n\t\t\treturn ServiceObservation{}, cut", "if serviceLeaseCut(err) {\n\t\t\treturn ServiceObservation{}, err", "launchdAgentAdapter.Inspect"},
+		{"launchd_cleanup_type_only", "service_launchd.go", "if cut := serviceAdapterReadFailure(ctx, err, nil); cut != nil {\n\t\t// Nor", "if serviceLeaseCut(err) {\n\t\t// Nor", "launchdAgentAdapter.cleanupPartial"},
 		{"launchd_host_type_only", "service_launchd.go", "if cut := serviceAdapterReadFailure(ctx, err, nil); cut != nil {\n\t\t\treturn cut\n\t\t}", "if serviceLeaseCut(err) {\n\t\t\treturn err\n\t\t}", "launchdAgentAdapter.Remove"},
 	} {
 		for _, ending := range []string{"LF", "CRLF"} {
@@ -634,6 +644,101 @@ func TestServiceAdapterCutGuardSourceContract(t *testing.T) {
 				}
 				if fixture.invariant != "" && (len(failures) != 1 || failures[0] != fixture.filename+":"+fixture.invariant) {
 					t.Fatalf("adapter cut guard mutation escaped %v", failures)
+				}
+			})
+		}
+	}
+}
+
+// The six removal-drain guards (LC-LEASE-2E5): each adapter's Remove returns
+// its drain's failure through the helper that keeps only the operation's own
+// cut, from the hook and from the built-in drain. They are return statements,
+// which the cut-guard pin above does not see, and no row tells a systemd Remove
+// that runs on after a cut drain from one that stops: its next read of the same
+// host lock is cut again. So the statements are pinned whole. A guard that lets
+// Remove go on after a cut, keeps a cut by its type alone, returns the fixed
+// refusal for every failure or detaches the drain from the operation's context
+// changes one of them.
+const serviceUnixDrainGuards = `if err := a.drain(ctx, d); err != nil { return serviceAdapterReadFailure(ctx, err, serviceSystemdError(ErrServiceRemovalFailed, "remove:host_exit", "host_exit_failed")) }
+if err := cell.exitServiceHostForRemoval(ctx); err != nil { return serviceAdapterReadFailure(ctx, err, serviceSystemdError(ErrServiceRemovalFailed, "remove:host_exit", "host_exit_failed")) }`
+
+var serviceAdapterDrainGuards = map[string]string{
+	"service_systemd_adapter.go:systemdUserAdapter.Remove": serviceUnixDrainGuards,
+	"service_launchd.go:launchdAgentAdapter.Remove":        serviceUnixDrainGuards,
+	"service_windows_task.go:windowsLogonTaskAdapter.Remove": `if err := a.drain(ctx, d); err != nil { return serviceAdapterReadFailure(ctx, err, windowsTaskError(ErrServiceRemovalFailed, "remove:host_exit", 0, "host_exit_failed")) }
+if err := cell.exitServiceHostForRemoval(ctx); err != nil { return serviceAdapterReadFailure(ctx, err, windowsTaskError(ErrServiceRemovalFailed, "remove:host_exit", 0, "host_exit_failed")) }`,
+}
+
+func serviceAdapterDrainGuardContract(sources map[string]string) []string {
+	var failures []string
+	for key, want := range serviceAdapterDrainGuards {
+		filename, declaration, _ := strings.Cut(key, ":")
+		file, err := parser.ParseFile(token.NewFileSet(), filename, strings.ReplaceAll(sources[filename], "\r\n", "\n"), 0)
+		if err != nil {
+			return []string{filename + ":parse"}
+		}
+		var got []string
+		for _, decl := range file.Decls {
+			if fn, ok := decl.(*ast.FuncDecl); ok && updateReceiverName(fn)+"."+fn.Name.Name == declaration {
+				ast.Inspect(fn, func(node ast.Node) bool {
+					if guard, ok := node.(*ast.IfStmt); ok && guard.Init != nil {
+						if call := admissionNodeText(guard.Init); strings.Contains(call, "a.drain(") || strings.Contains(call, "exitServiceHostForRemoval(") {
+							got = append(got, admissionNodeText(guard))
+						}
+					}
+					return true
+				})
+			}
+		}
+		if expected := admissionStatements(want); len(expected) != 2 || !slices.Equal(got, expected) {
+			failures = append(failures, key)
+		}
+	}
+	sort.Strings(failures)
+	return failures
+}
+
+func TestServiceAdapterDrainGuardSourceContract(t *testing.T) {
+	sources := admissionReadSources(t)
+	const systemd, launchd, task = "service_systemd_adapter.go", "service_launchd.go", "service_windows_task.go"
+	const hook, builtin = "if err := a.drain(ctx, d); err != nil {", "if err := cell.exitServiceHostForRemoval(ctx); err != nil {"
+	const kept, typeOnly = "\n\t\t\treturn serviceAdapterReadFailure(ctx, err, ", "\n\t\t\treturn serviceReadFailure(err, "
+	for _, fixture := range []struct{ name, filename, old, replacement, invariant string }{
+		{"none", "", "", "", ""},
+		{"systemd_builtin_runs_on", systemd, builtin, "if err := cell.exitServiceHostForRemoval(ctx); err != nil && !serviceContextLeaseCut(ctx, err) {", "systemdUserAdapter.Remove"},
+		{"launchd_builtin_runs_on", launchd, builtin, "if err := cell.exitServiceHostForRemoval(ctx); err != nil && !serviceContextLeaseCut(ctx, err) {", "launchdAgentAdapter.Remove"},
+		{"task_builtin_runs_on", task, builtin, "if err := cell.exitServiceHostForRemoval(ctx); err != nil && !serviceContextLeaseCut(ctx, err) {", "windowsLogonTaskAdapter.Remove"},
+		{"systemd_hook_runs_on", systemd, hook, "if err := a.drain(ctx, d); err != nil && !serviceContextLeaseCut(ctx, err) {", "systemdUserAdapter.Remove"},
+		{"systemd_builtin_detached", systemd, builtin, "if err := cell.exitServiceHostForRemoval(context.Background()); err != nil {", "systemdUserAdapter.Remove"},
+		{"systemd_builtin_type_only", systemd, builtin + kept, builtin + typeOnly, "systemdUserAdapter.Remove"},
+		{"launchd_builtin_type_only", launchd, builtin + kept, builtin + typeOnly, "launchdAgentAdapter.Remove"},
+		{"task_builtin_type_only", task, builtin + kept, builtin + typeOnly, "windowsLogonTaskAdapter.Remove"},
+		{"systemd_builtin_fixed", systemd, builtin + kept + "serviceSystemdError(", builtin + "\n\t\t\treturn (serviceSystemdError(", "systemdUserAdapter.Remove"},
+		{"systemd_builtin_removed", systemd, builtin, "if false {", "systemdUserAdapter.Remove"},
+	} {
+		for _, ending := range []string{"LF", "CRLF"} {
+			t.Run(fixture.name+"/"+ending, func(t *testing.T) {
+				input := serviceAdmissionClone(sources)
+				for name, source := range input {
+					input[name] = strings.ReplaceAll(source, "\r\n", "\n")
+				}
+				if fixture.filename != "" {
+					if strings.Count(input[fixture.filename], fixture.old) != 1 {
+						t.Fatal("removal drain guard mutation missed its raising site")
+					}
+					input[fixture.filename] = strings.Replace(input[fixture.filename], fixture.old, fixture.replacement, 1)
+				}
+				if ending == "CRLF" {
+					for name, source := range input {
+						input[name] = strings.ReplaceAll(source, "\n", "\r\n")
+					}
+				}
+				failures := serviceAdapterDrainGuardContract(input)
+				if fixture.invariant == "" && len(failures) != 0 {
+					t.Fatalf("removal drain guards changed %v", failures)
+				}
+				if fixture.invariant != "" && (len(failures) != 1 || failures[0] != fixture.filename+":"+fixture.invariant) {
+					t.Fatalf("removal drain guard mutation escaped %v", failures)
 				}
 			})
 		}

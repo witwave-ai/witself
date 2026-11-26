@@ -602,14 +602,18 @@ func (a *systemdUserAdapter) Remove(ctx context.Context, d ServiceIdentity) erro
 		return serviceSystemdError(ErrServiceOwnershipConflict, "remove:ownership", "not_owned")
 	}
 	// Draining needs the operation lock and must finish before either lock.
+	// The operation's own cut stays typed; every other failure is refused.
 	if a.drain != nil {
 		if err := a.drain(ctx, d); err != nil {
-			return serviceSystemdError(ErrServiceRemovalFailed, "remove:host_exit", "host_exit_failed")
+			return serviceAdapterReadFailure(ctx, err, serviceSystemdError(ErrServiceRemovalFailed, "remove:host_exit", "host_exit_failed"))
 		}
 	} else {
 		cell, err := New(Config{Root: d.Root, Timeout: 60 * time.Second})
-		if err != nil || cell.exitServiceHostForRemoval(ctx) != nil {
+		if err != nil {
 			return serviceSystemdError(ErrServiceRemovalFailed, "remove:host_exit", "host_exit_failed")
+		}
+		if err := cell.exitServiceHostForRemoval(ctx); err != nil {
+			return serviceAdapterReadFailure(ctx, err, serviceSystemdError(ErrServiceRemovalFailed, "remove:host_exit", "host_exit_failed"))
 		}
 	}
 	cell, fresh, unlock, err := serviceAdapterRemovalAdmission(ctx, a.uid, d, a.unitDir)
