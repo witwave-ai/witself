@@ -96,7 +96,7 @@ func (c *Cell) reinstallLocked(ctx context.Context, options ReinstallOptions) er
 			defer cancel()
 			stepCtx = withBindOperation(stepCtx, ctx)
 			runErr := step.run(stepCtx)
-			own = serviceContextLeaseCut(stepCtx, runErr)
+			own = serviceContextLeaseCut(stepCtx, runErr) || serviceContextLeaseCut(ctx, runErr)
 			return runErr
 		})
 		if err == nil {

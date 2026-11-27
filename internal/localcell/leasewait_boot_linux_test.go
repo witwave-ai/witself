@@ -130,6 +130,9 @@ func serviceOldBootLeases(t *testing.T) {
 	}
 }
 
+// LC-LEASE-2E7: deadline (the descriptor kept past the step's budget, the
+// operation live) gets the ceiling's refusal, no longer the step's cut; the
+// released, rollback and finish leaves are regression pins at b289a091.
 func TestPostPublicationCut(t *testing.T) {
 	for _, row := range []string{"released", "rollback", "finish", "deadline"} {
 		t.Run(row, func(t *testing.T) {
@@ -145,7 +148,8 @@ func TestPostPublicationCut(t *testing.T) {
 			leaseWait.ceiling = 750 * time.Millisecond
 			c.cfg.Timeout = 8 * leaseWait.ceiling
 			if row == "deadline" {
-				// The lease outlives the postgres step's own budget, which cuts the binding.
+				// The lease outlives the postgres step's own budget with the operation live: the
+				// binding ends with the operation, so it waits to the ceiling and refuses (LC-LEASE-2E7).
 				c.cfg.Timeout = 2 * leaseWait.ceiling
 				leaseWait.ceiling = 2 * c.cfg.Timeout
 			}
@@ -160,7 +164,7 @@ func TestPostPublicationCut(t *testing.T) {
 				}
 			}
 			var published ProcessRecord
-			var rollbackBegan time.Time
+			var rollbackBegan, broke time.Time
 			ops := c.principalStartOperations()
 			start := ops.postgres
 			ops.postgres = func(step context.Context, m *Manifest) error {
@@ -193,6 +197,7 @@ esac
 				done := StartJoinedTestRunForTest(t, cancel, c.cfg.Timeout, func() error { return start(step, m) })
 				_, ok := leaseContextBroken(descriptor)
 				requireServiceLease(t, ok, "the shared binding never reached its descriptor")
+				broke = time.Now()
 				path := c.path("run", "postgres.json")
 				requireServiceLease(t, readJSON(t.Context(), path, &published) == nil, "the binding preceded process publication")
 				requireServiceLease(t, published.PID == child.Process.Pid, "the launcher published the wrong child")
@@ -221,20 +226,16 @@ esac
 			err := c.Start(ctx)
 			rollbackElapsed := time.Since(rollbackBegan)
 			record.close()
-			requireServiceLease(t, serviceLeaseCut(err), "start lost the cut")
-			cause := context.Canceled
-			if row == "deadline" {
-				cause = context.DeadlineExceeded
-				requireServiceLease(t, errors.Is(err, cause), "start lost the step deadline")
-				requireServiceLease(t, !errors.Is(err, context.Canceled), "a step deadline cut carried a cancellation")
+			if row == "deadline" { // the ceiling's own refusal; the parent's cut at the step's deadline differs only in text and time
+				requireServiceLease(t, err != nil && err.Error() == "local cell start: postgres failed" && !serviceLeaseCut(err), "the step's own deadline cut the binding")
 				requireServiceLease(t, ctx.Err() == nil, "the step's own deadline ended the operation")
-				requireServiceLease(t, !errors.Is(err, ErrServiceOwnershipConflict), "a step deadline cut read as a stale or foreign binding")
-				requireServiceLease(t, !errors.Is(err, os.ErrNotExist), "a step deadline cut read as an absent binding")
+				requireServiceLease(t, rollbackBegan.Sub(broke) >= leaseWait.ceiling/2, "the binding ended at its step's own deadline")
 			} else {
+				requireServiceLease(t, serviceLeaseCut(err), "start lost the cut")
 				requireServiceLease(t, errors.Is(err, context.Canceled), "start lost the cancellation")
+				want := map[string]string{"released": "local cell start: postgres failed: ", "rollback": "local cell startup failed; rollback incomplete, repair required: ", "finish": "local cell startup failed; rollback completion failed, repair required: "}
+				requireServiceLease(t, err.Error() == want[row]+"local cell lease wait ended: context canceled", "start changed the fixed cut receipt")
 			}
-			want := map[string]string{"released": "local cell start: postgres failed: ", "rollback": "local cell startup failed; rollback incomplete, repair required: ", "finish": "local cell startup failed; rollback completion failed, repair required: ", "deadline": "local cell start: postgres failed: "}
-			requireServiceLease(t, err.Error() == want[row]+"local cell lease wait ended: "+cause.Error(), "start changed the fixed cut receipt")
 			if row == "rollback" {
 				requireServiceLease(t, rollbackElapsed >= leaseWait.ceiling/2, "rollback skipped its independent lease wait")
 				requireServiceLease(t, rollbackElapsed < 2*leaseWait.ceiling, "rollback exceeded twice its lease ceiling")
@@ -365,7 +366,11 @@ func TestSupervisorStartLeaseCut(t *testing.T) {
 }
 
 // A fresh Install and a selected Repair reach the shared binding after a real
-// process publication; neither classifies the operation's cut.
+// process publication; neither classifies the operation's cut. Neither carries
+// an operation (LC-LEASE-2E7), so the binding reads the context it is passed:
+// both leaves are regression pins, and a helper that returned
+// context.Background() for a context that carries nothing would bind after the
+// holder lets go instead of cutting (the second review's O5).
 func TestPostLaunchCallerCut(t *testing.T) {
 	for _, row := range []string{"install", "repair"} {
 		t.Run(row, func(t *testing.T) {
