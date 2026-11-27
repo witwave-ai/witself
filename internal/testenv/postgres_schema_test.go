@@ -1,13 +1,114 @@
 package testenv
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
+
+// FLAKE-65: a drop refused because the cluster's lock table is full is repeated
+// until it runs, at most lockTableAttempts times, with a wait that doubles up to
+// two seconds; any other refusal, and the end of the cleanup's budget, return at
+// once. Time is the test bubble's own, so every wait is exact. The fixture's one
+// schema drop goes through the repeat.
+func TestRetryLockTableFull(t *testing.T) {
+	full := &pgconn.PgError{Code: "53200", Message: "out of shared memory", Hint: "You might need to increase max_locks_per_transaction."}
+	synctest.Test(t, func(t *testing.T) {
+		calls, began := 0, time.Now()
+		err := retryLockTableFull(t.Context(), 300*time.Millisecond, func() error {
+			if calls++; calls < 4 {
+				return fmt.Errorf("wrapped: %w", full)
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal("a lock-table refusal that cleared did not end in success")
+		}
+		if calls != 4 {
+			t.Fatal("the statement was not repeated once per lock-table refusal")
+		}
+		if time.Since(began) != 2100*time.Millisecond {
+			t.Fatal("three refusals did not wait once, twice and four times the first wait")
+		}
+	})
+	synctest.Test(t, func(t *testing.T) {
+		var at []time.Duration
+		began := time.Now()
+		err := retryLockTableFull(t.Context(), 300*time.Millisecond, func() error {
+			at = append(at, time.Since(began))
+			if len(at) > 2*lockTableAttempts { // a repeat that should not happen ends by itself
+				return nil
+			}
+			return full
+		})
+		if !errors.Is(err, full) {
+			t.Fatal("a lock table that stayed full did not return its refusal")
+		}
+		want := []time.Duration{0, 300, 900, 2100, 4100, 6100, 8100, 10100, 12100, 14100}
+		if len(at) != len(want) {
+			t.Fatal("a lock table that stayed full was not given up after ten attempts")
+		}
+		for i := range at {
+			if at[i] != want[i]*time.Millisecond {
+				t.Fatal("the wait between attempts did not double up to two seconds")
+			}
+		}
+	})
+	for _, refusal := range []error{
+		&pgconn.PgError{Code: "42P01"}, &pgconn.PgError{Code: "53300", Hint: full.Hint},
+		&pgconn.PgError{Code: "53200", Message: "out of memory"}, errors.New("plain"), context.DeadlineExceeded,
+	} {
+		calls := 0
+		err := retryLockTableFull(t.Context(), time.Microsecond, func() error {
+			if calls++; calls > 3 { // a repeat that should not happen ends by itself
+				return nil
+			}
+			return refusal
+		})
+		if !errors.Is(err, refusal) {
+			t.Fatal("another refusal was not returned as it is")
+		}
+		if calls != 1 {
+			t.Fatal("another refusal was repeated")
+		}
+	}
+	synctest.Test(t, func(t *testing.T) {
+		budget, cancel := context.WithTimeout(t.Context(), time.Second)
+		defer cancel()
+		calls, began := 0, time.Now()
+		err := retryLockTableFull(budget, 300*time.Millisecond, func() error {
+			if calls++; calls > 2*lockTableAttempts {
+				return nil
+			}
+			return full
+		})
+		if !errors.Is(err, full) {
+			t.Fatal("an ended cleanup budget did not return the lock-table refusal")
+		}
+		if calls != 3 {
+			t.Fatal("an ended cleanup budget still repeated the statement")
+		}
+		if time.Since(began) != time.Second {
+			t.Fatal("the repeat did not end with the cleanup budget")
+		}
+	})
+	source, err := os.ReadFile("postgres_schema.go")
+	text := strings.ReplaceAll(string(source), "\r\n", "\n")
+	if err != nil || strings.Count(text, "DROP SCHEMA") != 1 {
+		t.Fatal("the fixture no longer has exactly one schema drop")
+	}
+	if !strings.Contains(text, "retryLockTableFull(ctx, wait, func() error {\n\t\t\t_, err := s.admin.ExecContext(ctx, `DROP SCHEMA `+s.name+` CASCADE`)\n") {
+		t.Fatal("the fixture's schema drop left the lock-table repeat")
+	}
+}
 
 func TestPostgresSchemaCleanupTimeout(t *testing.T) {
 	for _, elapsed := range []time.Duration{0, time.Second, 20 * time.Second, 20*time.Second + time.Nanosecond, 2 * time.Minute} {
