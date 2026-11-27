@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -37,7 +38,7 @@ type bindSite struct {
 const bindPgCtl = `#!/bin/sh
 case "$1" in
 start) for pid in %[1]s; do [ -e '%[2]s/'$pid ] && continue; : > '%[2]s/'$pid; printf '%%s\n%%s\n1\n' $pid "$3" > "$3/postmaster.pid"; exit 0; done; exit 1 ;;
-stop) pid=$(command -p head -n 1 "$3/postmaster.pid") && kill $pid && command -p rm "$3/postmaster.pid"%[3]s ;;
+stop) pid=$(command -p head -n 1 "$3/postmaster.pid") && kill $pid && while kill -0 $pid 2>/dev/null; do command -p sleep 0.01; done && command -p rm "$3/postmaster.pid"%[3]s ;;
 *) exit 1 ;;
 esac
 `
@@ -72,12 +73,12 @@ func newBindSite(t *testing.T, site string, swap bool) *bindSite {
 		ops, quiet := c.principalStartOperations(), func(context.Context, *Manifest) error { return nil }
 		launch := ops.launch
 		ops.verify, ops.account = quiet, quiet
-		if site == "launch" {
+		if site == "launch" || site == "worker" {
 			ops.postgres = quiet
 		}
 		ops.ready = func(context.Context, *Manifest, string, bool) error { return nil }
 		ops.launch = func(ctx context.Context, m *Manifest, component string, prepare func() error) error {
-			if site != "launch" || component != "server" {
+			if site != "worker" && (site != "launch" || component != "server") {
 				return nil
 			}
 			return launch(ctx, m, component, prepare)
@@ -98,20 +99,23 @@ func newBindSite(t *testing.T, site string, swap bool) *bindSite {
 		requireServiceLease(t, writeAtomicBytes(c.path("pg", "postmaster.pid"), fmt.Appendf(nil, "%d\n%s\n1\n", s.kids[0], c.path("pg")), nil) == nil &&
 			writeAtomic(c.path("run", "postgres.json"), ProcessRecord{PID: s.kids[0], StartTime: identity, Root: c.cfg.Root, Component: "postgres"}, nil) == nil &&
 			os.WriteFile(filepath.Join(s.used, fmt.Sprint(s.kids[0])), nil, 0o600) == nil, "cannot publish the live PostgreSQL")
-	case "launch":
+	case "launch", "worker": // worker: Start's real worker launch after its real server launch
 		sleep, err := exec.LookPath("sleep")
-		s.step, s.component, c.cfg.Binaries.Server = "server", "server", filepath.Join(t.TempDir(), "server")
+		s.step, c.cfg.Binaries.Server = map[string]string{"launch": "server", "worker": "worker"}[site], filepath.Join(t.TempDir(), "server")
+		s.component, c.cfg.Binaries.Worker = s.step, c.cfg.Binaries.Server
 		requireServiceLease(t, err == nil && os.WriteFile(c.cfg.Binaries.Server, []byte("#!/bin/sh\nexec "+sleep+" 60\n"), 0o700) == nil, "cannot prepare the synthetic server")
 		t.Cleanup(func() { // registered before any launch: the newest, should a row leave it
-			var r ProcessRecord
-			if readJSON(context.Background(), c.path("run", "server.json"), &r) == nil {
-				_ = cleanupEnvironmentFixture(r, 5*time.Second, processIdentity, terminateEnvironmentFixture)
+			for _, component := range []string{"server", "worker"} {
+				var r ProcessRecord
+				if readJSON(context.Background(), c.path("run", component+".json"), &r) == nil {
+					_ = cleanupEnvironmentFixture(r, 5*time.Second, processIdentity, terminateEnvironmentFixture)
+				}
 			}
 		})
 	}
 	if site != "retained" {
 		m, err := readManifest(t.Context(), c.cfg.Root)
-		for _, component := range []string{"postgres", "server"} {
+		for _, component := range []string{"postgres", "server", "worker"} {
 			if err == nil {
 				m.Ports, err = c.allocateAvailablePorts(m.Ports, component)
 			}
@@ -127,22 +131,24 @@ func newBindSite(t *testing.T, site string, swap bool) *bindSite {
 // process record behind a descriptor holder that lets go at its break. At the
 // target's break the kind acts: kept (cancelled; kept to the operation's
 // return), released (cancelled; let go 50 ms later), live (kept to the
-// ceiling, never cancelled), deadline (kept past the step's own deadline),
-// ordinary (the file replaced by one the read refuses) or finish (as kept).
+// ceiling, never cancelled), deadline (kept past the step's own deadline to the
+// ceiling), deadline_release (let go after the step's own deadline, before the
+// ceiling, never cancelled), ordinary (the file replaced by one the read
+// refuses), finish (as kept) or done (the record, see bindDone).
 // none takes no lease. canceled holds none of the binding's files and cancels
 // before its first read: alive at the break of a lease on the pidfile its
 // stage reads first, let go at once; launch at the pause; retained at the
 // record's publication. waited runs from the break to the step's failure
-// record.
+// record (deadline_release: to operation:done); -1 is a missed done window.
 func bindCut(t *testing.T, s *bindSite, read, kind string) (time.Duration, error) {
 	t.Helper()
 	c := s.cell
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	first, second := leaseHolder(t, "kept", unix.F_WRLCK), leaseHolder(t, "kept", unix.F_WRLCK)
-	if kind == "deadline" {
-		c.cfg.Timeout = 2 * time.Second
-		leaseWait.ceiling = 3 * c.cfg.Timeout
+	if strings.HasPrefix(kind, "deadline") {
+		c.cfg.Timeout = time.Second
+		leaseWait.ceiling = 4 * c.cfg.Timeout
 	} else if kind != "live" {
 		leaseWait.ceiling = 2 * time.Second
 	}
@@ -169,7 +175,7 @@ func bindCut(t *testing.T, s *bindSite, read, kind string) (time.Duration, error
 				close(paused)
 				<-resume
 			}
-		case last == s.step+":failed":
+		case last == s.step+":failed", kind == "deadline_release" && last == "operation:done":
 			failed = time.Now()
 		}
 		return err
@@ -197,10 +203,15 @@ func bindCut(t *testing.T, s *bindSite, read, kind string) (time.Duration, error
 	requireServiceLease(t, err == nil, "cannot snapshot the descriptor")
 	leaseTaken(t, first, descriptor)
 	close(resume)
+	if kind == "done" && !bindDone(first, second, c.path("run", s.component+".json"), cancel) {
+		cancel()
+		<-done
+		return -1, nil
+	}
 	_, ok := leaseContextBroken(first)
 	requireServiceLease(t, ok, "the binding never reached its descriptor")
 	target, path := first, map[string]string{"descriptor": descriptor, "manifest": c.path("manifest.json"), "record": c.path("run", s.component+".json")}[read]
-	if read != "descriptor" && kind != "ordinary" {
+	if read != "descriptor" && kind != "ordinary" && kind != "done" {
 		target = leaseTaken(t, second, path)
 		first.close()
 		_, ok = leaseContextBroken(second)
@@ -217,6 +228,9 @@ func bindCut(t *testing.T, s *bindSite, read, kind string) (time.Duration, error
 		cancel()
 		time.Sleep(50 * time.Millisecond)
 		target.release()
+	case "deadline_release":
+		time.Sleep(c.cfg.Timeout + c.cfg.Timeout/4)
+		target.release()
 	}
 	select {
 	case err = <-done:
@@ -230,6 +244,26 @@ func bindCut(t *testing.T, s *bindSite, read, kind string) (time.Duration, error
 		return time.Hour, err // the step never failed
 	}
 	return failed.Sub(broke), err
+}
+
+// bindDone (m2) takes second, retried until held, on the record the launch
+// helper has just published, so that the launch's last ownership poll waits on
+// it (on context.Background()) while the binding's descriptor (first) is still
+// unread; then it cancels and lets the record go: the poll returns into the
+// binding on a done context. False: the window was missed.
+func bindDone(first, second *writerLease, record string, cancel context.CancelFunc) bool {
+	for end := time.Now().Add(10 * time.Second); !second.do(func(uintptr) {}) && !first.broken() && time.Now().Before(end); runtime.Gosched() {
+		second.take(record)
+	}
+	if !second.do(func(uintptr) {}) || first.broken() {
+		return false
+	}
+	if _, ok := leaseContextBroken(second); !ok || first.broken() {
+		return false
+	}
+	cancel()
+	second.release()
+	return true
 }
 
 // bindRefused replaces path by one the binding's read refuses for an ordinary
@@ -264,18 +298,30 @@ func bindRefused(t *testing.T, c *Cell, read, path string) {
 // timing check, apart from the state checks and proportional to the ceiling,
 // is the proof that the binding took the operation's context. The released
 // leaves also show that the parent's late write (the bound record) does not
-// happen. Regression pins, passing on the parent's production code too: the
-// 24 none, canceled, live and ordinary leaves.
+// happen. launch/record/done (m2) cancels during the launch's last ownership
+// poll: the binding meets a done context, makes its one attempt and cuts. The
+// binding ends with the operation, never at the step's own deadline
+// (LC-LEASE-2E6-F1, B1): with the operation live a lease kept past it to the
+// ceiling gets the parent's refusal (deadline), and a holder that lets go
+// between the two (deadline_release, at each site and the worker launch) lets
+// the operation complete and bind, as at the parent; the timing checks apart.
+// Regression pins, passing on the parent's production code too: the 31 none,
+// canceled, live, ordinary, deadline and deadline_release leaves.
 func TestBindCutAfterLaunch(t *testing.T) {
-	for _, site := range []string{"alive", "launch", "retained"} {
-		leaves := []string{"none", "canceled", "descriptor/deadline"}
+	for _, site := range []string{"alive", "launch", "retained", "worker"} {
+		leaves := []string{"none", "canceled", "descriptor/deadline", "descriptor/deadline_release"}
 		for _, read := range []string{"descriptor", "manifest", "record"} {
 			for _, kind := range []string{"kept", "released", "live", "ordinary"} {
 				leaves = append(leaves, read+"/"+kind)
 			}
 		}
-		if site == "retained" {
+		switch site {
+		case "retained":
 			leaves = append(leaves, "descriptor/finish")
+		case "launch":
+			leaves = append(leaves, "record/done")
+		case "worker":
+			leaves = leaves[3:4]
 		}
 		for _, leaf := range leaves {
 			t.Run(site+"/"+leaf, func(t *testing.T) {
@@ -290,11 +336,19 @@ func TestBindCutAfterLaunch(t *testing.T) {
 				prior, _ := os.ReadFile(c.path("run", s.component+".json"))
 				prefix := len(leaseJournalRecords(c))
 				waited, err := bindCut(t, s, read, kind)
+				for attempt := 1; waited == -1; attempt++ { // a missed done window: a fresh fixture, bounded
+					requireServiceLease(t, attempt < 20, "the launch's last ownership poll never waited on its record")
+					s = newBindSite(t, site, false)
+					c, prefix = s.cell, len(leaseJournalRecords(s.cell))
+					before, err = readManifest(t.Context(), c.cfg.Root)
+					requireServiceLease(t, err == nil, "cannot snapshot the manifest")
+					waited, err = bindCut(t, s, read, kind)
+				}
 				boot, bootErr := serviceBootID()
 				requireServiceLease(t, bootErr == nil, "current boot unavailable")
 				var record ProcessRecord
 				recordErr := readJSON(t.Context(), c.path("run", s.component+".json"), &record)
-				cut := kind == "kept" || kind == "released" || kind == "deadline" || kind == "finish"
+				cut := kind == "kept" || kind == "released" || kind == "done" || kind == "finish"
 				held := read == "record" && (kind == "kept" || kind == "live") // the rollback's verifyAll waits on it
 				fixed := map[string]string{"start": "local cell start: " + s.step + " failed", "reinstall": "local cell reinstall: postgres failed"}[s.operation]
 				if held {
@@ -305,16 +359,18 @@ func TestBindCutAfterLaunch(t *testing.T) {
 				switch {
 				case kind == "none":
 					requireServiceLease(t, err == nil, "an unleased live operation failed")
+				case kind == "deadline_release":
+					requireServiceLease(t, err == nil, "a binding that outlasted its step's deadline failed the operation")
 				case kind == "canceled":
 					want := map[string]string{"alive": "local cell start: server failed", "launch": "local cell start: server failed", "retained": "local cell reinstall: verified failed: local_reinstall_identity_mismatch"}[site]
 					requireServiceLease(t, err != nil && err.Error() == want, "a cancelled unleased operation changed its refusal")
 					requireServiceLease(t, !serviceLeaseCut(err), "a cancelled unleased operation reported a lease cut")
 				case cut:
-					cause := map[bool]error{true: context.DeadlineExceeded, false: context.Canceled}[kind == "deadline"]
+					cause := context.Canceled
 					requireServiceLease(t, serviceLeaseCut(err), "the binding lost its lease cut")
 					requireServiceLease(t, errors.Is(err, cause), "the binding's cut lost its cause")
 					requireServiceLease(t, err.Error() == fixed+": local cell lease wait ended: "+cause.Error(), "the operation changed its fixed cut receipt")
-					for _, other := range []error{ErrServiceOwnershipConflict, ErrLocked, errMaintenanceFenceActive, os.ErrNotExist, unix.EWOULDBLOCK, map[bool]error{true: context.Canceled}[kind == "deadline"]} {
+					for _, other := range []error{ErrServiceOwnershipConflict, ErrLocked, errMaintenanceFenceActive, os.ErrNotExist, unix.EWOULDBLOCK, context.DeadlineExceeded} {
 						requireServiceLease(t, other == nil || !errors.Is(err, other), "the binding's cut carried an ordinary refusal or another cause")
 					}
 				default:
@@ -326,13 +382,24 @@ func TestBindCutAfterLaunch(t *testing.T) {
 					requireServiceLease(t, waited < leaseWait.ceiling/2, "the binding waited past half the lease ceiling after its cut")
 				} else if kind == "live" {
 					requireServiceLease(t, waited >= leaseKeptAfter, "a live binding returned before the lease ceiling")
+				} else if kind == "deadline" {
+					requireServiceLease(t, waited >= leaseWait.ceiling/2, "a binding ended at its step's own deadline")
+				} else if kind == "deadline_release" {
+					requireServiceLease(t, waited >= c.cfg.Timeout && waited < leaseWait.ceiling, "the holder did not let go between the step's deadline and the ceiling")
 				}
 				if kind == "finish" {
 					requireServiceLease(t, os.Remove(readerJournalPath(c)) == nil && os.Rename(c.path("journal", "saved"), readerJournalPath(c)) == nil, "cannot restore the journal")
 				}
 				progress, journalErr := c.readJournal(t.Context())
 				requireServiceLease(t, journalErr == nil && !progress.tornTail, "the operation left an unreadable journal")
-				if kind != "none" && kind != "canceled" {
+				if records := leaseJournalRecords(c)[prefix:]; kind == "deadline_release" { // completed: nothing failed, the record bound, nothing stopped
+					requireServiceLease(t, progress.pending == nil && records[len(records)-1] == "operation:done" && !slices.ContainsFunc(records, func(r string) bool { return strings.HasSuffix(r, ":failed") }),
+						"a binding that outlasted its step's deadline failed a step")
+					if state, stateErr := c.processState(t.Context(), s.component); site != "retained" {
+						requireServiceLease(t, recordErr == nil && record.BootID == boot, "a binding that outlasted its step's deadline did not bind")
+						requireServiceLease(t, stateErr == nil && state.Alive && state.Matches, "a completed operation stopped its child")
+					}
+				} else if kind != "none" && kind != "canceled" {
 					steps := []string{"operation:started", "postgres:started", "postgres:failed"}
 					if site == "launch" {
 						steps = []string{"operation:started", "postgres:started", "postgres:done", "server:started", "server:failed"}
@@ -366,13 +433,16 @@ func TestBindCutAfterLaunch(t *testing.T) {
 				}
 				// The next operation closes it: Repair for an open one, then a bound start and a stop.
 				var launched []ProcessRecord
-				if recordErr == nil && site == "launch" {
+				if recordErr == nil && (site == "launch" || site == "worker") {
 					launched = append(launched, record)
+				}
+				if server := (ProcessRecord{}); site == "worker" && readJSON(t.Context(), c.path("run", "server.json"), &server) == nil {
+					launched = append(launched, server)
 				}
 				if progress.pending != nil {
 					requireServiceLease(t, c.Repair(t.Context()) == nil, "repair did not close the open operation")
 				}
-				if kind != "none" && (kind != "ordinary" || read != "record" || site != "alive") {
+				if kind != "none" && kind != "deadline_release" && (kind != "ordinary" || read != "record" || site != "alive") {
 					requireServiceLease(t, s.run(t.Context()) == nil, "the next operation did not succeed")
 					requireServiceLease(t, readJSON(t.Context(), c.path("run", s.component+".json"), &record) == nil && record.BootID == boot, "the next operation did not bind")
 					if site == "launch" {
@@ -405,6 +475,52 @@ func TestBindCutAfterLaunch(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// B1 under the service host (LC-LEASE-2E6-F1): the supervisor's step with the
+// real Start, Stop and Repair, a descriptor lease at the server's or the
+// worker's binding let go after the step's own deadline, before the ceiling:
+// the tree runs, no failure is counted, no backoff, no receipt, as at the
+// parent (the reviewed head counted one, backed off and wrote the start
+// receipt). One round is enough: a round that counts nothing and leaves the
+// tree running sends the next tick to health, never to a start, so five
+// counted failures (the circuit) cannot accrue. Both leaves are regression pins.
+func TestBindSupervisorOutlastsStepDeadline(t *testing.T) {
+	for _, site := range []string{"launch", "worker"} {
+		t.Run(site, func(t *testing.T) {
+			s := newBindSite(t, site, false)
+			c := s.cell
+			hooks, _, _, _, _ := supervisorTestHooks()
+			hooks.start, hooks.stop, hooks.repair = c.Start, c.stopServiceChildren, c.Repair
+			host, previous := newSupervisor(c, SupervisorPolicy{hooks: &hooks}), os.Stderr
+			d, err := c.ServiceDescriptor()
+			requireServiceLease(t, err == nil && host.load(t.Context(), d) == nil, "cannot load the supervisor")
+			capture, err := os.CreateTemp(t.TempDir(), "receipt")
+			requireServiceLease(t, err == nil, "cannot capture the supervisor receipts")
+			os.Stderr, s.run = capture, host.step
+			defer func() { os.Stderr = previous; _ = capture.Close() }()
+			waited, err := bindCut(t, s, "descriptor", "deadline_release")
+			receipts, readErr := os.ReadFile(capture.Name())
+			var saved supervisorRecord
+			requireServiceLease(t, readErr == nil && readJSON(t.Context(), c.path("service", "supervisor.json"), &saved) == nil, "cannot inspect the service host")
+			requireServiceLease(t, err == nil && host.running && host.status.State == "running", "the service host did not run the tree")
+			requireServiceLease(t, saved.Attempts == 1 && len(saved.Failures) == 0, "the service host counted a failure")
+			requireServiceLease(t, saved.NextStart.IsZero(), "the service host backed off")
+			requireServiceLease(t, len(receipts) == 0, "the service host wrote a failure receipt")
+			requireServiceLease(t, waited >= c.cfg.Timeout && waited < leaseWait.ceiling, "the holder did not let go between the step's deadline and the ceiling")
+			var launched []ProcessRecord
+			for _, component := range []string{"server", "worker"} {
+				if r := (ProcessRecord{}); readJSON(t.Context(), c.path("run", component+".json"), &r) == nil {
+					launched = append(launched, r)
+				}
+			}
+			requireServiceLease(t, len(launched) == map[string]int{"launch": 1, "worker": 2}[site] && c.Stop(t.Context()) == nil, "stop did not stop the tree")
+			for _, r := range launched {
+				identity, alive, err := processIdentity(r.PID)
+				requireServiceLease(t, err == nil && (!alive || identity != r.StartTime), "a launched child was left running")
+			}
+		})
 	}
 }
 

@@ -94,6 +94,7 @@ func (c *Cell) reinstallLocked(ctx context.Context, options ReinstallOptions) er
 		err := c.step(context.Background(), "reinstall", step.name, func() error {
 			stepCtx, cancel := context.WithTimeout(ctx, c.cfg.Timeout)
 			defer cancel()
+			stepCtx = withBindOperation(stepCtx, ctx)
 			runErr := step.run(stepCtx)
 			own = serviceContextLeaseCut(stepCtx, runErr)
 			return runErr
@@ -248,7 +249,7 @@ func (c *Cell) startRetainedPostgres(ctx context.Context, m *Manifest) error {
 	if err := c.startPostgres(ctx, m); err != nil {
 		return err
 	}
-	return c.bindServiceProcessBoot(ctx, "postgres")
+	return c.bindServiceProcessBoot(bindOperation(ctx), "postgres")
 }
 
 // verifyRetainedIdentity writes nothing, not even the manifest. Selected layouts
