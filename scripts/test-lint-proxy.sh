@@ -58,7 +58,7 @@ lint_command="go run $lint_module@$version run ./..."
 read -r windows_exec <<'SH'
 go run -exec "sh -c 'GOOS=windows GOARCH=amd64 exec \"\$@\"' sh"
 SH
-windows_packages='./internal/localcell/... ./internal/dashboard/... ./internal/listenerdiagnostic/... ./internal/memorycurator/... ./internal/memoryhydration/... ./internal/runtimeconfig/... ./internal/tools/capturemix/... ./internal/tools/localcellharness/...'
+windows_packages='./cmd/... ./internal/localcell/... ./internal/dashboard/... ./internal/listenerdiagnostic/... ./internal/memorycurator/... ./internal/memoryhydration/... ./internal/runtimeconfig/... ./internal/tools/capturemix/... ./internal/tools/localcellharness/...'
 windows_command="$windows_exec $lint_module@$version run $windows_packages"
 proxy_prefix="GOPROXY=\"file://$scratch_cache/cache/download,$scratch_proxy\" "
 root_count=0
@@ -90,5 +90,14 @@ done <"$work_dir/dry-run"
 [[ "$root_count" == 1 ]] || fail 'expected exactly one root Linux lint recipe'
 [[ "$windows_count" == 1 ]] || fail 'expected exactly one root Windows lint recipe'
 [[ "$infra_count" == 1 ]] || fail 'expected exactly one cd infra/pulumi lint recipe'
+
+# The CI lint step repeats the Windows scope by hand; hold it to the same list.
+ci_windows=$(awk '
+  { sub(/^[[:space:]]+/, "") }
+  /^GOOS=windows GOARCH=amd64 golangci-lint run / { print; count++ }
+  END { if (count != 1) exit 1 }
+' "$source_root/.github/workflows/ci.yml") || fail 'expected exactly one Windows lint command in the CI workflow'
+[[ "$ci_windows" == "GOOS=windows GOARCH=amd64 golangci-lint run $windows_packages" ]] \
+  || fail 'CI Windows lint package scope differs from the check recipe'
 
 printf 'lint-proxy regression: three lint recipes validated (root Linux, root Windows, infra/pulumi)\n'

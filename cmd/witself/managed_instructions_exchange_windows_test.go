@@ -84,7 +84,7 @@ func TestWindowsManagedInstructionExchangeReconcilesPartialReplaceFailure(t *tes
 	}
 
 	originalCall := replaceManagedInstructionWindowsFileCall
-	replaceManagedInstructionWindowsFileCall = func(replaced, replacement, backup string) error {
+	replaceManagedInstructionWindowsFileCall = func(replaced, _, backup string) error {
 		// Model documented ERROR_UNABLE_TO_MOVE_REPLACEMENT_2: the old
 		// destination has moved to backup, the replacement remains at its
 		// original path, and the shared destination is absent.
