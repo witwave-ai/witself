@@ -157,14 +157,14 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 }
 
 // passwordConfig keeps the password out of the command line and environment.
-// O_NOFOLLOW closes the symlink race after Lstat, and O_NONBLOCK prevents a
-// swapped special file from blocking before its descriptor can be checked.
+// openPasswordFile opens the file without following a link or blocking on a
+// special file swapped in after Lstat; it refuses on Windows.
 func passwordConfig(dsn, filename string) (*pgx.ConnConfig, error) {
 	info, err := os.Lstat(filename)
 	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0077 != 0 || info.Size() > 256 {
 		return nil, errPasswordFile
 	}
-	file, err := os.OpenFile(filename, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	file, err := openPasswordFile(filename)
 	if err != nil {
 		return nil, errPasswordFile
 	}
