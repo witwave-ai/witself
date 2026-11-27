@@ -26,7 +26,7 @@ func renameAntigravityBundleDirectoryNoReplace(source, destination string) error
 	source = filepath.Clean(source)
 	destination = filepath.Clean(destination)
 	if strings.EqualFold(source, destination) {
-		return errors.New("Antigravity bundle rename source and destination are the same Windows path")
+		return errors.New("antigravity bundle rename source and destination are the same Windows path")
 	}
 	sourceDirectory := filepath.Dir(source)
 	destinationDirectory := filepath.Dir(destination)
@@ -38,7 +38,7 @@ func renameAntigravityBundleDirectoryNoReplace(source, destination string) error
 	if err != nil {
 		return err
 	}
-	defer sourceDirectoryHandle.Close()
+	defer func() { _ = sourceDirectoryHandle.Close() }()
 	if !strings.EqualFold(sourceDirectory, destinationDirectory) {
 		destinationDirectoryHandle, err := openManagedInstructionWindowsDirectory(
 			destinationDirectory,
@@ -48,7 +48,7 @@ func renameAntigravityBundleDirectoryNoReplace(source, destination string) error
 		if err != nil {
 			return err
 		}
-		defer destinationDirectoryHandle.Close()
+		defer func() { _ = destinationDirectoryHandle.Close() }()
 		var sourceInformation, destinationInformation windows.ByHandleFileInformation
 		if err := windows.GetFileInformationByHandle(
 			windows.Handle(sourceDirectoryHandle.Fd()),
@@ -63,16 +63,16 @@ func renameAntigravityBundleDirectoryNoReplace(source, destination string) error
 			return err
 		}
 		if sourceInformation.VolumeSerialNumber != destinationInformation.VolumeSerialNumber {
-			return errors.New("Antigravity bundle Windows rename requires one volume")
+			return errors.New("antigravity bundle Windows rename requires one volume")
 		}
 	}
 	file, info, err := openManagedInstructionWindowsRenameSource(source)
 	if err != nil {
 		return err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	if !info.IsDir() {
-		return errors.New("Antigravity bundle Windows rename source must be a directory")
+		return errors.New("antigravity bundle Windows rename source must be a directory")
 	}
 	return renameOpenManagedInstructionWindowsFileNoReplace(file, destination)
 }

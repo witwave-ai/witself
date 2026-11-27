@@ -54,24 +54,24 @@ func exchangeManagedInstructionFiles(first, second string) error {
 	if err != nil {
 		return err
 	}
-	defer directoryHandle.Close()
+	defer func() { _ = directoryHandle.Close() }()
 
 	firstFile, firstInfo, err := openManagedInstructionWindowsReplaceSource(first)
 	if err != nil {
 		return err
 	}
-	defer firstFile.Close()
+	defer func() { _ = firstFile.Close() }()
 	secondFile, secondInfo, err := openManagedInstructionWindowsReplaceSource(second)
 	if err != nil {
 		_ = firstFile.Close()
 		return err
 	}
-	defer secondFile.Close()
+	defer func() { _ = secondFile.Close() }()
 	if os.SameFile(firstInfo, secondInfo) {
 		return errors.New("managed-instruction exchange paths identify the same Windows file")
 	}
 	if firstInfo.IsDir() || secondInfo.IsDir() {
-		return errors.New("Windows managed-instruction exchange supports regular files only")
+		return errors.New("managed-instruction Windows exchange supports regular files only")
 	}
 
 	preservationPath, err := vacantManagedInstructionWindowsPath(directory)
@@ -120,7 +120,8 @@ func exchangeManagedInstructionFiles(first, second string) error {
 	// first, the validated old destination at the requested backup, and second
 	// absent. Complete that interrupted move without replacing a racing entry.
 	if firstState.matches && !secondState.exists && preservationState.matches {
-		if moveErr := renameManagedInstructionFileNoReplace(first, second); moveErr == nil {
+		moveErr := renameManagedInstructionFileNoReplace(first, second)
+		if moveErr == nil {
 			return finishManagedInstructionWindowsExchange(
 				secondFile,
 				firstInfo,
@@ -129,20 +130,19 @@ func exchangeManagedInstructionFiles(first, second string) error {
 				preservationPath,
 				replaceErr,
 			)
-		} else {
-			cause := errors.Join(replaceErr, fmt.Errorf("complete partial Windows replacement: %w", moveErr))
-			currentSecond, inspectErr := inspectManagedInstructionWindowsPath(second, secondInfo)
-			cause = errors.Join(cause, inspectErr)
-			if inspectErr == nil && !currentSecond.exists {
-				// No racer supplied a shared-path entry. Restore the exact displaced
-				// destination so a reported failure never knowingly returns with the
-				// shared instruction path absent.
-				if restoreErr := renameOpenManagedInstructionWindowsFileNoReplace(secondFile, second); restoreErr != nil {
-					cause = errors.Join(cause, fmt.Errorf("restore shared Windows instruction path: %w", restoreErr))
-				}
-			}
-			return managedInstructionWindowsExchangeFailure(cause, first, second, preservationPath)
 		}
+		cause := errors.Join(replaceErr, fmt.Errorf("complete partial Windows replacement: %w", moveErr))
+		currentSecond, inspectErr := inspectManagedInstructionWindowsPath(second, secondInfo)
+		cause = errors.Join(cause, inspectErr)
+		if inspectErr == nil && !currentSecond.exists {
+			// No racer supplied a shared-path entry. Restore the exact displaced
+			// destination so a reported failure never knowingly returns with the
+			// shared instruction path absent.
+			if restoreErr := renameOpenManagedInstructionWindowsFileNoReplace(secondFile, second); restoreErr != nil {
+				cause = errors.Join(cause, fmt.Errorf("restore shared Windows instruction path: %w", restoreErr))
+			}
+		}
+		return managedInstructionWindowsExchangeFailure(cause, first, second, preservationPath)
 	}
 
 	// A concurrent writer may have replaced second after ReplaceFileW returned.
@@ -200,7 +200,7 @@ func finishManagedInstructionWindowsExchange(
 			secondErr,
 			preservationErr,
 			fmt.Errorf(
-				"Windows exchange changed while finishing (first=%s second=%s backup=%s)",
+				"exchange changed while finishing (first=%s second=%s backup=%s)",
 				firstState,
 				secondState,
 				preservationState,
@@ -296,12 +296,12 @@ func renameManagedInstructionFileNoReplace(source, destination string) error {
 	if err != nil {
 		return err
 	}
-	defer directoryHandle.Close()
+	defer func() { _ = directoryHandle.Close() }()
 	file, _, err := openManagedInstructionWindowsRenameSource(source)
 	if err != nil {
 		return err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	return renameOpenManagedInstructionWindowsFileNoReplace(file, destination)
 }
 
@@ -358,7 +358,7 @@ func openManagedInstructionWindowsSource(path string, share uint32) (*os.File, o
 	file := os.NewFile(uintptr(handle), path)
 	if file == nil {
 		_ = windows.CloseHandle(handle)
-		return nil, nil, errors.New("Windows managed-instruction rename handle is unavailable")
+		return nil, nil, errors.New("managed-instruction Windows rename handle is unavailable")
 	}
 	opened, err := file.Stat()
 	if err != nil {
@@ -384,7 +384,7 @@ func openManagedInstructionWindowsSource(path string, share uint32) (*os.File, o
 	linkedSupported := linked.Mode().IsRegular() || linked.IsDir()
 	if !openedSupported || !linkedSupported || opened.IsDir() != linked.IsDir() || !os.SameFile(opened, linked) {
 		_ = file.Close()
-		return nil, nil, fmt.Errorf("Windows managed-instruction source %s changed while opening", path)
+		return nil, nil, fmt.Errorf("managed-instruction Windows source %s changed while opening", path)
 	}
 	return file, opened, nil
 }
@@ -400,7 +400,7 @@ func renameOpenManagedInstructionWindowsFileNoReplace(file *os.File, destination
 	}
 	nameUnits := len(encoded) - 1
 	if nameUnits > windows.MAX_LONG_PATH {
-		return errors.New("Windows managed-instruction destination exceeds the long-path limit")
+		return errors.New("managed-instruction Windows destination exceeds the long-path limit")
 	}
 	var information managedInstructionWindowsRenameInfo
 	information.FileNameLength = uint32(nameUnits * 2)
@@ -478,7 +478,7 @@ func openManagedInstructionWindowsDirectory(path string, access, share uint32) (
 	file := os.NewFile(uintptr(handle), path)
 	if file == nil {
 		_ = windows.CloseHandle(handle)
-		return nil, errors.New("Windows managed-instruction directory handle is unavailable")
+		return nil, errors.New("managed-instruction Windows directory handle is unavailable")
 	}
 	opened, err := file.Stat()
 	if err != nil {
