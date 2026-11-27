@@ -221,9 +221,14 @@ var leaseWaitServiceCalls = map[string]string{
 	"service_health.go:(*Cell).healthStore":                           "healthDSN",
 	"service_health.go:(*Cell).serviceAPICredential":                  "readJSON",
 	"service_health.go:(*Cell).serviceLiveTree":                       "processState verifyAll",
-	// Start's account step hands verifyStartAccount, through its field, the step's own context (LC-LEASE-2E3-F1, m2).
-	"lifecycle.go:(*Cell).Start":              "account",
+	// Start's account step hands verifyStartAccount, through its field, the step's own context (LC-LEASE-2E3-F1, m2),
+	// and its postgres stage the binding of an already-live PostgreSQL its own formal (LC-LEASE-2E6).
+	"lifecycle.go:(*Cell).Start":              "account bindServiceProcessBoot",
 	"lifecycle.go:(*Cell).verifyStartAccount": "prepareSelectedHealthCredential",
+
+	// The binding after a launch takes the launching operation's own context (LC-LEASE-2E6).
+	"commands.go:(*Cell).startChildPrepared":     "bindServiceProcessBoot",
+	"reinstall.go:(*Cell).startRetainedPostgres": "bindServiceProcessBoot",
 
 	"service_boot.go:(*Cell).reconcileServiceBoot":                     "maintenanceFenceAllows own readJSON reconcileOldBoot serviceDescriptor",
 	"service_boot.go:(*Cell).reconcileOldBoot":                         "postmaster readJSON",
@@ -281,7 +286,7 @@ var leaseWaitServiceCalls = map[string]string{
 // context.Background() instead of their declaration's own context, by file and
 // declaration with their counts (R6); it grows until the host's slices (OQ-H).
 var leaseWaitPlaceholders = map[string]int{"checkpoint_verify.go:(*Cell).verifyCheckpoint": 1, "commands.go:(*Cell).databaseCommand": 1,
-	"commands.go:(*Cell).pgCommand": 1, "commands.go:(*Cell).startChildPrepared": 4, "commands.go:(*Cell).waitReady": 2, "drill_reserve.go:(*Cell).reserveDrillLocked": 2,
+	"commands.go:(*Cell).pgCommand": 1, "commands.go:(*Cell).startChildPrepared": 3, "commands.go:(*Cell).waitReady": 2, "drill_reserve.go:(*Cell).reserveDrillLocked": 2,
 	"drill_root.go:(*Cell).deleteDrillLocked": 2, "drill_root.go:(*Cell).drillRootList": 1, "drill_storage.go:(*Cell).admitDrillStorageLocked": 3,
 	"files.go:(*Cell).readUpdateJournal":                3,
 	"installer_principals.go:(*Cell).installPrincipals": 1, "installer_principals.go:(*Cell).installerAdmin": 4,
@@ -290,12 +295,12 @@ var leaseWaitPlaceholders = map[string]int{"checkpoint_verify.go:(*Cell).verifyC
 	"installer_principals.go:(*Cell).runPrincipalMigration": 1, "installer_principals.go:(*Cell).verifyCredentialPurposes": 1,
 	"installer_principals.go:(*Cell).verifyInstallerStartupCatalog": 1, "installer_principals.go:(*Cell).verifyRuntimePrincipalStart": 1,
 	"launch_unix.go:(*Cell).launchChild": 1, "lifecycle.go:(*Cell).Install": 6, "lifecycle.go:(*Cell).Remove": 12, "lifecycle.go:(*Cell).Repair": 12,
-	"lifecycle.go:(*Cell).Start": 17, "lifecycle.go:(*Cell).Status": 1,
+	"lifecycle.go:(*Cell).Start": 16, "lifecycle.go:(*Cell).Status": 1,
 	"lifecycle.go:(*Cell).stopSelected": 4, "lifecycle.go:(*Cell).stopSelectedLegacy": 5, "lifecycle.go:(*Cell).stopWithServiceFence": 7,
 	"lock_contention.go:classifyOwnershipFailure":        1,
 	"port_recovery.go:(*Cell).waitReadyWithPortRecovery": 2, "postgres_unix.go:(*Cell).startPostgres": 3, "postgres_windows.go:(*Cell).pendingPostgresWithoutPID": 1,
 	"postgres_windows.go:(*Cell).pendingPostmasterPID": 1, "postgres_windows.go:(*Cell).startPostgres": 3,
-	"readiness.go:(*Cell).childReadinessExit": 1, "reinstall.go:(*Cell).Reinstall": 2, "reinstall.go:(*Cell).reinstallLocked": 6, "reinstall.go:(*Cell).startRetainedPostgres": 1,
+	"readiness.go:(*Cell).childReadinessExit": 1, "reinstall.go:(*Cell).Reinstall": 2, "reinstall.go:(*Cell).reinstallLocked": 6,
 	"service_task_host.go:(*Cell).ValidateTaskHost": 1, "service_descriptor.go:(*Cell).ServiceDescriptor": 1,
 	"service_shutdown_other.go:(*Cell).stopChildOutcome": 1, "service_shutdown_windows.go:(*Cell).stopChildOutcomeWithBudget": 1,
 	"service_shutdown_windows.go:waitShutdownReady": 1, "service_supervisor.go:(*Cell).Run": 1, "service_windows_task.go:(*windowsLogonTaskAdapter).Apply": 1,
@@ -335,6 +340,14 @@ var leaseWaitCutText = map[string][]string{"files.go": {"type leaseWaitCut struc
 var leaseWaitDetachedTexts = map[string][]string{"files.go": {"type leaseWaitDetachedKey struct{}\n",
 	"func leaseWaitDetached(ctx context.Context) context.Context {\n\treturn context.WithValue(ctx, leaseWaitDetachedKey{}, true)\n}\n"},
 	"files_other.go": {"func leaseWaitDone(ctx context.Context) <-chan struct{} {\n\tif ctx.Value(leaseWaitDetachedKey{}) != nil {\n\t\treturn nil\n\t}\n\treturn ctx.Done()\n}\n"}}
+
+// LC-LEASE-2E6-F1: the two step loops whose bindings end with the operation carry
+// its own context into each step's, once, by these texts and these helpers.
+var leaseWaitCarried = []string{"lifecycle.go:(*Cell).Start", "reinstall.go:(*Cell).reinstallLocked"}
+var leaseWaitCarryTexts = map[string]string{"lifecycle.go": "defer cancel()\n\t\t\tstepCtx = withBindOperation(stepCtx, ctx)\n", "reinstall.go": "defer cancel()\n\t\t\tstepCtx = withBindOperation(stepCtx, ctx)\n",
+	"service_boot.go": "type bindOperationKey struct{}\n\nfunc withBindOperation(step, operation context.Context) context.Context {\n\treturn context.WithValue(step, bindOperationKey{}, operation)\n}\n\n" +
+		"// bindOperation is the operation's context that ctx carries, else ctx itself.\nfunc bindOperation(ctx context.Context) context.Context {\n" +
+		"\tif operation, ok := ctx.Value(bindOperationKey{}).(context.Context); ok {\n\t\treturn operation\n\t}\n\treturn ctx\n}\n"}
 var leaseWaitDetachedNames = map[string]int{"files.go:leaseWaitDetachedKey": 1, "files.go:leaseWaitDetached": 2, "files_other.go:leaseWaitDone": 1,
 	"checkpoint.go:(*Cell).Checkpoint": 1, "checkpoint.go:(*Cell).DeleteCheckpoint": 1, "lifecycle.go:(*Cell).Inspect": 1}
 var leaseWaitReleased = []string{"checkpoint.go:(*Cell).Checkpoint", "checkpoint.go:(*Cell).DeleteCheckpoint", "lifecycle.go:(*Cell).Inspect",
@@ -445,7 +458,18 @@ func leaseWaitTyped(world *referencesWorld, system string, sources map[string]st
 					if callee == nil && !seam {
 						return true
 					}
-					use, own, receiver := leaseWaitCall{name + ":" + owner, fset.PositionFor(call.Pos(), false).Offset, referencesIdentifier(call.Fun).Name}, leaseWaitOwnTyped(info, holder, call.Args), (*types.Var)(nil)
+					// LC-LEASE-2E6-F1: a step carries its declaration's own context (carry), and a binding's
+					// bindOperation(ctx) is judged by ctx; the helpers' bodies are pinned (lease_wait_carry).
+					args := call.Args
+					if callee != nil && callee.Pkg() == self && callee.Name() == "withBindOperation" {
+						calls[leaseWaitCall{name + ":" + owner, fset.PositionFor(call.Pos(), false).Offset, callee.Name()}] = map[bool]string{true: "carry", false: "carry_other"}[len(args) == 2 && leaseWaitOwnTyped(info, holder, args[1:])]
+						return true
+					} else if inner, ok := slices.Concat(args, []ast.Expr{nil})[0].(*ast.CallExpr); ok && callee != nil && callee.Name() == "bindServiceProcessBoot" && len(inner.Args) == 1 {
+						if helper, _ := referencesNamed(info, inner.Fun).(*types.Func); helper != nil && helper.Pkg() == self && helper.Name() == "bindOperation" {
+							args = inner.Args
+						}
+					}
+					use, own, receiver := leaseWaitCall{name + ":" + owner, fset.PositionFor(call.Pos(), false).Offset, referencesIdentifier(call.Fun).Name}, leaseWaitOwnTyped(info, holder, args), (*types.Var)(nil)
 					if !seam {
 						receiver = callee.Signature().Recv()
 						if !targets[callee.Origin()] && !released[callee.Origin()] && (receiver == nil || !types.IsInterface(receiver.Type()) || !types.Identical(callee.Type(), methods[callee.Name()])) {
@@ -467,7 +491,24 @@ func leaseWaitTyped(world *referencesWorld, system string, sources map[string]st
 						ast.Inspect(holder.Body, func(node ast.Node) bool {
 							lit, ok := node.(*ast.FuncLit)
 							if ok && lit.Pos() < call.Pos() && call.End() < lit.End() {
-								own = leaseWaitOwnTyped(info, &ast.FuncDecl{Type: lit.Type}, call.Args)
+								own = leaseWaitOwnTyped(info, &ast.FuncDecl{Type: lit.Type}, call.Args) && !leaseWaitExposed(info, lit, call.Args)
+							}
+							return true
+						})
+					case "lifecycle.go:(*Cell).Start/bindServiceProcessBoot":
+						// LC-LEASE-2E6: the already-live binding passes the formal of its innermost literal, and that
+						// literal is the postgres stage's own initializer, never one nested in it or another stage.
+						own = false
+						var inner *ast.FuncLit
+						ast.Inspect(holder.Body, func(node ast.Node) bool {
+							if lit, ok := node.(*ast.FuncLit); ok && lit.Pos() < call.Pos() && call.End() < lit.End() {
+								inner = lit
+							}
+							return true
+						})
+						ast.Inspect(holder.Body, func(node ast.Node) bool {
+							if stage, ok := node.(*ast.CompositeLit); ok && inner != nil && len(stage.Elts) == 2 && types.ExprString(stage.Elts[0]) == `"postgres"` && stage.Elts[1] == inner {
+								own = leaseWaitOwnTyped(info, &ast.FuncDecl{Type: inner.Type}, args) && !leaseWaitExposed(info, inner, args)
 							}
 							return true
 						})
@@ -581,6 +622,29 @@ func leaseWaitOwnTyped(info *types.Info, function *ast.FuncDecl, arguments []ast
 	return false
 }
 
+// leaseWaitExposed: lit assigns to the object of the first argument or takes its
+// address (LC-LEASE-2E6-F1, m1: a stage's or a step's formal reassigned).
+func leaseWaitExposed(info *types.Info, lit *ast.FuncLit, arguments []ast.Expr) (exposed bool) {
+	identifier, _ := arguments[0].(*ast.Ident)
+	ast.Inspect(lit.Body, func(node ast.Node) bool {
+		var targets []ast.Expr
+		switch node := node.(type) {
+		case *ast.AssignStmt:
+			targets = node.Lhs
+		case *ast.UnaryExpr:
+			targets = []ast.Expr{map[bool]ast.Expr{true: node.X}[node.Op == token.AND]}
+		case *ast.RangeStmt:
+			targets = []ast.Expr{node.Key, node.Value}
+		}
+		for _, target := range targets {
+			id, ok := ast.Unparen(target).(*ast.Ident)
+			exposed = exposed || ok && identifier != nil && info.Uses[id] != nil && info.Uses[id] == info.Uses[identifier]
+		}
+		return true
+	})
+	return exposed
+}
+
 // leaseWaitContract returns every failed key of R6 over the non-test sources,
 // read without build constraints and with CRLF normalised; LC-LEASE-2A adds
 // lease_wait_placeholder and lease_wait_cut, LC-LEASE-2B resolves the first by
@@ -591,7 +655,7 @@ func leaseWaitContract(sources map[string]string) (result []string) {
 	placeholders, lf, typed, group := map[string]int{}, map[string]string{}, [len(referencesSystems)]map[leaseWaitCall]string{}, sync.WaitGroup{}
 	resolved, failed := [len(referencesSystems)]map[string]bool{}, [len(referencesSystems)]bool{}
 	detached, entries := map[string]int{}, map[string]bool{} // LC-LEASE-2C2's lease_wait_detached
-	values, released, reassigned := map[string]int{}, map[string]int{}, map[string]int{}
+	values, released, reassigned, carried := map[string]int{}, map[string]int{}, map[string]int{}, map[string]int{}
 	for name, source := range sources {
 		lf[name] = strings.ReplaceAll(source, "\r\n", "\n")
 	}
@@ -622,6 +686,8 @@ func leaseWaitContract(sources map[string]string) (result []string) {
 			failures["lease_wait_live:"+call.site] = failures["lease_wait_live:"+call.site] || !slices.Contains(leaseWaitOpeners, owner) && !slices.Contains(leaseWaitReleased, call.site)
 		case "value":
 			values[call.site]++
+		case "carry", "carry_other":
+			carried[call.site] += map[string]int{"carry": 1, "carry_other": 2}[kind]
 		case "released", "released_other":
 			released[call.site]++
 			failures["lease_wait_released:"+call.site] = failures["lease_wait_released:"+call.site] || kind != "released"
@@ -636,6 +702,12 @@ func leaseWaitContract(sources map[string]string) (result []string) {
 	}
 	for _, site := range slices.Concat(slices.Collect(maps.Keys(values)), slices.Collect(maps.Keys(leaseWaitValueUses))) {
 		failures["lease_wait_value:"+site] = values[site] != leaseWaitValueUses[site]
+	}
+	for _, site := range slices.Concat(slices.Collect(maps.Keys(carried)), leaseWaitCarried) {
+		failures["lease_wait_carry:"+site] = carried[site] != map[bool]int{true: 1}[slices.Contains(leaseWaitCarried, site)]
+	}
+	for file, text := range leaseWaitCarryTexts {
+		failures["lease_wait_carry"] = failures["lease_wait_carry"] || strings.Count(lf[file], text) != 1
 	}
 	for _, site := range slices.Concat(slices.Collect(maps.Keys(released)), slices.Collect(maps.Keys(leaseWaitReleasedCallers))) {
 		failures["lease_wait_released:"+site] = failures["lease_wait_released:"+site] || !slices.Contains(leaseWaitReleased, site) && released[site] != leaseWaitReleasedCallers[site]
@@ -1005,6 +1077,24 @@ func TestLeaseWaitSourceContract(t *testing.T) {
 		{"remember_host_detached", "service_supervisor.go", "readJSON(ctx, s.cell.path(\"service\", \"lease.json\")", "readJSON(context.Background(), s.cell.path(\"service\", \"lease.json\")", "lease_wait_placeholder:service_supervisor.go:(*supervisor).rememberProcesses"},
 		{"refresh_busy_detached", "service_supervisor.go", "_ = s.rememberProcesses(ctx, d) }()\n\t\t\treturn s.busy()", "_ = s.rememberProcesses(context.Background(), d) }()\n\t\t\treturn s.busy()", "lease_wait_placeholder:service_supervisor.go:(*supervisor).step"},
 		{"refresh_step_detached", "service_supervisor.go", "snapshot.\n\tdefer func() { _ = s.rememberProcesses(ctx, d) }()", "snapshot.\n\tdefer func() { _ = s.rememberProcesses(context.Background(), d) }()", "lease_wait_placeholder:service_supervisor.go:(*supervisor).step"},
+		// LC-LEASE-2E6: each binding after a child started takes the operation's own context.
+		{"boot_live_detached", "lifecycle.go", `return c.bindServiceProcessBoot(bindOperation(ctx), "postgres")`, `return c.bindServiceProcessBoot(context.Background(), "postgres")`, "lease_wait_placeholder:lifecycle.go:(*Cell).Start"},
+		{"boot_live_nested", "lifecycle.go", `return c.bindServiceProcessBoot(bindOperation(ctx), "postgres")`, `return func(ctx context.Context) error { return c.bindServiceProcessBoot(bindOperation(ctx), "postgres") }(context.Background())`,
+			"lease_wait_placeholder:lifecycle.go:(*Cell).Start"},
+		{"boot_launch_detached", "commands.go", "c.bindServiceProcessBoot(bindOperation(ctx), component)", "c.bindServiceProcessBoot(context.Background(), component)", "lease_wait_placeholder:commands.go:(*Cell).startChildPrepared"},
+		{"boot_retained_detached", "reinstall.go", `c.bindServiceProcessBoot(bindOperation(ctx), "postgres")`, `c.bindServiceProcessBoot(bindOperation(context.WithoutCancel(ctx)), "postgres")`, "lease_wait_placeholder:reinstall.go:(*Cell).startRetainedPostgres"},
+		// LC-LEASE-2E6-F1: the helper detached at a site, the stage's or the account step's formal reassigned or exposed
+		// (m1: WA, WF), the helper returning the step's context or a detached one, a step loop that does not carry.
+		{"boot_live_helper_detached", "lifecycle.go", `bindOperation(ctx), "postgres"`, `bindOperation(context.Background()), "postgres"`, "lease_wait_placeholder:lifecycle.go:(*Cell).Start"},
+		{"boot_launch_helper_detached", "commands.go", "bindOperation(ctx), component", "bindOperation(context.Background()), component", "lease_wait_placeholder:commands.go:(*Cell).startChildPrepared"},
+		{"boot_live_reassigned", "lifecycle.go", "\t\t\t\treturn c.bindServiceProcessBoot(", "\t\t\t\tctx = context.Background()\n\t\t\t\treturn c.bindServiceProcessBoot(", "lease_wait_placeholder:lifecycle.go:(*Cell).Start"},
+		{"boot_live_exposed", "lifecycle.go", "\t\t\t\treturn c.bindServiceProcessBoot(", "\t\t\t\tp := &ctx\n\t\t\t\t*p = context.Background()\n\t\t\t\treturn c.bindServiceProcessBoot(", "lease_wait_placeholder:lifecycle.go:(*Cell).Start"},
+		{"account_reassigned", "lifecycle.go", "error { return ops.account(ctx, m) }", "error { ctx = context.Background(); return ops.account(ctx, m) }", "lease_wait_placeholder:lifecycle.go:(*Cell).Start"},
+		{"helper_returns_step", "service_boot.go", "if operation, ok := ctx.Value(bindOperationKey{}).(context.Context); ok {\n\t\treturn operation\n", "if _, ok := ctx.Value(bindOperationKey{}).(context.Context); ok {\n\t\treturn ctx\n", "lease_wait_carry"},
+		{"helper_returns_background", "service_boot.go", "ok {\n\t\treturn operation\n", "ok && operation != nil {\n\t\treturn context.Background()\n", "lease_wait_carry"},
+		{"carry_dropped_start", "lifecycle.go", "\t\t\tstepCtx = withBindOperation(stepCtx, ctx)\n", "", "lease_wait_carry:lifecycle.go:(*Cell).Start"},
+		{"carry_dropped_reinstall", "reinstall.go", "\t\t\tstepCtx = withBindOperation(stepCtx, ctx)\n", "", "lease_wait_carry:reinstall.go:(*Cell).reinstallLocked"},
+		{"carry_shadowed", "lifecycle.go", "\t\t\tstepCtx, cancel := context.WithTimeout(ctx, timeout)\n", "\t\t\tctx := context.WithoutCancel(ctx)\n\t\t\tstepCtx, cancel := context.WithTimeout(ctx, timeout)\n", "lease_wait_carry:lifecycle.go:(*Cell).Start"},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			if strings.Count(sources[row.file], row.before) != 1 {

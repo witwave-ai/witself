@@ -120,6 +120,24 @@ func (c *Cell) bindServiceProcessBoot(ctx context.Context, component string) err
 	return c.bindServiceProcessBootWithReader(ctx, component, serviceBootID)
 }
 
+// bindOperationKey carries an operation's own context inside each of its step
+// contexts, so that a binding after a child started ends with the operation,
+// never at the step's own deadline: the next step has a fresh one, so a binding
+// that outlasted its step's budget and then bound lets the operation complete.
+type bindOperationKey struct{}
+
+func withBindOperation(step, operation context.Context) context.Context {
+	return context.WithValue(step, bindOperationKey{}, operation)
+}
+
+// bindOperation is the operation's context that ctx carries, else ctx itself.
+func bindOperation(ctx context.Context) context.Context {
+	if operation, ok := ctx.Value(bindOperationKey{}).(context.Context); ok {
+		return operation
+	}
+	return ctx
+}
+
 func (c *Cell) bindServiceProcessBootWithReader(ctx context.Context, component string, readBoot func() (string, error)) (result error) {
 	defer func() { result = serviceFailureFallback(result, "boot_binding") }()
 	if os.Getenv("WITSELF_RUNTIME") != "local" {

@@ -337,7 +337,7 @@ func (c *Cell) Start(ctx context.Context) error {
 				if !state.Matches {
 					return errors.New("local cell process identity mismatch")
 				}
-				return c.bindServiceProcessBoot(context.Background(), "postgres")
+				return c.bindServiceProcessBoot(bindOperation(ctx), "postgres")
 			}
 			before["postgres"] = false
 			if err := c.prepareComponentPorts(context.Background(), m, "postgres", false, false); err != nil {
@@ -371,6 +371,7 @@ func (c *Cell) Start(ctx context.Context) error {
 			}
 			stepCtx, cancel := context.WithTimeout(ctx, timeout)
 			defer cancel()
+			stepCtx = withBindOperation(stepCtx, ctx)
 			// The readiness steps run even when the step context is already done:
 			// waitReady turns the cancellation into the fixed readiness cause with
 			// the pre-rollback process observation (slice LC-S2-PW3), which a bare
