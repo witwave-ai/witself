@@ -16,7 +16,7 @@ func journalRecord(t *testing.T, operation, step, state string) []byte {
 	t.Helper()
 	data, err := json.Marshal(journalEntry{Operation: operation, Step: step, State: state, At: time.Now().UTC()})
 	if err != nil {
-		t.Fatal(err)
+		t.Fatal("could not encode journal record")
 	}
 	return append(data, '\n')
 }
@@ -49,14 +49,14 @@ func TestJournalAppendSync(t *testing.T) {
 				}
 				err := c.journal(context.Background(), "stop", "operation", state)
 				if calls != 1 {
-					t.Fatalf("journal append synced %d times; want exactly one", calls)
+					t.Fatal("journal append did not sync exactly once")
 				}
 				if outcome == "failure" {
 					if err == nil || err.Error() != "cannot sync local cell journal" {
 						t.Fatal("append sync failure did not return the value-free journal error")
 					}
 				} else if err != nil {
-					t.Fatal(err)
+					t.Fatal("journal append failed after a successful sync")
 				}
 			})
 		}
@@ -70,7 +70,7 @@ func TestJournalTailTruncationSync(t *testing.T) {
 			path := c.path("journal", "operations.jsonl")
 			prefix := journalRecord(t, "stop", "operation", "started")
 			if err := testWriteFile(path, append(bytes.Clone(prefix), []byte(`{"operation":`)...), 0o600); err != nil {
-				t.Fatal(err)
+				t.Fatal("could not prepare torn journal for truncation sync")
 			}
 			originalSync := syncFile
 			t.Cleanup(func() { syncFile = originalSync })
@@ -108,19 +108,29 @@ func TestJournalTailTruncationSync(t *testing.T) {
 			}
 			err := c.Repair(t.Context())
 			if outcome == "failure" {
+				if journalRepairErrorClass(err) != "sentinel=other windows_errno=other path=other step=flush" {
+					t.Logf("journal repair error class: %s", journalRepairErrorClass(err))
+					t.Fatal("repair classifier lost the discard flush failure")
+				}
 				if err == nil || err.Error() != "cannot sync repaired local cell journal" || calls != 1 {
+					t.Logf("journal repair error class: %s", journalRepairErrorClass(err))
 					t.Fatal("truncation sync failure did not stop Repair with the value-free journal error")
 				}
 				assertFileBytes(t, path, prefix, "Repair appended after a failed truncation sync")
 				return
 			}
 			if err != nil {
-				t.Fatal(err)
+				t.Logf("journal repair error class: %s", journalRepairErrorClass(err))
+				t.Fatal("Repair failed after a successful truncation sync")
 			}
 			if calls != prefixSyncs+len(want)-1 {
 				t.Fatal("Repair performed the wrong number of journal syncs")
 			}
-			if err := c.Repair(t.Context()); err != nil || calls != prefixSyncs+len(want)-1 {
+			if err := c.Repair(t.Context()); err != nil {
+				t.Logf("journal repair error class: %s", journalRepairErrorClass(err))
+				t.Fatal("repeated Repair failed after truncation sync")
+			}
+			if calls != prefixSyncs+len(want)-1 {
 				t.Fatal("repeated Repair performed another journal sync")
 			}
 		})
@@ -134,12 +144,12 @@ func TestJournalTornTailRepair(t *testing.T) {
 				c, _ := unitCell(t)
 				if err := testMkdir(c.path("pg"), 0o700); err != nil {
 					t.Logf("journal repair error class: %s", journalRepairErrorClass(err))
-					t.Fatal(err)
+					t.Fatal("could not create the retained data directory")
 				}
 				const retained = "retained synthetic PostgreSQL bytes"
 				if err := testWriteFile(c.path("pg", "retained-data"), []byte(retained), 0o600); err != nil {
 					t.Logf("journal repair error class: %s", journalRepairErrorClass(err))
-					t.Fatal(err)
+					t.Fatal("could not write the retained data fixture")
 				}
 				// Recover from a settled prior operation or the empty durable prefix,
 				// without inventing an operation identity from the unacknowledged tail.
@@ -177,35 +187,36 @@ func TestJournalTornTailRepair(t *testing.T) {
 				path := c.path("journal", "operations.jsonl")
 				if err := testWriteFile(path, data, 0o600); err != nil {
 					t.Logf("journal repair error class: %s", journalRepairErrorClass(err))
-					t.Fatal(err)
+					t.Fatal("could not write the torn journal fixture")
 				}
 				pgBefore, err := os.Stat(c.path("pg", "retained-data"))
 				if err != nil {
 					t.Logf("journal repair error class: %s", journalRepairErrorClass(err))
-					t.Fatal(err)
+					t.Fatal("could not stat retained data before Inspect")
 				}
 				inspection, err := c.Inspect(t.Context())
 				if err != nil || !inspection.JournalTailIncomplete || (inspection.Interrupted != nil) != (cut > 0) {
 					t.Logf("journal repair error class: %s", journalRepairErrorClass(err))
-					t.Fatalf("Inspect did not recover the validated prefix: %v", err)
+					t.Fatal("Inspect did not recover the validated prefix")
 				}
 				assertFileBytes(t, path, data, "Inspect changed the journal")
 				lock, err := c.own(context.Background(), false)
 				if err != nil {
 					t.Logf("journal repair error class: %s", journalRepairErrorClass(err))
-					t.Fatal(err)
+					t.Fatal("could not acquire the fixture lock")
 				}
 				if err := c.Repair(t.Context()); !errors.Is(err, ErrLocked) {
+					t.Logf("journal repair error class: %s", journalRepairErrorClass(err))
 					t.Fatal("Repair reconciled a tail without exclusive ownership")
 				}
 				assertFileBytes(t, path, data, "locked Repair changed the journal")
 				if err := lock.Close(); err != nil {
 					t.Logf("journal repair error class: %s", journalRepairErrorClass(err))
-					t.Fatal(err)
+					t.Fatal("could not release the fixture lock")
 				}
 				if err := c.Repair(t.Context()); err != nil {
 					t.Logf("journal repair error class: %s", journalRepairErrorClass(err))
-					t.Fatalf("Repair rejected a torn final append: %v", err)
+					t.Fatal("Repair rejected a torn final append")
 				}
 				repaired, err := os.ReadFile(path)
 				if err != nil || !bytes.HasPrefix(repaired, prefix) {
@@ -222,26 +233,26 @@ func TestJournalTornTailRepair(t *testing.T) {
 				inspection, err = c.Inspect(t.Context())
 				if err != nil || inspection.Interrupted != nil || inspection.JournalTailIncomplete {
 					t.Logf("journal repair error class: %s", journalRepairErrorClass(err))
-					t.Fatalf("Repair left unsettled journal state: %v", err)
+					t.Fatal("Repair left unsettled journal state")
 				}
 				manifest, err := os.ReadFile(c.path("manifest.json"))
 				if err != nil {
 					t.Logf("journal repair error class: %s", journalRepairErrorClass(err))
-					t.Fatal(err)
+					t.Fatal("could not read the repaired manifest")
 				}
 				journalBefore, err := os.Stat(path)
 				if err != nil {
 					t.Logf("journal repair error class: %s", journalRepairErrorClass(err))
-					t.Fatal(err)
+					t.Fatal("could not stat the repaired journal")
 				}
 				manifestBefore, err := os.Stat(c.path("manifest.json"))
 				if err != nil {
 					t.Logf("journal repair error class: %s", journalRepairErrorClass(err))
-					t.Fatal(err)
+					t.Fatal("could not stat the repaired manifest")
 				}
 				if err := c.Repair(t.Context()); err != nil {
 					t.Logf("journal repair error class: %s", journalRepairErrorClass(err))
-					t.Fatal(err)
+					t.Fatal("second Repair failed on the settled journal")
 				}
 				for _, before := range []struct {
 					path string
@@ -293,12 +304,14 @@ func TestJournalCorruptionFailsClosed(t *testing.T) {
 			c, _ := unitCell(t)
 			path := c.path("journal", "operations.jsonl")
 			if err := testWriteFile(path, test.data, 0o600); err != nil {
-				t.Fatal(err)
+				t.Fatal("could not write the corrupt journal fixture")
 			}
 			if _, err := c.Inspect(t.Context()); err == nil || !strings.Contains(err.Error(), "manual recovery required") {
+				t.Logf("journal repair error class: %s", journalRepairErrorClass(err))
 				t.Fatal("Inspect accepted committed or ambiguous corruption")
 			}
 			if err := c.Repair(t.Context()); err == nil || !strings.Contains(err.Error(), "manual recovery required") {
+				t.Logf("journal repair error class: %s", journalRepairErrorClass(err))
 				t.Fatal("Repair accepted committed or ambiguous corruption")
 			}
 			assertFileBytes(t, path, test.data, "Repair changed corrupt journal evidence")

@@ -182,8 +182,14 @@ function classPrefix(message, packageName) {
 function classDiagnostic(message, prefix, packageName) {
   const value = message.slice(prefix.length);
   const vocabulary = classAllowlist.get(packageName).vocabulary;
-  const accepted = value.length <= 160 && /^[a-z][a-z_-]*(?:[ ,=][a-z][a-z_-]*)*$/.test(value) &&
-    !/[\r\n]/.test(value) && value.split(/[ ,=]/).every(word => vocabulary.has(word));
+  let words = value;
+  if (packageName === expectedPackages[0] && prefix === 'journal repair error class: ') {
+    // Only this field of the journal class may carry a canonical Win32 DWORD.
+    const errno = /^sentinel=[a-z_]+(?:,[a-z_]+)* windows_errno=(0|[1-9][0-9]{0,9}) path=(?:journal|manifest|lock|pg|other)(?: step=[a-z_]+)?$/.exec(value);
+    if (errno && Number(errno[1]) <= 0xffffffff) words = value.replace(errno[1], 'other');
+  }
+  const accepted = value.length <= 160 && /^[a-z][a-z_-]*(?:[ ,=][a-z][a-z_-]*)*$/.test(words) &&
+    !/[\r\n]/.test(value) && words.split(/[ ,=]/).every(word => vocabulary.has(word));
   return `${prefix}${accepted ? value : '(rejected)'}`;
 }
 

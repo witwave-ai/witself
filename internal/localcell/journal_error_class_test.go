@@ -5,15 +5,18 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"math"
 	"os"
+	"reflect"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
 )
 
-// Only literal classes may leave this helper. Error text, operation names and
-// paths can contain private data, including in wrappers around known sentinels.
+// Emit only fixed labels and native Windows error numbers. Never format an
+// error, operation name or path; even a wrapper around a sentinel may be private.
 func journalRepairErrorClass(err error) string {
 	return journalRepairErrorClassForOS(err, runtime.GOOS)
 }
@@ -65,16 +68,38 @@ func journalRepairErrorClassForOS(err error, goos string) string {
 			windowsErrno = "sharing_violation"
 		case denied:
 			windowsErrno = "access_denied"
+		default:
+			var errno syscall.Errno
+			if errors.As(err, &errno) && uint64(errno) <= math.MaxUint32 {
+				windowsErrno = strconv.FormatUint(uint64(errno), 10)
+			}
 		}
 	}
 
 	pathClass := "other"
+	step := ""
 	var pathErr *fs.PathError
 	if errors.As(err, &pathErr) {
 		// Recognize either separator so the Windows cases run on Unix too.
 		base := pathErr.Path[strings.LastIndexAny(pathErr.Path, `/\`)+1:]
 		switch base {
-		case "operations.jsonl", "journal":
+		case "operations.jsonl":
+			// A PathError identifies the journal operation, even when another
+			// part of Repair performed it. Its Op is never copied to the log.
+			switch pathErr.Op {
+			case "open":
+				step = "open"
+			case "stat", "GetFileType", "GetFileInformationByHandle", "GetFileInformationByHandleEx":
+				step = "stat"
+			case "truncate":
+				step = "truncate"
+			case "sync":
+				step = "flush"
+			case "close":
+				step = "close"
+			}
+			fallthrough
+		case "journal":
 			pathClass = "journal"
 		case "manifest.json":
 			pathClass = "manifest"
@@ -84,7 +109,25 @@ func journalRepairErrorClassForOS(err error, goos string) string {
 			pathClass = "pg"
 		}
 	}
-	return "sentinel=" + sentinel + " windows_errno=" + windowsErrno + " path=" + pathClass
+	// Repair returns fresh errors.New values for these failures. Compare only
+	// against those complete values without invoking an arbitrary Error method.
+	for cause := err; cause != nil && step == ""; cause = errors.Unwrap(cause) {
+		switch {
+		case reflect.DeepEqual(cause, errors.New("cannot open torn local cell journal")):
+			step = "open_or_identity"
+		case reflect.DeepEqual(cause, errors.New("cannot truncate torn local cell journal")):
+			step = "truncate"
+		case reflect.DeepEqual(cause, errors.New("cannot sync repaired local cell journal")):
+			step = "flush"
+		case reflect.DeepEqual(cause, errors.New("local cell start: revert_stop failed")):
+			step = "revert_stop"
+		}
+	}
+	line := "sentinel=" + sentinel + " windows_errno=" + windowsErrno + " path=" + pathClass
+	if step != "" {
+		line += " step=" + step
+	}
+	return line
 }
 
 type journalErrorTextMustNotBeRead struct{}
@@ -144,7 +187,9 @@ func TestJournalRepairErrorClassWindows(t *testing.T) {
 		{"denied", syscall.Errno(5), "access_denied"},
 		{"wrapped", fmt.Errorf("synthetic private wrapper: %w", syscall.Errno(32)), "sharing_violation"},
 		{"joined", errors.Join(syscall.Errno(32), syscall.Errno(5)), "sharing_violation,access_denied"},
-		{"unknown", syscall.Errno(12345), "other"},
+		{"unknown", syscall.Errno(12345), "12345"},
+		{"wrapped_unknown", fmt.Errorf("private: %w", syscall.Errno(1224)), "1224"},
+		{"joined_listed", errors.Join(syscall.Errno(33), syscall.Errno(32)), "sharing_violation"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			for _, goos := range []string{"windows", "linux", "darwin"} {
@@ -159,6 +204,74 @@ func TestJournalRepairErrorClassWindows(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestJournalRepairErrorClassWindowsBounds(t *testing.T) {
+	for _, row := range []struct {
+		number        uint64
+		want, failure string
+	}{
+		{math.MaxUint32, "4294967295", "classifier lost the largest Windows errno"},
+		{math.MaxUint32 + 1, "other", "classifier accepted an oversized Windows errno"},
+	} {
+		t.Run(row.failure, func(t *testing.T) {
+			errno := syscall.Errno(row.number)
+			if uint64(errno) != row.number {
+				t.Skip("native errno cannot represent this Windows test value")
+			}
+			if journalRepairErrorClassForOS(errno, "windows") != "sentinel=other windows_errno="+row.want+" path=other" {
+				t.Fatal(row.failure)
+			}
+		})
+	}
+}
+
+func TestJournalRepairErrorClassStep(t *testing.T) {
+	const other = "sentinel=other windows_errno=other path=other"
+	for _, row := range []struct{ message, want string }{
+		{"cannot open torn local cell journal", other + " step=open_or_identity"},
+		{"cannot truncate torn local cell journal", other + " step=truncate"},
+		{"cannot sync repaired local cell journal", other + " step=flush"},
+		{"local cell start: revert_stop failed", other + " step=revert_stop"},
+		{"private: cannot truncate torn local cell journal", other},
+	} {
+		if journalRepairErrorClass(fmt.Errorf("private: %w", errors.New(row.message))) != row.want {
+			t.Fatal("journal repair classifier lost or invented a fixed failure step")
+		}
+	}
+	const journal = "sentinel=other windows_errno=1224 path=journal"
+	for _, row := range []struct{ op, want string }{
+		{"open", journal + " step=open"}, {"stat", journal + " step=stat"},
+		{"truncate", journal + " step=truncate"}, {"sync", journal + " step=flush"},
+		{"close", journal + " step=close"}, {"private operation", journal},
+	} {
+		err := &fs.PathError{Op: row.op, Path: `C:\private\operations.jsonl`, Err: syscall.Errno(1224)}
+		if journalRepairErrorClassForOS(err, "windows") != row.want {
+			t.Fatal("journal repair classifier lost or exposed a journal operation")
+		}
+	}
+	for _, row := range []struct {
+		op      string
+		cause   error
+		step    string
+		failure string
+	}{
+		{"GetFileType", journalErrorTextMustNotBeRead{}, "stat", "classifier lost the GetFileType step"},
+		{"GetFileInformationByHandle", journalErrorTextMustNotBeRead{}, "stat", "classifier lost the GetFileInformationByHandle step"},
+		{"GetFileInformationByHandleEx", journalErrorTextMustNotBeRead{}, "stat", "classifier lost the GetFileInformationByHandleEx step"},
+		{"open", errors.New("cannot sync repaired local cell journal"), "open", "classifier replaced the outer journal step"},
+	} {
+		t.Run(row.op, func(t *testing.T) {
+			err := &fs.PathError{Op: row.op, Path: "operations.jsonl", Err: row.cause}
+			if journalRepairErrorClassForOS(err, "windows") != "sentinel=other windows_errno=other path=journal step="+row.step {
+				t.Fatal(row.failure)
+			}
+		})
+	}
+	err := &fs.PathError{Op: "truncate", Path: "/journal/private-file", Err: journalErrorTextMustNotBeRead{}}
+	if journalRepairErrorClass(err) != other {
+		t.Fatal("journal repair classifier attributed an unrelated file operation to the journal")
 	}
 }
 
