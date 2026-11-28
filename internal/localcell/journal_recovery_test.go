@@ -79,7 +79,7 @@ func TestJournalTailTruncationSync(t *testing.T) {
 				{"revert_stop", "done"}, {"operation", "done"},
 			}
 			prefixSyncs := 1 // discard sync
-			if checkpointJournalSettlementSupported {
+			if checkpointJournalBarrierSupported {
 				prefixSyncs++ // admitted Repair syncs its prefix before recovery
 			}
 			calls := 0

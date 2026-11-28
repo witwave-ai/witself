@@ -1,4 +1,4 @@
-//go:build linux || darwin
+//go:build linux || darwin || windows
 
 package localcell
 
@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -298,7 +299,13 @@ func TestRepairCheckpointJournalIO(t *testing.T) {
 		_, _ = c.RepairCheckpointJournal(t.Context())
 		t.Fatal("cut did not reach its file boundary")
 	}
-	for _, mode := range []string{"fault", "cut"} {
+	// The Windows binding reports its hold of the root first; its rows start no
+	// child process, so the cut, which needs one, runs only on Linux and macOS.
+	hold, modes := "", []string{"fault", "cut"}
+	if runtime.GOOS == "windows" {
+		hold, modes = "hold ", modes[:1]
+	}
+	for _, mode := range modes {
 		for _, boundary := range []string{"truncate", "file", "journal", "root", "settled", "close"} {
 			t.Run(mode+"/"+boundary, func(t *testing.T) {
 				f, _ := checkpointFixture(t, "legacy", false)
@@ -327,9 +334,9 @@ func TestRepairCheckpointJournalIO(t *testing.T) {
 					repairDiagnostic(t, err, "local_checkpoint_operation_failed", failure)
 					drillAssert(t, s == "", "repair reported status on failure")
 				}
-				want, visible, sequence := CheckpointJournalClean, prefix, "validated file journal root settled close "
+				want, visible, sequence := CheckpointJournalClean, prefix, hold+"validated file journal root settled close "
 				if boundary == "truncate" {
-					want, visible, sequence = CheckpointJournalTailDiscarded, prefix+"{", "validated truncate file journal root settled close "
+					want, visible, sequence = CheckpointJournalTailDiscarded, prefix+"{", hold+"validated truncate file journal root settled close "
 				}
 				assertFileBytes(t, c.path(repairLog), []byte(visible), "retry lost a validated record")
 				fault, calls = false, ""

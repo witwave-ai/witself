@@ -51,7 +51,7 @@ var errSyncLifecycleJournal = errors.New("cannot make local cell journal durable
 // Nothing was written when this fails, so a plain retry is right; a lease
 // wait its context ended stays a cut.
 func (c *Cell) syncLifecycleJournalPrefix(ctx context.Context, progress journalProgress) error {
-	if !checkpointJournalSettlementSupported {
+	if !checkpointJournalBarrierSupported {
 		return nil
 	}
 	err := c.syncCheckpointJournalPrefix(ctx, progress)
