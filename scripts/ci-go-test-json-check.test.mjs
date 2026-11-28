@@ -827,14 +827,17 @@ test('class diagnostics vocabulary uses only eligible package test literals and 
 
 test('class diagnostics print valid values verbatim and reject private values without fragments', () => {
   const value = 'sentinel=deadline_exceeded windows_errno=other path=journal';
+  const journalPrefix = 'journal repair error class: ';
   withClassSources(target => {
-    assertFixture(target, classFailure([`fixture error class: ${value}\n`], [`fixture error class: ${value}`]));
+    // Even an enrolled journal prefix in runtimeconfig cannot opt into numeric errno output.
+    assertFixture(target, classFailure([`fixture error class: ${value}\n`, `${journalPrefix}${value.replace('other', '33')}\n`],
+      [`fixture error class: ${value}`, `${journalPrefix}(rejected)`]));
     for (const rejected of ['outofvocabularyprivate', 'digitprivate7', 'Uppercaseprivate', 'slashprivate/pathprivate',
       'backslashprivate\\pathprivate', 'colonprivate:pathprivate', '', 'lengthprivate'.repeat(14), 'a'.repeat(64),
       'ok  next', 'ok, next', 'ok=', 'ok ', 'ok\tprivate', 'ok\rprivate', 'ok\u0000private']) {
       assertFixture(target, classFailure([`fixture error class: ${rejected}\n`], ['fixture error class: (rejected)']));
     }
-  });
+  }, {testSource: 't.Logf("journal repair error class: %s", value)'});
 });
 
 test('class diagnostics enforce the value length boundary even for enrolled words', () => {
@@ -925,6 +928,34 @@ test('class diagnostics enroll the real journal repair format and reject an unkn
     const why = `why ${packages[0]} ${name} :: (unclassified)\n`;
     assertFixture(script, {input: stream(events),
       output: output.replace(why, `${why}class ${packages[0]} ${name} :: ${prefix}${expected}\n`), stderr: failureDiagnostic});
+  }
+});
+
+test('only the Windows errno field of a journal repair class admits decimal digits', async () => {
+  const pkg = packages[0];
+  const name = 'TestJournalTornTailRepair/operation_done/partial';
+  for (const [value, accepted, prefix = 'journal repair error class: '] of [
+    ['sentinel=other windows_errno=1224 path=journal step=truncate', true],
+    ['sentinel=other windows_errno=4294967295 path=other', true],
+    ['sentinel=other windows_errno=other path=other step=open_or_identity', true],
+    ['sentinel=other windows_errno=0 path=journal', true],
+    ['sentinel=other windows_errno=-1 path=journal', false],
+    ['sentinel=other windows_errno=33 path=/journal/operations.jsonl', false],
+    ['sentinel=other windows_errno=33 path=journal step=32', false],
+    ['sentinel=other windows_errno=33 path=journal', false, 'Lifecycle start class: '],
+    [`sentinel=${'other,'.repeat(18)}canceled windows_errno=4294967295 path=other`, false],
+    ['sentinel=other windows_errno=4294967296 path=other', false],
+    ['sentinel=other windows_errno=01234 path=other', false],
+    ['sentinel=other windows_errno=33 path=private123', false],
+    ['sentinel=other windows_errno=33 path=journal step=private123', false],
+    ['sentinel=other windows_errno=33 path=journal windows_errno=1234', false],
+  ]) {
+    const input = stream([event('start', pkg), event('run', pkg, name),
+      event('output', pkg, name, {Output: `    journal_recovery_test.go:12: ${prefix}${value}\r\n`}),
+      event('fail', pkg, name), event('fail', pkg)]);
+    const result = await checkGoTestJSON([input], [name]);
+    assert.deepEqual(result.lines.filter(line => line.startsWith('class ')),
+      [`class ${pkg} ${name} :: ${prefix}${accepted ? value : '(rejected)'}`], 'incorrect hosted journal repair class');
   }
 });
 
