@@ -422,10 +422,13 @@ jobs:
           # must fail this gate, not leave a partial package list to test.
           go list ./... | grep -vE '/internal/store(/|$)' > "$RUNNER_TEMP/go-test-packages.txt"
           mapfile -t packages < "$RUNNER_TEMP/go-test-packages.txt"
+          # The limit is per package. The Local Cell package alone takes 19 to
+          # 23 minutes here under the race detector and coverage, and a slow
+          # runner took more than 30.
           go test "${packages[@]}" \
             -race \
             -shuffle=on \
-            -timeout=30m \
+            -timeout=45m \
             -covermode=atomic \
             -coverprofile="$RUNNER_TEMP/go-coverage-rest.out"
           go tool cover -func="$RUNNER_TEMP/go-coverage-rest.out"
