@@ -6163,7 +6163,7 @@ Flags:
 
 **Family status: implemented.**
 
-`witself local checkpoint create|inspect|delete` manages cold checkpoints of one
+`witself local checkpoint create|inspect|delete|repair-journal` manages cold checkpoints of one
 local cell: copies of its stopped PostgreSQL data, `manifest.json` and kept
 passwords below `recovery/`, at most two complete ones. It never installs,
 starts, stops, repairs, restores or removes a cell. `create` admits only a
@@ -6179,13 +6179,13 @@ value, it refuses with `local_checkpoint_command_disabled`, exit 2, touching
 nothing in the root. No environment variable, configuration or discovery
 selects it.
 `--root` is the cell root's absolute path. `--timeout` (positive, default `30s`)
-budgets `create`'s cooperative checks and each `pg_controldata` run; `inspect`
+budgets the cooperative checks in `repair-journal` and `create`, including each `pg_controldata` run in `create`. `inspect`
 and `delete` ignore it, a consented `delete` proceeds after it is spent, and it
 is no wall-clock bound. `create` also takes `--pgbin`, the absolute PostgreSQL
 16 binary directory (an absolute path proves nothing about authenticity), and
 `--installation-id`, exactly as `inspect` reports it (1 to 64 ASCII letters,
 digits, `_` or `-`); `delete` takes one exact `--checkpoint-id`. The identifier
-is the only consent: no prompt and no yes, force, latest, oldest, all, prefix
+gives consent for these two verbs, with no prompt and no yes, force, latest, oldest, all, prefix
 or glob form. Options are read in order up to the first argument the parser
 cannot take, and a call whose selector was not read by then is disabled.
 Otherwise an unknown verb, an unknown or repeated option, an extra argument, a
@@ -6196,7 +6196,7 @@ refusal or failure, 2 a usage, selector or consent refusal, also a `create`
 whose `--installation-id` differs from the one the command reads first
 (`local_checkpoint_identity_mismatch`).
 
-Each call prints one JSON receipt line: `operation` (`create`, `inspect`,
+The JSON receipt line for `create`, `inspect` or `delete` includes `operation` (`create`, `inspect`,
 `delete` or `unknown`); `outcome` (`succeeded`, `failed` or `refused`);
 `failure` (`class`, an optional `reason`, `cleanup_incomplete`); `before` and
 `after`, each with `status` (`listed`, `busy`, `unowned` or `unavailable`),
@@ -6229,7 +6229,7 @@ other failure. Reasons: `boundary_unreadable`, `boundary_noncanonical`,
 `unknown_entries`.
 
 A `recovery/` that is itself a link, not a directory or not private makes all
-three verbs refuse with `local_cell_layout_refused` and no reason. An object
+three listing verbs refuse with `local_cell_layout_refused` and no reason. An object
 below it that is not private, or not a plain file or directory, makes them
 refuse with `local_checkpoint_state_unsupported` and a reason, unless the cell
 is `busy` or `unowned`, which they report instead. Either way nothing changes.
@@ -6286,8 +6286,7 @@ an incomplete checkpoint) closes nothing. Any other open operation, a torn
 journal tail, or an operation Repair has begun keeps both verbs refusing with
 `local_checkpoint_state_unsupported`; `inspect` cannot show why. A torn tail,
 from a power loss or disk failure during a journal write (the close's own
-included), is never closed by these verbs: only the cell's Repair settles it,
-and no released command performs Repair.
+included), can be settled explicitly if eligible.
 
 An interrupted `create` can leave a half-written checkpoint directory: `inspect`
 lists it by exact identifier with `"complete": false`, `create` refuses with
@@ -6298,7 +6297,7 @@ checkpoint lists the same way: one whose `witness.json` is missing, is a
 directory, or was read and is not that checkpoint's witness. A link, FIFO or
 socket at that name, or a `witness.json` whose mode refuses the open, is an
 object below `recovery/` that is not private or not a plain file: all three
-verbs refuse with `local_checkpoint_state_unsupported` and `descendant_refused`.
+listing verbs refuse with `local_checkpoint_state_unsupported` and `descendant_refused`.
 On Windows that check opens `witness.json` itself, so one that another process
 holds open without read sharing is refused there the same way.
 A `witness.json` that passes that check (a private regular file) but cannot be
@@ -6326,11 +6325,56 @@ and exits 1. When a failed `create` reports `cleanup_incomplete: true`, run
 `inspect` first and delete the incomplete entry by its identifier if it is
 listed. If the journal ends in a torn record, `inspect` can still list the
 entry, but `delete` and `create` return `local_checkpoint_state_unsupported`
-until the cell's Repair settles the journal. No released command runs Repair.
+until the journal is settled. After `repair-journal`, delete the listed incomplete entry by its exact ID.
 If `inspect` succeeds and no entry has that identifier, the partial copy may
 have moved away from its name (Linux and macOS), or cleanup may have failed to
 confirm its absence on disk. In either case there is nothing to delete by
 identifier.
+
+### Settling a torn checkpoint journal
+
+```text
+witself local checkpoint repair-journal --checkpoint-mode=cold-v1 --root=ABSOLUTE_PATH --confirm=discard-tail [--timeout=DURATION]
+```
+
+The absolute root and literal confirmation authorize discarding a suffix after the last validated newline in a cold, owned cell,
+even after purge without a manifest or ID. A fragment must fit a checkpoint writer's header, but a short prefix may fit other writers too.
+Missing or empty confirmation gives `local_checkpoint_confirmation_required`. A wrong or repeated confirmation, `--pgbin`,
+or an installation or checkpoint ID gives `local_checkpoint_arguments_invalid`. Only `repair-journal` accepts `--confirm`.
+This command does not run the CLI's startup migration of its own home, so a refusal changes nothing below the root even when that home lies inside the cell.
+
+On success (exit 0) the receipt gives `journal_status` of `tail_discarded` (eligible suffix removed),
+`clean` (existing journal flushed, including an empty file), or `absent` (no journal to flush or create).
+It carries `verification=not_performed` and the usual notice, without a checkpoint listing or target.
+It writes no audit entry and leaves any pending operation open. If a purged root has lost its last
+checkpoint, its pending deletion stays open even after `tail_discarded`: create lacks an installation
+identity and delete has no target. Invalid committed history requires manual operator recovery.
+
+An operational failure (exit 1) gives `outcome=failed` with no `journal_status` or diagnostic reason
+and with `cleanup_incomplete=false`. The class identifies the failed check.
+A signal or a timeout that arrives after the operation's last check does not undo a repair that completes. The receipt then reports success, because that is what happened.
+
+| Class | Condition |
+|---|---|
+| `local_checkpoint_state_unsupported` | Ineligible operation or cleanup, a parsed suffix whose header is ineligible, missing owner lock, live component, or visible postmaster PID. |
+| `local_maintenance_fence_active` | A maintenance fence is present or cannot be ruled out. |
+| `local_cell_locked` | Another operation holds the cell lock. |
+| `local_cell_layout_refused` | The private cell layout was refused. |
+| `local_checkpoint_interrupted` | A check found cancellation or an expired timeout. |
+| `local_checkpoint_operation_failed` | Unproven process identity, a journal parse error (including malformed final bytes or committed history), or a read, write, flush or close failure. |
+
+A failed repair can leave the journal shortened. A successful retry on the existing clean journal flushes the validated prefix.
+On Linux and macOS, repair and a writer's check before its first append flush the journal, its directory and the cell root, in that order.
+On Windows, repair flushes the existing journal's contents and length. Before a writer's first append to an existing journal it normally
+flushes the file; if access is denied or another program's hold prevents one of its opens, the writer skips this flush, and an append that then
+succeeds performs its own file flush. Windows flushes no directory here, including when the first record of a new journal is written.
+
+On Windows, use the cell's own path. A last element spelled with its 8.3 short name, a substituted drive
+letter, or a second letter for the same volume that differs from its canonical drive letter gives
+`local_checkpoint_operation_failed` and changes nothing. Retrying the same spelling cannot help. A different letter case is accepted.
+The same class can mean another program has the journal mapped, open for writing or deletion, or open in
+a way that denies writing. Retry when that program (for example, a backup tool or scanner) releases it.
+While repair holds the journal, another program cannot write, rename, replace or delete it through an open handle.
 
 ### Same-user limits
 

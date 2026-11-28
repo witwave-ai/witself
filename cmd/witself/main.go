@@ -54,7 +54,7 @@ func main() {
 		if err := retireLegacyMessageRunnerServeTombstone(runtimeName); err != nil {
 			fmt.Fprintf(os.Stderr, "witself: warning: retire active legacy message runner: %v\n", err)
 		}
-	} else if !explicitCleanup {
+	} else if !explicitCleanup && !journalRepairInvocation(args) {
 		if err := retireLegacyMessageRunnersOnStartup(); err != nil {
 			fmt.Fprintf(os.Stderr, "witself: warning: retire legacy message runner: %v\n", err)
 			if errors.Is(err, legacyrunnercleanup.ErrUnownedService) {
@@ -65,6 +65,11 @@ func main() {
 		}
 	}
 	os.Exit(run(args))
+}
+
+// A repair refusal must leave the CLI home alone even when it lies inside the cell.
+func journalRepairInvocation(args []string) bool {
+	return len(args) >= 3 && args[0] == "local" && args[1] == "checkpoint" && args[2] == "repair-journal"
 }
 
 func applyStartupWitselfHome(args []string) error {
@@ -4320,7 +4325,7 @@ func usage(w io.Writer) {
 	cliout.Line(w, "  witself dashboard serve|status|stop  Serve a local content-read-only Agent Console, list registered ones, or stop one")
 	cliout.Line(w, "  witself dashboard open [--print-url]  Verify and open a running console, or deliberately print its private opening URL")
 	cliout.Line(w, "  witself tui [--agent NAME] [--demo]  Open the native agent terminal workspace")
-	cliout.Line(w, "  witself local checkpoint create|inspect|delete  Opt-in cold local-cell checkpoints (--checkpoint-mode=cold-v1); not restore-verified")
+	cliout.Line(w, "  witself local checkpoint create|inspect|delete|repair-journal  Opt-in cold local-cell checkpoints (--checkpoint-mode=cold-v1); not restore-verified")
 	cliout.Line(w, "  witself help                 Show this help")
 	cliout.Line(w)
 	cliout.Line(w, "Cloud commands take --account NAME (a local account name; when omitted,")

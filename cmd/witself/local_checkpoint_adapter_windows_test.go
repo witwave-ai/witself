@@ -1,9 +1,12 @@
 package main
 
 import (
+	"maps"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"slices"
+	"strings"
 	"syscall"
 	"testing"
 
@@ -67,4 +70,40 @@ func lcsSend(process *os.Process, _ string) error {
 // lcsEndedBy: the default Ctrl-Break handler's status, never the command's 0, 1 or 2.
 func lcsEndedBy(state *os.ProcessState, _ string) bool {
 	return !slices.Contains([]int{-1, 0, 1, 2}, state.ExitCode())
+}
+
+func TestLocalCheckpointRepairJournalWindowsSharing(t *testing.T) {
+	bin := lcrExecutable(t)
+	for _, row := range []struct {
+		name          string
+		access, share uint32
+	}{
+		{"writer", windows.GENERIC_WRITE, windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE | windows.FILE_SHARE_DELETE},
+		{"reader-denies-write", windows.GENERIC_READ, windows.FILE_SHARE_READ},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			tail := `{"op`
+			root := lcrFixture(t, &tail)
+			before := lcaTree(t, root)
+			journal := filepath.Join(root, lcrLog)
+			name, err := windows.UTF16PtrFromString(journal)
+			lcrCheck(t, err == nil, "cannot prepare the journal sharing fixture")
+			hold, err := windows.CreateFile(name, row.access, row.share, nil, windows.OPEN_EXISTING, 0, 0)
+			lcrCheck(t, err == nil, "cannot hold the journal")
+			file := os.NewFile(uintptr(hold), journal)
+			t.Cleanup(func() { _ = file.Close() })
+			run := func(status, class string) {
+				t.Helper()
+				code, raw, stderr := lcrBinary(t, bin, lcrArgs(root), nil)
+				lcrReceipt(t, raw, code, status, class)
+				lcrCheck(t, stderr == "", "repair emitted private material")
+			}
+			run("", lcrIO)
+			lcrCheck(t, file.Close() == nil, "cannot release the journal")
+			lcrCheck(t, maps.Equal(before, lcaTree(t, root)), "refusal wrote journal bytes")
+			run("tail_discarded", "")
+			before[journal] = strings.TrimSuffix(before[journal], tail)
+			lcrCheck(t, maps.Equal(before, lcaTree(t, root)), "repair changed a nonjournal object")
+		})
+	}
 }

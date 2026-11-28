@@ -17,13 +17,13 @@ import (
 //
 // Trust boundary: the callbacks are adapter-owned and cooperative. They always
 // pass the handler's context, never panic on any local cell result, and reach
-// only Inspect, Checkpoint and DeleteCheckpoint of a Cell that
-// localCheckpointOpen constructs once per callback invocation, after the
-// cold-v1 guard. --timeout budgets that context; Inspect and DeleteCheckpoint
+// only the four methods of localCheckpointCell. localCheckpointOpen constructs
+// one Cell per callback, after the cold-v1 and command-specific consent guards.
+// --timeout budgets that context; Inspect and DeleteCheckpoint
 // ignore it, so it is no wall-clock bound, and an absolute binary path proves
 // no authenticity. A first signal cancels the context; a killed process leaves
-// its operation open for the next admitted create or delete to close; a torn
-// journal tail still needs Repair, which this command never runs. A stdout
+// its operation open for the next admitted create or delete to close. Only
+// repair-journal can discard a compatible uncommitted tail. A stdout
 // failure mid-receipt can leave a truncated line, after which the handler
 // prints only its fixed stderr line.
 type localCheckpointMode string
@@ -36,6 +36,7 @@ type localCheckpointCell interface {
 	Inspect(context.Context) (localcell.Inspection, error)
 	Checkpoint(context.Context, localcell.CheckpointOptions) error
 	DeleteCheckpoint(context.Context, localcell.DeleteCheckpointOptions) error
+	RepairCheckpointJournal(context.Context) (localcell.CheckpointJournalStatus, error)
 }
 
 // localCheckpointOpen refuses before construction unless the mode is cold-v1
@@ -58,7 +59,7 @@ func localCheckpointFailed(err error) localCheckpointFailure {
 	return localCheckpointFailure{err, failure.Class, failure.Reason, failure.CleanupIncomplete}
 }
 
-// localCheckpointCallbacksFor returns three non-nil callbacks. Each invocation
+// localCheckpointCallbacksFor returns four non-nil callbacks. Each invocation
 // opens one Cell with mode and makes one API call. Summaries map 1:1, in
 // order and without a maximum; a repeated identifier fails the read closed.
 func localCheckpointCallbacksFor(mode localCheckpointMode, open func(localCheckpointMode, localCheckpointRequest) (localCheckpointCell, error)) localCheckpointCallbacks {
@@ -98,7 +99,15 @@ func localCheckpointCallbacksFor(mode localCheckpointMode, open func(localCheckp
 		}
 		return localCheckpointFailed(err)
 	}
-	return localCheckpointCallbacks{create, read, remove}
+	repair := func(ctx context.Context, r localCheckpointRequest) (string, localCheckpointFailure) {
+		cell, err := open(mode, r)
+		if err != nil {
+			return "", localCheckpointFailed(err)
+		}
+		status, err := cell.RepairCheckpointJournal(ctx)
+		return string(status), localCheckpointFailed(err)
+	}
+	return localCheckpointCallbacks{create, read, remove, repair}
 }
 
 // localCheckpointRun selects cold-v1 only when the handler's own parser admits
@@ -128,8 +137,14 @@ func localCheckpointSignals() (context.Context, context.CancelFunc) {
 // the signal context is made before the handler parses and stopped on return.
 func localCheckpointNamespace(args []string) int {
 	if len(args) == 0 || args[0] != "checkpoint" {
-		_, _ = io.WriteString(os.Stderr, "usage: witself local checkpoint create|inspect|delete --checkpoint-mode=cold-v1 --root=ABSOLUTE_PATH\n")
+		_, _ = io.WriteString(os.Stderr, "usage: witself local checkpoint create|inspect|delete|repair-journal --checkpoint-mode=cold-v1 --root=ABSOLUTE_PATH\n")
 		return 2
+	}
+	if len(args) >= 2 && args[1] == "repair-journal" {
+		// Let the receipt writer report EPIPE if the reader has gone away.
+		pipe := make(chan os.Signal, 1)
+		signal.Notify(pipe, syscall.SIGPIPE)
+		defer signal.Stop(pipe)
 	}
 	ctx, stop := localCheckpointSignals()
 	defer stop()
