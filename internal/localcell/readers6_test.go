@@ -418,7 +418,7 @@ func TestJournalWritersStillWrite(t *testing.T) {
 			return saved(f)
 		}
 		want := 1 // the retained-cleanup sync
-		if checkpointJournalSettlementSupported {
+		if checkpointJournalBarrierSupported {
 			want++ // settle the prefix before recovery
 		}
 		err := c.Repair(t.Context())
@@ -448,7 +448,7 @@ func TestJournalWritersStillWrite(t *testing.T) {
 			before, err := os.ReadFile(name)
 			replace := func() {
 				want := 0
-				if site == "retained" && checkpointJournalSettlementSupported {
+				if site == "retained" && checkpointJournalBarrierSupported {
 					want = 1
 				}
 				if syncs != want {

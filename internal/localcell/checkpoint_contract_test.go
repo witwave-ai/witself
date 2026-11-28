@@ -1095,7 +1095,7 @@ func checkpointSourceContract(sources map[string]string) []string {
 		repair + "RepairCheckpointJournal:checkpointRootHere": 1, repair + "RepairCheckpointJournal:checkpointCold": 1,
 		repair + "settleCheckpointJournal:checkpointLeftover": 1, repair + "checkpointTailCompatible:checkpointLeftover": 1,
 		repair + "syncHeldCheckpointJournal:syncCheckpointRoot": 2, "checkpoint_journal_binding_unix.go:repairOwnedJournal:checkpointRootHere": 1,
-		"checkpoint_journal_binding_unix.go:syncCheckpointJournalPrefix:checkpointRootHere": 2,
+		"checkpoint_journal_binding_unix.go:syncCheckpointJournalPrefix:checkpointRootHere": 2, "checkpoint_journal_binding_windows.go:repairOwnedJournal:checkpointRootHere": 1,
 	}
 	documentReads := map[string]int{}
 	wantedReads := map[string]int{"witness_read:checkpoint.go:checkpointComplete": 1,
@@ -1467,6 +1467,7 @@ func checkpointSourceContract(sources map[string]string) []string {
 		// A system without a native binding keeps the shared settlement referenced; it calls nothing.
 		"checkpoint_journal_binding_other.go::settleCheckpointJournal":             1,
 		"checkpoint_journal_binding_unix.go:repairOwnedJournal:repairOwnedJournal": 1, "checkpoint_journal_binding_unix.go:repairOwnedJournal:settleCheckpointJournal": 1,
+		"checkpoint_journal_binding_windows.go:repairOwnedJournal:repairOwnedJournal": 1, "checkpoint_journal_binding_windows.go:repairOwnedJournal:settleCheckpointJournal": 1,
 		// The test hook: its field and the one boundary that reads it. Production assigns it nowhere.
 		"types.go::beforeJournalSettlement": 1, repair + "journalSettlementBoundary:beforeJournalSettlement": 2,
 	})
@@ -2301,7 +2302,7 @@ func TestCheckpointReleasedCallerContract(t *testing.T) {
 // Inspect production source across build tags, including method values and
 // interface declarations. Only settlement may truncate the held journal.
 func TestRepairCheckpointJournalDark(t *testing.T) {
-	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" && runtime.GOOS != "windows" {
 		status, err := new(Cell).RepairCheckpointJournal(t.Context())
 		drillAssert(t, ClassifyCheckpointFailure(err).Class == "local_checkpoint_state_unsupported", "unavailable journal repair changed class")
 		drillAssert(t, status == "", "repair reported status on failure")
