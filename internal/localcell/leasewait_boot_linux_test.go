@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -134,10 +135,32 @@ func serviceOldBootLeases(t *testing.T) {
 // operation live) gets the ceiling's refusal, no longer the step's cut; the
 // released, rollback and finish leaves are regression pins at b289a091.
 func TestPostPublicationCut(t *testing.T) {
-	for _, row := range []string{"released", "rollback", "finish", "deadline"} {
+	testPostPublicationCut(t, 0, "released", "rollback", "finish", "deadline")
+}
+
+func TestPostPublicationCutWithBusyPort(t *testing.T) {
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	requireServiceLease(t, err == nil, "cannot open the busy publication fixture listener")
+	t.Cleanup(func() { _ = listener.Close() })
+	testPostPublicationCut(t, listener.Addr().(*net.TCPAddr).Port, "released")
+}
+
+func testPostPublicationCut(t *testing.T, busyPort int, rows ...string) {
+	t.Helper()
+	for _, row := range rows {
 		t.Run(row, func(t *testing.T) {
 			closed := row == "released" || row == "deadline" // the rollback closes the start
 			c, _ := descriptorTestCell(t)
+			fixture, err := readManifest(t.Context(), c.cfg.Root)
+			requireServiceLease(t, err == nil, "cannot read the publication fixture manifest")
+			if busyPort != 0 {
+				fixture.Ports.Postgres = busyPort
+				requireServiceLease(t, writeAtomic(c.path("manifest.json"), fixture, nil) == nil, "cannot save the busy PostgreSQL port in the publication fixture")
+			}
+			savedPostgresPort := fixture.Ports.Postgres
+			fixture.Ports, err = c.allocateAvailablePorts(fixture.Ports, "")
+			requireServiceLease(t, err == nil, "cannot allocate the publication fixture ports")
+			requireServiceLease(t, writeAtomic(c.path("manifest.json"), fixture, nil) == nil, "cannot save the publication fixture ports")
 			requireServiceLease(t, c.makePassword() == nil, "cannot prepare the start fixture")
 			requireServiceLease(t, privateDir(c.path("pg"), true) == nil, "cannot prepare the start directory")
 			c.cfg.Binaries.PostgresDir = t.TempDir()
@@ -223,7 +246,7 @@ esac
 				return err
 			}
 			c.installerStart = &ops
-			err := c.Start(ctx)
+			err = c.Start(ctx)
 			rollbackElapsed := time.Since(rollbackBegan)
 			record.close()
 			if row == "deadline" { // the ceiling's own refusal; the parent's cut at the step's deadline differs only in text and time
@@ -271,6 +294,7 @@ esac
 				requireServiceLease(t, progress.pending.Step == "postgres", "secondary failure changed the open step")
 			}
 			requireServiceLease(t, slices.Equal(leaseJournalRecords(c), steps), "start wrote unexpected journal records")
+			requireServiceLease(t, m.Ports.Postgres != savedPostgresPort, "the start manifest kept the saved publication fixture PostgreSQL port")
 			if !closed {
 				requireServiceLease(t, c.Repair(t.Context()) == nil, "repair did not recover the open start")
 				if row == "rollback" {
