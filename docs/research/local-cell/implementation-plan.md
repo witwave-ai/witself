@@ -1269,7 +1269,8 @@ retained. This is no M4/M5 completion or supported-offering claim.
 
 LC-S7D2E0, LC-S7D2E1 and LC-S7D2E2 add cold checkpoints; the released
 `witself local checkpoint create|inspect|delete` reaches them, opt-in per call,
-and no other released command does. `Checkpoint` copies the PGDATA, `manifest.json` and
+and [`repair-journal`](../../cli-command-surface.md#settling-a-torn-checkpoint-journal) can discard an eligible suffix with explicit consent.
+`Checkpoint` copies the PGDATA, `manifest.json` and
 retained custody (the bootstrap password, plus the six role credentials in a
 selected layout) of the installation named by its exact identity from
 `Inspect`, byte for byte, into a new `recovery/<id>/`. It re-reads every copy

@@ -610,7 +610,8 @@ func parseJournalFile(r io.Reader, acceptTail func(*Interruption, []byte) bool) 
 
 // discardJournalTail requires the operation lock. Sync the truncation before
 // any recovery append so a second crash cannot turn the tail into an interior
-// record. Inspection only reads the prefix; Repair performs this reconciliation.
+// record. Whole-cell Repair uses this path. RepairCheckpointJournal checks the
+// writer header and truncates through the same handle it parsed.
 // The opened handle must be the file readJournal measured: another file put at
 // the name since (during a lease wait, say) is refused, never truncated.
 func (c *Cell) discardJournalTail(ctx context.Context, progress journalProgress) error {

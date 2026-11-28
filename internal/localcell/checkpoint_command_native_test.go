@@ -89,11 +89,11 @@ func checkpointCommandKeys(decoder *json.Decoder) bool {
 	return err == nil
 }
 
-// testCheckpointCommandNative proves the released command on a real PostgreSQL
+// releasedCheckpointCommand drives the standalone namespace proof and the real PostgreSQL
 // 16 cell (legacy layout): a CLI built once from this checkout runs with the
 // parent environment and fresh homes that stay empty. New identifiers come from
 // a receipt's own before and after observations, never from attribution.
-func testCheckpointCommandNative(t *testing.T, binaries localcell.Binaries) {
+func releasedCheckpointCommand(t *testing.T, captured *[]byte) (func(int, ...string) checkpointCommandReceipt, []string) {
 	ctx := t.Context()
 	source, err := filepath.Abs(filepath.Join("..", ".."))
 	cli := filepath.Join(t.TempDir(), lifecycleExecutableName("witself"))
@@ -107,7 +107,6 @@ func testCheckpointCommandNative(t *testing.T, binaries localcell.Binaries) {
 	for _, name := range []string{"HOME", "USERPROFILE", "XDG_CONFIG_HOME", "WITSELF_HOME", "DSH_HOME"} {
 		homes = append(homes, name+"="+t.TempDir())
 	}
-	var captured []byte
 	command := func(want int, args ...string) (receipt checkpointCommandReceipt) {
 		t.Helper()
 		var stdout, stderr bytes.Buffer
@@ -116,7 +115,7 @@ func testCheckpointCommandNative(t *testing.T, binaries localcell.Binaries) {
 		cmd := exec.CommandContext(bounded, cli, args...)
 		cmd.Env, cmd.Stdout, cmd.Stderr = append(os.Environ(), homes...), &stdout, &stderr
 		code, err := 0, cmd.Run()
-		captured = append(append(captured, stdout.Bytes()...), stderr.Bytes()...)
+		*captured = append(append(*captured, stdout.Bytes()...), stderr.Bytes()...)
 		var exit *exec.ExitError
 		if errors.As(err, &exit) {
 			code = exit.ExitCode()
@@ -127,7 +126,10 @@ func testCheckpointCommandNative(t *testing.T, binaries localcell.Binaries) {
 			t.Fatal("the released checkpoint command exit code differs")
 		}
 		if len(args) < 2 || args[1] != "checkpoint" {
-			if stdout.Len() != 0 || stderr.String() != "usage: witself local checkpoint create|inspect|delete --checkpoint-mode=cold-v1 --root=ABSOLUTE_PATH\n" {
+			if stdout.Len() != 0 {
+				t.Fatal("the released namespace wrote to stdout")
+			}
+			if stderr.String() != "usage: witself local checkpoint create|inspect|delete|repair-journal --checkpoint-mode=cold-v1 --root=ABSOLUTE_PATH\n" {
 				t.Fatal("the released namespace usage line differs")
 			}
 			return receipt
@@ -140,6 +142,18 @@ func testCheckpointCommandNative(t *testing.T, binaries localcell.Binaries) {
 		}
 		return receipt
 	}
+	return command, homes
+}
+
+func TestLocalCheckpointNamespaceUsage(t *testing.T) {
+	command, _ := releasedCheckpointCommand(t, new([]byte))
+	command(2, "local")
+}
+
+func testCheckpointCommandNative(t *testing.T, binaries localcell.Binaries) {
+	ctx := t.Context()
+	var captured []byte
+	command, homes := releasedCheckpointCommand(t, &captured)
 	cell, root := disposableCell(t, binaries, nil)
 	if cell.Install(ctx, localcell.InstallOptions{}) != nil || startLifecycle(t, cell, root) != nil {
 		t.Fatal("cannot install and start the command proof cell")

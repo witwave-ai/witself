@@ -274,7 +274,7 @@ func (f lcImporter) Import(path string) (*types.Package, error) { return f(path)
 // adapter's imports, selector and composite-key names, and handler names.
 var lcHandlerUses = []string{"context.Context", "context.WithTimeout", "encoding/json.NewEncoder", "errors.New", "flag.ContinueOnError", "flag.NewFlagSet", "io.Discard", "io.WriteString", "io.Writer", "path/filepath.IsAbs", "regexp.MustCompile", "strings.Trim", "time.Duration", "time.ParseDuration", "time.Second", "time.Time"}
 var lcAdapterImports = []string{"context", "errors", "io", "os", "os/signal", "strings", "syscall", "github.com/witwave-ai/witself/internal/localcell"}
-var lcAdapterNames = []string{"Binaries", "Bytes", "Checkpoint", "CheckpointID", "CheckpointListing", "CheckpointOptions", "CheckpointUnknown", "Checkpoints", "Class", "ClassifyCheckpointFailure", "CleanupIncomplete", "Complete", "Config", "ContainsRune", "Context", "CreatedAt", "DeleteCheckpoint", "DeleteCheckpointOptions", "ID", "Inspect", "Inspection", "InstallationID", "Manifest", "New", "PostgresDir", "Reason", "Root", "Timeout", "Writer", "checkpointID", "entries", "installationID", "installationPresent", "pgbin", "root", "status", "timeout", "unknown"}
+var lcAdapterNames = []string{"Binaries", "Bytes", "Checkpoint", "CheckpointID", "CheckpointJournalStatus", "CheckpointListing", "CheckpointOptions", "CheckpointUnknown", "Checkpoints", "Class", "ClassifyCheckpointFailure", "CleanupIncomplete", "Complete", "Config", "ContainsRune", "Context", "CreatedAt", "DeleteCheckpoint", "DeleteCheckpointOptions", "ID", "Inspect", "Inspection", "InstallationID", "Manifest", "New", "PostgresDir", "Reason", "RepairCheckpointJournal", "Root", "Timeout", "Writer", "checkpointID", "entries", "installationID", "installationPresent", "pgbin", "root", "status", "timeout", "unknown"}
 var lcAdapterHandler = []string{"localCheckpointCommand", "localCheckpointParse", "localCheckpointCallbacks", "localCheckpointRequest", "localCheckpointFailure", "localCheckpointObservation", "localCheckpointSummary"}
 
 // The command sources that may import os/signal, closed (LC-S7D2F4B2R G-3).
@@ -291,11 +291,17 @@ const lcSignalsEntry = `func localCheckpointSignals() (context.Context, context.
 }`
 
 // The released route: run's one case body, usage's one help line, the namespace.
-const lcRoute, lcHelp = "return localCheckpointNamespace(args[1:])", "  witself local checkpoint create|inspect|delete  Opt-in cold local-cell checkpoints (--checkpoint-mode=cold-v1); not restore-verified"
+const lcRoute, lcHelp = "return localCheckpointNamespace(args[1:])", "  witself local checkpoint create|inspect|delete|repair-journal  Opt-in cold local-cell checkpoints (--checkpoint-mode=cold-v1); not restore-verified"
 const lcNamespaceEntry = `func localCheckpointNamespace(args []string) int {
 	if len(args) == 0 || args[0] != "checkpoint" {
-		_, _ = io.WriteString(os.Stderr, "usage: witself local checkpoint create|inspect|delete --checkpoint-mode=cold-v1 --root=ABSOLUTE_PATH\n")
+		_, _ = io.WriteString(os.Stderr, "usage: witself local checkpoint create|inspect|delete|repair-journal --checkpoint-mode=cold-v1 --root=ABSOLUTE_PATH\n")
 		return 2
+	}
+	if len(args) >= 2 && args[1] == "repair-journal" {
+		// Let the receipt writer report EPIPE if the reader has gone away.
+		pipe := make(chan os.Signal, 1)
+		signal.Notify(pipe, syscall.SIGPIPE)
+		defer signal.Stop(pipe)
 	}
 	ctx, stop := localCheckpointSignals()
 	defer stop()
@@ -307,7 +313,7 @@ var lcEntries = []struct {
 	name, text string
 	admits     []string
 }{{"localCheckpointSignals", lcSignalsEntry, slices.Concat(lcSignalNames, lcSignalObjects)},
-	{"localCheckpointNamespace", lcNamespaceEntry, []string{"Stderr", "Stdout", "WriteString", "io.WriteString", "os.Stderr", "os.Stdout"}}}
+	{"localCheckpointNamespace", lcNamespaceEntry, []string{"Stderr", "Stdout", "WriteString", "io.WriteString", "os.Stderr", "os.Stdout", "Signal", "Notify", "Stop", "SIGPIPE", "os.Signal", "os/signal.Notify", "os/signal.Stop", "syscall.SIGPIPE"}}}
 
 // lcCheck type-checks files as package main, importing only admitted paths.
 func lcCheck(files []*ast.File, admit func(string) bool) (*types.Scope, map[*ast.Ident]types.Object, []types.Error) {
@@ -859,6 +865,16 @@ func (c *lcsCell) DeleteCheckpoint(ctx context.Context, _ localcell.DeleteCheckp
 	return nil
 }
 
+func (c *lcaCell) RepairCheckpointJournal(ctx context.Context) (localcell.CheckpointJournalStatus, error) {
+	c.record(ctx, "repair-journal")
+	return localcell.CheckpointJournalStatus(lcSentinel), c.mutation
+}
+
+func (c *lcsCell) RepairCheckpointJournal(ctx context.Context) (localcell.CheckpointJournalStatus, error) {
+	c.wait(ctx, "repair-journal")
+	return "", ctx.Err()
+}
+
 // TestLocalCheckpointSignalHelperProcess is TestLocalCheckpointSignal's child
 // when its last two arguments are local-checkpoint-signal-helper and a verb.
 func TestLocalCheckpointSignalHelperProcess(_ *testing.T) {
@@ -867,7 +883,11 @@ func TestLocalCheckpointSignalHelperProcess(_ *testing.T) {
 	}
 	cell := &lcsCell{verb: os.Args[len(os.Args)-1], call: strings.Replace(os.Args[len(os.Args)-1], "second-exits", "create", 1)}
 	ctx, stop := localCheckpointSignals()
-	code := localCheckpointRun(ctx, lcArgs(cell.call), func(localCheckpointMode, localCheckpointRequest) (localCheckpointCell, error) { return cell, nil }, os.Stdout, os.Stderr)
+	args := lcArgs(cell.call)
+	if cell.call == "repair-journal" {
+		args = append(args, "--confirm=discard-tail")
+	}
+	code := localCheckpointRun(ctx, args, func(localCheckpointMode, localCheckpointRequest) (localCheckpointCell, error) { return cell, nil }, os.Stdout, os.Stderr)
 	stop()
 	os.Exit(code)
 }
@@ -876,7 +896,7 @@ func TestLocalCheckpointSignalHelperProcess(_ *testing.T) {
 // ends on its own with one clean receipt; for second-exits a signal repeated
 // every 50 ms (at most 10 s) ends it by that signal, with no receipt.
 func TestLocalCheckpointSignal(t *testing.T) {
-	for _, verb := range []string{"create", "delete", "inspect", "second-exits"} {
+	for _, verb := range []string{"create", "delete", "inspect", "repair-journal", "second-exits"} {
 		t.Run(verb, func(t *testing.T) {
 			for _, name := range lcsNames {
 				t.Run(name, func(t *testing.T) {
@@ -935,11 +955,13 @@ func TestLocalCheckpointSignal(t *testing.T) {
 						}
 						return
 					}
-					if !clean || child.ProcessState.ExitCode() != map[string]int{"create": 1}[verb] {
+					if !clean || child.ProcessState.ExitCode() != map[string]int{"create": 1, "repair-journal": 1}[verb] {
 						t.Fatal("the signalled command did not end on its own")
 					}
 					r := lcaReceipt(t, stdout.String())
 					switch {
+					case verb == "repair-journal" && (r.Outcome != "failed" || r.Failure == nil || r.Failure.Class != "local_checkpoint_interrupted"):
+						t.Fatal("a signalled repair did not report interruption")
 					case verb == "create" && (r.Outcome != "failed" || r.Failure == nil || r.Failure.Class != "local_checkpoint_operation_failed" || r.After == nil || r.After.Status != "listed"):
 						t.Fatal("a signalled create did not fail with its after-read")
 					case verb == "delete" && (r.Outcome != "succeeded" || r.Failure != nil || r.Target != lcID || r.Before == nil || r.Before.Count == nil || *r.Before.Count != 1 || r.Presence != "absent"):
@@ -967,7 +989,7 @@ func TestLocalCheckpointDispatch(t *testing.T) {
 		if code != 2 || strings.Contains(stdout+stderr, root) || strings.Contains(stdout+stderr, lcSentinel) || !maps.Equal(before, lcaTree(t, filepath.Dir(root))) {
 			t.Fatal("a released spelling was not refused unchanged or echoed an argument")
 		}
-		if class == "" && (stdout != "" || stderr != "usage: witself local checkpoint create|inspect|delete --checkpoint-mode=cold-v1 --root=ABSOLUTE_PATH\n") {
+		if class == "" && (stdout != "" || stderr != "usage: witself local checkpoint create|inspect|delete|repair-journal --checkpoint-mode=cold-v1 --root=ABSOLUTE_PATH\n") {
 			t.Fatal("the namespace usage line differs")
 		}
 		if class != "" {

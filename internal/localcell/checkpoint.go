@@ -922,7 +922,7 @@ func (c *Cell) witnessCheckpoint(ctx context.Context, checkpointID string, plan 
 }
 
 // closeCheckpointFailure closes a failed operation unless the journal ends in
-// a torn record, which only Repair may truncate.
+// a torn record. Only Repair and explicit checkpoint journal repair truncate tails.
 func (c *Cell) closeCheckpointFailure(ctx context.Context, operation string, stepErr error, discarded bool, beforeClose func()) error {
 	if beforeClose != nil {
 		beforeClose()

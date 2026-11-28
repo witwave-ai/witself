@@ -1969,7 +1969,7 @@ func checkpointAPIWired(sources map[string]string) []string {
 		ast.Inspect(files[name], func(node ast.Node) bool {
 			switch node := node.(type) {
 			case *ast.SelectorExpr:
-				if importing[path.Dir(name)] && slices.Contains([]string{"Checkpoint", "DeleteCheckpoint", "CheckpointOptions", "DeleteCheckpointOptions"}, node.Sel.Name) {
+				if importing[path.Dir(name)] && slices.Contains([]string{"Checkpoint", "DeleteCheckpoint", "RepairCheckpointJournal", "CheckpointOptions", "DeleteCheckpointOptions"}, node.Sel.Name) {
 					wired = append(wired, name)
 				}
 			case *ast.CallExpr:
@@ -2086,7 +2086,8 @@ const checkpointAdapterRun = `func localCheckpointRun(ctx context.Context, args 
 var checkpointAdapterCalls = []string{
 	"localCheckpointCallbacksFor cell.Checkpoint(ctx, localcell.CheckpointOptions{InstallationID: r.installationID})",
 	"localCheckpointCallbacksFor cell.DeleteCheckpoint(ctx, localcell.DeleteCheckpointOptions{CheckpointID: r.checkpointID})",
-	"localCheckpointCallbacksFor cell.Inspect(ctx)",
+	"localCheckpointCallbacksFor cell.Inspect(ctx)", "localCheckpointCallbacksFor cell.RepairCheckpointJournal(ctx)",
+	"localCheckpointCallbacksFor mode", "localCheckpointCallbacksFor open(mode, r)", "localCheckpointCallbacksFor repair", "localCheckpointCallbacksFor repair",
 	"localCheckpointCallbacksFor mode", "localCheckpointCallbacksFor mode", "localCheckpointCallbacksFor mode",
 	"localCheckpointCallbacksFor open(mode, r)", "localCheckpointCallbacksFor open(mode, r)", "localCheckpointCallbacksFor open(mode, r)",
 	"localCheckpointCallbacksFor create", "localCheckpointCallbacksFor create", "localCheckpointCallbacksFor read", "localCheckpointCallbacksFor read", "localCheckpointCallbacksFor remove", "localCheckpointCallbacksFor remove",
@@ -2101,9 +2102,9 @@ const checkpointAdapterRelease = "localCheckpointRun(ctx, args[1:], localCheckpo
 // checkpointAdapterMembers closes, over the whole adapter file, the local cell
 // package members it may name and the fields, methods and composite keys it
 // may select; other packages' members are the command fence's.
-var checkpointAdapterMembers = []string{"localcell.Binaries", "localcell.CheckpointOptions", "localcell.ClassifyCheckpointFailure", "localcell.Config", "localcell.DeleteCheckpointOptions", "localcell.Inspection", "localcell.New",
+var checkpointAdapterMembers = []string{"localcell.Binaries", "localcell.CheckpointJournalStatus", "localcell.CheckpointOptions", "localcell.ClassifyCheckpointFailure", "localcell.Config", "localcell.DeleteCheckpointOptions", "localcell.Inspection", "localcell.New",
 	".Binaries", ".Bytes", ".Checkpoint", ".CheckpointID", ".CheckpointListing", ".CheckpointUnknown", ".Checkpoints", ".Class", ".CleanupIncomplete", ".Complete", ".CreatedAt", ".DeleteCheckpoint", ".ID", ".Inspect",
-	".InstallationID", ".Manifest", ".PostgresDir", ".Reason", ".Root", ".Timeout", ".checkpointID", ".entries", ".installationID", ".installationPresent", ".pgbin", ".root", ".status", ".timeout", ".unknown"}
+	".InstallationID", ".Manifest", ".PostgresDir", ".Reason", ".RepairCheckpointJournal", ".Root", ".Timeout", ".checkpointID", ".entries", ".installationID", ".installationPresent", ".pgbin", ".root", ".status", ".timeout", ".unknown"}
 
 // checkpointAdapterFlow checks every declaration of the adapter, not only
 // function bodies, against the reviewed entry points, calls and members. Only
@@ -2123,6 +2124,7 @@ func checkpointAdapterFlow(file *ast.File, text func(ast.Node) string) map[strin
 			calls[node.Fun] = node
 		case *ast.SelectorExpr:
 			member = "." + node.Sel.Name
+			failed["whole-cell Repair"] = failed["whole-cell Repair"] || node.Sel.Name == "Repair"
 			if x, ok := node.X.(*ast.Ident); ok && x.Obj != nil && packages[x.Name] != "" {
 				member = "shadowed " + x.Name
 			} else if ok && packages[x.Name] == "github.com/witwave-ai/witself/internal/localcell" {
@@ -2153,12 +2155,12 @@ func checkpointAdapterFlow(file *ast.File, text func(ast.Node) string) map[strin
 			site := ""
 			switch node := node.(type) {
 			case *ast.SelectorExpr:
-				if x, ok := node.X.(*ast.Ident); slices.Contains([]string{"Inspect", "Checkpoint", "DeleteCheckpoint"}, node.Sel.Name) || ok && x.Name == "localcell" && node.Sel.Name == "New" {
+				if x, ok := node.X.(*ast.Ident); slices.Contains([]string{"Inspect", "Checkpoint", "DeleteCheckpoint", "RepairCheckpointJournal"}, node.Sel.Name) || ok && x.Name == "localcell" && node.Sel.Name == "New" {
 					site = text(node)
 				}
 			case *ast.Ident:
 				if slices.Contains([]string{"localCheckpointOpen", "localCheckpointCallbacksFor", "localCheckpointRun", "localCheckpointCommand", "localCheckpointNamespace"}, node.Name) ||
-					node.Name == "open" && (calls[node] != nil || name == "localCheckpointCallbacksFor") || slices.Contains([]string{"mode", "create", "read", "remove"}, node.Name) && name == "localCheckpointCallbacksFor" {
+					node.Name == "open" && (calls[node] != nil || name == "localCheckpointCallbacksFor") || slices.Contains([]string{"mode", "create", "read", "remove", "repair"}, node.Name) && name == "localCheckpointCallbacksFor" {
 					site = node.Name
 				}
 			}
@@ -2195,6 +2197,7 @@ func TestCheckpointReleasedCallerContract(t *testing.T) {
 			t.Fatalf("the checkpoint API callers are %v, want only the command adapter", wired)
 		}
 		if failures := checkpointReleasedCaller(sources); len(failures) != 0 {
+			drillAssert(t, !slices.Contains(failures, "whole-cell Repair"), "the command reached whole-cell Repair")
 			t.Fatalf("the released caller contract reported %v", failures)
 		}
 	})
@@ -2283,7 +2286,7 @@ func TestCheckpointReleasedCallerContract(t *testing.T) {
 			{"namespace-reentry-from-read", adapter, readOpen, opener + readOpen + "\t\t_ = localCheckpointRun(ctx, []string{\"delete\"}, localCheckpointNamespace(), nil, nil)\n", "calls"},
 			{"namespace-opener-in-read", adapter, readOpen, opener + readOpen + "\t\t_, _ = localCheckpointNamespace()(localCheckpointColdV1, r)\n", "calls"},
 			{"command-from-read", adapter, readOpen, readOpen + "\t\t_ = localCheckpointCommand(ctx, []string{\"delete\"}, localCheckpointCallbacks{}, nil, nil)\n", "calls"},
-			{"read-wrapped-with-remove", adapter, "{create, read, remove}\n", "{create, func(ctx context.Context, r localCheckpointRequest) (localCheckpointObservation, localCheckpointFailure) {\n\t\tif o, f := read(ctx, r); len(o.entries) <= 2 {\n\t\t\treturn o, f\n\t\t}\n\t\treturn localCheckpointObservation{}, remove(ctx, r)\n\t}, remove}\n", "calls"},
+			{"read-wrapped-with-remove", adapter, "{create, read, remove, repair}\n", "{create, func(ctx context.Context, r localCheckpointRequest) (localCheckpointObservation, localCheckpointFailure) {\n\t\tif o, f := read(ctx, r); len(o.entries) <= 2 {\n\t\t\treturn o, f\n\t\t}\n\t\treturn localCheckpointObservation{}, remove(ctx, r)\n\t}, remove, repair}\n", "calls"},
 			{"release-forces-mode", adapter, checkpointAdapterRelease, strings.Replace(checkpointAdapterRelease, "args[1:]", "append(args[1:], \"--checkpoint-mode=cold-v1\")", 1), "calls"},
 			{"release-background", adapter, checkpointAdapterRelease, strings.Replace(checkpointAdapterRelease, "ctx,", "context.Background(),", 1), "calls"},
 			{"stop-shadowed", adapter, "err = cell.DeleteCheckpoint(", "if strings, ok := cell.(interface{ Stop(context.Context) error }); ok {\n\t\t\t\t_ = strings.Stop(ctx)\n\t\t\t}\n\t\t\terr = cell.DeleteCheckpoint(", "members"},
@@ -2307,14 +2310,36 @@ func TestCheckpointReleasedCallerContract(t *testing.T) {
 }
 
 // Inspect production source across build tags, including method values and
-// interface declarations. Only settlement may truncate the held journal.
+// interface declarations. Only the reviewed adapter callback may reach settlement.
 func TestRepairCheckpointJournalDark(t *testing.T) {
 	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" && runtime.GOOS != "windows" {
 		status, err := new(Cell).RepairCheckpointJournal(t.Context())
 		drillAssert(t, ClassifyCheckpointFailure(err).Class == "local_checkpoint_state_unsupported", "unavailable journal repair changed class")
 		drillAssert(t, status == "", "repair reported status on failure")
 	}
-	for _, source := range checkpointWiringSources(t, filepath.Join("..", "..")) {
+	const cell = `type localCheckpointCell interface {
+	Inspect(context.Context) (localcell.Inspection, error)
+	Checkpoint(context.Context, localcell.CheckpointOptions) error
+	DeleteCheckpoint(context.Context, localcell.DeleteCheckpointOptions) error
+	RepairCheckpointJournal(context.Context) (localcell.CheckpointJournalStatus, error)
+}`
+	const callback = `repair := func(ctx context.Context, r localCheckpointRequest) (string, localCheckpointFailure) {
+		cell, err := open(mode, r)
+		if err != nil {
+			return "", localCheckpointFailed(err)
+		}
+		status, err := cell.RepairCheckpointJournal(ctx)
+		return string(status), localCheckpointFailed(err)
+	}
+	return localCheckpointCallbacks{create, read, remove, repair}`
+	for name, source := range checkpointWiringSources(t, filepath.Join("..", "..")) {
+		if name == "cmd/witself/local_checkpoint_adapter.go" {
+			source = strings.ReplaceAll(source, "\r\n", "\n")
+			drillAssert(t, strings.Contains(source, cell), "checkpoint adapter interface changed")
+			drillAssert(t, strings.Contains(source, callback), "checkpoint adapter repair callback changed")
+			source = strings.Replace(source, cell, "", 1)
+			source = strings.Replace(source, callback, "", 1)
+		}
 		drillAssert(t, !strings.Contains(source, "RepairCheckpointJournal"), "production source reached journal repair")
 	}
 }

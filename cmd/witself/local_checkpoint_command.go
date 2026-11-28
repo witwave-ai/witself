@@ -18,6 +18,7 @@ import (
 type localCheckpointRequest struct {
 	operation, root, pgbin, installationID, checkpointID string
 	timeout                                              time.Duration
+	confirm                                              string
 }
 type localCheckpointFailure struct {
 	err           error
@@ -40,6 +41,7 @@ type localCheckpointCallbacks struct {
 	create func(context.Context, localCheckpointRequest) localCheckpointFailure
 	read   func(context.Context, localCheckpointRequest) (localCheckpointObservation, localCheckpointFailure)
 	delete func(context.Context, localCheckpointRequest) localCheckpointFailure
+	repair func(context.Context, localCheckpointRequest) (string, localCheckpointFailure)
 }
 type localCheckpointDiagnostic struct {
 	Class             string `json:"class"`
@@ -70,6 +72,8 @@ type localCheckpointReceipt struct {
 	Presence     string                     `json:"presence,omitempty"`
 	Verification string                     `json:"verification"`
 	Notice       string                     `json:"notice"`
+	// Only successful journal repair reports the disposition of the journal.
+	JournalStatus string `json:"journal_status,omitempty"`
 }
 
 const localCheckpointNotice = "Checkpoint journal history may remain, including after purged-root delete; another purge does not prune it. Older readers may refuse that history; downgrade compatibility is unsupported."
@@ -78,6 +82,10 @@ var localCheckpointID = regexp.MustCompile(`^ckpt_[a-z2-7]{16}$`)
 
 func localCheckpointIdentity(s string) bool {
 	return len(s) <= 64 && strings.Trim(s, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-") == ""
+}
+
+func localCheckpointVerb(op string) bool {
+	return op == "create" || op == "inspect" || op == "delete" || op == "repair-journal"
 }
 
 func localCheckpointParse(args []string) (localCheckpointRequest, string) {
@@ -108,17 +116,27 @@ func localCheckpointParse(args []string) (localCheckpointRequest, string) {
 		register(&r.installationID, "installation-id")
 	case "delete":
 		register(&r.checkpointID, "checkpoint-id")
+	case "repair-journal":
+		register(&r.confirm, "confirm")
 	}
 	err := f.Parse(args[1:])
 	if mode != "cold-v1" {
 		return r, "local_checkpoint_command_disabled"
 	}
-	if err != nil || f.NArg() != 0 || (r.operation != "create" && r.operation != "inspect" && r.operation != "delete") {
+	if err != nil || f.NArg() != 0 || !localCheckpointVerb(r.operation) {
 		return r, "local_checkpoint_arguments_invalid"
 	}
 	r.timeout, err = time.ParseDuration(timeout)
 	if err != nil || r.timeout <= 0 || !filepath.IsAbs(r.root) || (r.operation == "create" && !filepath.IsAbs(r.pgbin)) {
 		return r, "local_checkpoint_arguments_invalid"
+	}
+	if r.operation == "repair-journal" {
+		if r.confirm == "" {
+			return r, "local_checkpoint_confirmation_required"
+		}
+		if r.confirm != "discard-tail" {
+			return r, "local_checkpoint_arguments_invalid"
+		}
 	}
 	if (r.operation == "create" && r.installationID == "") || (r.operation == "delete" && r.checkpointID == "") {
 		return r, "local_checkpoint_confirmation_required"
@@ -184,7 +202,7 @@ func localCheckpointCommand(ctx context.Context, args []string, cb localCheckpoi
 		}
 		return code
 	}
-	if r.operation == "create" || r.operation == "inspect" || r.operation == "delete" {
+	if localCheckpointVerb(r.operation) {
 		receipt.Operation = r.operation
 	}
 	if refusal != "" {
@@ -196,6 +214,24 @@ func localCheckpointCommand(ctx context.Context, args []string, cb localCheckpoi
 	}
 	ctx, cancel := context.WithTimeout(ctx, r.timeout)
 	defer cancel()
+	if r.operation == "repair-journal" {
+		receipt.Outcome = "failed"
+		if cb.repair != nil {
+			status, failure := cb.repair(ctx, r)
+			if failure.err != nil {
+				receipt.Failure = localCheckpointSafeFailure(localCheckpointFailure{class: failure.class})
+				return finish(1)
+			}
+			switch status {
+			case "tail_discarded", "clean", "absent":
+				receipt.Outcome = "succeeded"
+				receipt.JournalStatus = status
+				return finish(0)
+			}
+		}
+		receipt.Failure = localCheckpointSafeFailure(localCheckpointFailure{})
+		return finish(1)
+	}
 	if r.operation == "inspect" {
 		receipt.After = localCheckpointRead(ctx, r, cb)
 		if receipt.After.Status != "listed" {

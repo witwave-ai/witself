@@ -1645,7 +1645,7 @@
         },
         "entitlement_policy": {
           "state": "conditional",
-          "summary": "Lifecycle and explicit service foundations remain opt-in and dark; the released CLI reaches only cold checkpoint create, inspect and delete, per call with an explicit selector. Local routes and console trust are implemented separately; standalone policy, operator bootstrap and enrollment authority remain product gates.",
+          "summary": "Lifecycle and service foundations remain dark. The CLI exposes cold checkpoint create, inspect, delete and repair-journal with a per-call selector and explicit consent for journal repair. Local routes and console trust are implemented. Standalone policy, operator bootstrap and enrollment authority remain product gates.",
           "evidence": [
             "docs/research/local-cell/implementation-plan.md"
           ]
