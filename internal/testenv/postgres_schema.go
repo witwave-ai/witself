@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	_ "github.com/jackc/pgx/v5/stdlib" // register the test fixture database driver
 )
 
@@ -88,7 +89,11 @@ func (s *PostgresSchema) Close() error {
 	s.once.Do(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), PostgresSchemaCleanupTimeout(time.Since(s.started)))
 		defer cancel()
-		if _, err := s.admin.ExecContext(ctx, `DROP SCHEMA `+s.name+` CASCADE`); err != nil {
+		wait := time.Duration(50+os.Getpid()%50) * time.Millisecond // processes that collided do not repeat in step
+		if err := retryLockTableFull(ctx, wait, func() error {
+			_, err := s.admin.ExecContext(ctx, `DROP SCHEMA `+s.name+` CASCADE`)
+			return err
+		}); err != nil {
 			s.err = errors.New("drop allocated schema failed")
 		} else {
 			var exists bool
@@ -104,6 +109,36 @@ func (s *PostgresSchema) Close() error {
 		}
 	})
 	return s.err
+}
+
+// lockTableAttempts bounds the repeat by itself: a lock table that stays full
+// fails the cleanup after about ten seconds, not after its whole budget.
+const lockTableAttempts = 10
+
+// retryLockTableFull repeats statement while PostgreSQL refuses it because the
+// lock table is full: SQLSTATE 53200 with the hint that names
+// max_locks_per_transaction (the code alone also means a backend out of
+// memory). The cluster has one lock table and a cascading drop locks every
+// object of its schema at once, so test processes that drop migrated schemas
+// in the same moment can fill it. A refused statement has dropped nothing, and
+// the table empties as the other drops end. The wait doubles up to two
+// seconds. Any other refusal, the last attempt's, and the end of ctx return at
+// once (FLAKE-65).
+func retryLockTableFull(ctx context.Context, wait time.Duration, statement func() error) error {
+	for attempt := 1; ; attempt++ {
+		err := statement()
+		var refused *pgconn.PgError
+		if err == nil || attempt == lockTableAttempts || !errors.As(err, &refused) || refused.Code != "53200" ||
+			!strings.Contains(refused.Hint, "max_locks_per_transaction") {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return err
+		case <-time.After(wait):
+		}
+		wait = min(2*wait, 2*time.Second)
+	}
 }
 
 // PostgresSchemaCleanupTimeout includes the full fixture lifetime, preserving
