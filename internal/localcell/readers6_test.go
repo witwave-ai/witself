@@ -412,13 +412,13 @@ func TestJournalWritersStillWrite(t *testing.T) {
 		c, saved, journalSyncs := writerRetainedCleanup(t), syncFile, 0
 		t.Cleanup(func() { syncFile = saved })
 		syncFile = func(f *os.File) error {
-			if filepath.Base(f.Name()) == "operations.jsonl" {
+			if filepath.Base(f.Name()) == "operations.jsonl" || f.Name() == "private flush" {
 				journalSyncs++
 			}
 			return saved(f)
 		}
 		want := 1 // the retained-cleanup sync
-		if checkpointJournalBarrierSupported {
+		if checkpointJournalSettlementSupported {
 			want++ // settle the prefix before recovery
 		}
 		err := c.Repair(t.Context())
@@ -441,14 +441,14 @@ func TestJournalWritersStillWrite(t *testing.T) {
 			saved, syncs, bystander := syncFile, 0, []byte("bystander")
 			t.Cleanup(func() { syncFile = saved })
 			syncFile = func(f *os.File) error {
-				syncs += map[bool]int{true: 1}[filepath.Base(f.Name()) == "operations.jsonl"]
+				syncs += map[bool]int{true: 1}[filepath.Base(f.Name()) == "operations.jsonl" || f.Name() == "private flush"]
 				return saved(f)
 			}
 			name := readerJournalPath(c)
 			before, err := os.ReadFile(name)
 			replace := func() {
 				want := 0
-				if site == "retained" && checkpointJournalBarrierSupported {
+				if site == "retained" && checkpointJournalSettlementSupported {
 					want = 1
 				}
 				if syncs != want {

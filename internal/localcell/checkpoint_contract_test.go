@@ -1194,7 +1194,7 @@ func checkpointSourceContract(sources map[string]string) []string {
 					listedUninitialized = len(value.Values) == 0
 				}
 				if identifier, ok := node.(*ast.Ident); ok {
-					if slices.Contains([]string{"RepairCheckpointJournal", "repairOwnedJournal", "settleCheckpointJournal", "beforeJournalSettlement"}, identifier.Name) {
+					if slices.Contains([]string{"RepairCheckpointJournal", "repairOwnedJournal", "settleCheckpointJournal", "beforeJournalSettlement", "runWindowsJournalBarrier", "syncCheckpointJournalPrefix", "syncLifecycleJournalPrefix"}, identifier.Name) {
 						repairNames[name+":"+owner+":"+identifier.Name]++
 					}
 					if identifier.Name == "checkpointTreeListed" {
@@ -1468,6 +1468,13 @@ func checkpointSourceContract(sources map[string]string) []string {
 		"checkpoint_journal_binding_other.go::settleCheckpointJournal":             1,
 		"checkpoint_journal_binding_unix.go:repairOwnedJournal:repairOwnedJournal": 1, "checkpoint_journal_binding_unix.go:repairOwnedJournal:settleCheckpointJournal": 1,
 		"checkpoint_journal_binding_windows.go:repairOwnedJournal:repairOwnedJournal": 1, "checkpoint_journal_binding_windows.go:repairOwnedJournal:settleCheckpointJournal": 1,
+		// Exactly the two admission paths reach platform barriers; whole-cell Repair bypasses begin.
+		"checkpoint_journal_binding_other.go:syncCheckpointJournalPrefix:syncCheckpointJournalPrefix":   1,
+		"checkpoint_journal_binding_unix.go:syncCheckpointJournalPrefix:syncCheckpointJournalPrefix":    1,
+		"checkpoint_journal_binding_windows.go:syncCheckpointJournalPrefix:syncCheckpointJournalPrefix": 1,
+		"checkpoint.go:closeCheckpointLeftover:syncCheckpointJournalPrefix":                             1, "lifecycle.go:syncLifecycleJournalPrefix:syncCheckpointJournalPrefix": 1,
+		"lifecycle.go:syncLifecycleJournalPrefix:syncLifecycleJournalPrefix": 1, "lifecycle.go:begin:syncLifecycleJournalPrefix": 1, "lifecycle.go:Repair:syncLifecycleJournalPrefix": 1,
+		"checkpoint_journal_binding_windows.go::runWindowsJournalBarrier": 1, "checkpoint_journal_binding_windows.go:syncCheckpointJournalPrefix:runWindowsJournalBarrier": 1,
 		// The test hook: its field and the one boundary that reads it. Production assigns it nowhere.
 		"types.go::beforeJournalSettlement": 1, repair + "journalSettlementBoundary:beforeJournalSettlement": 2,
 	})

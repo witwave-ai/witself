@@ -1,4 +1,4 @@
-//go:build linux || darwin
+//go:build linux || darwin || windows
 
 package localcell
 
@@ -9,6 +9,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -72,6 +73,9 @@ func TestLifecycleJournalBarrier(t *testing.T) {
 func checkLifecycleWriterBarrier(t *testing.T, op string, binaries Binaries) {
 	t.Helper()
 	for _, state := range []string{"healthy", "second-name", "mode-0640", "retry-file", "retry-journal", "retry-empty", "pending", "torn", "file", "journal", "root"} {
+		if runtime.GOOS == "windows" && (state == "mode-0640" || state == "journal" || state == "root") {
+			continue // Windows has neither the POSIX mode nor a directory barrier.
+		}
 		t.Run(state, func(t *testing.T) {
 			f, call := lifecycleWriterFixture(t, op, binaries)
 			c := f.cell
@@ -107,7 +111,7 @@ func checkLifecycleWriterBarrier(t *testing.T, op string, binaries Binaries) {
 				trace.fail = state
 				before := retainedSnapshot(t, c)
 				err := call()
-				stages := []string{"file", "journal", "root"}
+				stages := barrierStages
 				drillAssert(t, checkpointSameError(err, "cannot make local cell journal durable"), "writer prefix failure changed storage error")
 				drillAssert(t, slices.Equal(trace.events, stages[:slices.Index(stages, state)+1]), "writer continued past a failed prefix sync")
 				drillAssert(t, maps.Equal(before, retainedSnapshot(t, c)), "writer prefix failure changed the cell")
@@ -139,10 +143,10 @@ func cutCheckpointSettlement(t *testing.T, f *retainedFixture, trace *barrierTra
 func assertWriterPrefix(t *testing.T, f *retainedFixture, trace *barrierTrace) {
 	t.Helper()
 	stages := slices.DeleteFunc(slices.Clone(trace.events), func(s string) bool { return s == "append" })
-	drillAssert(t, slices.Equal(stages, []string{"file", "journal", "root"}), "writer did not settle the three prefix objects exactly once")
-	drillAssert(t, slices.Index(trace.events, "append") == 3, "writer appended before the prefix was durable")
+	drillAssert(t, slices.Equal(stages, barrierStages), "barrier count changed for an existing log")
+	drillAssert(t, slices.Index(trace.events, "append") == len(barrierStages), "an append preceded the prefix sync")
 	drillAssert(t, trace.prefixSize == int64(len(f.prefix)), "writer changed journal bytes before the prefix sync")
-	drillAssert(t, trace.readOnly, "writer settled the prefix through a writable descriptor")
+	drillAssert(t, trace.prefix, "writer settled the prefix through the wrong descriptor")
 }
 
 func assertLifecycleRecords(t *testing.T, f *retainedFixture, op string) {
@@ -190,7 +194,6 @@ func TestCheckpointJournalBarrierRetryBeforeDirectorySync(t *testing.T) {
 // functions, nothing synced or written; released, a live context settles all three.
 func TestLifecycleJournalBarrierLeaseCut(t *testing.T) {
 	take, _, release := barrierLease(t)
-	leaseWait.ceiling = 10 * time.Second // the context ends the wait, never the ceiling
 	f := retainedRemovalFixture(t, "legacy", false)
 	progress, err := f.cell.readJournal(t.Context())
 	drillAssert(t, err == nil, "cannot read the lifecycle journal before its lease")

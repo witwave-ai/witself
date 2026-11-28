@@ -974,7 +974,7 @@ func (c *Cell) closeCheckpointLeftover(ctx context.Context) error {
 			return errCheckpointState
 		}
 	}
-	if checkpointJournalBarrierSupported {
+	if checkpointJournalSettlementSupported {
 		if !leftover && (progress.pending != nil || progress.tornTail) {
 			return errJournalInterrupted // same refusal as begin
 		}

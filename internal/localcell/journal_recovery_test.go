@@ -79,12 +79,12 @@ func TestJournalTailTruncationSync(t *testing.T) {
 				{"revert_stop", "done"}, {"operation", "done"},
 			}
 			prefixSyncs := 1 // discard sync
-			if checkpointJournalBarrierSupported {
+			if checkpointJournalSettlementSupported {
 				prefixSyncs++ // admitted Repair syncs its prefix before recovery
 			}
 			calls := 0
 			syncFile = func(f *os.File) error {
-				if filepath.Clean(f.Name()) != path {
+				if filepath.Clean(f.Name()) != path && f.Name() != "private flush" {
 					return originalSync(f) // Atomic manifest publication shares the seam.
 				}
 				calls++

@@ -76,21 +76,32 @@ func WindowsPrivateHoldPath(path string) (*os.File, error) {
 // does not validate: the caller refuses a reparse point, the wrong type or a
 // descriptor that is not private, by handle.
 func WindowsPrivateHold(parent *os.File, name string, directory bool) (*os.File, error) {
+	access, share, options := uint32(windows.GENERIC_READ|windows.GENERIC_WRITE), uint32(windows.FILE_SHARE_READ), uint32(0)
+	if directory {
+		access, share, options = windows.FILE_TRAVERSE, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, windows.FILE_DIRECTORY_FILE
+	}
+	return windowsPrivateOpenHeld(parent, name, "private hold", access|windows.READ_CONTROL, share, options)
+}
+
+// WindowsPrivateOpenFlush opens an existing non-directory below parent without
+// following a reparse point. The caller checks the held file before syncing it.
+// FILE_APPEND_DATA permits a flush without granting truncation or overwrite.
+func WindowsPrivateOpenFlush(parent *os.File, name string) (*os.File, error) {
+	return windowsPrivateOpenHeld(parent, name, "private flush", windows.FILE_APPEND_DATA, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, windows.FILE_NON_DIRECTORY_FILE)
+}
+
+func windowsPrivateOpenHeld(parent *os.File, name, label string, access, share, options uint32) (*os.File, error) {
 	parts, ok := windowsPrivateBeneathParts(name)
 	clean, err := windowsPrivateCleanPath(`C:\` + name)
 	if !ok || len(parts) != 1 || err != nil || clean != `C:\`+name || parent == nil {
 		return nil, windowsPrivateFailure(nil)
 	}
-	access, share, options := uint32(windows.GENERIC_READ|windows.GENERIC_WRITE), uint32(windows.FILE_SHARE_READ), uint32(0)
-	if directory {
-		access, share, options = windows.FILE_TRAVERSE, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, windows.FILE_DIRECTORY_FILE
-	}
-	handle, err := windowsPrivateAt(windows.Handle(parent.Fd()), name, access|windows.READ_CONTROL, share, windows.FILE_OPEN, options, nil)
+	handle, err := windowsPrivateAt(windows.Handle(parent.Fd()), name, access, share, windows.FILE_OPEN, options, nil)
 	runtime.KeepAlive(parent)
 	if err != nil {
 		return nil, err
 	}
-	return os.NewFile(uintptr(handle), "private hold"), nil
+	return os.NewFile(uintptr(handle), label), nil
 }
 
 // WindowsPrivateIdentity reads the identity of an opened object by handle.

@@ -1,4 +1,4 @@
-//go:build linux || darwin
+//go:build linux || darwin || windows
 
 package localcell
 
@@ -8,6 +8,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"testing"
@@ -57,7 +58,7 @@ func TestRepairJournalBarrierAdmission(t *testing.T) {
 				drillAssert(t, err != nil && err.Error() == wantErr, "Repair admission error changed")
 			}
 			drillAssert(t, slices.Equal(trace.events, events), "Repair admission reached a prefix sync or append")
-			drillAssert(t, !trace.readOnly, "Repair synced a prefix without pending work")
+			drillAssert(t, !trace.prefix, "Repair synced a prefix without pending work")
 			assertFileBytes(t, c.path(repairLog), []byte(data), "Repair admission changed the validated journal")
 			drillAssert(t, maps.Equal(before, repairTree(t, c)), "Repair admission changed the cell")
 		})
@@ -88,9 +89,9 @@ func TestRepairJournalBarrierRetry(t *testing.T) {
 			}
 			err := c.Repair(t.Context())
 			drillAssert(t, err == nil, "Repair did not resume the validated prefix")
-			drillAssert(t, slices.Equal(trace.events, []string{"file", "journal", "root", "append", "append", "append"}), "Repair resumed before syncing the journal prefix exactly once")
+			drillAssert(t, slices.Equal(trace.events, slices.Concat(barrierStages, []string{"append", "append", "append"})), "Repair resumed before syncing the journal prefix exactly once")
 			drillAssert(t, trace.prefixSize == int64(len(prefix)), "Repair wrote before the prefix sync")
-			drillAssert(t, trace.readOnly, "Repair synced a writable prefix descriptor")
+			drillAssert(t, trace.prefix, "Repair synced the wrong prefix descriptor")
 			admissionAssertJournalBytes(t, c, "checkpoint", []string{"revert_stop"})
 			if row == "hard-link" {
 				assertFileBytes(t, alias, retainedRead(t, c, repairLog), "Repair changed the hard-linked journal identity")
@@ -101,10 +102,13 @@ func TestRepairJournalBarrierRetry(t *testing.T) {
 
 func TestRepairJournalBarrierRecovery(t *testing.T) {
 	for _, row := range []string{"record", "verify-all", "remove-stop", "database", "resume", "installed", "provision", "principal", "custody"} {
+		if runtime.GOOS == "windows" && row == "remove-stop" {
+			continue // The live stop witness starts a child process.
+		}
 		t.Run(row, func(t *testing.T) {
 			c, m := unitCell(t)
 			locklessLock(t, c, ".owner.lock", false)
-			events := []string{"file", "journal", "root"}
+			events := barrierStages
 			trace := traceBarrier(t, c)
 			call := func(stage string) func(context.Context, *Manifest) error {
 				return func(context.Context, *Manifest) error {
@@ -130,7 +134,7 @@ func TestRepairJournalBarrierRecovery(t *testing.T) {
 					drillAssert(t, writeAtomic(c.path("run", "postgres.json"), child, nil) == nil, "cannot seed Repair stop record")
 					defer requireSafetyChildAlive(t, child)
 				}
-				drillAssert(t, os.Mkdir(c.path("pg"), 0700) == nil, "cannot seed Repair data directory")
+				drillAssert(t, testMkdir(c.path("pg"), 0700) == nil, "cannot seed Repair data directory")
 				drillAssert(t, testWriteFile(c.path("pg", "postmaster.pid"), []byte(strconv.Itoa(pid)+"\n"+c.path("pg")+"\ninvalid\n"), 0600) == nil, "cannot seed Repair postmaster record")
 			case "verify-all":
 				op, steps, wantErr = "stop", nil, "invalid local cell process record"
@@ -161,9 +165,13 @@ func TestRepairJournalBarrierRecovery(t *testing.T) {
 			for _, step := range steps {
 				data += repairRecord(t, op, step, "done")
 			}
-			repairSeed(t, c, data+"{")
+			tail, stages := "{", []string{"journal", "file", "root"}
+			if runtime.GOOS == "windows" {
+				tail, stages = "", barrierStages // the tail discard is exercised by Admission/discard
+			}
+			repairSeed(t, c, data+tail)
 			before := repairTree(t, c)
-			for _, stage := range []string{"journal", "file", "root"} {
+			for _, stage := range stages {
 				trace.fail, trace.events = stage, nil
 				err := c.Repair(t.Context())
 				drillAssert(t, errors.Is(err, errSyncLifecycleJournal), "Repair acted before its failed prefix sync")
@@ -201,7 +209,7 @@ func TestRepairServiceJournalBarriers(t *testing.T) {
 	if err := c.RepairService(t.Context()); err != nil {
 		t.Fatal("service repair did not finish the interrupted stop")
 	}
-	prefix := []string{"file", "journal", "root"}
+	prefix := barrierStages
 	want := slices.Concat(prefix, []string{"append", "append", "append"}, prefix, []string{"append", "append", "append", "append"})
 	if !slices.Equal(trace.events, want) {
 		t.Fatal("service repair failed to settle each independently owned operation")

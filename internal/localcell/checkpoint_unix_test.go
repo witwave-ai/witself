@@ -336,3 +336,18 @@ func TestRepairCheckpointJournalSettlement(t *testing.T) {
 		})
 	}
 }
+
+var barrierStages = []string{"file", "journal", "root"}
+
+func barrierDescriptor(t *testing.T, f *os.File, log string) (string, bool) {
+	t.Helper()
+	if filepath.Clean(f.Name()) != log {
+		return "", false
+	}
+	flags, err := unix.FcntlInt(f.Fd(), unix.F_GETFL, 0)
+	drillAssert(t, err == nil, "cannot observe journal descriptor")
+	if flags&unix.O_APPEND != 0 {
+		return "append", false
+	}
+	return "file", flags&unix.O_ACCMODE == unix.O_RDONLY
+}
