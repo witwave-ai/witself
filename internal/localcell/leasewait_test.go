@@ -226,15 +226,16 @@ var leaseWaitServiceCalls = map[string]string{
 	"lifecycle.go:(*Cell).Start":              "account bindServiceProcessBoot",
 	"lifecycle.go:(*Cell).verifyStartAccount": "prepareSelectedHealthCredential",
 
-	// The binding after a launch takes the launching operation's own context (LC-LEASE-2E6).
-	"commands.go:(*Cell).startChildPrepared":     "bindServiceProcessBoot",
-	"reinstall.go:(*Cell).startRetainedPostgres": "bindServiceProcessBoot",
+	// The binding after a launch takes the launching operation's own context (LC-LEASE-2E6), the one its step
+	// carries: startServicePostgres's too, which passed its plain parameter before (LC-LEASE-2E7).
+	"commands.go:(*Cell).startChildPrepared":       "bindServiceProcessBoot",
+	"reinstall.go:(*Cell).startRetainedPostgres":   "bindServiceProcessBoot",
+	"service_boot.go:(*Cell).startServicePostgres": "bindServiceProcessBoot",
 
 	"service_boot.go:(*Cell).reconcileServiceBoot":                     "maintenanceFenceAllows own readJSON reconcileOldBoot serviceDescriptor",
 	"service_boot.go:(*Cell).reconcileOldBoot":                         "postmaster readJSON",
 	"service_boot.go:(*Cell).bindServiceProcessBoot":                   "bindServiceProcessBootWithReader",
 	"service_boot.go:(*Cell).bindServiceProcessBootWithReader":         "readJSON serviceDescriptor",
-	"service_boot.go:(*Cell).startServicePostgres":                     "bindServiceProcessBoot",
 	"service_control.go:(*Cell).Control":                               "readServiceControlSecret validateServiceControlEndpoint",
 	"service_control.go:(*Cell).readServiceControlSecret":              "serviceControlSecretBy",
 	"service_control.go:(*Cell).serveServiceControlForPlatform":        "listenRunServiceControl readServiceControlSecret removeServiceControlEndpoint",
@@ -345,9 +346,16 @@ var leaseWaitDetachedTexts = map[string][]string{"files.go": {"type leaseWaitDet
 // its own context into each step's, once, by these texts and these helpers.
 var leaseWaitCarried = []string{"lifecycle.go:(*Cell).Start", "reinstall.go:(*Cell).reinstallLocked"}
 var leaseWaitCarryTexts = map[string]string{"lifecycle.go": "defer cancel()\n\t\t\tstepCtx = withBindOperation(stepCtx, ctx)\n", "reinstall.go": "defer cancel()\n\t\t\tstepCtx = withBindOperation(stepCtx, ctx)\n",
-	"service_boot.go": "type bindOperationKey struct{}\n\nfunc withBindOperation(step, operation context.Context) context.Context {\n\treturn context.WithValue(step, bindOperationKey{}, operation)\n}\n\n" +
+	"service_boot.go": "type bindOperationKey struct{}\n\n// Nothing nests: a step loop run inside another's step would carry its own\n" +
+		"// operation, the outer step's context, over the outer one, so its bindings\n// would end at the outer step's deadline (LC-LEASE-2E7, n3).\n" +
+		"func withBindOperation(step, operation context.Context) context.Context {\n\treturn context.WithValue(step, bindOperationKey{}, operation)\n}\n\n" +
 		"// bindOperation is the operation's context that ctx carries, else ctx itself.\nfunc bindOperation(ctx context.Context) context.Context {\n" +
 		"\tif operation, ok := ctx.Value(bindOperationKey{}).(context.Context); ok {\n\t\treturn operation\n\t}\n\treturn ctx\n}\n"}
+
+// LC-LEASE-2E7: the four bindings after a child started each read the carried
+// operation once, as bindOperation of their own context, and nothing else does.
+var leaseWaitCarryReaders = []string{"commands.go:(*Cell).startChildPrepared", "lifecycle.go:(*Cell).Start", "reinstall.go:(*Cell).startRetainedPostgres",
+	"service_boot.go:(*Cell).startServicePostgres"}
 var leaseWaitDetachedNames = map[string]int{"files.go:leaseWaitDetachedKey": 1, "files.go:leaseWaitDetached": 2, "files_other.go:leaseWaitDone": 1,
 	"checkpoint.go:(*Cell).Checkpoint": 1, "checkpoint.go:(*Cell).DeleteCheckpoint": 1, "lifecycle.go:(*Cell).Inspect": 1}
 var leaseWaitReleased = []string{"checkpoint.go:(*Cell).Checkpoint", "checkpoint.go:(*Cell).DeleteCheckpoint", "lifecycle.go:(*Cell).Inspect",
@@ -448,6 +456,13 @@ func leaseWaitTyped(world *referencesWorld, system string, sources map[string]st
 							calls[leaseWaitCall{name + ":" + owner, fset.PositionFor(identifier.Pos(), false).Offset, identifier.Name}] = "value"
 						}
 					}
+					// LC-LEASE-2E7-F1 (n5): each use of bindOperation, called or not, is a read of the carried operation in its
+					// declaration; a binding's own context argument is the read recorded with it below, so any other is one more.
+					if identifier, ok := node.(*ast.Ident); ok {
+						if helper, _ := info.Uses[identifier].(*types.Func); helper != nil && helper.Pkg() == self && helper.Name() == "bindOperation" {
+							calls[leaseWaitCall{name + ":" + owner, fset.PositionFor(identifier.Pos(), false).Offset, helper.Name()}] = "carry_read"
+						}
+					}
 					call, _ := node.(*ast.CallExpr)
 					callee, seam := (*types.Func)(nil), false
 					if call != nil {
@@ -462,11 +477,13 @@ func leaseWaitTyped(world *referencesWorld, system string, sources map[string]st
 					// bindOperation(ctx) is judged by ctx; the helpers' bodies are pinned (lease_wait_carry).
 					args := call.Args
 					if callee != nil && callee.Pkg() == self && callee.Name() == "withBindOperation" {
-						calls[leaseWaitCall{name + ":" + owner, fset.PositionFor(call.Pos(), false).Offset, callee.Name()}] = map[bool]string{true: "carry", false: "carry_other"}[len(args) == 2 && leaseWaitOwnTyped(info, holder, args[1:])]
+						calls[leaseWaitCall{name + ":" + owner, fset.PositionFor(call.Pos(), false).Offset, callee.Name()}] = map[bool]string{true: "carry", false: "carry_other"}[len(args) == 2 &&
+							leaseWaitOwnTyped(info, holder, args[1:]) && leaseWaitCarriedInto(info, holder, call)]
 						return true
 					} else if inner, ok := slices.Concat(args, []ast.Expr{nil})[0].(*ast.CallExpr); ok && callee != nil && callee.Name() == "bindServiceProcessBoot" && len(inner.Args) == 1 {
 						if helper, _ := referencesNamed(info, inner.Fun).(*types.Func); helper != nil && helper.Pkg() == self && helper.Name() == "bindOperation" {
 							args = inner.Args
+							calls[leaseWaitCall{name + ":" + owner, fset.PositionFor(inner.Pos(), false).Offset, helper.Name()}] = "carry_read"
 						}
 					}
 					use, own, receiver := leaseWaitCall{name + ":" + owner, fset.PositionFor(call.Pos(), false).Offset, referencesIdentifier(call.Fun).Name}, leaseWaitOwnTyped(info, holder, args), (*types.Var)(nil)
@@ -581,6 +598,72 @@ func leaseWaitBoundContext(info *types.Info, function *ast.FuncDecl, call *ast.C
 	return bound && !overwritten
 }
 
+// leaseWaitCarriedInto (LC-LEASE-2E7, n4; F1, m1): carry is the whole right side
+// of an assignment to one variable in the literal around it, which assigns that
+// variable nowhere else (its definition apart), never takes its address or
+// ranges into it, and names step.run once: as the callee of a call that follows
+// carry, is neither go nor defer nor inside a nested literal, and is handed
+// that variable itself.
+func leaseWaitCarriedInto(info *types.Info, holder *ast.FuncDecl, carry *ast.CallExpr) bool {
+	var lit *ast.FuncLit
+	var carried types.Object
+	if holder == nil || holder.Body == nil {
+		return false
+	}
+	ast.Inspect(holder.Body, func(node ast.Node) bool {
+		if inner, ok := node.(*ast.FuncLit); ok && inner.Pos() < carry.Pos() && carry.End() < inner.End() {
+			lit = inner
+		} else if assign, ok := node.(*ast.AssignStmt); ok && len(assign.Lhs) == 1 && len(assign.Rhs) == 1 && assign.Rhs[0] == carry {
+			if id, ok := assign.Lhs[0].(*ast.Ident); ok {
+				carried = info.Uses[id]
+			}
+		}
+		return true
+	})
+	runs, clean, called := 0, lit != nil && carried != nil, map[ast.Expr]bool{}
+	if !clean {
+		return false
+	}
+	ast.Inspect(lit.Body, func(node ast.Node) bool {
+		var targets []ast.Expr
+		switch node := node.(type) {
+		case *ast.AssignStmt:
+			if len(node.Rhs) != 1 || node.Rhs[0] != carry {
+				targets = node.Lhs
+			}
+		case *ast.UnaryExpr:
+			targets = []ast.Expr{map[bool]ast.Expr{true: node.X}[node.Op == token.AND]}
+		case *ast.RangeStmt:
+			targets = []ast.Expr{node.Key, node.Value}
+		case *ast.CallExpr:
+			if types.ExprString(node.Fun) == "step.run" {
+				id, ok := slices.Concat(node.Args, []ast.Expr{nil})[0].(*ast.Ident)
+				clean, called[node.Fun] = clean && ok && len(node.Args) == 1 && info.Uses[id] == carried && carry.End() < node.Pos(), true
+			}
+		case *ast.FuncLit: // inside a nested literal step.run may never run, or run apart from the step
+			ast.Inspect(node.Body, func(inner ast.Node) bool {
+				selector, ok := inner.(*ast.SelectorExpr)
+				clean = clean && (!ok || types.ExprString(selector) != "step.run")
+				return true
+			})
+		case *ast.GoStmt:
+			clean = clean && types.ExprString(node.Call.Fun) != "step.run"
+		case *ast.DeferStmt:
+			clean = clean && types.ExprString(node.Call.Fun) != "step.run"
+		case *ast.SelectorExpr: // every step.run counts, called or not (a method value is not called)
+			if types.ExprString(node) == "step.run" {
+				runs, clean = runs+1, clean && called[node]
+			}
+		}
+		for _, target := range targets {
+			id, ok := ast.Unparen(target).(*ast.Ident)
+			clean = clean && (!ok || info.Uses[id] != carried)
+		}
+		return true
+	})
+	return clean && runs == 1
+}
+
 // leaseWaitHolder is the declaration whose context parameters are a call's
 // own: function, or for a package-level seam (a value specification of one
 // function literal, LC-LEASE-2D) the literal's type.
@@ -655,7 +738,7 @@ func leaseWaitContract(sources map[string]string) (result []string) {
 	placeholders, lf, typed, group := map[string]int{}, map[string]string{}, [len(referencesSystems)]map[leaseWaitCall]string{}, sync.WaitGroup{}
 	resolved, failed := [len(referencesSystems)]map[string]bool{}, [len(referencesSystems)]bool{}
 	detached, entries := map[string]int{}, map[string]bool{} // LC-LEASE-2C2's lease_wait_detached
-	values, released, reassigned, carried := map[string]int{}, map[string]int{}, map[string]int{}, map[string]int{}
+	values, released, reassigned, carried, read := map[string]int{}, map[string]int{}, map[string]int{}, map[string]int{}, map[string]int{}
 	for name, source := range sources {
 		lf[name] = strings.ReplaceAll(source, "\r\n", "\n")
 	}
@@ -688,6 +771,8 @@ func leaseWaitContract(sources map[string]string) (result []string) {
 			values[call.site]++
 		case "carry", "carry_other":
 			carried[call.site] += map[string]int{"carry": 1, "carry_other": 2}[kind]
+		case "carry_read":
+			read[call.site]++
 		case "released", "released_other":
 			released[call.site]++
 			failures["lease_wait_released:"+call.site] = failures["lease_wait_released:"+call.site] || kind != "released"
@@ -705,6 +790,9 @@ func leaseWaitContract(sources map[string]string) (result []string) {
 	}
 	for _, site := range slices.Concat(slices.Collect(maps.Keys(carried)), leaseWaitCarried) {
 		failures["lease_wait_carry:"+site] = carried[site] != map[bool]int{true: 1}[slices.Contains(leaseWaitCarried, site)]
+	}
+	for _, site := range slices.Concat(slices.Collect(maps.Keys(read)), leaseWaitCarryReaders) {
+		failures["lease_wait_carry:"+site] = failures["lease_wait_carry:"+site] || read[site] != map[bool]int{true: 1}[slices.Contains(leaseWaitCarryReaders, site)]
 	}
 	for file, text := range leaseWaitCarryTexts {
 		failures["lease_wait_carry"] = failures["lease_wait_carry"] || strings.Count(lf[file], text) != 1
@@ -970,7 +1058,19 @@ func TestLeaseWaitSourceContract(t *testing.T) {
 	const checkpoint, start = "func (c *Cell) Checkpoint(ctx context.Context, options CheckpointOptions) error {\n", "func (c *Cell) Start(ctx context.Context) error {\n"
 	const source, ops = "\topen, release, err := c.openCheckpointSource(", "\t\tops.open = func(path string) (*os.File, error) { return openPrivateReader(ctx, path) }\n"
 	const begin, inspect, witness = "\tif err := c.begin(context.Background(), \"start\"); err != nil {\n", "\tinspection, err := c.Inspect(ctx)\n", source + "ctx)\n\tif err != nil {\n\t\treturn errCheckpointWitness\n"
+	// WU (LC-LEASE-2E7, n4): a step loop runs its step on an alias of the step context taken before the carry.
+	alias := func(file, from, run string) (string, string) {
+		_, rest, _ := strings.Cut(sources[file], from)
+		body, _, _ := strings.Cut(rest, run)
+		return from + body + run, strings.Replace(from+body, "\t\t\tdefer cancel()\n", "\t\t\tplain := stepCtx\n\t\t\tdefer cancel()\n", 1) + strings.Replace(run, "stepCtx", "plain", 1)
+	}
+	startRun, startAlias := alias("lifecycle.go", "\t\t\tstepCtx, cancel := context.WithTimeout(ctx, timeout)\n", "return step.run(stepCtx)")
+	reinstallRun, reinstallAlias := alias("reinstall.go", "\t\t\tstepCtx, cancel := context.WithTimeout(ctx, c.cfg.Timeout)\n", "runErr := step.run(stepCtx)")
+	const carry, overwrite = "\t\t\tstepCtx = withBindOperation(stepCtx, ctx)\n", "\t\t\tstepCtx = context.WithValue(stepCtx, bindOperationKey{}, stepCtx)\n"
 	const journal, removal = "\tprogress, err := c.readJournal(ctx)\n\tif err != nil {\n\t\treturn result, err\n\t}\n", "func (c *Cell) finishRemoval(ctx context.Context, m *Manifest, purge bool) error {\n"
+	// LC-LEASE-2E7-F1 (m1): Start's carry moved after its step's run, and WU through a method value beside a run of the carry.
+	moved := strings.Replace(strings.Replace(startRun, "\t\t\tdefer cancel()\n"+carry, "", 1), "return step.run(stepCtx)", "runErr := step.run(stepCtx)\n\t\t\tdefer cancel()\n"+carry+"\t\t\treturn runErr", 1)
+	method := strings.Replace(startAlias, "return step.run(plain)", "run := step.run\n\t\t\tif plain == nil {\n\t\t\t\treturn step.run(stepCtx)\n\t\t\t}\n\t\t\treturn run(plain)", 1)
 	for _, row := range []struct{ name, file, before, after, want string }{
 		{"exit_admission_transaction", "service_control_exit.go", "c.validateHostExitEnvelope(admissionCtx, envelope, listener)", "c.validateHostExitEnvelope(ctx, envelope, listener)", "lease_wait_live:service_control_exit.go:(*Cell).serveHostExit"},
 		{"exit_drain_reassigned", "service_control_exit.go", "defer cancel()\n\terr := retryServiceContention(drainCtx", "defer cancel()\n\tdrainCtx = ctx\n\terr := retryServiceContention(drainCtx", "lease_wait_live:service_control_exit.go:(*supervisor).finishHostExit"},
@@ -1095,6 +1195,32 @@ func TestLeaseWaitSourceContract(t *testing.T) {
 		{"carry_dropped_start", "lifecycle.go", "\t\t\tstepCtx = withBindOperation(stepCtx, ctx)\n", "", "lease_wait_carry:lifecycle.go:(*Cell).Start"},
 		{"carry_dropped_reinstall", "reinstall.go", "\t\t\tstepCtx = withBindOperation(stepCtx, ctx)\n", "", "lease_wait_carry:reinstall.go:(*Cell).reinstallLocked"},
 		{"carry_shadowed", "lifecycle.go", "\t\t\tstepCtx, cancel := context.WithTimeout(ctx, timeout)\n", "\t\t\tctx := context.WithoutCancel(ctx)\n\t\t\tstepCtx, cancel := context.WithTimeout(ctx, timeout)\n", "lease_wait_carry:lifecycle.go:(*Cell).Start"},
+		// LC-LEASE-2E7: startServicePostgres's binding reads the carried operation (its plain parameter, a detached
+		// context or a detached helper each fail), and each step loop hands step.run the carried variable itself (n4: WT, WU).
+		{"boot_postgres_plain", "service_boot.go", `c.bindServiceProcessBoot(bindOperation(ctx), "postgres")`, `c.bindServiceProcessBoot(ctx, "postgres")`, "lease_wait_carry:service_boot.go:(*Cell).startServicePostgres"},
+		{"boot_postgres_detached", "service_boot.go", `c.bindServiceProcessBoot(bindOperation(ctx), "postgres")`, `c.bindServiceProcessBoot(context.Background(), "postgres")`, "lease_wait_placeholder:service_boot.go:(*Cell).startServicePostgres"},
+		{"boot_postgres_helper_detached", "service_boot.go", `bindOperation(ctx), "postgres"`, `bindOperation(context.WithoutCancel(ctx)), "postgres"`, "lease_wait_placeholder:service_boot.go:(*Cell).startServicePostgres"},
+		{"carry_overwritten_start", "lifecycle.go", carry, carry + overwrite, "lease_wait_carry:lifecycle.go:(*Cell).Start"},
+		{"carry_overwritten_reinstall", "reinstall.go", carry, carry + overwrite, "lease_wait_carry:reinstall.go:(*Cell).reinstallLocked"},
+		{"carry_aliased_start", "lifecycle.go", startRun, startAlias, "lease_wait_carry:lifecycle.go:(*Cell).Start"},
+		{"carry_aliased_reinstall", "reinstall.go", reinstallRun, reinstallAlias, "lease_wait_carry:reinstall.go:(*Cell).reinstallLocked"},
+		// LC-LEASE-2E7-F1: the carry after the call, a method value, go and defer (m1); the address, two runs and a range
+		// (m2); the helper outside a binding, called or as a value (n5).
+		{"carry_after_call_start", "lifecycle.go", startRun, moved, "lease_wait_carry:lifecycle.go:(*Cell).Start"},
+		{"carry_after_call_reinstall", "reinstall.go", "\t\t\tdefer cancel()\n" + carry + "\t\t\trunErr := step.run(stepCtx)\n", "\t\t\trunErr := step.run(stepCtx)\n\t\t\tdefer cancel()\n" + carry,
+			"lease_wait_carry:reinstall.go:(*Cell).reinstallLocked"},
+		{"carry_method_value_start", "lifecycle.go", startRun, method, "lease_wait_carry:lifecycle.go:(*Cell).Start"},
+		{"carry_method_value_only_start", "lifecycle.go", "return step.run(stepCtx)", "run := step.run\n\t\t\treturn run(stepCtx)", "lease_wait_carry:lifecycle.go:(*Cell).Start"},
+		{"carry_go_start", "lifecycle.go", "return step.run(stepCtx)", "go step.run(stepCtx)\n\t\t\treturn nil", "lease_wait_carry:lifecycle.go:(*Cell).Start"},
+		{"carry_defer_start", "lifecycle.go", "return step.run(stepCtx)", "defer step.run(stepCtx)\n\t\t\treturn nil", "lease_wait_carry:lifecycle.go:(*Cell).Start"},
+		{"carry_address_start", "lifecycle.go", carry, carry + "\t\t\tp := &stepCtx\n\t\t\t*p = ctx\n", "lease_wait_carry:lifecycle.go:(*Cell).Start"},
+		{"carry_two_runs_start", "lifecycle.go", "return step.run(stepCtx)", "if err := step.run(stepCtx); err != nil {\n\t\t\t\treturn err\n\t\t\t}\n\t\t\treturn step.run(stepCtx)",
+			"lease_wait_carry:lifecycle.go:(*Cell).Start"},
+		{"carry_range_start", "lifecycle.go", carry, carry + "\t\t\tfor _, stepCtx = range []context.Context{ctx} {\n\t\t\t}\n", "lease_wait_carry:lifecycle.go:(*Cell).Start"},
+		{"carry_nested_literal_start", "lifecycle.go", "return step.run(stepCtx)", "go func() { _ = step.run(stepCtx) }()\n\t\t\treturn nil", "lease_wait_carry:lifecycle.go:(*Cell).Start"},
+		{"helper_outside_stage", "lifecycle.go", "return ops.postgres(ctx, m)", "return ops.postgres(bindOperation(ctx), m)", "lease_wait_carry:lifecycle.go:(*Cell).Start"},
+		{"helper_outside_postgres", "service_boot.go", "c.startPostgres(ctx, m)", "c.startPostgres(bindOperation(ctx), m)", "lease_wait_carry:service_boot.go:(*Cell).startServicePostgres"},
+		{"helper_value_stage", "lifecycle.go", "\t\t\treturn ops.postgres(ctx, m)\n", "\t\t\tread := bindOperation\n\t\t\treturn ops.postgres(read(ctx), m)\n", "lease_wait_carry:lifecycle.go:(*Cell).Start"},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			if strings.Count(sources[row.file], row.before) != 1 {

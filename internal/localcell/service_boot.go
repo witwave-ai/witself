@@ -126,6 +126,9 @@ func (c *Cell) bindServiceProcessBoot(ctx context.Context, component string) err
 // that outlasted its step's budget and then bound lets the operation complete.
 type bindOperationKey struct{}
 
+// Nothing nests: a step loop run inside another's step would carry its own
+// operation, the outer step's context, over the outer one, so its bindings
+// would end at the outer step's deadline (LC-LEASE-2E7, n3).
 func withBindOperation(step, operation context.Context) context.Context {
 	return context.WithValue(step, bindOperationKey{}, operation)
 }
@@ -174,5 +177,5 @@ func (c *Cell) startServicePostgres(ctx context.Context, m *Manifest) error {
 	if err := c.startPostgres(ctx, m); err != nil {
 		return err
 	}
-	return c.bindServiceProcessBoot(ctx, "postgres")
+	return c.bindServiceProcessBoot(bindOperation(ctx), "postgres")
 }
