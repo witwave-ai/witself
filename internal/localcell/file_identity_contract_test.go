@@ -21,6 +21,8 @@ type fileIdentityCount struct {
 }
 
 var fileIdentityExpected = map[string]fileIdentityCount{
+	"checkpoint_journal_binding_windows.go": {1, 0}, // reader and flush descriptor are both statted by handle
+
 	"checkpoint_journal_binding_unix.go": {3, 0}, // repair and barrier name bindings, plus the reader-to-barrier file identity.
 	"checkpoint_root.go":                 {2, 0},
 	"drill_reserve.go":                   {1, 0}, // drillReserveSame: the open handle's stat against the caller's (drillReserveRoot: Root.Stat, by handle; the boundary bind: recovery/ read at the comparison itself, as drill_root.go's)

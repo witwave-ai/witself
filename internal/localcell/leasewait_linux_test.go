@@ -336,7 +336,7 @@ func TestLeaseWaitRepairSwap(t *testing.T) {
 				err = readerWatchdog(t, func() error { return c.Repair(t.Context()) }, l.release)
 				returned, at := time.Now(), <-swapped
 				m, manifestErr := readManifest(t.Context(), c.cfg.Root)
-				if site == "retained" && checkpointJournalBarrierSupported && prefixSyncs != 1 {
+				if site == "retained" && checkpointJournalSettlementSupported && prefixSyncs != 1 {
 					t.Fatal("retained Repair did not sync the prefix before the lease boundary")
 				}
 				if size == "plain" {

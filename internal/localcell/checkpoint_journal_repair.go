@@ -22,10 +22,7 @@ const (
 
 var errCheckpointJournalIO = errors.New("cannot settle local cell checkpoint journal")
 
-// The repair has a native binding on these three systems; the barrier before
-// the first append, not yet on Windows (slice 1WB merges the two again).
 const checkpointJournalSettlementSupported = runtime.GOOS == "linux" || runtime.GOOS == "darwin" || runtime.GOOS == "windows"
-const checkpointJournalBarrierSupported = runtime.GOOS == "linux" || runtime.GOOS == "darwin"
 
 // RepairCheckpointJournal durably discards at most one uncommitted suffix on a
 // cold, owned cell. Its writer header limits eligible tears without proving

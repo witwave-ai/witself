@@ -130,6 +130,74 @@ func (c *Cell) repairOwnedJournal(ctx context.Context, owner *os.File, root *os.
 	return c.settleCheckpointJournal(ctx, root, dir, f, before.Size, revalidate)
 }
 
-// The prefix barrier is not built on Windows yet (checkpointJournalBarrierSupported
-// is false here, so nothing calls this).
-func (c *Cell) syncCheckpointJournalPrefix(context.Context, journalProgress) error { return nil }
+// Only tests replace this function, to bracket or omit the complete barrier.
+var runWindowsJournalBarrier = (*Cell).syncWindowsJournalPrefix
+
+func (c *Cell) syncCheckpointJournalPrefix(ctx context.Context, progress journalProgress) error {
+	return runWindowsJournalBarrier(c, ctx, progress)
+}
+
+// windowsHoldRefused: another program's handle refuses a directory hold for a
+// moment (a sharing violation), or the directory is on its way out (access
+// denied). The barrier then makes no flush, exactly as when the journal's own
+// open is refused: a later append owns its open errors.
+func windowsHoldRefused(err error) bool {
+	return errors.Is(err, windows.ERROR_SHARING_VIOLATION) || errors.Is(err, windows.ERROR_ACCESS_DENIED)
+}
+
+// An admitted writer settles the existing journal file under the owner lock.
+// Match the reader's handle and the three names without the repair's stricter
+// requirements on spelling, privacy and link count.
+func (c *Cell) syncWindowsJournalPrefix(_ context.Context, progress journalProgress) (err error) {
+	if progress.absent {
+		return nil
+	}
+	if progress.readFile == nil {
+		return errCheckpointJournalIO
+	}
+	root, err := runtimeconfig.WindowsPrivateHoldPath(c.cfg.Root)
+	if windowsHoldRefused(err) {
+		return nil // the root, held by another program for a moment
+	}
+	if err != nil {
+		return errCheckpointJournalIO
+	}
+	defer func() { _ = root.Close() }()
+	dir, err := runtimeconfig.WindowsPrivateHold(root, "journal", true)
+	if windowsHoldRefused(err) {
+		return nil // journal/, held by another program for a moment
+	}
+	if err != nil {
+		return errCheckpointJournalIO
+	}
+	defer func() { _ = dir.Close() }()
+	const name = "operations.jsonl"
+	f, err := runtimeconfig.WindowsPrivateOpenFlush(dir, name)
+	// A later append owns its open error. Repair may finish without an append.
+	if errors.Is(err, windows.ERROR_ACCESS_DENIED) || errors.Is(err, windows.ERROR_SHARING_VIOLATION) {
+		return nil
+	}
+	if err != nil {
+		return errCheckpointJournalIO
+	}
+	defer func() {
+		if closeErr := f.Close(); err == nil && closeErr != nil {
+			err = errCheckpointJournalIO
+		}
+	}()
+	info, err := f.Stat()
+	if err != nil || !info.Mode().IsRegular() || !os.SameFile(progress.readFile, info) {
+		return errCheckpointJournalIO
+	}
+	for _, h := range []windowsJournalHold{{c.cfg.Root, root, true}, {c.path("journal"), dir, true}, {c.path("journal", name), f, false}} {
+		held, err := runtimeconfig.WindowsPrivateIdentity(h.file)
+		named, nameErr := runtimeconfig.WindowsPrivateNameIdentity(h.path)
+		if err != nil || nameErr != nil || held.Attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 || held.Volume != named.Volume || held.Index != named.Index {
+			return errCheckpointJournalIO
+		}
+	}
+	if syncFile(f) != nil {
+		return errCheckpointJournalIO
+	}
+	return nil
+}

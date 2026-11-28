@@ -66,6 +66,25 @@ func TestWindowsPrivateHold(t *testing.T) {
 	check(errors.Is(err, windows.ERROR_FILE_NOT_FOUND), "a hold of a missing name did not report ERROR_FILE_NOT_FOUND")
 	_, err = os.Lstat(filepath.Join(dir, "journal", "missing"))
 	check(errors.Is(err, os.ErrNotExist), "a hold created a missing name")
+	flush, err := WindowsPrivateOpenFlush(journal, "log")
+	check(err == nil, "the flush open refused an existing journal")
+	defer func() { _ = flush.Close() }()
+	check(flush.Sync() == nil, "the flush open could not flush the journal")
+	check(errors.Is(flush.Truncate(0), windows.ERROR_ACCESS_DENIED), "the flush open did not refuse truncation with access denied")
+	peer, err := os.OpenFile(file, os.O_RDWR, 0)
+	check(err == nil, "the flush open did not share reading and writing")
+	check(peer.Close() == nil && flush.Close() == nil, fixture)
+	refusal := func(parent *os.File, name string) error {
+		unexpected, err := WindowsPrivateOpenFlush(parent, name)
+		if err == nil {
+			_ = unexpected.Close()
+		}
+		return err
+	}
+	check(refusal(root, "journal") != nil, "the flush open accepted a directory")
+	check(errors.Is(refusal(journal, "missing"), windows.ERROR_FILE_NOT_FOUND), "the flush open did not report the missing journal")
+	_, err = os.Lstat(filepath.Join(dir, "journal", "missing"))
+	check(errors.Is(err, os.ErrNotExist), "the flush open created a missing journal")
 	held, err := WindowsPrivateHold(journal, "log", false)
 	check(err == nil, "cannot hold a file relative to its held parent")
 	defer func() { _ = held.Close() }()

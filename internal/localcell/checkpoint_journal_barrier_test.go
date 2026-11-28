@@ -1,4 +1,4 @@
-//go:build linux || darwin
+//go:build linux || darwin || windows
 
 package localcell
 
@@ -8,12 +8,11 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
 	"time"
-
-	"golang.org/x/sys/unix"
 )
 
 // Only the ordinary journal and its two held directories count. The append
@@ -21,7 +20,7 @@ import (
 type barrierTrace struct {
 	events     []string
 	fail       string
-	readOnly   bool
+	prefix     bool
 	prefixSize int64
 }
 
@@ -38,14 +37,9 @@ func traceBarrier(t *testing.T, c *Cell) *barrierTrace {
 		return nil
 	}
 	syncFile = func(f *os.File) error {
-		if filepath.Clean(f.Name()) == c.path(repairLog) {
-			flags, err := unix.FcntlInt(f.Fd(), unix.F_GETFL, 0)
-			drillAssert(t, err == nil, "cannot observe journal descriptor")
-			stage := "file"
-			if flags&unix.O_APPEND != 0 {
-				stage = "append"
-			} else {
-				trace.readOnly = flags&unix.O_ACCMODE == unix.O_RDONLY
+		if stage, prefix := barrierDescriptor(t, f, c.path(repairLog)); stage != "" {
+			if stage == "file" {
+				trace.prefix = prefix
 				info, err := f.Stat()
 				drillAssert(t, err == nil, "cannot stat journal at prefix sync")
 				trace.prefixSize = info.Size()
@@ -113,6 +107,9 @@ func checkBarrierRecords(t *testing.T, f *retainedFixture, verb string, pending 
 func TestCheckpointJournalBarrierAdmitted(t *testing.T) {
 	for _, verb := range []string{"create", "delete"} {
 		for _, state := range []string{"clean", "pending", "empty", "absent", "second-name", "mode-0640"} {
+			if state == "mode-0640" && runtime.GOOS == "windows" {
+				continue // Windows has no POSIX group-read mode.
+			}
 			t.Run(verb+"/"+state, func(t *testing.T) {
 				f, call := barrierFixture(t, verb)
 				switch state {
@@ -135,14 +132,15 @@ func TestCheckpointJournalBarrierAdmitted(t *testing.T) {
 				err := call()
 				stages := slices.DeleteFunc(slices.Clone(trace.events), func(s string) bool { return s == "append" })
 				if state == "absent" {
-					drillAssert(t, slices.Equal(stages, []string{"publish", "publish-root"}), "barrier created an absent log")
+					published := []string{"publish", "publish-root"}
+					if runtime.GOOS == "windows" {
+						published = published[:1]
+					}
+					drillAssert(t, slices.Equal(stages, published), "barrier created an absent log")
 					drillAssert(t, slices.Index(trace.events, "publish") == 1, "first journal name was acknowledged without directory sync")
-					drillAssert(t, slices.Index(trace.events, "publish-root") == 2, "first publication did not sync the root before the next append")
+					drillAssert(t, runtime.GOOS == "windows" || slices.Index(trace.events, "publish-root") == 2, "first publication did not sync the root before the next append")
 				} else {
-					drillAssert(t, slices.Equal(stages, []string{"file", "journal", "root"}), "barrier count changed for an existing log")
-					drillAssert(t, slices.Index(trace.events, "append") == 3, "an append preceded the prefix sync")
-					drillAssert(t, trace.readOnly, "prefix sync used a writable descriptor")
-					drillAssert(t, trace.prefixSize == int64(len(f.prefix)), "an append preceded the prefix sync")
+					assertWriterPrefix(t, f, trace)
 				}
 				drillAssert(t, err == nil, "the admitted verb did not finish after repair")
 				checkBarrierRecords(t, f, verb, state == "pending")
@@ -164,7 +162,7 @@ func TestCheckpointJournalBarrierRetry(t *testing.T) {
 				flags := os.O_WRONLY | os.O_APPEND
 				if history == "zero" {
 					drillAssert(t, os.Rename(c.path("journal"), filepath.Join(t.TempDir(), "old")) == nil, "cannot retire fixture journal directory")
-					drillAssert(t, os.Mkdir(c.path("journal"), 0700) == nil, "cannot plant a fresh journal directory")
+					drillAssert(t, testMkdir(c.path("journal"), 0700) == nil, "cannot plant a fresh journal directory")
 					flags |= os.O_CREATE | os.O_EXCL
 					f.prefix = nil
 				} else {
@@ -172,7 +170,7 @@ func TestCheckpointJournalBarrierRetry(t *testing.T) {
 					f.prefix = retainedRead(t, c, repairLog)
 					tail = repairRecord(t, "checkpoint", "copy", "started")
 				}
-				file, err := os.OpenFile(c.path(repairLog), flags, 0600)
+				file, err := openPrivateFile(c.path(repairLog), flags, 0600)
 				drillAssert(t, err == nil, "cannot open cut fixture")
 				n, err := file.WriteString(tail[:len(tail)/2])
 				closed := file.Close()
@@ -183,20 +181,15 @@ func TestCheckpointJournalBarrierRetry(t *testing.T) {
 				drillAssert(t, slices.Equal(trace.events, []string{"file"}), "cut did not reach its file boundary")
 				drillAssert(t, err != nil, "failed settlement claimed success")
 				drillAssert(t, status == "", "repair reported status on failure")
-				drillAssert(t, !trace.readOnly, "repair did not sync its truncate descriptor")
+				drillAssert(t, !trace.prefix, "repair did not sync its truncate descriptor")
 				assertFileBytes(t, c.path(repairLog), f.prefix, "retry lost a validated record")
 				trace.fail, trace.events = "", nil
 				err = call()
 				if history == "zero" {
 					drillAssert(t, slices.Contains(trace.events, "file"), "retry skipped the clean-file sync")
 				}
-				drillAssert(t, slices.Index(trace.events, "file") == 0, "an append preceded the prefix sync")
-				drillAssert(t, slices.Index(trace.events, "journal") == 1, "first journal name was acknowledged without directory sync")
-				drillAssert(t, slices.Index(trace.events, "root") == 2, "journal directory was acknowledged without root sync")
-				drillAssert(t, slices.Index(trace.events, "append") == 3, "an append preceded the prefix sync")
+				assertWriterPrefix(t, f, trace)
 				drillAssert(t, err == nil, "the admitted verb did not finish after repair")
-				drillAssert(t, trace.readOnly, "prefix sync used a writable descriptor")
-				drillAssert(t, trace.prefixSize == int64(len(f.prefix)), "an append preceded the prefix sync")
 				checkBarrierRecords(t, f, verb, history == "pending")
 			})
 		}
@@ -205,7 +198,7 @@ func TestCheckpointJournalBarrierRetry(t *testing.T) {
 
 func TestCheckpointJournalBarrierFailure(t *testing.T) {
 	for _, verb := range []string{"create", "delete"} {
-		for i, stage := range []string{"file", "journal", "root"} {
+		for i, stage := range barrierStages {
 			t.Run(verb+"/"+stage, func(t *testing.T) {
 				f, call := barrierFixture(t, verb)
 				drillAssert(t, f.cell.begin(t.Context(), "checkpoint") == nil, "cannot prepare open checkpoint")
@@ -214,7 +207,7 @@ func TestCheckpointJournalBarrierFailure(t *testing.T) {
 				trace.fail = stage
 				d := ClassifyCheckpointFailure(call())
 				drillAssert(t, !slices.Contains(trace.events, "append"), "sync failure allowed a journal append")
-				drillAssert(t, slices.Equal(trace.events, []string{"file", "journal", "root"}[:i+1]), "barrier count changed for an existing log")
+				drillAssert(t, slices.Equal(trace.events, barrierStages[:i+1]), "barrier count changed for an existing log")
 				drillAssert(t, d.Class == "local_checkpoint_operation_failed", "barrier failure changed diagnostic class")
 				drillAssert(t, d.Reason == "", "barrier failure exposed a reason")
 				drillAssert(t, !d.CleanupIncomplete, "barrier failure claimed incomplete cleanup")
@@ -380,6 +373,8 @@ func TestCheckpointJournalBarrierObservation(t *testing.T) {
 
 // barrierLease gives a kept write-lease holder's take, broken and release
 // (readers6_linux_test.go). Only Linux waits a lease out (waitOutLease).
+const barrierLeaseCeiling = 10 * time.Second
+
 var barrierLease = func(t *testing.T) (func(string) bool, func() bool, func()) {
 	t.Skip("rebound fixture needs an open that waits out a lease")
 	return nil, nil, nil
@@ -397,7 +392,6 @@ func TestCheckpointJournalBarrierRebound(t *testing.T) {
 				takeJournal, journalBroken, releaseJournal := barrierLease(t)
 				// The holder keeps its lease until the row lets go, so nothing here waits for the
 				// ceiling; a long one only leaves a loaded machine room to move the directory.
-				leaseWait.ceiling = 10 * time.Second
 				f, call := barrierFixture(t, verb)
 				c, from := f.cell, f.cell.path("journal")
 				if moved == "root" {
@@ -427,8 +421,8 @@ func TestCheckpointJournalBarrierRebound(t *testing.T) {
 				go func() { defer close(finished); refused = call() }()
 				t.Cleanup(func() { releaseManifest(); releaseJournal(); <-finished })
 				seen := func(broken func() bool) bool {
-					for end := time.Now().Add(leaseWait.ceiling); !broken() && time.Now().Before(end); {
-						time.Sleep(leaseWait.first)
+					for end := time.Now().Add(barrierLeaseCeiling); !broken() && time.Now().Before(end); {
+						time.Sleep(time.Millisecond)
 					}
 					return broken()
 				}
@@ -449,7 +443,7 @@ func TestCheckpointJournalBarrierRebound(t *testing.T) {
 					}
 				})
 				drillAssert(t, copied == nil, "cannot copy fixture directory with hard links")
-				drillAssert(t, time.Since(broke) < leaseWait.ceiling/2, "barrier open could reach its lease ceiling before the release")
+				drillAssert(t, time.Since(broke) < barrierLeaseCeiling/2, "barrier open could reach its lease ceiling before the release")
 				releaseJournal()
 				<-finished
 				drillAssert(t, len(trace.events) == 0, "barrier synced a journal that was no longer at its name")

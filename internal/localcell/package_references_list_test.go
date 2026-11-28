@@ -25,7 +25,7 @@ net/http.Dir net/http.ServeFile net/http.FileServer net/http.FS net/http.ServeFi
 github.com/witwave-ai/witself/internal/runtimeconfig.WindowsPrivateOpenFile github.com/witwave-ai/witself/internal/runtimeconfig.WindowsPrivateOpenSnapshot github.com/witwave-ai/witself/internal/runtimeconfig.WindowsPrivateValidateSnapshot github.com/witwave-ai/witself/internal/runtimeconfig.WindowsPrivateCreateTemp
 github.com/witwave-ai/witself/internal/runtimeconfig.WindowsPrivatePostgresOpen github.com/witwave-ai/witself/internal/runtimeconfig.WindowsPrivatePostgresRead
 github.com/witwave-ai/witself/internal/runtimeconfig.WindowsPrivateOpenRoot github.com/witwave-ai/witself/internal/runtimeconfig.OpenSpoolRoot
-github.com/witwave-ai/witself/internal/runtimeconfig.WindowsPrivateHold github.com/witwave-ai/witself/internal/runtimeconfig.WindowsPrivateHoldPath github.com/witwave-ai/witself/internal/runtimeconfig.WindowsPrivateNameIdentity
+github.com/witwave-ai/witself/internal/runtimeconfig.WindowsPrivateHold github.com/witwave-ai/witself/internal/runtimeconfig.WindowsPrivateHoldPath github.com/witwave-ai/witself/internal/runtimeconfig.WindowsPrivateNameIdentity github.com/witwave-ai/witself/internal/runtimeconfig.WindowsPrivateOpenFlush
 openPrivateFile openPrivateReader openPrivateWriter openPlainReader openPostgresReader readPrivateFile readPostgresFile createPrivateTemp
 openLockFile openRegular openRegularBy openRegularWriter readRegular openServiceRecord openAdmissionRecord openWindowsServiceSnapshot readServiceRecordJSON readManifestJSON readManifestBy readWindowsTaskRecord readJSON readMaintenanceFenceJSON
 syncDirectory (*Cell).openCheckpointSource (*Cell).holdCheckpoint (*Cell).holdRecovery
@@ -118,6 +118,7 @@ checkpoint_journal_binding_unix.go
 checkpoint_journal_binding_windows.go
 	import cmp context errors github.com/witwave-ai/witself/internal/runtimeconfig golang.org/x/sys/windows io os strings
 	(*Cell).repairOwnedJournal (*os.Root).OpenRoot github.com/witwave-ai/witself/internal/runtimeconfig.WindowsPrivateHold x2 github.com/witwave-ai/witself/internal/runtimeconfig.WindowsPrivateHoldPath
+	(*Cell).syncWindowsJournalPrefix github.com/witwave-ai/witself/internal/runtimeconfig.WindowsPrivateHold github.com/witwave-ai/witself/internal/runtimeconfig.WindowsPrivateHoldPath github.com/witwave-ai/witself/internal/runtimeconfig.WindowsPrivateNameIdentity github.com/witwave-ai/witself/internal/runtimeconfig.WindowsPrivateOpenFlush
 	(*Cell).windowsJournalBound github.com/witwave-ai/witself/internal/runtimeconfig.WindowsPrivateNameIdentity
 checkpoint_journal_repair.go
 	import bytes context crypto/sha256 errors io os runtime

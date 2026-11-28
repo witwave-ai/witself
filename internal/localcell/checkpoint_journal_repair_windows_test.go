@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"slices"
 	"strings"
 	"testing"
 	"unsafe"
@@ -221,6 +222,9 @@ func TestRepairCheckpointJournalWindowsRootSpelling(t *testing.T) {
 			drillAssert(t, err == nil && filepath.Base(c.cfg.Root) == filepath.Base(configured), "cannot prepare root spelling fixture")
 			_, err = c.Inspect(t.Context())
 			drillAssert(t, err == nil, "released inspection refused the root spelling")
+			progress, err := c.readJournal(t.Context())
+			drillAssert(t, err == nil, "cannot read journal under admitted root spelling")
+			drillAssert(t, c.syncCheckpointJournalPrefix(t.Context(), progress) == nil, "barrier refused an admitted root spelling")
 			status, err := c.RepairCheckpointJournal(t.Context())
 			log := filepath.Join(root, "journal", "operations.jsonl")
 			if spelling == "case" {
@@ -241,4 +245,88 @@ func TestRepairCheckpointJournalWindowsNoDirectorySync(t *testing.T) {
 	root, err := os.OpenRoot(t.TempDir())
 	drillAssert(t, err == nil && root.Close() == nil, "cannot prepare directory fixture")
 	drillAssert(t, syncCheckpointRoot(root) == nil, "Windows flushed a journal directory")
+}
+
+type repairBarrierPath struct {
+	name, data       string
+	cleanup          bool
+	flushes, appends int
+	prefix           int // the barrier's own flushes, apart from the discard's and the retained resync's
+}
+
+func TestRepairJournalBarrierEmptyManifestCleanup(t *testing.T) {
+	repairBarrierPath{"read-only", "", true, 0, 0, 0}.check(t)
+}
+
+func TestRepairJournalBarrierPaths(t *testing.T) {
+	start := func(op string) string { return repairRecord(t, op, "operation", "started") }
+	completed := start("remove") + repairRecord(t, "remove", "operation", "done")
+	for _, row := range []repairBarrierPath{
+		{"none", completed, false, 0, 0, 0}, {"start", start("start"), false, 1, 3, 1}, {"stop", start("stop"), false, 1, 3, 1},
+		{"remove", start("remove"), false, 1, 3, 1}, {"empty", "", true, 1, 0, 1}, {"nonempty", completed, true, 2, 0, 1},
+		{"torn", "{", true, 2, 0, 1}, {"torn-read-only", "{", true, 1, 0, 0}, {"deny-no-append", "", true, 0, 0, 0},
+		{"decision", "", true, 1, 4, 1}, // includes the interposed writer
+	} {
+		t.Run(row.name, row.check)
+	}
+}
+
+func (row repairBarrierPath) check(t *testing.T) {
+	var c *Cell
+	if row.cleanup {
+		c = writerRetainedCleanup(t)
+	} else {
+		c, _ = unitCell(t)
+	}
+	repairSeed(t, c, row.data)
+	path, trace := c.path(repairLog), traceBarrier(t, c)
+	file, prefix := syncFile, 0
+	t.Cleanup(func() { syncFile = file })
+	syncFile = func(f *os.File) error {
+		if f.Name() == "private flush" {
+			prefix++
+		}
+		return file(f)
+	}
+	readOnly := func() {
+		drillAssert(t, os.Chmod(path, 0400) == nil, "cannot mark the empty fixture journal read-only")
+		t.Cleanup(func() { _ = os.Chmod(path, 0600) })
+	}
+	switch row.name {
+	case "read-only":
+		readOnly()
+	case "deny-no-append":
+		denyJournalWrites(t, c)
+	case "torn-read-only":
+		barrier := runWindowsJournalBarrier
+		t.Cleanup(func() { runWindowsJournalBarrier = barrier })
+		runWindowsJournalBarrier = func(c *Cell, ctx context.Context, p journalProgress) error {
+			assertFileBytes(t, path, nil, "Repair reached the barrier before the discard")
+			readOnly()
+			return barrier(c, ctx, p)
+		}
+	case "decision":
+		c.cfg.Failpoint = func(_, step string) error {
+			if step == "removal_retained" {
+				drillAssert(t, slices.Equal(trace.events, []string{"file"}), "Repair missed the flush before the second journal read")
+				return c.journal(t.Context(), "remove", "operation", "started")
+			}
+			return nil
+		}
+	}
+	drillAssert(t, c.Repair(t.Context()) == nil, "Repair refused an admitted journal")
+	if row.name == "torn-read-only" {
+		info, err := os.Stat(path)
+		drillAssert(t, err == nil && info.Mode()&0200 == 0, "Repair skipped the protected post-discard boundary")
+	}
+	flushes := slices.DeleteFunc(slices.Clone(trace.events), func(event string) bool { return event == "append" })
+	drillAssert(t, slices.Equal(flushes, slices.Repeat(barrierStages, row.flushes)), "Repair made the wrong number of journal flushes")
+	drillAssert(t, slices.Equal(trace.events[:len(flushes)], flushes), "Repair flushed the prefix after an append")
+	drillAssert(t, len(trace.events)-len(flushes) == row.appends, "Repair made the wrong number of journal appends")
+	drillAssert(t, prefix == row.prefix, "Repair made the wrong number of barrier flushes")
+	if row.appends == 0 {
+		assertFileBytes(t, path, []byte(strings.TrimSuffix(row.data, "{")), "Repair changed the validated journal bytes")
+	}
+	m, err := readManifest(t.Context(), c.cfg.Root)
+	drillAssert(t, err == nil && m != nil && m.Cleanup == nil, "manifest-only cleanup left its checkpoint")
 }
